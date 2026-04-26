@@ -1,0 +1,20 @@
+{
+  "slice": 0,
+  "name": "skeleton",
+  "spec_coverage": "Persistence layer, schema constraints, transaction predicates, artifact store layout. Section 15 support for all later tests.",
+  "completion_promise": "SLICE_0_COMPLETE",
+  "max_iterations": 30,
+  "max_budget_usd_per_iteration": 5,
+  "expected_tests": [
+    "test_schema_creates_required_tables",
+    "test_schema_enforces_one_pending_attempt_per_task",
+    "test_schema_enforces_recovery_artifact_idempotency",
+    "test_schema_rejects_orphan_attempts_artifacts_and_events",
+    "test_test_harness_provides_temp_data_dir_db_and_clock",
+    "test_artifact_store_writes_file_and_db_row"
+  ],
+  "forbidden_paths": [
+    "src/cli/",
+    "src/core/"
+  ]
+}

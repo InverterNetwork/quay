@@ -1,0 +1,19 @@
+{
+  "slice": 10,
+  "name": "cli-adapters",
+  "spec_coverage": "CLI output shape; read commands; real tmux/git/GitHub/Slack adapter behavior. Section 15: 31, 32, 70, 71, 72, 74e, 84, 85, 85a-85d, 86.",
+  "completion_promise": "SLICE_10_COMPLETE",
+  "max_iterations": 40,
+  "max_budget_usd_per_iteration": 5,
+  "expected_tests": [
+    "test_070_task_list_empty_returns_json_array",
+    "test_071_task_get_returns_object",
+    "test_072_tick_outputs_ndjson",
+    "test_084_external_ref_is_slugged_before_use",
+    "test_086_install_cmd_runs_through_shell",
+    "test_tmux_adapter_session_exits_when_agent_exits",
+    "test_git_adapter_branch_slug_final_check_ref_format",
+    "test_cli_write_errors_are_json_objects"
+  ],
+  "forbidden_paths": []
+}

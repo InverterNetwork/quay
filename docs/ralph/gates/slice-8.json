@@ -1,0 +1,20 @@
+{
+  "slice": 8,
+  "name": "slack",
+  "spec_coverage": "Tick-only Slack writer; per-escalation nonce; no duplicate post on crash; reply cursor uses recovered bot-post timestamp. Section 15: 11, 11a, 11b, 12, 31b, 41, 42, 47, 48, 48a, 48b, 48c, 64.",
+  "completion_promise": "SLICE_8_COMPLETE",
+  "max_iterations": 40,
+  "max_budget_usd_per_iteration": 5,
+  "expected_tests": [
+    "test_011_escalate_human_cli_does_not_call_slack",
+    "test_011b_tick_recovers_posted_slack_message_by_nonce",
+    "test_048_slack_post_sql_failure_does_not_duplicate_post",
+    "test_048a_second_escalation_same_body_is_distinct",
+    "test_048c_inter_window_chatter_excluded_after_recovery",
+    "test_047_slack_post_failure_retries_without_looping",
+    "test_012_slack_reply_transitions_to_awaiting_next_brief"
+  ],
+  "forbidden_paths": [
+    "src/cli/"
+  ]
+}

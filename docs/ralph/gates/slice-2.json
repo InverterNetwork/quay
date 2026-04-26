@@ -1,0 +1,20 @@
+{
+  "slice": 2,
+  "name": "enqueue",
+  "spec_coverage": "Enqueue does not spawn; bootstrap is synchronous at enqueue; every attempt has one brief and one final_prompt artifact. Section 15: 33, 36, 39, 41, 42, 55, 56, 57, 65.",
+  "completion_promise": "SLICE_2_COMPLETE",
+  "max_iterations": 35,
+  "max_budget_usd_per_iteration": 5,
+  "expected_tests": [
+    "test_055_enqueue_fresh_repo_bootstraps_and_queues_task",
+    "test_056_enqueue_existing_repo_reuses_bare_clone_and_fetches",
+    "test_057_enqueue_bootstrap_failure_leaves_no_task_row",
+    "test_065_initial_attempt_has_brief_and_final_prompt",
+    "test_039_branch_slug_examples",
+    "test_040_branch_collision_adds_task_suffix",
+    "test_041_enqueue_rejects_unknown_or_archived_repo"
+  ],
+  "forbidden_paths": [
+    "src/cli/"
+  ]
+}

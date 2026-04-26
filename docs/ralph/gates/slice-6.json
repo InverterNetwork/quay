@@ -1,0 +1,21 @@
+{
+  "slice": 6,
+  "name": "claims",
+  "spec_coverage": "Atomic claims; claim ownership fence; claim timeout and loop parking. submit-brief schedules a pending attempt but never spawns directly. escalate-human is a claim-scoped SQL/artifact transition; Slack posting is deferred. Section 15: 14, 15, 16, 17, 18, 19, 20, 20a, 20b, 20c, 20d, 34, 58.",
+  "completion_promise": "SLICE_6_COMPLETE",
+  "max_iterations": 40,
+  "max_budget_usd_per_iteration": 5,
+  "expected_tests": [
+    "test_015_concurrent_claims_only_one_wins",
+    "test_016_claim_timeout_auto_releases",
+    "test_020_claim_expiration_cap_parks_orchestrator_loop",
+    "test_020a_stale_claimant_cannot_submit_brief",
+    "test_020b_cancel_in_flight_fences_claim_scoped_writes",
+    "test_020d_release_claim_mismatch_is_claim_lost",
+    "test_058_submit_brief_schedules_queued_not_running",
+    "test_escalate_human_claim_transition_is_sql_only"
+  ],
+  "forbidden_paths": [
+    "src/cli/"
+  ]
+}

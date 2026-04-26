@@ -1,0 +1,20 @@
+{
+  "slice": 7,
+  "name": "cancel",
+  "spec_coverage": "Durable task-level cancel intent; single canonical cancel finalizer; cleanup matrix; crash recovery after irreversible side effects. Section 15: 24-29 (incl. 29a-29g), 31a-31e, 79-82.",
+  "completion_promise": "SLICE_7_COMPLETE",
+  "max_iterations": 40,
+  "max_budget_usd_per_iteration": 5,
+  "expected_tests": [
+    "test_029a_cancel_crash_after_intent_recovers_from_running",
+    "test_029c_cancel_close_pr_crash_after_irreversible_side_effects",
+    "test_029e_cancel_waiting_human_preserves_slack_artifact",
+    "test_031c_cancel_races_mid_spawn_converges",
+    "test_081_cancel_with_open_pr_retains_remote_branch",
+    "test_026_cancel_terminal_state_semantics",
+    "test_029f_cancel_parked_state_runs_cleanup"
+  ],
+  "forbidden_paths": [
+    "src/cli/"
+  ]
+}

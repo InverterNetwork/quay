@@ -1,0 +1,18 @@
+{
+  "slice": 3,
+  "name": "tick",
+  "spec_coverage": "Single spawn point: queued -> running. Budget consumed at promotion. Capacity cap. Section 15: 1 (partial), 35, 59, 60.",
+  "completion_promise": "SLICE_3_COMPLETE",
+  "max_iterations": 30,
+  "max_budget_usd_per_iteration": 5,
+  "expected_tests": [
+    "test_001_tick_promotes_queued_to_running",
+    "test_035_capacity_cap_prevents_extra_spawn",
+    "test_promotion_consumes_budget_once",
+    "test_promotion_rowcount_zero_on_cancel_intent_skips_spawn",
+    "test_spawn_failure_window_leaves_running_with_null_session_for_recovery"
+  ],
+  "forbidden_paths": [
+    "src/cli/"
+  ]
+}

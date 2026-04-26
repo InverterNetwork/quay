@@ -1,0 +1,21 @@
+{
+  "slice": 4,
+  "name": "classifier",
+  "spec_coverage": "Worker-alive check precedes PR check; blocker, malformed signal, PR opened, no-progress, crash. Idempotent PR contract. Section 15: 2, 3, 30, 43, 44, 64, 73, 74, 74b, 74c, 74d.",
+  "completion_promise": "SLICE_4_COMPLETE",
+  "max_iterations": 40,
+  "max_budget_usd_per_iteration": 5,
+  "expected_tests": [
+    "test_002_worker_blocker_transitions_to_awaiting_next_brief",
+    "test_003_dead_worker_without_pr_or_signal_schedules_crash_retry",
+    "test_043_blocker_crash_after_artifact_write_converges",
+    "test_073_retry_attempt_does_not_create_duplicate_pr",
+    "test_074_no_remote_progress_is_no_progress",
+    "test_074c_pr_created_during_attempt_counts_as_progress",
+    "test_malformed_blocker_schedules_malformed_signal_retry",
+    "test_spawn_window_null_session_uses_same_classifier"
+  ],
+  "forbidden_paths": [
+    "src/cli/"
+  ]
+}

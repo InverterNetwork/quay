@@ -1,0 +1,23 @@
+{
+  "slice": 9,
+  "name": "pr-poll",
+  "spec_coverage": "pr-open and done polling; CI source-of-truth rules; review/conflict non-budget respawns and dedupe; non-budget safety cap. Section 15: 6-10, 48-52 (non-budget retry dedup), 53-54 (pr-open polling), 66-69, 76-78, 83.",
+  "completion_promise": "SLICE_9_COMPLETE",
+  "max_iterations": 45,
+  "max_budget_usd_per_iteration": 5,
+  "expected_tests": [
+    "test_066_named_workflow_only_controls_ci_status",
+    "test_068_no_required_checks_means_pass",
+    "test_076_stale_check_sha_logs_tick_error_without_transition",
+    "test_048_nonbudget_review_dedupe_does_not_respawn_same_review",
+    "test_052_non_budget_cap_parks_on_n_plus_one",
+    "test_083_advice_answered_does_not_increment_non_budget_counter",
+    "test_053_pr_open_merged_transitions_terminal",
+    "test_054_pr_open_closed_transitions_closed_unmerged",
+    "test_review_feedback_schedules_non_budget_respawn",
+    "test_conflict_schedules_non_budget_respawn"
+  ],
+  "forbidden_paths": [
+    "src/cli/"
+  ]
+}

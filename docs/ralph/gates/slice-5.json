@@ -1,0 +1,19 @@
+{
+  "slice": 5,
+  "name": "retries",
+  "spec_coverage": "Deterministic failure retry composition. Budget consumed at spawn, not trigger detection. Exhaustion parks in awaiting-next-brief with budget_exhausted. Section 15: 5, 13, 21, 22, 23, 60.",
+  "completion_promise": "SLICE_5_COMPLETE",
+  "max_iterations": 35,
+  "max_budget_usd_per_iteration": 5,
+  "expected_tests": [
+    "test_005_ci_fail_schedules_budget_consuming_retry",
+    "test_013_final_attempt_blocker_sets_budget_exhausted",
+    "test_021_retry_budget_exhaustion_creates_last_failure",
+    "test_022_wall_clock_kill_schedules_retry",
+    "test_023_retry_brief_uses_most_recent_brief",
+    "test_stale_kill_schedules_retry_once"
+  ],
+  "forbidden_paths": [
+    "src/cli/"
+  ]
+}
