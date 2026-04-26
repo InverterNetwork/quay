@@ -3,6 +3,7 @@ import { createHarness, type Harness } from "../support/harness.ts";
 import { createRepoService } from "../../src/core/repos/service.ts";
 import { enqueue } from "../../src/core/enqueue.ts";
 import { QuayError } from "../../src/core/errors.ts";
+import { buildEnqueueDeps } from "../support/enqueue_deps.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -25,9 +26,14 @@ test("test_enqueue_rejects_archived_repo", () => {
   repos.add({ ...REQUIRED_FIELDS });
   repos.remove(REQUIRED_FIELDS.repo_id);
 
+  const { deps } = buildEnqueueDeps(h);
+
   let caught: unknown;
   try {
-    enqueue({ db: h.db, clock: h.clock }, { repo_id: REQUIRED_FIELDS.repo_id });
+    enqueue(deps, {
+      repo_id: REQUIRED_FIELDS.repo_id,
+      brief: "anything",
+    });
   } catch (err) {
     caught = err;
   }
