@@ -84,7 +84,7 @@ run_slice() {
     local err_path="${LOG_DIR}/slice-${slice}-attempt-${i}.err.log"
 
     if ! claude -p \
-        --dangerously-skip-permissions \
+        --permission-mode bypassPermissions \
         --max-budget-usd "${budget}" \
         --output-format stream-json \
         --verbose \
