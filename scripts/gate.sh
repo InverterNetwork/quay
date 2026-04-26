@@ -102,8 +102,9 @@ $(git diff --stat main -- docs/quay-spec.md)
 The plan is read-only inside slices."
   fi
   if ! git diff --quiet main -- docs/ralph/; then
-    # Only blockers/ may be added; everything else under docs/ralph/ is read-only.
-    bad="$(git diff --name-only main -- docs/ralph/ | grep -v '^docs/ralph/blockers/' || true)"
+    # Only blockers/ may be added; everything else under docs/ralph/
+    # is read-only. Use --relative so output is cwd-rooted.
+    bad="$(git diff --relative --name-only main -- docs/ralph/ | grep -v '^docs/ralph/blockers/' || true)"
     if [[ -n "$bad" ]]; then
       add_reason "### Files under \`docs/ralph/\` were modified outside \`blockers/\`
 
@@ -128,8 +129,12 @@ fi
 # untracked files do not appear in `git diff` but are still present and
 # could violate the slice's path restrictions.
 if git rev-parse --verify main >/dev/null 2>&1; then
-  committed_changed="$(git diff --name-only main..HEAD || true)"
-  untracked="$(git ls-files --others --exclude-standard || true)"
+  # Scope to the quay/ subtree so unrelated changes elsewhere in the
+  # enclosing repo don't show up as forbidden-path drift. Use
+  # --relative so output paths match cwd-relative gate-config patterns
+  # (e.g. "src/cli/" instead of "quay/src/cli/").
+  committed_changed="$(git diff --relative --name-only main..HEAD -- . || true)"
+  untracked="$(git ls-files --others --exclude-standard -- . || true)"
   changed="$(printf '%s\n%s\n' "$committed_changed" "$untracked" | awk 'NF && !seen[$0]++')"
   while IFS= read -r pattern; do
     [[ -z "$pattern" ]] && continue
@@ -147,10 +152,11 @@ Matched gate-config pattern \`$pattern\`. This slice should not be modifying tha
   done < <(jq -r '.forbidden_paths[]?' "$CONFIG")
 fi
 
-# 5b. Refuse to pass if the working tree is dirty. The driver commits
-# WIP before invoking the gate; a dirty tree here means the gate is
-# being run manually before commit, or the driver is misbehaving.
-if [[ -n "$(git status --porcelain)" ]]; then
+# 5b. Refuse to pass if the working tree is dirty (under quay/).
+# The driver commits WIP before invoking the gate; a dirty tree here
+# means the gate is being run manually before commit, or the driver
+# is misbehaving.
+if [[ -n "$(git status --porcelain -- .)" ]]; then
   add_reason "### Working tree is dirty
 
 The gate evaluates committed branch state. Uncommitted changes are

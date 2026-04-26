@@ -18,8 +18,9 @@ cd "$ROOT"
 
 SLICES=(${QUAY_SLICES:-0 1 2 3 4 5 6 7 8 9 10})
 
-# pre-flight
-[[ -z "$(git status --porcelain)" ]] || { echo "Working tree dirty; commit or stash first." >&2; exit 2; }
+# pre-flight (scope dirty-tree check to the quay/ subtree — the
+# enclosing git repo may have unrelated changes at higher levels)
+[[ -z "$(git status --porcelain -- .)" ]] || { echo "Working tree dirty under $(pwd); commit or stash first." >&2; exit 2; }
 [[ "$(git rev-parse --abbrev-ref HEAD)" == "main" ]] || { echo "Not on main." >&2; exit 2; }
 command -v claude >/dev/null || { echo "claude CLI not on PATH" >&2; exit 2; }
 command -v bun >/dev/null || { echo "bun not on PATH" >&2; exit 2; }
