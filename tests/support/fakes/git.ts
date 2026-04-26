@@ -21,6 +21,7 @@ export class FakeGit implements GitPort {
   readonly localBranches = new Map<string, Set<string>>();
   readonly remoteBranches = new Map<string, Set<string>>();
   readonly openPrBranches = new Map<string, Set<string>>();
+  readonly remoteHeads = new Map<string, string>(); // key = `${repoId}\0${branch}`
   readonly worktrees = new Set<string>();
   readonly reposRoot: string;
   fail: FakeGitFailures = {};
@@ -115,6 +116,20 @@ export class FakeGit implements GitPort {
     this.record("removeBareClone", { repoId });
     rmSync(this.bareDir(repoId), { recursive: true, force: true });
     this.bareClones.delete(repoId);
+  }
+
+  remoteHeadSha(repoId: string, branch: string): string | null {
+    this.record("remoteHeadSha", { repoId, branch });
+    return this.remoteHeads.get(`${repoId}\0${branch}`) ?? null;
+  }
+
+  setRemoteHeadSha(repoId: string, branch: string, sha: string | null): void {
+    const key = `${repoId}\0${branch}`;
+    if (sha === null) {
+      this.remoteHeads.delete(key);
+    } else {
+      this.remoteHeads.set(key, sha);
+    }
   }
 
   // Helpers for test setup.
