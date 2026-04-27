@@ -35,10 +35,15 @@ For each slice 0..10, the driver:
    - `scripts/` is unchanged.
    - Diff does not touch any path in
      `gates/slice-N.json:forbidden_paths`.
-4. On gate pass: ff-merge to `main`, advance to slice N+1.
+4. On gate pass: push `slice-N-<name>` to `origin`, open a PR via
+   `gh pr create`, squash-merge it via `gh pr merge --squash
+   --delete-branch`, then `git pull` main. Each slice → one PR on
+   GitHub for review/audit, one squashed commit on `main`.
 5. On exhaustion: write
    `docs/ralph/blockers/CHAIN-STOPPED-slice-N.md` and exit
-   non-zero. Earlier merged slices remain on `main`.
+   non-zero. Earlier merged slices remain on `main`. The
+   slice's WIP commits remain on the local branch and on `origin`
+   for forensic inspection.
 
 The "loop" is in the driver, not in the agent's session. Each attempt
 starts with a clean Claude context — no long-context drift between
@@ -47,7 +52,8 @@ attempts within a slice. Memory between attempts is the file system
 
 ## Launch
 
-Pre-flight: clean working tree, on `main`, `claude`/`bun`/`jq` on PATH.
+Pre-flight: clean working tree, on `main`, `claude`/`bun`/`jq`/`gh`
+on PATH, `gh` authenticated, `origin` remote configured.
 
 ```bash
 bash scripts/run-overnight.sh 2>&1 | tee docs/ralph/runs/last.log
