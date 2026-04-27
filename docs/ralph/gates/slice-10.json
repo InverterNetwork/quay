@@ -4,7 +4,7 @@
   "spec_coverage": "CLI output shape; read commands; real tmux/git/GitHub/Slack adapter behavior. Section 15: 31, 32, 70, 71, 72, 74e, 84, 85, 85a-85d, 86.",
   "completion_promise": "SLICE_10_COMPLETE",
   "max_iterations": 40,
-  "max_budget_usd_per_iteration": 5,
+  "attempt_timeout_seconds": 3600,
   "expected_tests": [
     "test_070_task_list_empty_returns_json_array",
     "test_071_task_get_returns_object",

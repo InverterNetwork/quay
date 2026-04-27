@@ -4,7 +4,7 @@
   "spec_coverage": "Single spawn point: queued -> running. Budget consumed at promotion. Capacity cap. Section 15: 1 (partial), 35, 59, 60.",
   "completion_promise": "SLICE_3_COMPLETE",
   "max_iterations": 30,
-  "max_budget_usd_per_iteration": 5,
+  "attempt_timeout_seconds": 2700,
   "expected_tests": [
     "test_001_tick_promotes_queued_to_running",
     "test_035_capacity_cap_prevents_extra_spawn",

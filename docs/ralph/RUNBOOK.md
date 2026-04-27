@@ -72,18 +72,21 @@ claude -p --dangerously-skip-permissions \
 scripts/gate.sh 0
 ```
 
-## Costs and caps
+## Caps
 
-`docs/ralph/gates/slice-N.json` controls per-slice budget:
+`docs/ralph/gates/slice-N.json` controls per-slice limits:
 
 - `max_iterations`: hard cap on attempts before the chain stops.
-- `max_budget_usd_per_iteration`: per-attempt cap passed to
-  `claude --max-budget-usd`.
+- `attempt_timeout_seconds`: wall-clock cap per `claude -p` attempt.
+  When hit, SIGTERM is sent (with a 30s grace before SIGKILL) and
+  the driver moves on to commit + gate the partial work.
 
-Worst-case for one slice ≈ `max_iterations * max_budget_usd_per_iteration`.
-The defaults total roughly ~$2k worst-case across all 11 slices, but
-real cost is typically a fraction of that because most slices pass
-within the first few attempts.
+We deliberately do not pass `--max-budget-usd` to `claude -p`. That
+flag is for API-key billing; on a Claude Code subscription it is
+dead weight, and when it does fire, the headless process tends to
+hang instead of exit, blocking the driver. The wall-clock cap is
+the only safety we need, since subscription usage is window-bounded
+rather than dollar-bounded.
 
 Tune the JSON before running. The driver reads it at slice start.
 

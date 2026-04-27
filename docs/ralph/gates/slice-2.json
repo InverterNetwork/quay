@@ -4,7 +4,7 @@
   "spec_coverage": "Enqueue does not spawn; bootstrap is synchronous at enqueue; every attempt has one brief and one final_prompt artifact. Section 15: 33, 36, 39, 41, 42, 55, 56, 57, 65.",
   "completion_promise": "SLICE_2_COMPLETE",
   "max_iterations": 35,
-  "max_budget_usd_per_iteration": 5,
+  "attempt_timeout_seconds": 2700,
   "expected_tests": [
     "test_055_enqueue_fresh_repo_bootstraps_and_queues_task",
     "test_056_enqueue_existing_repo_reuses_bare_clone_and_fetches",

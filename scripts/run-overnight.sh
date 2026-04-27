@@ -26,6 +26,48 @@ command -v claude >/dev/null || { echo "claude CLI not on PATH" >&2; exit 2; }
 command -v bun >/dev/null || { echo "bun not on PATH" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq not on PATH" >&2; exit 2; }
 
+# Portable wall-clock timeout for the headless attempt.
+# Linux: GNU coreutils `timeout`. macOS via Homebrew coreutils:
+# `gtimeout`. Otherwise a pure-bash watchdog using a backgrounded
+# killer. Exits 124 on overrun (matching GNU `timeout` semantics)
+# and 137 if SIGKILL was needed after the grace period.
+if command -v timeout >/dev/null; then
+  TIMEOUT_CMD=(timeout --kill-after=30)
+elif command -v gtimeout >/dev/null; then
+  TIMEOUT_CMD=(gtimeout --kill-after=30)
+else
+  TIMEOUT_CMD=()
+fi
+
+run_with_timeout() {
+  local secs=$1; shift
+  if (( ${#TIMEOUT_CMD[@]} > 0 )); then
+    "${TIMEOUT_CMD[@]}" "$secs" "$@"
+    return $?
+  fi
+  # Pure-bash fallback (macOS without coreutils).
+  "$@" &
+  local child=$!
+  (
+    sleep "$secs"
+    if kill -0 "$child" 2>/dev/null; then
+      kill -TERM "$child" 2>/dev/null
+      sleep 30
+      kill -KILL "$child" 2>/dev/null
+    fi
+  ) &
+  local watchdog=$!
+  set +e
+  wait "$child"
+  local rc=$?
+  set -e
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  if (( rc == 143 )); then return 124; fi
+  if (( rc == 137 )); then return 137; fi
+  return "$rc"
+}
+
 LOG_DIR="docs/ralph/runs/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$LOG_DIR"
 echo "[driver] log dir: $LOG_DIR"
@@ -41,11 +83,14 @@ run_slice() {
   local branch="slice-${slice}-${name}"
   local promise; promise="$(jq -r '.completion_promise' "$config")"
   local max_iter; max_iter="$(jq -r '.max_iterations' "$config")"
-  local budget; budget="$(jq -r '.max_budget_usd_per_iteration' "$config")"
+  # Per-attempt wall-clock cap (seconds). Subscription billing has no
+  # dollar cap; the only safety we need is "kill an attempt that hangs"
+  # so the driver can move on to the next attempt or the gate.
+  local timeout_s; timeout_s="$(jq -r '.attempt_timeout_seconds // 1800' "$config")"
 
   echo
   echo "═══════════════════════════════════════════════════════════"
-  echo "SLICE ${slice} → ${branch}  (max ${max_iter} attempts, \$${budget}/attempt)"
+  echo "SLICE ${slice} → ${branch}  (max ${max_iter} attempts, ${timeout_s}s wall-clock per attempt)"
   echo "═══════════════════════════════════════════════════════════"
 
   if git show-ref --verify --quiet "refs/heads/${branch}"; then
@@ -83,16 +128,30 @@ run_slice() {
     local out_path="${LOG_DIR}/slice-${slice}-attempt-${i}.out.jsonl"
     local err_path="${LOG_DIR}/slice-${slice}-attempt-${i}.err.log"
 
-    if ! claude -p \
+    # Wall-clock-bounded headless attempt. We intentionally do NOT pass
+    # --max-budget-usd: that flag is for API-key billing and on a
+    # subscription it is dead weight. Worse, when it does fire (we've
+    # observed it) the headless process hangs instead of exiting,
+    # blocking the driver indefinitely. The wall-clock guard is the
+    # real safety: if claude hangs for any reason, SIGTERM lands at
+    # +timeout_s and the driver moves on to commit + gate the
+    # partial work.
+    set +e
+    run_with_timeout "${timeout_s}" claude -p \
         --permission-mode bypassPermissions \
-        --max-budget-usd "${budget}" \
         --output-format stream-json \
         --verbose \
         --add-dir "${ROOT}" \
         < "${prompt_path}" \
-        > "${out_path}" 2> "${err_path}"; then
-      echo "[${branch}] claude exited non-zero on attempt ${i} (continuing to gate)"
-    fi
+        > "${out_path}" 2> "${err_path}"
+    local rc=$?
+    set -e
+    case "$rc" in
+      0)   ;;
+      124) echo "[${branch}] claude hit ${timeout_s}s wall-clock cap on attempt ${i} (continuing to gate)";;
+      137) echo "[${branch}] claude SIGKILL'd after grace period on attempt ${i} (continuing to gate)";;
+      *)   echo "[${branch}] claude exited ${rc} on attempt ${i} (continuing to gate)";;
+    esac
 
     # Commit WIP BEFORE the gate so the gate evaluates committed branch
     # state, not a dirty working tree. This is what gets ff-merged to

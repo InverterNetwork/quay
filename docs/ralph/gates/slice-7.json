@@ -4,7 +4,7 @@
   "spec_coverage": "Durable task-level cancel intent; single canonical cancel finalizer; cleanup matrix; crash recovery after irreversible side effects. Section 15: 24-29 (incl. 29a-29g), 31a-31e, 79-82.",
   "completion_promise": "SLICE_7_COMPLETE",
   "max_iterations": 40,
-  "max_budget_usd_per_iteration": 5,
+  "attempt_timeout_seconds": 3600,
   "expected_tests": [
     "test_029a_cancel_crash_after_intent_recovers_from_running",
     "test_029c_cancel_close_pr_crash_after_irreversible_side_effects",

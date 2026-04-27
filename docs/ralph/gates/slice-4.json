@@ -4,7 +4,7 @@
   "spec_coverage": "Worker-alive check precedes PR check; blocker, malformed signal, PR opened, no-progress, crash. Idempotent PR contract. Section 15: 2, 3, 30, 43, 44, 64, 73, 74, 74b, 74c, 74d.",
   "completion_promise": "SLICE_4_COMPLETE",
   "max_iterations": 40,
-  "max_budget_usd_per_iteration": 5,
+  "attempt_timeout_seconds": 3600,
   "expected_tests": [
     "test_002_worker_blocker_transitions_to_awaiting_next_brief",
     "test_003_dead_worker_without_pr_or_signal_schedules_crash_retry",

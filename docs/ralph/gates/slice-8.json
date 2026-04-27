@@ -4,7 +4,7 @@
   "spec_coverage": "Tick-only Slack writer; per-escalation nonce; no duplicate post on crash; reply cursor uses recovered bot-post timestamp. Section 15: 11, 11a, 11b, 12, 31b, 41, 42, 47, 48, 48a, 48b, 48c, 64.",
   "completion_promise": "SLICE_8_COMPLETE",
   "max_iterations": 40,
-  "max_budget_usd_per_iteration": 5,
+  "attempt_timeout_seconds": 3600,
   "expected_tests": [
     "test_011_escalate_human_cli_does_not_call_slack",
     "test_011b_tick_recovers_posted_slack_message_by_nonce",

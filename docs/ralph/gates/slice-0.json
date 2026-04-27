@@ -4,7 +4,7 @@
   "spec_coverage": "Persistence layer, schema constraints, transaction predicates, artifact store layout. Section 15 support for all later tests.",
   "completion_promise": "SLICE_0_COMPLETE",
   "max_iterations": 30,
-  "max_budget_usd_per_iteration": 5,
+  "attempt_timeout_seconds": 1800,
   "expected_tests": [
     "test_schema_creates_required_tables",
     "test_schema_enforces_one_pending_attempt_per_task",

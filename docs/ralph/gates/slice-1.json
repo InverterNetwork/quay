@@ -4,7 +4,7 @@
   "spec_coverage": "Per-repo config; quay repo add/update/remove basics; archived repos reject new enqueues.",
   "completion_promise": "SLICE_1_COMPLETE",
   "max_iterations": 25,
-  "max_budget_usd_per_iteration": 4,
+  "attempt_timeout_seconds": 1800,
   "expected_tests": [
     "test_repo_add_persists_required_repo_config",
     "test_repo_add_persists_optional_repo_config",
