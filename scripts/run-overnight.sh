@@ -25,6 +25,9 @@ SLICES=(${QUAY_SLICES:-0 1 2 3 4 5 6 7 8 9 10})
 command -v claude >/dev/null || { echo "claude CLI not on PATH" >&2; exit 2; }
 command -v bun >/dev/null || { echo "bun not on PATH" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq not on PATH" >&2; exit 2; }
+command -v gh >/dev/null || { echo "gh CLI not on PATH" >&2; exit 2; }
+gh auth status >/dev/null 2>&1 || { echo "gh CLI not authenticated; run 'gh auth login'" >&2; exit 2; }
+git remote get-url origin >/dev/null 2>&1 || { echo "no 'origin' remote configured; cannot open PRs" >&2; exit 2; }
 
 # Portable wall-clock timeout for the headless attempt.
 # Linux: GNU coreutils `timeout`. macOS via Homebrew coreutils:
@@ -208,10 +211,44 @@ run_slice() {
     return 1
   fi
 
-  # Gate passed. ff-merge to main.
-  echo "[${branch}] gate passed; ff-merging to main"
+  # Gate passed. Push slice branch, open PR, merge via gh, sync main.
+  # Each slice gets one PR on origin for review/audit; the merge style
+  # is squash so main stays linear and per-slice.
+  echo "[${branch}] gate passed; pushing branch and opening PR"
+
+  # Push (force-with-lease in case we re-ran the slice and the remote
+  # branch already exists from a previous attempt).
+  git push --force-with-lease -u origin "${branch}"
+
+  local pr_title="slice ${slice}: ${name}"
+  local pr_body
+  pr_body="$(printf 'Slice %s of the Quay TDD chain.\n\n## Spec coverage\n\n%s\n\n## Tests added\n\n%s\n\n_Created by `scripts/run-overnight.sh` after `scripts/gate.sh %s` passed._' \
+    "${slice}" \
+    "$(jq -r '.spec_coverage' "${config}")" \
+    "$(jq -r '.expected_tests | map("- `" + . + "`") | join("\n")' "${config}")" \
+    "${slice}")"
+
+  # Idempotent PR creation: if a PR already exists for this branch
+  # (re-run case), reuse it. Otherwise create.
+  local pr_url
+  pr_url="$(gh pr view "${branch}" --json url -q .url 2>/dev/null || true)"
+  if [[ -z "${pr_url}" ]]; then
+    pr_url="$(gh pr create --base main --head "${branch}" \
+      --title "${pr_title}" --body "${pr_body}")"
+  fi
+  echo "[${branch}] PR: ${pr_url}"
+
+  # Merge the PR. Squash collapses the per-attempt commits (if any)
+  # into a single slice commit on main. --delete-branch removes the
+  # remote branch after merge so origin stays tidy.
+  gh pr merge "${branch}" --squash --delete-branch
+
+  # Pull main so the local repo reflects the merged state before the
+  # next slice branches off it.
   git switch main
-  git merge --ff-only "${branch}"
+  git pull --ff-only origin main
+  # Local slice branch is now stale (its tip != main's history).
+  git branch -D "${branch}" 2>/dev/null || true
   rm -f "${feedback_file}"
 }
 
