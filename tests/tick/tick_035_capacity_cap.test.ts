@@ -1,7 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import {
+  insertAttempt,
+  insertFinalPromptArtifact,
+  insertRepo,
+  insertTask,
+} from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -16,12 +21,13 @@ test("test_035_capacity_cap_prevents_extra_spawn", () => {
   const tasks = ["task-a", "task-b", "task-c"];
   for (const id of tasks) {
     insertTask(h.db, { taskId: id, repoId });
-    insertAttempt(h.db, {
+    const attemptId = insertAttempt(h.db, {
       taskId: id,
       attemptNumber: 1,
       reason: "initial",
       consumedBudget: 1,
     });
+    insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, id, attemptId);
   }
 
   const built = buildTickDeps(h);

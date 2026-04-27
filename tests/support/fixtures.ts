@@ -1,4 +1,6 @@
 import type { DB } from "../../src/db/connection.ts";
+import { createArtifactStore } from "../../src/artifacts/store.ts";
+import type { Clock } from "../../src/ports/clock.ts";
 
 const NOW = "2026-01-01T00:00:00.000Z";
 
@@ -77,4 +79,22 @@ export function insertAttempt(db: DB, opts: InsertAttemptOptions): number {
     );
   if (!row) throw new Error("attempt insert returned no row");
   return row.attempt_id;
+}
+
+export function insertFinalPromptArtifact(
+  db: DB,
+  artifactRoot: string,
+  clock: Clock,
+  taskId: string,
+  attemptId: number,
+  content = "final prompt\n",
+): number {
+  const store = createArtifactStore({ db, artifactRoot, clock });
+  return store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "final_prompt",
+    content,
+    extension: "md",
+  }).artifactId;
 }

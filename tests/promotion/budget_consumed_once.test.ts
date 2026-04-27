@@ -1,7 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import {
+  insertAttempt,
+  insertFinalPromptArtifact,
+  insertRepo,
+  insertTask,
+} from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -14,12 +19,13 @@ test("test_promotion_consumes_budget_once", () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-budget");
   const taskId = insertTask(h.db, { taskId: "task-once", repoId });
-  insertAttempt(h.db, {
+  const attemptId = insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
     reason: "initial",
     consumedBudget: 1,
   });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, attemptId);
 
   const built = buildTickDeps(h);
   built.git.setRemoteHeadSha(repoId, `quay/${taskId}`, null);

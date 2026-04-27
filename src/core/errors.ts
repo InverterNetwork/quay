@@ -3,6 +3,7 @@ export type QuayErrorCode =
   | "duplicate_repo"
   | "unknown_repo"
   | "repo_archived"
+  | "repo_has_active_tasks"
   | "branch_collision_unresolvable"
   | "bootstrap_failed";
 

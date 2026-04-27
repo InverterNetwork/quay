@@ -1,5 +1,6 @@
 import { test, expect, afterEach } from "bun:test";
 import { createHarness, type Harness } from "../support/harness.ts";
+import { QuayError } from "../../src/core/errors.ts";
 import { createRepoService, type RepoRow } from "../../src/core/repos/service.ts";
 import { insertTask } from "../support/fixtures.ts";
 
@@ -22,8 +23,12 @@ test("test_repo_remove_soft_deletes_repo", () => {
   const repos = createRepoService({ db: h.db, clock: h.clock });
 
   repos.add({ ...REQUIRED_FIELDS });
-  // Create a task that references the repo so we can prove the FK is preserved.
-  insertTask(h.db, { repoId: REQUIRED_FIELDS.repo_id, taskId: "task-keep" });
+  // Create a terminal task that references the repo so we can prove the FK is preserved.
+  insertTask(h.db, {
+    repoId: REQUIRED_FIELDS.repo_id,
+    taskId: "task-keep",
+    state: "merged",
+  });
 
   h.clock.advanceMs(60_000);
   const expectedArchivedAt = h.clock.nowISO();
@@ -50,4 +55,23 @@ test("test_repo_remove_soft_deletes_repo", () => {
     )
     .get("task-keep");
   expect(taskRow?.repo_id).toBe(REQUIRED_FIELDS.repo_id);
+});
+
+test("test_repo_remove_rejects_active_tasks", () => {
+  h = createHarness();
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+
+  repos.add({ ...REQUIRED_FIELDS });
+  insertTask(h.db, { repoId: REQUIRED_FIELDS.repo_id, taskId: "task-active" });
+
+  let caught: unknown = null;
+  try {
+    repos.remove(REQUIRED_FIELDS.repo_id);
+  } catch (err) {
+    caught = err;
+  }
+
+  expect(caught).toBeInstanceOf(QuayError);
+  expect((caught as QuayError).code).toBe("repo_has_active_tasks");
+  expect(repos.get(REQUIRED_FIELDS.repo_id)!.archived_at).toBeNull();
 });
