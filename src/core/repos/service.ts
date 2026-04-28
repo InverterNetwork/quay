@@ -39,6 +39,8 @@ const SELECT_REPO_COLUMNS = `
   archived_at, created_at
 `;
 
+// Mirrors spec §10: repo removal blocks non-terminal, non-parked tasks only.
+// Parked and terminal tasks keep their FK for forensics after archival.
 const ACTIVE_TASK_STATES = [
   "queued",
   "running",

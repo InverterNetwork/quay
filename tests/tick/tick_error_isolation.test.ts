@@ -90,4 +90,26 @@ test("test_tick_error_isolated_to_task_and_tick_continues", () => {
     { task_id: failingTask, event_type: "tick_error" },
     { task_id: healthyTask, event_type: "spawned" },
   ]);
+
+  delete built.git.fail.fetch;
+
+  const retry = tick_once(built.deps);
+
+  expect(retry).toEqual([{ task_id: failingTask, action: "spawned" }]);
+
+  const recovered = h.db
+    .query<
+      { state: string; attempts_consumed: number; tick_error: string | null },
+      [string]
+    >(
+      `SELECT state, attempts_consumed, tick_error
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(failingTask);
+
+  expect(recovered).toEqual({
+    state: "running",
+    attempts_consumed: 1,
+    tick_error: null,
+  });
 });

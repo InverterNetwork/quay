@@ -236,6 +236,7 @@ function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
         `UPDATE tasks
             SET state = 'running',
                 attempts_consumed = attempts_consumed + ?,
+                tick_error = NULL,
                 updated_at = ?
           WHERE task_id = ?
             AND state = 'queued'
