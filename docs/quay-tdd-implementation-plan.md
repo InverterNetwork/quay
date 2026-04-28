@@ -464,7 +464,8 @@ Each slice should be planned and implemented in this format:
 - Deterministic failure retry composition.
 - Budget consumed at spawn, not trigger detection.
 - Exhaustion parks in `awaiting-next-brief` with `budget_exhausted`.
-- Section 15 cases: 5, 13, 21, 22, 23, 60.
+- Spawn-failure no-evidence rollback and `worktree_error` parking.
+- Section 15 cases: 5, 13, 21, 22, 23, 45, 46b, 60, 62, 63.
 
 **Red tests**
 
@@ -476,6 +477,10 @@ Each slice should be planned and implemented in this format:
 | `test_022_wall_clock_kill_schedules_retry` | A live worker past `max_attempt_duration_seconds` gets `kill_intent = wall_clock` before tmux kill; the finalizer marks `killed_wall_clock` and schedules a pending budget-consuming `wall_clock` retry. |
 | `test_023_retry_brief_uses_most_recent_brief` | Quay-composed deterministic retry briefs wrap the latest spawned brief, including orchestrator-submitted follow-up briefs, rather than reverting to the initial enqueue brief. |
 | `test_stale_kill_schedules_retry_once` | A stale live worker gets `kill_intent = stale` before tmux kill, and retry/finalizer re-entry schedules exactly one pending `stale` retry. |
+| `test_045_spawn_failure_no_evidence_rolls_back_budget_and_requeues` | A spawn-window attempt with no worker evidence is classified as `spawn_failed`, rolls back the promotion budget increment, increments `spawn_failures_consecutive`, and schedules a clean retry of the same logical attempt. |
+| `test_046b_spawn_window_push_without_pr_takes_spawn_failed_default` | A spawn-window worker push without a PR is not trackable as `pr-open`; with no signal file and no PR, the no-evidence default applies: `spawn_failed`, budget rollback, fresh queued attempt. |
+| `test_062_max_spawn_failures_parks_worktree_error` | Consecutive no-evidence spawn failures increment `spawn_failures_consecutive`; once the cap is reached, the task parks in `worktree_error`. |
+| `test_063_evidence_found_recovery_resets_spawn_failures` | Evidence-found spawn-window recovery outcomes reset `spawn_failures_consecutive` to 0 and preserve budget. |
 
 **Minimal implementation**
 
@@ -483,12 +488,15 @@ Each slice should be planned and implemented in this format:
 - Attempt scheduling helper.
 - Budget-exhausted helper.
 - Stale and wall-clock kill-intent finalizers.
+- Spawn-failure rollback helper for no-evidence spawn-window recovery.
 
 **Done criteria**
 
 - Trigger detection never increments budget directly.
 - Budget-consuming attempts increment only on later promotion.
 - Exhausted tasks are handed back to the orchestrator, not terminal-failed.
+- No-evidence substrate spawn failures never consume retry budget and park in
+  `worktree_error` after the configured consecutive-failure cap.
 
 ### Slice 6: Claim Fencing and Orchestrator Loop Parking
 
