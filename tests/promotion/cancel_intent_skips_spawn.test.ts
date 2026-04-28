@@ -39,6 +39,8 @@ test("test_promotion_rowcount_zero_on_cancel_intent_skips_spawn", () => {
   // No tmux spawn at all (not even attempted).
   expect(built.tmux.spawnAttempts).toHaveLength(0);
   expect(built.tmux.spawnCalls).toHaveLength(0);
+  expect(built.git.calls).toHaveLength(0);
+  expect(built.github.calls).toHaveLength(0);
 
   // Task still queued; no budget consumed.
   const task = h.db

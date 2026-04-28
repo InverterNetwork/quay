@@ -1,7 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import {
+  insertAttempt,
+  insertFinalPromptArtifact,
+  insertRepo,
+  insertTask,
+} from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -22,6 +27,7 @@ test("test_001_tick_promotes_queued_to_running", () => {
     reason: "initial",
     consumedBudget: 1,
   });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, attemptId);
 
   const built = buildTickDeps(h);
   built.git.setRemoteHeadSha(repoId, `quay/${taskId}`, "deadbeef");

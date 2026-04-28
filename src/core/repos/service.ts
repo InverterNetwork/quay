@@ -39,6 +39,18 @@ const SELECT_REPO_COLUMNS = `
   archived_at, created_at
 `;
 
+// Mirrors spec §10: repo removal blocks non-terminal, non-parked tasks only.
+// Parked and terminal tasks keep their FK for forensics after archival.
+const ACTIVE_TASK_STATES = [
+  "queued",
+  "running",
+  "pr-open",
+  "done",
+  "awaiting-next-brief",
+  "claimed-by-orchestrator",
+  "waiting_human",
+] as const;
+
 export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
   function get(repoId: string): RepoRow | null {
     return (
@@ -130,6 +142,22 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
       });
     }
     if (existing.archived_at !== null) return existing;
+    const placeholders = ACTIVE_TASK_STATES.map(() => "?").join(", ");
+    const active = db
+      .query<{ n: number }, [string, ...string[]]>(
+        `SELECT COUNT(*) AS n
+           FROM tasks
+          WHERE repo_id = ?
+            AND state IN (${placeholders})`,
+      )
+      .get(repoId, ...ACTIVE_TASK_STATES);
+    if ((active?.n ?? 0) > 0) {
+      throw new QuayError(
+        "repo_has_active_tasks",
+        `repo "${repoId}" has active tasks and cannot be archived`,
+        { repo_id: repoId, active_tasks: active!.n },
+      );
+    }
     db.query(`UPDATE repos SET archived_at = ? WHERE repo_id = ?`).run(
       clock.nowISO(),
       repoId,
