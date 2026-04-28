@@ -23,6 +23,8 @@ export const DEFAULT_MAX_CONCURRENT = 2;
 export const DEFAULT_MAX_ATTEMPT_DURATION_SECONDS = 3600;
 export const DEFAULT_STALENESS_THRESHOLD_SECONDS = 600;
 export const DEFAULT_MAX_SPAWN_FAILURES = 3;
+export const DEFAULT_CLAIM_TIMEOUT_SECONDS = 1800;
+export const DEFAULT_MAX_CLAIM_EXPIRATIONS = 3;
 export const DEFAULT_AGENT_INVOCATION =
   "claude --permission-mode bypassPermissions < {prompt_file}";
 
@@ -42,6 +44,8 @@ export interface TickOptions {
   maxAttemptDurationSeconds?: number;
   stalenessThresholdSeconds?: number;
   maxSpawnFailures?: number;
+  claimTimeoutSeconds?: number;
+  maxClaimExpirations?: number;
 }
 
 export type TickAction =
@@ -63,6 +67,8 @@ export type TickAction =
   | "ci_failed"
   | "ci_pending"
   | "ci_passed"
+  | "claim_expired"
+  | "orchestrator_loop_parked"
   | "tick_error";
 
 export interface TickTaskResult {
@@ -93,6 +99,13 @@ interface PrOpenTaskRow {
   task_id: string;
   repo_id: string;
   branch_name: string;
+  cancel_requested_at: string | null;
+}
+
+interface ClaimedTaskRow {
+  task_id: string;
+  claimed_at: string | null;
+  claim_expirations_consecutive: number;
   cancel_requested_at: string | null;
 }
 
@@ -129,6 +142,7 @@ export function tick_once(deps: TickDeps, options: TickOptions = {}): TickTaskRe
     // until the next tick — the retry latency budget is one tick interval.
     const runningSnapshot = readRunning(deps.db);
     const prOpenSnapshot = readPrOpen(deps.db);
+    const claimedSnapshot = readClaimed(deps.db);
     const queuedSnapshot = readQueued(deps.db);
 
     for (const task of runningSnapshot) {
@@ -143,6 +157,15 @@ export function tick_once(deps: TickDeps, options: TickOptions = {}): TickTaskRe
     for (const task of prOpenSnapshot) {
       try {
         const result = processPrOpenTask(deps, task);
+        if (result !== null) results.push(result);
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
+    for (const task of claimedSnapshot) {
+      try {
+        const result = processClaimedTask(deps, task, options);
         if (result !== null) results.push(result);
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
@@ -187,6 +210,17 @@ function readRunning(db: DB): RunningTaskRow[] {
          FROM tasks
         WHERE state = 'running'
         ORDER BY created_at, task_id`,
+    )
+    .all();
+}
+
+function readClaimed(db: DB): ClaimedTaskRow[] {
+  return db
+    .query<ClaimedTaskRow, []>(
+      `SELECT task_id, claimed_at, claim_expirations_consecutive, cancel_requested_at
+         FROM tasks
+        WHERE state = 'claimed-by-orchestrator'
+        ORDER BY claimed_at, task_id`,
     )
     .all();
 }
@@ -403,6 +437,80 @@ function processPrOpenTask(
     } catch {}
     throw err;
   }
+}
+
+function processClaimedTask(
+  deps: TickDeps,
+  task: ClaimedTaskRow,
+  options: TickOptions,
+): TickTaskResult | null {
+  // Cancel intent is the slice-7 finalizer's responsibility; skip cleanly.
+  if (task.cancel_requested_at !== null) return null;
+  if (task.claimed_at === null) return null;
+
+  const claimTimeoutSeconds =
+    options.claimTimeoutSeconds ?? DEFAULT_CLAIM_TIMEOUT_SECONDS;
+  const maxClaimExpirations =
+    options.maxClaimExpirations ?? DEFAULT_MAX_CLAIM_EXPIRATIONS;
+
+  const nowMs = Date.parse(deps.clock.nowISO());
+  const claimedMs = Date.parse(task.claimed_at);
+  if (nowMs - claimedMs <= claimTimeoutSeconds * 1000) return null;
+
+  const now = deps.clock.nowISO();
+  const newCount = task.claim_expirations_consecutive + 1;
+  const parking = newCount >= maxClaimExpirations;
+  const targetState = parking ? "orchestrator_loop" : "awaiting-next-brief";
+
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    const upd = deps.db
+      .query(
+        `UPDATE tasks
+            SET state = ?,
+                claim_id = NULL,
+                claimed_at = NULL,
+                claim_expirations_consecutive = ?,
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ?
+            AND state = 'claimed-by-orchestrator'
+            AND cancel_requested_at IS NULL`,
+      )
+      .run(targetState, newCount, now, task.task_id);
+    const changes = (upd as { changes?: number }).changes ?? 0;
+    if (changes === 0) {
+      deps.db.exec("ROLLBACK");
+      return null;
+    }
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, event_type, from_state, to_state, occurred_at
+         ) VALUES (?, 'claim_expired', 'claimed-by-orchestrator', ?, ?)`,
+      )
+      .run(task.task_id, targetState, now);
+    if (parking) {
+      deps.db
+        .query(
+          `INSERT INTO events (
+             task_id, event_type, from_state, to_state, occurred_at
+           ) VALUES (?, 'orchestrator_loop_parked', 'claimed-by-orchestrator', 'orchestrator_loop', ?)`,
+        )
+        .run(task.task_id, now);
+    }
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+
+  return {
+    task_id: task.task_id,
+    action: parking ? "orchestrator_loop_parked" : "claim_expired",
+  };
 }
 
 function loadLatestAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
