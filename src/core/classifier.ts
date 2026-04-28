@@ -491,7 +491,6 @@ function scheduleRetry(
           ? "The worker exited with an existing PR but made no trackable remote progress during this attempt."
           : "The worker exited without producing a PR or valid blocker signal.",
       fromState: "running",
-      remoteShaAtExit,
     });
     const eventType = exitKind === "no_progress" ? "no_progress" : "crashed";
     deps.db

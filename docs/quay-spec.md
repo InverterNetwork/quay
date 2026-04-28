@@ -868,7 +868,7 @@ CREATE TABLE events (
   event_id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id TEXT NOT NULL REFERENCES tasks(task_id),
   attempt_id INTEGER REFERENCES attempts(attempt_id),
-  event_type TEXT NOT NULL,           -- spawned / pr_opened / ci_failed / ci_passed / merged / closed / changes_requested / conflict / blocker_ingested / slack_reply_ingested / claimed / claim_expired / orchestrator_loop_parked / non_budget_loop_parked / brief_submitted / human_escalated / budget_exhausted / wall_clock_exceeded / cancelled / worktree_error / tick_error
+  event_type TEXT NOT NULL,           -- spawned / pr_opened / ci_failed / ci_passed / merged / closed / changes_requested / conflict / blocker_ingested / malformed_signal_ingested / no_progress / crashed / spawn_failed / stale_detected / stale_killed / wall_clock_exceeded / wall_clock_killed / slack_reply_ingested / claimed / claim_expired / orchestrator_loop_parked / non_budget_loop_parked / brief_submitted / human_escalated / budget_exhausted / cancelled / worktree_error / tick_error
   from_state TEXT,
   to_state TEXT,
   payload_artifact_id INTEGER REFERENCES artifacts(artifact_id),

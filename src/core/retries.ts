@@ -29,8 +29,6 @@ export interface ScheduleDeterministicRetryInput {
   reason: BudgetRetryReason;
   diagnostics: string;
   fromState?: string;
-  eventType?: string;
-  remoteShaAtExit?: string | null;
 }
 
 export interface ScheduleDeterministicRetryResult {
@@ -88,7 +86,7 @@ export function scheduleDeterministicRetry(
                 budget_exhausted = 1,
                 tick_error = NULL,
                 updated_at = ?
-          WHERE task_id = ?`,
+          WHERE task_id = ? AND cancel_requested_at IS NULL`,
       )
       .run(now, input.taskId);
     deps.db
@@ -146,7 +144,7 @@ export function scheduleDeterministicRetry(
           SET state = 'queued',
               tick_error = NULL,
               updated_at = ?
-        WHERE task_id = ?`,
+        WHERE task_id = ? AND cancel_requested_at IS NULL`,
     )
     .run(now, input.taskId);
   return { scheduled: true, artifactId: brief.artifactId, nextAttemptId: attempt.attempt_id };
@@ -189,7 +187,10 @@ export function writeBlockerBudgetExhausted(
     extension: "md",
   });
   deps.db
-    .query(`UPDATE tasks SET budget_exhausted = 1 WHERE task_id = ?`)
+    .query(
+      `UPDATE tasks SET budget_exhausted = 1
+        WHERE task_id = ? AND cancel_requested_at IS NULL`,
+    )
     .run(input.taskId);
   deps.db
     .query(
@@ -252,7 +253,7 @@ export function scheduleCleanSpawnRetry(
           SET state = 'queued',
               tick_error = NULL,
               updated_at = ?
-        WHERE task_id = ?`,
+        WHERE task_id = ? AND cancel_requested_at IS NULL`,
     )
     .run(deps.clock.nowISO(), input.taskId);
   return attempt.attempt_id;
@@ -294,7 +295,11 @@ function loadMostRecentBrief(db: DB, taskId: string): string {
     )
     .get(taskId);
   if (!row) return "(No prior brief artifact was recorded.)";
-  return readFileSync(row.file_path, "utf8");
+  try {
+    return readFileSync(row.file_path, "utf8");
+  } catch {
+    return "(Prior brief artifact file was missing or unreadable.)";
+  }
 }
 
 function composeRetryBrief(input: {

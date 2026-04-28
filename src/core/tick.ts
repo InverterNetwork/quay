@@ -710,10 +710,16 @@ function promoteAndSpawn(
   fireFailpoint("after_tmux_session_created");
 
   // Record session AFTER successful substrate spawn so the spawn-failure
-  // window (running + tmux_session NULL) is real.
+  // window (running + tmux_session NULL) is real. Resetting
+  // spawn_failures_consecutive here (and not inside the promotion txn) is
+  // load-bearing: a substrate failure between promotion and this point must
+  // leave the consecutive counter intact so it can accumulate across ticks.
   deps.db
     .query(`UPDATE attempts SET tmux_session = ? WHERE attempt_id = ?`)
     .run(sessionName, pending.attempt_id);
+  deps.db
+    .query(`UPDATE tasks SET spawn_failures_consecutive = 0 WHERE task_id = ?`)
+    .run(task.task_id);
 
   return { task_id: task.task_id, action: "spawned" };
 }
@@ -758,7 +764,6 @@ function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
       `UPDATE tasks
           SET state = 'running',
               attempts_consumed = attempts_consumed + ?,
-              spawn_failures_consecutive = 0,
               tick_error = NULL,
               updated_at = ?
         WHERE task_id = ?

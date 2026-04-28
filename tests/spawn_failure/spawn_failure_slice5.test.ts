@@ -2,7 +2,13 @@ import { afterEach, expect, test } from "bun:test";
 import { join } from "node:path";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertRepo, insertRunningTask } from "../support/fixtures.ts";
+import {
+  insertAttempt,
+  insertFinalPromptArtifact,
+  insertRepo,
+  insertRunningTask,
+  insertTask,
+} from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -98,6 +104,37 @@ test("test_062_max_spawn_failures_parks_worktree_error", () => {
       `SELECT state, spawn_failures_consecutive FROM tasks WHERE task_id = ?`,
     )
     .get(t.taskId);
+  expect(task).toEqual({
+    state: "worktree_error",
+    spawn_failures_consecutive: 3,
+  });
+});
+
+test("test_062_consecutive_substrate_failures_accumulate_across_ticks", () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-spawn-loop");
+  const taskId = insertTask(h.db, { taskId: "task-spawn-loop", repoId });
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+  });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, attemptId);
+
+  const built = buildTickDeps(h);
+  built.git.setRemoteHeadSha(repoId, `quay/${taskId}`, null);
+  built.github.setPrExists(repoId, `quay/${taskId}`, false);
+
+  for (let i = 0; i < 6; i++) {
+    built.tmux.failSpawnNext();
+    tick_once(built.deps);
+  }
+  const task = h.db
+    .query<{ state: string; spawn_failures_consecutive: number }, [string]>(
+      `SELECT state, spawn_failures_consecutive FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
   expect(task).toEqual({
     state: "worktree_error",
     spawn_failures_consecutive: 3,
