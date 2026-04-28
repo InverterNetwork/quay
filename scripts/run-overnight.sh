@@ -49,7 +49,10 @@ run_with_timeout() {
     return $?
   fi
   # Pure-bash fallback (macOS without coreutils).
-  "$@" &
+  # Background jobs in non-interactive bash read from /dev/null unless stdin is
+  # explicitly preserved. Keep the caller's prompt redirection attached to the
+  # child process.
+  "$@" <&0 &
   local child=$!
   (
     sleep "$secs"
