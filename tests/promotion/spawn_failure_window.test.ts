@@ -80,10 +80,16 @@ test("test_spawn_failure_window_leaves_running_with_null_session_for_recovery", 
     .get(taskId);
   expect(ev!.n).toBe(1);
 
-  // A second tick must NOT promote a duplicate — the task is no longer
-  // 'queued', so the predicate prevents any double-spawn. Recovery is the
-  // explicit job of Slice 4, not tick promotion.
+  // A second tick runs slice-5 recovery: the no-evidence spawn-window default
+  // marks spawn_failed, rolls back budget, and schedules a clean retry. It
+  // still must not promote a duplicate in the same tick.
   const again = tick_once(built.deps);
-  expect(again).toHaveLength(0);
+  expect(again).toEqual([{ task_id: taskId, action: "spawn_failed" }]);
   expect(built.tmux.spawnCalls).toHaveLength(0);
+  const recovered = h.db
+    .query<{ state: string; attempts_consumed: number }, [string]>(
+      `SELECT state, attempts_consumed FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(recovered).toEqual({ state: "queued", attempts_consumed: 0 });
 });

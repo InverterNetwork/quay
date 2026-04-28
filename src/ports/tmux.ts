@@ -19,4 +19,7 @@ export interface TmuxPort {
   // null if no log is available (session never logged, log file missing, etc).
   // The classifier persists the returned bytes as a `session_log` artifact.
   collectLog(sessionName: string): string | null;
+  // Returns the latest log-write timestamp for a live session. For a freshly
+  // spawned worker with no log bytes yet, implementations return spawned_at.
+  logFreshness(sessionName: string, spawnedAt: string): string;
 }

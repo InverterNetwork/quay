@@ -5,4 +5,12 @@
 // Returns true iff `gh pr view` would exit 0.
 export interface GitHubPort {
   prExistsForBranch(repoId: string, branch: string): boolean;
+  prCheckStatus(repoId: string, branch: string): PrCheckStatus;
+}
+
+export type PrCheckState = "pass" | "fail" | "pending";
+
+export interface PrCheckStatus {
+  state: PrCheckState;
+  excerpt?: string;
 }
