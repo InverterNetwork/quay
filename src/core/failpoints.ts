@@ -7,6 +7,7 @@
 export type FailpointName =
   | "after_blocker_artifact_write"
   | "after_blocker_state_commit"
+  | "after_kill_intent_commit"
   | "after_tmux_session_created";
 
 const handlers = new Map<FailpointName, () => void>();

@@ -17,6 +17,10 @@ import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort } from "../ports/github.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import {
+  scheduleDeterministicRetry,
+  writeBlockerBudgetExhausted,
+} from "./retries.ts";
 
 const BLOCKER_FILENAME = ".quay-blocked.md";
 const BLOCKER_MAX_BYTES = 64 * 1024;
@@ -230,6 +234,7 @@ function ingestBlocker(
         .query(
           `UPDATE tasks
               SET state = 'awaiting-next-brief',
+                  spawn_failures_consecutive = 0,
                   tick_error = NULL,
                   updated_at = ?
             WHERE task_id = ? AND state = 'running'
@@ -250,6 +255,11 @@ function ingestBlocker(
               WHERE attempt_id = ? AND ended_at IS NULL`,
           )
           .run(now, attempt.attempt_id);
+        writeBlockerBudgetExhausted(deps, {
+          taskId: task.task_id,
+          attempt,
+          blockerContent: content,
+        });
         deps.db
           .query(
             `INSERT INTO events (
@@ -308,6 +318,7 @@ function ingestMalformed(
         .query(
           `UPDATE tasks
               SET state = 'queued',
+                  spawn_failures_consecutive = 0,
                   tick_error = NULL,
                   updated_at = ?
             WHERE task_id = ? AND state = 'running'
@@ -326,7 +337,13 @@ function ingestMalformed(
               WHERE attempt_id = ? AND ended_at IS NULL`,
           )
           .run(now, attempt.attempt_id);
-        insertPendingRetryAttempt(deps.db, task.task_id, attempt, "malformed_signal");
+        scheduleDeterministicRetry(deps, {
+          taskId: task.task_id,
+          prevAttempt: attempt,
+          reason: "malformed_signal",
+          diagnostics: "Worker wrote a malformed .quay-blocked.md signal. The raw malformed bytes were persisted as a malformed_signal artifact.",
+          fromState: "running",
+        });
         deps.db
           .query(
             `INSERT INTO events (
@@ -363,8 +380,9 @@ function transitionPrOpened(
     const taskUpd = deps.db
       .query(
         `UPDATE tasks
-            SET state = 'pr-open',
-                tick_error = NULL,
+          SET state = 'pr-open',
+              spawn_failures_consecutive = 0,
+              tick_error = NULL,
                 updated_at = ?
           WHERE task_id = ? AND state = 'running'
             AND cancel_requested_at IS NULL`,
@@ -443,7 +461,7 @@ function scheduleRetry(
     const taskUpd = deps.db
       .query(
         `UPDATE tasks
-            SET state = 'queued',
+            SET spawn_failures_consecutive = 0,
                 tick_error = NULL,
                 updated_at = ?
           WHERE task_id = ? AND state = 'running'
@@ -464,16 +482,26 @@ function scheduleRetry(
           WHERE attempt_id = ?`,
       )
       .run(exitKind, now, remoteShaAtExit, attempt.attempt_id);
-    insertPendingRetryAttempt(deps.db, task.task_id, attempt, retryReason);
+    scheduleDeterministicRetry(deps, {
+      taskId: task.task_id,
+      prevAttempt: attempt,
+      reason: retryReason,
+      diagnostics:
+        exitKind === "no_progress"
+          ? "The worker exited with an existing PR but made no trackable remote progress during this attempt."
+          : "The worker exited without producing a PR or valid blocker signal.",
+      fromState: "running",
+      remoteShaAtExit,
+    });
     const eventType = exitKind === "no_progress" ? "no_progress" : "crashed";
     deps.db
       .query(
         `INSERT INTO events (
            task_id, attempt_id, event_type,
            from_state, to_state, occurred_at
-         ) VALUES (?, ?, ?, 'running', 'queued', ?)`,
+         ) VALUES (?, ?, ?, 'running', (SELECT state FROM tasks WHERE task_id = ?), ?)`,
       )
-      .run(task.task_id, attempt.attempt_id, eventType, now);
+      .run(task.task_id, attempt.attempt_id, eventType, task.task_id, now);
     deps.db.exec("COMMIT");
     return { outcome: exitKind === "no_progress" ? "no_progress" : "crashed" };
   } catch (err) {
@@ -482,23 +510,6 @@ function scheduleRetry(
     } catch {}
     throw err;
   }
-}
-
-function insertPendingRetryAttempt(
-  db: DB,
-  taskId: string,
-  prevAttempt: ClassifyContextAttempt,
-  reason: "crash" | "malformed_signal",
-): void {
-  // Slice 4 only schedules the pending row. Brief / final_prompt / template
-  // composition is Slice 5's responsibility (deterministic retry composition).
-  // The single-pending-attempt index permits this insert because the previous
-  // attempt has spawned_at set.
-  db.query(
-    `INSERT INTO attempts (
-       task_id, attempt_number, preamble_id, reason, consumed_budget
-     ) VALUES (?, ?, ?, ?, 1)`,
-  ).run(taskId, prevAttempt.attempt_number + 1, prevAttempt.preamble_id, reason);
 }
 
 interface UpsertArtifactInput {

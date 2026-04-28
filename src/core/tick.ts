@@ -12,9 +12,17 @@ import {
   type ClassifyOutcome,
 } from "./classifier.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import {
+  scheduleCleanSpawnRetry,
+  scheduleDeterministicRetry,
+  type BudgetRetryReason,
+} from "./retries.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
 
 export const DEFAULT_MAX_CONCURRENT = 2;
+export const DEFAULT_MAX_ATTEMPT_DURATION_SECONDS = 3600;
+export const DEFAULT_STALENESS_THRESHOLD_SECONDS = 600;
+export const DEFAULT_MAX_SPAWN_FAILURES = 3;
 export const DEFAULT_AGENT_INVOCATION =
   "claude --permission-mode bypassPermissions < {prompt_file}";
 
@@ -31,6 +39,9 @@ export interface TickDeps {
 export interface TickOptions {
   maxConcurrent?: number;
   agentInvocation?: string;
+  maxAttemptDurationSeconds?: number;
+  stalenessThresholdSeconds?: number;
+  maxSpawnFailures?: number;
 }
 
 export type TickAction =
@@ -45,6 +56,13 @@ export type TickAction =
   | "no_progress"
   | "crashed"
   | "spawn_window_recovered"
+  | "spawn_failed"
+  | "wall_clock_killed"
+  | "stale_killed"
+  | "kill_intent_set"
+  | "ci_failed"
+  | "ci_pending"
+  | "ci_passed"
   | "tick_error";
 
 export interface TickTaskResult {
@@ -71,6 +89,13 @@ interface RunningTaskRow {
   cancel_requested_at: string | null;
 }
 
+interface PrOpenTaskRow {
+  task_id: string;
+  repo_id: string;
+  branch_name: string;
+  cancel_requested_at: string | null;
+}
+
 interface PendingAttemptRow {
   attempt_id: number;
   attempt_number: number;
@@ -82,10 +107,14 @@ interface CurrentAttemptRow {
   attempt_id: number;
   attempt_number: number;
   preamble_id: number;
+  template_id: number | null;
+  reason: string;
+  consumed_budget: number;
   remote_sha_at_spawn: string | null;
   pr_existed_at_spawn: number;
   tmux_session: string | null;
   spawned_at: string | null;
+  kill_intent: string | null;
 }
 
 export function tick_once(deps: TickDeps, options: TickOptions = {}): TickTaskResult[] {
@@ -99,11 +128,21 @@ export function tick_once(deps: TickDeps, options: TickOptions = {}): TickTaskRe
     // but tasks that transition through `queued` mid-tick are not promoted
     // until the next tick — the retry latency budget is one tick interval.
     const runningSnapshot = readRunning(deps.db);
+    const prOpenSnapshot = readPrOpen(deps.db);
     const queuedSnapshot = readQueued(deps.db);
 
     for (const task of runningSnapshot) {
       try {
-        const result = processRunningTask(deps, task);
+        const result = processRunningTask(deps, task, options);
+        if (result !== null) results.push(result);
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
+    for (const task of prOpenSnapshot) {
+      try {
+        const result = processPrOpenTask(deps, task);
         if (result !== null) results.push(result);
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
@@ -152,12 +191,25 @@ function readRunning(db: DB): RunningTaskRow[] {
     .all();
 }
 
+function readPrOpen(db: DB): PrOpenTaskRow[] {
+  return db
+    .query<PrOpenTaskRow, []>(
+      `SELECT task_id, repo_id, branch_name, cancel_requested_at
+         FROM tasks
+        WHERE state = 'pr-open'
+        ORDER BY created_at, task_id`,
+    )
+    .all();
+}
+
 function loadCurrentAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
   return (
     db
       .query<CurrentAttemptRow, [string]>(
         `SELECT attempt_id, attempt_number, preamble_id,
-                remote_sha_at_spawn, pr_existed_at_spawn, tmux_session, spawned_at
+                template_id, reason, consumed_budget,
+                remote_sha_at_spawn, pr_existed_at_spawn, tmux_session,
+                spawned_at, kill_intent
            FROM attempts
           WHERE task_id = ? AND spawned_at IS NOT NULL
           ORDER BY attempt_id DESC
@@ -170,6 +222,7 @@ function loadCurrentAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
 function processRunningTask(
   deps: TickDeps,
   task: RunningTaskRow,
+  options: TickOptions,
 ): TickTaskResult | null {
   // Cancel intent is the slice-7 finalizer's responsibility; skip cleanly.
   if (task.cancel_requested_at !== null) return null;
@@ -208,12 +261,34 @@ function processRunningTask(
       ctxAttempt,
       { sessionName: canonical, spawnWindow: true },
     );
+    if (res.outcome === "spawn_window_no_evidence") {
+      return handleSpawnFailure(deps, task, attempt, options);
+    }
     return outcomeToResult(task.task_id, res.outcome, true);
   }
 
   if (deps.tmux.isAlive(attempt.tmux_session)) {
-    // Live workers are the slice-5 stale/wall-clock detector's job. Skip.
+    if (attempt.kill_intent !== null) {
+      deps.tmux.kill(attempt.tmux_session);
+      return { task_id: task.task_id, action: "kill_intent_set" };
+    }
+    const intent = detectKillIntent(deps, attempt, options);
+    if (intent !== null) {
+      setKillIntent(deps, task.task_id, attempt.attempt_id, intent);
+      fireFailpoint("after_kill_intent_commit");
+      deps.tmux.kill(attempt.tmux_session);
+      return { task_id: task.task_id, action: "kill_intent_set" };
+    }
     return null;
+  }
+
+  if (attempt.kill_intent === "wall_clock" || attempt.kill_intent === "stale") {
+    const retryReason: BudgetRetryReason = attempt.kill_intent;
+    finalizeKillIntent(deps, task, attempt, retryReason);
+    return {
+      task_id: task.task_id,
+      action: retryReason === "wall_clock" ? "wall_clock_killed" : "stale_killed",
+    };
   }
 
   const res = classifyAndApply(
@@ -245,9 +320,291 @@ function outcomeToResult(
     case "crashed":
       return { task_id: taskId, action: "crashed" };
     case "spawn_window_no_evidence":
-      // Slice 5 finishes the spawn_failed rollback path; for slice 4 the row
-      // is left untouched and recovery converges later.
       return null;
+  }
+}
+
+function processPrOpenTask(
+  deps: TickDeps,
+  task: PrOpenTaskRow,
+): TickTaskResult | null {
+  if (task.cancel_requested_at !== null) return null;
+  const attempt = loadLatestAttempt(deps.db, task.task_id);
+  if (!attempt) return null;
+
+  const status = deps.github.prCheckStatus(task.repo_id, task.branch_name);
+  if (status.state === "pending") {
+    return { task_id: task.task_id, action: "ci_pending" };
+  }
+
+  const now = deps.clock.nowISO();
+  if (status.state === "pass") {
+    deps.db.exec("BEGIN");
+    try {
+      const upd = deps.db
+        .query(
+          `UPDATE tasks
+              SET state = 'done', tick_error = NULL, updated_at = ?
+            WHERE task_id = ? AND state = 'pr-open'
+              AND cancel_requested_at IS NULL`,
+        )
+        .run(now, task.task_id);
+      const changes = (upd as { changes?: number }).changes ?? 0;
+      if (changes === 0) {
+        deps.db.exec("ROLLBACK");
+        return null;
+      }
+      deps.db
+        .query(
+          `INSERT INTO events (
+             task_id, attempt_id, event_type, from_state, to_state, occurred_at
+           ) VALUES (?, ?, 'ci_passed', 'pr-open', 'done', ?)`,
+        )
+        .run(task.task_id, attempt.attempt_id, now);
+      deps.db.exec("COMMIT");
+      return { task_id: task.task_id, action: "ci_passed" };
+    } catch (err) {
+      try {
+        deps.db.exec("ROLLBACK");
+      } catch {}
+      throw err;
+    }
+  }
+
+  deps.db.exec("BEGIN");
+  try {
+    const excerpt = deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: attempt.attempt_id,
+      kind: "ci_failure_excerpt",
+      content: status.excerpt ?? "CI failed.",
+      extension: "txt",
+    });
+    scheduleDeterministicRetry(deps, {
+      taskId: task.task_id,
+      prevAttempt: attempt,
+      reason: "ci_fail",
+      diagnostics: status.excerpt ?? "CI failed.",
+      fromState: "pr-open",
+    });
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state,
+           payload_artifact_id, occurred_at
+         ) VALUES (?, ?, 'ci_failed', 'pr-open', (SELECT state FROM tasks WHERE task_id = ?), ?, ?)`,
+      )
+      .run(task.task_id, attempt.attempt_id, task.task_id, excerpt.artifactId, now);
+    deps.db.exec("COMMIT");
+    return { task_id: task.task_id, action: "ci_failed" };
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+}
+
+function loadLatestAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
+  return (
+    db
+      .query<CurrentAttemptRow, [string]>(
+        `SELECT attempt_id, attempt_number, preamble_id,
+                template_id, reason, consumed_budget,
+                remote_sha_at_spawn, pr_existed_at_spawn, tmux_session,
+                spawned_at, kill_intent
+           FROM attempts
+          WHERE task_id = ?
+          ORDER BY attempt_id DESC
+          LIMIT 1`,
+      )
+      .get(taskId) ?? null
+  );
+}
+
+function detectKillIntent(
+  deps: TickDeps,
+  attempt: CurrentAttemptRow,
+  options: TickOptions,
+): "wall_clock" | "stale" | null {
+  if (attempt.spawned_at === null || attempt.tmux_session === null) return null;
+  const nowMs = Date.parse(deps.clock.nowISO());
+  const spawnedMs = Date.parse(attempt.spawned_at);
+  const maxAttemptSeconds =
+    options.maxAttemptDurationSeconds ?? DEFAULT_MAX_ATTEMPT_DURATION_SECONDS;
+  if (nowMs - spawnedMs > maxAttemptSeconds * 1000) return "wall_clock";
+
+  const freshMs = Date.parse(
+    deps.tmux.logFreshness(attempt.tmux_session, attempt.spawned_at),
+  );
+  const stalenessSeconds =
+    options.stalenessThresholdSeconds ?? DEFAULT_STALENESS_THRESHOLD_SECONDS;
+  if (nowMs - freshMs > stalenessSeconds * 1000) return "stale";
+  return null;
+}
+
+function setKillIntent(
+  deps: TickDeps,
+  taskId: string,
+  attemptId: number,
+  intent: "wall_clock" | "stale",
+): void {
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN");
+  try {
+    deps.db
+      .query(
+        `UPDATE attempts SET kill_intent = ? WHERE attempt_id = ? AND kill_intent IS NULL`,
+      )
+      .run(intent, attemptId);
+    deps.db
+      .query(
+        `INSERT INTO events (task_id, attempt_id, event_type, occurred_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(
+        taskId,
+        attemptId,
+        intent === "wall_clock" ? "wall_clock_exceeded" : "stale_detected",
+        now,
+      );
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+}
+
+function finalizeKillIntent(
+  deps: TickDeps,
+  task: RunningTaskRow,
+  attempt: CurrentAttemptRow,
+  reason: "wall_clock" | "stale",
+): void {
+  if (attempt.tmux_session) {
+    try {
+      const log = deps.tmux.collectLog(attempt.tmux_session);
+      if (log !== null) {
+        deps.artifactStore.writeArtifact({
+          taskId: task.task_id,
+          attemptId: attempt.attempt_id,
+          kind: "session_log",
+          content: log,
+          extension: "txt",
+        });
+      }
+    } catch {}
+  }
+
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN");
+  try {
+    deps.db
+      .query(
+        `UPDATE attempts
+            SET exit_kind = ?,
+                ended_at = ?,
+                kill_intent = NULL
+          WHERE attempt_id = ? AND ended_at IS NULL`,
+      )
+      .run(
+        reason === "wall_clock" ? "killed_wall_clock" : "killed_stale",
+        now,
+        attempt.attempt_id,
+      );
+    scheduleDeterministicRetry(deps, {
+      taskId: task.task_id,
+      prevAttempt: attempt,
+      reason,
+      diagnostics:
+        reason === "wall_clock"
+          ? "The live worker exceeded max_attempt_duration_seconds and was killed."
+          : "The live worker stopped producing fresh logs past staleness_threshold_seconds and was killed.",
+      fromState: "running",
+    });
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state, occurred_at
+         ) VALUES (?, ?, ?, 'running', (SELECT state FROM tasks WHERE task_id = ?), ?)`,
+      )
+      .run(
+        task.task_id,
+        attempt.attempt_id,
+        reason === "wall_clock" ? "wall_clock_killed" : "stale_killed",
+        task.task_id,
+        now,
+      );
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+}
+
+function handleSpawnFailure(
+  deps: TickDeps,
+  task: RunningTaskRow,
+  attempt: CurrentAttemptRow,
+  options: TickOptions,
+): TickTaskResult {
+  const now = deps.clock.nowISO();
+  const maxSpawnFailures =
+    options.maxSpawnFailures ?? DEFAULT_MAX_SPAWN_FAILURES;
+  deps.db.exec("BEGIN");
+  try {
+    deps.db
+      .query(
+        `UPDATE attempts
+            SET exit_kind = 'spawn_failed',
+                ended_at = ?
+          WHERE attempt_id = ? AND ended_at IS NULL`,
+      )
+      .run(now, attempt.attempt_id);
+    const updated = deps.db
+      .query<{ n: number }, [number, string, string]>(
+        `UPDATE tasks
+            SET attempts_consumed = attempts_consumed - ?,
+                spawn_failures_consecutive = spawn_failures_consecutive + 1,
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ?
+          RETURNING spawn_failures_consecutive AS n`,
+      )
+      .get(attempt.consumed_budget, now, task.task_id);
+    const failures = updated?.n ?? 0;
+    if (failures >= maxSpawnFailures) {
+      deps.db
+        .query(`UPDATE tasks SET state = 'worktree_error' WHERE task_id = ?`)
+        .run(task.task_id);
+      deps.db
+        .query(
+          `INSERT INTO events (
+             task_id, attempt_id, event_type, from_state, to_state, occurred_at
+           ) VALUES (?, ?, 'worktree_error', 'running', 'worktree_error', ?)`,
+        )
+        .run(task.task_id, attempt.attempt_id, now);
+    } else {
+      scheduleCleanSpawnRetry(deps, { taskId: task.task_id, prevAttempt: attempt });
+      deps.db
+        .query(
+          `INSERT INTO events (
+             task_id, attempt_id, event_type, from_state, to_state, occurred_at
+           ) VALUES (?, ?, 'spawn_failed', 'running', 'queued', ?)`,
+        )
+        .run(task.task_id, attempt.attempt_id, now);
+    }
+    deps.db.exec("COMMIT");
+    return { task_id: task.task_id, action: "spawn_failed" };
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
   }
 }
 
@@ -398,12 +755,13 @@ function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
   try {
     const taskUpdate = db
       .query(
-        `UPDATE tasks
-            SET state = 'running',
-                attempts_consumed = attempts_consumed + ?,
-                tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ?
+      `UPDATE tasks
+          SET state = 'running',
+              attempts_consumed = attempts_consumed + ?,
+              spawn_failures_consecutive = 0,
+              tick_error = NULL,
+              updated_at = ?
+        WHERE task_id = ?
             AND state = 'queued'
             AND cancel_requested_at IS NULL`,
       )

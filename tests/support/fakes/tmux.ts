@@ -12,8 +12,10 @@ export class FakeTmux implements TmuxPort {
   readonly spawnCalls: FakeTmuxSpawnCall[] = [];
   readonly killCalls: string[] = [];
   readonly collectLogCalls: string[] = [];
+  readonly logFreshnessCalls: string[] = [];
   readonly liveSessions = new Set<string>();
   readonly sessionLogs = new Map<string, string>();
+  readonly sessionFreshness = new Map<string, string>();
   spawnHandler: ((input: TmuxSpawnInput) => void) | null = null;
 
   spawn(input: TmuxSpawnInput): void {
@@ -39,8 +41,17 @@ export class FakeTmux implements TmuxPort {
     return this.sessionLogs.get(sessionName) ?? null;
   }
 
+  logFreshness(sessionName: string, spawnedAt: string): string {
+    this.logFreshnessCalls.push(sessionName);
+    return this.sessionFreshness.get(sessionName) ?? spawnedAt;
+  }
+
   setSessionLog(sessionName: string, content: string): void {
     this.sessionLogs.set(sessionName, content);
+  }
+
+  setLogFreshness(sessionName: string, at: string): void {
+    this.sessionFreshness.set(sessionName, at);
   }
 
   markDead(sessionName: string): void {

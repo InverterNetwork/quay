@@ -1,0 +1,319 @@
+import { readFileSync } from "node:fs";
+import type { ArtifactStore } from "../artifacts/store.ts";
+import type { DB } from "../db/connection.ts";
+import type { Clock } from "../ports/clock.ts";
+import { loadPreambleBody } from "./preamble.ts";
+
+export type BudgetRetryReason =
+  | "ci_fail"
+  | "crash"
+  | "stale"
+  | "wall_clock"
+  | "malformed_signal";
+
+export interface RetryDeps {
+  db: DB;
+  clock: Clock;
+  artifactStore: ArtifactStore;
+}
+
+export interface RetryAttemptRef {
+  attempt_id: number;
+  attempt_number: number;
+  preamble_id: number;
+}
+
+export interface ScheduleDeterministicRetryInput {
+  taskId: string;
+  prevAttempt: RetryAttemptRef;
+  reason: BudgetRetryReason;
+  diagnostics: string;
+  fromState?: string;
+  eventType?: string;
+  remoteShaAtExit?: string | null;
+}
+
+export interface ScheduleDeterministicRetryResult {
+  scheduled: boolean;
+  artifactId: number;
+  nextAttemptId?: number;
+}
+
+const DEFAULT_RETRY_TEMPLATES: Record<BudgetRetryReason, string> = {
+  ci_fail:
+    "The pull request CI failed. Use the CI failure excerpt, inspect the code, fix the failure, push the branch, and update the existing PR.",
+  crash:
+    "The previous worker exited without producing a trackable PR or blocker. Continue from the persisted worktree, recover any useful local state, push the branch, and open or update the PR.",
+  stale:
+    "The previous worker stopped producing fresh logs and was killed as stale. Inspect the worktree and logs, then continue the task without repeating already-completed work.",
+  wall_clock:
+    "The previous worker exceeded the maximum allowed attempt duration and was killed. Continue from the persisted worktree with a narrower, practical next step.",
+  malformed_signal:
+    "The previous worker wrote an invalid .quay-blocked.md signal. Inspect the malformed signal artifact and continue or write a valid blocker if work cannot proceed.",
+};
+
+export function scheduleDeterministicRetry(
+  deps: RetryDeps,
+  input: ScheduleDeterministicRetryInput,
+): ScheduleDeterministicRetryResult {
+  const now = deps.clock.nowISO();
+  const template = ensureRetryTemplate(deps.db, deps.clock, input.reason);
+  const priorBrief = loadMostRecentBrief(deps.db, input.taskId);
+  const retryBrief = composeRetryBrief({
+    reason: input.reason,
+    templateBody: template.body,
+    diagnostics: input.diagnostics,
+    priorBrief,
+  });
+
+  const task = deps.db
+    .query<{ attempts_consumed: number; retry_budget: number }, [string]>(
+      `SELECT attempts_consumed, retry_budget FROM tasks WHERE task_id = ?`,
+    )
+    .get(input.taskId);
+  if (!task) throw new Error(`task ${input.taskId} not found`);
+
+  if (task.attempts_consumed >= task.retry_budget) {
+    const lastFailure = deps.artifactStore.writeArtifact({
+      taskId: input.taskId,
+      attemptId: input.prevAttempt.attempt_id,
+      kind: "last_failure",
+      content: retryBrief,
+      extension: "md",
+    });
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET state = 'awaiting-next-brief',
+                budget_exhausted = 1,
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ?`,
+      )
+      .run(now, input.taskId);
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state,
+           payload_artifact_id, occurred_at
+         ) VALUES (?, ?, 'budget_exhausted', ?, 'awaiting-next-brief', ?, ?)`,
+      )
+      .run(
+        input.taskId,
+        input.prevAttempt.attempt_id,
+        input.fromState ?? "running",
+        lastFailure.artifactId,
+        now,
+      );
+    return { scheduled: false, artifactId: lastFailure.artifactId };
+  }
+
+  const attempt = deps.db
+    .query<{ attempt_id: number }, [string, number, number, number, string]>(
+      `INSERT INTO attempts (
+         task_id, attempt_number, preamble_id, template_id, reason, consumed_budget
+       ) VALUES (?, ?, ?, ?, ?, 1)
+       RETURNING attempt_id`,
+    )
+    .get(
+      input.taskId,
+      input.prevAttempt.attempt_number + 1,
+      input.prevAttempt.preamble_id,
+      template.template_id,
+      input.reason,
+    );
+  if (!attempt) throw new Error("attempt insert returned no row");
+
+  const brief = deps.artifactStore.writeArtifact({
+    taskId: input.taskId,
+    attemptId: attempt.attempt_id,
+    kind: "brief",
+    content: retryBrief,
+    extension: "md",
+  });
+  const preamble = loadPreambleBody(deps.db, input.prevAttempt.preamble_id);
+  deps.artifactStore.writeArtifact({
+    taskId: input.taskId,
+    attemptId: attempt.attempt_id,
+    kind: "final_prompt",
+    content: `${preamble}\n\n${retryBrief}`,
+    extension: "md",
+  });
+
+  deps.db
+    .query(
+      `UPDATE tasks
+          SET state = 'queued',
+              tick_error = NULL,
+              updated_at = ?
+        WHERE task_id = ?`,
+    )
+    .run(now, input.taskId);
+  return { scheduled: true, artifactId: brief.artifactId, nextAttemptId: attempt.attempt_id };
+}
+
+export function writeBlockerBudgetExhausted(
+  deps: RetryDeps,
+  input: {
+    taskId: string;
+    attempt: RetryAttemptRef;
+    blockerContent: string;
+  },
+): number | null {
+  const task = deps.db
+    .query<{ attempts_consumed: number; retry_budget: number }, [string]>(
+      `SELECT attempts_consumed, retry_budget FROM tasks WHERE task_id = ?`,
+    )
+    .get(input.taskId);
+  if (!task || task.attempts_consumed < task.retry_budget) return null;
+
+  const priorBrief = loadMostRecentBrief(deps.db, input.taskId);
+  const body = [
+    "# Retry budget exhausted",
+    "",
+    "A worker blocker was ingested on the final allowed budget-consuming attempt. No blocker_resolved respawn was scheduled.",
+    "",
+    "## Blocker",
+    "",
+    input.blockerContent,
+    "",
+    "## Most recent brief",
+    "",
+    priorBrief,
+  ].join("\n");
+  const artifact = deps.artifactStore.writeArtifact({
+    taskId: input.taskId,
+    attemptId: input.attempt.attempt_id,
+    kind: "last_failure",
+    content: body,
+    extension: "md",
+  });
+  deps.db
+    .query(`UPDATE tasks SET budget_exhausted = 1 WHERE task_id = ?`)
+    .run(input.taskId);
+  deps.db
+    .query(
+      `INSERT INTO events (
+         task_id, attempt_id, event_type, from_state, to_state,
+         payload_artifact_id, occurred_at
+       ) VALUES (?, ?, 'budget_exhausted', 'running', 'awaiting-next-brief', ?, ?)`,
+    )
+    .run(input.taskId, input.attempt.attempt_id, artifact.artifactId, deps.clock.nowISO());
+  return artifact.artifactId;
+}
+
+export function scheduleCleanSpawnRetry(
+  deps: RetryDeps,
+  input: {
+    taskId: string;
+    prevAttempt: RetryAttemptRef & {
+      reason: string;
+      consumed_budget: number;
+      template_id: number | null;
+    };
+  },
+): number {
+  const priorBrief = loadMostRecentBrief(deps.db, input.taskId);
+  const attempt = deps.db
+    .query<{ attempt_id: number }, [string, number, number, number | null, string, number]>(
+      `INSERT INTO attempts (
+         task_id, attempt_number, preamble_id, template_id, reason, consumed_budget
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       RETURNING attempt_id`,
+    )
+    .get(
+      input.taskId,
+      input.prevAttempt.attempt_number + 1,
+      input.prevAttempt.preamble_id,
+      input.prevAttempt.template_id,
+      input.prevAttempt.reason,
+      input.prevAttempt.consumed_budget,
+    );
+  if (!attempt) throw new Error("attempt insert returned no row");
+
+  deps.artifactStore.writeArtifact({
+    taskId: input.taskId,
+    attemptId: attempt.attempt_id,
+    kind: "brief",
+    content: priorBrief,
+    extension: "md",
+  });
+  const preamble = loadPreambleBody(deps.db, input.prevAttempt.preamble_id);
+  deps.artifactStore.writeArtifact({
+    taskId: input.taskId,
+    attemptId: attempt.attempt_id,
+    kind: "final_prompt",
+    content: `${preamble}\n\n${priorBrief}`,
+    extension: "md",
+  });
+  deps.db
+    .query(
+      `UPDATE tasks
+          SET state = 'queued',
+              tick_error = NULL,
+              updated_at = ?
+        WHERE task_id = ?`,
+    )
+    .run(deps.clock.nowISO(), input.taskId);
+  return attempt.attempt_id;
+}
+
+function ensureRetryTemplate(
+  db: DB,
+  clock: Clock,
+  kind: BudgetRetryReason,
+): { template_id: number; body: string } {
+  const existing = db
+    .query<{ template_id: number; body: string }, [string]>(
+      `SELECT template_id, body FROM retry_templates
+        WHERE kind = ?
+        ORDER BY template_id DESC
+        LIMIT 1`,
+    )
+    .get(kind);
+  if (existing) return existing;
+
+  const inserted = db
+    .query<{ template_id: number; body: string }, [string, string, string]>(
+      `INSERT INTO retry_templates (kind, body, created_at)
+       VALUES (?, ?, ?)
+       RETURNING template_id, body`,
+    )
+    .get(kind, DEFAULT_RETRY_TEMPLATES[kind], clock.nowISO());
+  if (!inserted) throw new Error("retry template insert returned no row");
+  return inserted;
+}
+
+function loadMostRecentBrief(db: DB, taskId: string): string {
+  const row = db
+    .query<{ file_path: string }, [string]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND kind = 'brief'
+        ORDER BY artifact_id DESC
+        LIMIT 1`,
+    )
+    .get(taskId);
+  if (!row) return "(No prior brief artifact was recorded.)";
+  return readFileSync(row.file_path, "utf8");
+}
+
+function composeRetryBrief(input: {
+  reason: BudgetRetryReason;
+  templateBody: string;
+  diagnostics: string;
+  priorBrief: string;
+}): string {
+  return [
+    `# Quay deterministic retry: ${input.reason}`,
+    "",
+    input.templateBody,
+    "",
+    "## Observed context",
+    "",
+    input.diagnostics,
+    "",
+    "## Most recent brief",
+    "",
+    input.priorBrief,
+  ].join("\n");
+}
