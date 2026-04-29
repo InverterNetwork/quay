@@ -33,13 +33,11 @@ test("test_promotion_rowcount_zero_on_cancel_intent_skips_spawn", () => {
   built.git.setRemoteHeadSha(repoId, `quay/${taskId}`, null);
   built.github.setPrExists(repoId, `quay/${taskId}`, false);
 
-  // With Slice 7's top-of-loop cancel finalizer, a pre-existing
-  // cancel_requested_at is honored before per-state handling: the task
-  // converges to `cancelled` without ever reaching the queued promotion path.
-  // The Slice 3 invariant survives — promotion's `cancel_requested_at IS NULL`
-  // predicate is still in place as a belt-and-suspenders backstop, and the
-  // observable result is identical: no tmux spawn, no budget consumed, no
-  // `spawned` event, no per-attempt promotion commits.
+  // A pre-existing cancel_requested_at is honored before per-state handling:
+  // the task converges to `cancelled` without reaching queued promotion. The
+  // promotion predicate remains as a backstop, and the observable result is
+  // unchanged: no tmux spawn, no budget consumed, no spawned event, no
+  // per-attempt promotion commits.
   const results = tick_once(built.deps);
   expect(results).toEqual([{ task_id: taskId, action: "cancel_finalized" }]);
 

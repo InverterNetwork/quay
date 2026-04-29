@@ -11,6 +11,7 @@ export interface FakeGitFailures {
   cloneBare?: (repoId: string) => boolean;
   fetch?: (repoId: string, ref: string) => boolean;
   worktreeAdd?: (worktreePath: string) => boolean;
+  worktreeDetach?: (worktreePath: string) => boolean;
   branchDelete?: (branch: string) => boolean;
   worktreeRemove?: (worktreePath: string) => boolean;
 }
@@ -23,6 +24,7 @@ export class FakeGit implements GitPort {
   readonly openPrBranches = new Map<string, Set<string>>();
   readonly remoteHeads = new Map<string, string>(); // key = `${repoId}\0${branch}`
   readonly worktrees = new Set<string>();
+  readonly worktreeBranches = new Map<string, { repoId: string; branch: string }>();
   readonly reposRoot: string;
   fail: FakeGitFailures = {};
 
@@ -93,6 +95,15 @@ export class FakeGit implements GitPort {
       this.localBranches.set(repoId, set);
     }
     set.add(branch);
+    this.worktreeBranches.set(worktreePath, { repoId, branch });
+  }
+
+  worktreeDetach(worktreePath: string): void {
+    this.record("worktreeDetach", { worktreePath });
+    if (this.fail.worktreeDetach?.(worktreePath)) {
+      throw new Error(`fake: worktreeDetach failed for ${worktreePath}`);
+    }
+    this.worktreeBranches.delete(worktreePath);
   }
 
   worktreeRemove(worktreePath: string): void {
@@ -102,12 +113,18 @@ export class FakeGit implements GitPort {
     }
     rmSync(worktreePath, { recursive: true, force: true });
     this.worktrees.delete(worktreePath);
+    this.worktreeBranches.delete(worktreePath);
   }
 
   branchDelete(repoId: string, branch: string): void {
     this.record("branchDelete", { repoId, branch });
     if (this.fail.branchDelete?.(branch)) {
       throw new Error(`fake: branchDelete failed for ${branch}`);
+    }
+    for (const checkout of this.worktreeBranches.values()) {
+      if (checkout.repoId === repoId && checkout.branch === branch) {
+        throw new Error(`fake: branch ${branch} is checked out in a worktree`);
+      }
     }
     this.localBranches.get(repoId)?.delete(branch);
   }
@@ -144,6 +161,11 @@ export class FakeGit implements GitPort {
   }
   setRemoteBranches(repoId: string, branches: string[]): void {
     this.remoteBranches.set(repoId, new Set(branches));
+  }
+  setWorktreeBranch(repoId: string, worktreePath: string, branch: string): void {
+    mkdirSync(worktreePath, { recursive: true });
+    this.worktrees.add(worktreePath);
+    this.worktreeBranches.set(worktreePath, { repoId, branch });
   }
   setOpenPrBranches(repoId: string, branches: string[]): void {
     this.openPrBranches.set(repoId, new Set(branches));

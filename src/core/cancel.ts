@@ -343,19 +343,25 @@ function applyCleanupMatrix(deps: CancelDeps, row: TaskRow): void {
     } catch {}
   }
 
-  // Local branch always deleted under cancel cleanup.
-  try {
-    deps.git.branchDelete(row.repo_id, row.branch_name);
-  } catch {}
-
-  // Worktree removal — best-effort and skipped when `--keep-worktree`.
-  if (!keepWorktree) {
+  if (keepWorktree) {
+    try {
+      if (existsSync(row.worktree_path)) {
+        deps.git.worktreeDetach(row.worktree_path);
+      }
+    } catch {}
+  } else {
     try {
       if (existsSync(row.worktree_path)) {
         deps.git.worktreeRemove(row.worktree_path);
       }
     } catch {}
   }
+
+  // Delete after removing or detaching the worktree. Git refuses to delete a
+  // branch that is checked out by any linked worktree.
+  try {
+    deps.git.branchDelete(row.repo_id, row.branch_name);
+  } catch {}
 }
 
 function commitTerminal(
