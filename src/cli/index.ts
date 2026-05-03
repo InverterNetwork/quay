@@ -14,6 +14,7 @@ import { openDatabase } from "../db/connection.ts";
 import { runMigrations } from "../db/migrate.ts";
 import {
   GitHubCliAdapter,
+  LinearAdapter,
   LocalGitAdapter,
   ShellCommandRunner,
   SlackAdapter,
@@ -65,6 +66,7 @@ async function main(): Promise<number> {
     github: new GitHubCliAdapter(reposRoot),
     tmux: new TmuxAdapter(),
     slack: new SlackAdapter(),
+    linear: new LinearAdapter(),
     commandRunner: new ShellCommandRunner(),
     artifactStore,
     supervisorLock: new FileSupervisorLock(
@@ -87,10 +89,12 @@ async function main(): Promise<number> {
     ...(config.retry_budget !== undefined
       ? { retryBudget: config.retry_budget }
       : {}),
-    // Adapters spec §11: validate-ticket runs as a child process. The runner
-    // is wired here so it's available the moment slice 17's LinearAdapter
-    // lands; until then `quay enqueue --linear-issue` returns
-    // `adapter_not_enabled` because `linear` is undefined.
+    // Adapters spec §11: validate-ticket runs as a child process.
+    // `quay enqueue --linear-issue` still returns `adapter_not_enabled` until
+    // `[adapters.linear].enabled` flows through into `deps.adaptersConfig` —
+    // the LinearAdapter (slice 17) is constructed unconditionally because
+    // the bot token resolves lazily on first use, but the dispatcher gates
+    // on the per-deployment enablement flag, not on the adapter's existence.
     validatorRunner: new SpawnedValidatorRunner(),
   };
 

@@ -5,4 +5,5 @@ export { ShellCommandRunner } from "./command_runner.ts";
 export { LocalGitAdapter } from "./git.ts";
 export { TmuxAdapter } from "./tmux.ts";
 export { GitHubCliAdapter } from "./github.ts";
+export { LinearAdapter } from "./linear.ts";
 export { SlackAdapter } from "./slack.ts";
