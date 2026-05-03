@@ -150,3 +150,40 @@ test("test_repo_add_requires_minimum_fields", () => {
 
   expect(repoCount(h)).toBe(0);
 });
+
+test("test_repo_add_rejects_unsafe_repo_ids", () => {
+  // The real git adapter uses repo_id directly in filesystem paths
+  // (`<reposRoot>/<repo_id>.git`), so an id like `../escape` would write
+  // outside the data dir. Schema validation must reject anything containing
+  // path separators or `..`.
+  h = createHarness();
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+
+  const unsafeIds = [
+    "../escape",
+    "..",
+    ".",
+    "foo/bar",
+    "foo\\bar",
+    "abc def", // whitespace
+    "abc\u0000def", // NUL
+    "abc\u0001def", // control char
+    "é", // non-ASCII (the schema is intentionally ASCII-only)
+  ];
+  for (const id of unsafeIds) {
+    let caught: unknown;
+    try {
+      repos.add({ ...REQUIRED_FIELDS, repo_id: id });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(QuayError);
+    expect((caught as QuayError).code).toBe("validation_error");
+  }
+
+  // Sanity: the safe ids the existing test suite uses are still accepted.
+  for (const id of ["repo-1", "repo_1", "repo.1", "ABC123"]) {
+    const row = repos.add({ ...REQUIRED_FIELDS, repo_id: id });
+    expect(row.repo_id).toBe(id);
+  }
+});

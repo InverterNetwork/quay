@@ -2,9 +2,24 @@ import { z } from "zod";
 
 const nonEmptyString = z.string().min(1);
 
+// `repo_id` is the stable key under which Quay creates per-repo on-disk state
+// (`<reposRoot>/<repo_id>.git`, artifact subdirs, log filenames). It must not
+// contain path separators or relative-path segments — otherwise an operator
+// id like `../escape` would let the bare clone (and downstream cleanup) write
+// outside `data_dir`. We constrain to a conservative identifier charset; that
+// is also what the docs imply by calling `repo_id` an "id".
+const repoIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((s) => /^[A-Za-z0-9._-]+$/.test(s) && s !== "." && s !== "..", {
+    message:
+      "repo_id must match [A-Za-z0-9._-]+ and cannot be '.' or '..' (no path separators or traversal)",
+  });
+
 export const repoAddInputSchema = z
   .object({
-    repo_id: nonEmptyString,
+    repo_id: repoIdSchema,
     repo_url: nonEmptyString,
     base_branch: nonEmptyString,
     package_manager: nonEmptyString,
@@ -30,3 +45,25 @@ export const repoUpdateInputSchema = z
   .strict();
 
 export type RepoUpdateInput = z.infer<typeof repoUpdateInputSchema>;
+
+// `repo import` rows accept the same required fields as `repo add` plus the
+// two metadata columns (`archived_at`, `created_at`) so a full-fidelity
+// export → wipe → import round-trip preserves timestamps. Both metadata
+// fields are optional: hand-written single-row dumps can omit them and rely
+// on the service's default ("preserve existing" / "now()").
+export const repoImportInputSchema = z
+  .object({
+    repo_id: repoIdSchema,
+    repo_url: nonEmptyString,
+    base_branch: nonEmptyString,
+    package_manager: nonEmptyString,
+    install_cmd: nonEmptyString,
+    test_cmd: nonEmptyString.nullable().optional(),
+    ci_workflow_name: nonEmptyString.nullable().optional(),
+    contribution_guide_path: nonEmptyString.nullable().optional(),
+    archived_at: z.string().nullable().optional(),
+    created_at: nonEmptyString.optional(),
+  })
+  .strict();
+
+export type RepoImportInput = z.infer<typeof repoImportInputSchema>;

@@ -165,7 +165,12 @@ interface CurrentAttemptRow {
 export function tick_once(deps: TickDeps, options: TickOptions = {}): TickTaskResult[] {
   const max = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const agentInvocation = options.agentInvocation ?? DEFAULT_AGENT_INVOCATION;
-  return deps.supervisorLock.run(() => {
+  // Spec §5: a tick that fires while another tick (or `quay cancel`) holds
+  // the supervisor lock exits immediately without action — the next
+  // scheduled fire retries. `tryRun` returns `acquired: false` in that case;
+  // we surface it as an empty result list rather than throwing, so cron
+  // observes a clean exit.
+  const attempt = deps.supervisorLock.tryRun(() => {
     const results: TickTaskResult[] = [];
 
     // Top-of-loop cancel check (spec §5 + §14). Cancel intent is durable on
@@ -272,6 +277,7 @@ export function tick_once(deps: TickDeps, options: TickOptions = {}): TickTaskRe
 
     return results;
   });
+  return attempt.acquired ? attempt.value : [];
 }
 
 interface CancelTargetRow {
@@ -435,7 +441,7 @@ function processRunningTask(
       deps.tmux.kill(attempt.tmux_session);
       return { task_id: task.task_id, action: "kill_intent_set" };
     }
-    const intent = detectKillIntent(deps, attempt, options);
+    const intent = detectKillIntent(deps, task, attempt, options);
     if (intent !== null) {
       setKillIntent(deps, task.task_id, attempt.attempt_id, intent);
       fireFailpoint("after_kill_intent_commit");
@@ -1265,6 +1271,7 @@ function loadLatestAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
 
 function detectKillIntent(
   deps: TickDeps,
+  task: { worktree_path: string },
   attempt: CurrentAttemptRow,
   options: TickOptions,
 ): "wall_clock" | "stale" | null {
@@ -1276,7 +1283,11 @@ function detectKillIntent(
   if (nowMs - spawnedMs > maxAttemptSeconds * 1000) return "wall_clock";
 
   const freshMs = Date.parse(
-    deps.tmux.logFreshness(attempt.tmux_session, attempt.spawned_at),
+    deps.tmux.logFreshness(
+      attempt.tmux_session,
+      task.worktree_path,
+      attempt.spawned_at,
+    ),
   );
   const stalenessSeconds =
     options.stalenessThresholdSeconds ?? DEFAULT_STALENESS_THRESHOLD_SECONDS;
@@ -1326,7 +1337,10 @@ function finalizeKillIntent(
 ): void {
   if (attempt.tmux_session) {
     try {
-      const log = deps.tmux.collectLog(attempt.tmux_session);
+      const log = deps.tmux.collectLog(
+        attempt.tmux_session,
+        task.worktree_path,
+      );
       if (log !== null) {
         deps.artifactStore.writeArtifact({
           taskId: task.task_id,
@@ -1507,7 +1521,13 @@ function promoteAndSpawn(
   // Refresh the remote branch ref and snapshot spawn-time inputs *before* the
   // promotion transaction. These reads are external; we don't want them inside
   // the SQL transaction that flips state.
-  deps.git.fetch(task.repo_id, task.branch_name);
+  //
+  // For a brand-new task the worker has not pushed `quay/<slug>` yet, so the
+  // remote ref legitimately doesn't exist. `fetchBranchIfExists` tolerates
+  // that case and lets `remoteHeadSha` return null — the spec records
+  // `remote_sha_at_spawn = null` for the first attempt, so a missing remote
+  // is the *expected* state, not a tick error.
+  deps.git.fetchBranchIfExists(task.repo_id, task.branch_name);
   const remoteSha = deps.git.remoteHeadSha(task.repo_id, task.branch_name);
   const prExisted = deps.github.prExistsForBranch(task.repo_id, task.branch_name)
     ? 1

@@ -4,6 +4,12 @@ export interface GitPort {
   bareCloneExists(repoId: string): boolean;
   cloneBare(repoId: string, repoUrl: string): void;
   fetch(repoId: string, ref: string): void;
+  // Like `fetch`, but tolerates "remote ref does not exist" — the natural case
+  // for newly-enqueued tasks whose `quay/<slug>` branch hasn't been pushed
+  // yet, and for spawn-window recoveries where the worker died before push.
+  // Other failures (network, permissions, malformed args) still throw so
+  // genuine breakage surfaces as a tick error.
+  fetchBranchIfExists(repoId: string, branch: string): void;
   hasLocalBranch(repoId: string, branch: string): boolean;
   hasRemoteBranch(repoId: string, branch: string): boolean;
   hasOpenPullRequestForBranch(repoId: string, branch: string): boolean;
@@ -23,4 +29,8 @@ export interface GitPort {
   // Idempotent `git push origin --delete <branch>`. Real adapter tolerates
   // "remote ref does not exist" and any other non-fatal error.
   deleteRemoteBranch(repoId: string, branch: string): void;
+  // Final defense-in-depth gate after the JS slug normalizer (spec §13):
+  // returns the input slug if `git check-ref-format refs/heads/quay/<slug>`
+  // accepts it, otherwise returns `task-<taskIdShort>`.
+  safeBranchSlug(slug: string, taskIdShort: string): string;
 }
