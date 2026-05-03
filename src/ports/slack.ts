@@ -1,6 +1,7 @@
-// Slack adapter contract. Slice 6 only needs the type to exist so the
-// escalate-human service can fence against accidental Slack calls; the real
-// posting + reply ingestion landing in Slice 8.
+// Slack adapter contract. Slice 6 only needed the type to exist so the
+// escalate-human service could fence against accidental Slack calls; slice
+// 8 added posting + reply ingestion; slice 14 (adapters spec §7) extends
+// the port with `fetchThreadContext` for assembling enqueue-time briefs.
 
 export interface SlackPostInput {
   threadRef: string;
@@ -17,9 +18,29 @@ export interface SlackReply {
   text: string;
 }
 
+export interface SlackThreadMessage {
+  ts: string;
+  authorBot: boolean;
+  authorName: string | null;
+  text: string;
+}
+
+export interface SlackThread {
+  parent: SlackThreadMessage;
+  replies: SlackThreadMessage[];
+}
+
 export interface SlackPort {
   post(input: SlackPostInput): SlackPostResult;
   fenceTs(threadRef: string): string;
   searchByNonce(threadRef: string, nonce: string): SlackReply | null;
   listReplies(threadRef: string, lowerBoundTs: string): SlackReply[];
+  // Returns the original conversation (parent + every reply, ordered) for
+  // brief composition. Distinct from `listReplies`, which filters to
+  // replies after a fence for `waiting_human` ingestion. Truncation above
+  // `[adapters.slack].max_thread_messages` happens inside the adapter so
+  // the marker is part of the returned `replies` payload (spec §7).
+  // Throws on thread-not-found, 4xx/5xx, 429, and network/auth errors;
+  // the caller (`ticketContext.fetch`) wraps as `adapter_error{adapter:"slack"}`.
+  fetchThreadContext(threadRef: string): SlackThread;
 }

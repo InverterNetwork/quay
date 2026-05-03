@@ -10,6 +10,7 @@ import type {
   SlackPostInput,
   SlackPostResult,
   SlackReply,
+  SlackThread,
 } from "../ports/slack.ts";
 
 interface SlackMessage {
@@ -102,6 +103,14 @@ export class SlackAdapter implements SlackPort {
       }
     }
     return null;
+  }
+
+  fetchThreadContext(_threadRef: string): SlackThread {
+    // Real implementation lands in slice 18 (adapters spec §7). The
+    // placeholder satisfies the extended `SlackPort` interface so the rest
+    // of the codebase typechecks; any caller that reaches it before slice
+    // 18 has skipped the dispatcher gate.
+    throw new Error("not implemented; landed in slice 18");
   }
 
   listReplies(threadRef: string, lowerBoundTs: string): SlackReply[] {

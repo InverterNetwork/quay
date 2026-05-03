@@ -3,6 +3,8 @@ import type {
   SlackPostInput,
   SlackPostResult,
   SlackReply,
+  SlackThread,
+  SlackThreadMessage,
 } from "../../../src/ports/slack.ts";
 
 interface FakeMessage {
@@ -11,13 +13,26 @@ interface FakeMessage {
   text: string;
 }
 
+interface FakeThreadContext {
+  parent: SlackThreadMessage;
+  replies: SlackThreadMessage[];
+}
+
+// Default cap matches `[adapters.slack].max_thread_messages` in the spec.
+const DEFAULT_MAX_THREAD_MESSAGES = 200;
+
 export class FakeSlack implements SlackPort {
   postCalls: SlackPostInput[] = [];
   fenceCalls: string[] = [];
   searchCalls: { threadRef: string; nonce: string }[] = [];
   listCalls: { threadRef: string; lowerBoundTs: string }[] = [];
+  fetchThreadContextCalls: string[] = [];
+
+  // Public so tests can mutate without an explicit setter call.
+  maxThreadMessages = DEFAULT_MAX_THREAD_MESSAGES;
 
   private threads = new Map<string, FakeMessage[]>();
+  private threadContexts = new Map<string, FakeThreadContext>();
   private tsCounter = 0;
   private postFailureQueue: Error[] = [];
   private fenceFailureQueue: Error[] = [];
@@ -70,12 +85,28 @@ export class FakeSlack implements SlackPort {
     this.searchFailureQueue.push(new Error(message));
   }
 
+  configureThreadContext(
+    threadRef: string,
+    parent: SlackThreadMessage,
+    replies: SlackThreadMessage[],
+  ): void {
+    this.threadContexts.set(threadRef, {
+      parent,
+      replies: [...replies],
+    });
+  }
+
+  setMaxThreadMessages(cap: number): void {
+    this.maxThreadMessages = cap;
+  }
+
   totalCalls(): number {
     return (
       this.postCalls.length +
       this.fenceCalls.length +
       this.searchCalls.length +
-      this.listCalls.length
+      this.listCalls.length +
+      this.fetchThreadContextCalls.length
     );
   }
 
@@ -120,5 +151,32 @@ export class FakeSlack implements SlackPort {
     return thread
       .filter((m) => Number(m.ts) > lb)
       .map((m) => ({ ts: m.ts, authorBot: m.authorBot, text: m.text }));
+  }
+
+  fetchThreadContext(threadRef: string): SlackThread {
+    this.fetchThreadContextCalls.push(threadRef);
+    const ctx = this.threadContexts.get(threadRef);
+    if (!ctx) {
+      throw new Error(`fake: thread not found: ${threadRef}`);
+    }
+    const cap = this.maxThreadMessages;
+    const replies = ctx.replies;
+    if (replies.length <= cap) {
+      return { parent: ctx.parent, replies: [...replies] };
+    }
+    // Truncation: first floor(cap/2) + marker + last floor(cap/2). The
+    // marker text is canonical (spec §7 / §17) — the brief composer
+    // renders it verbatim so the worker sees the omission.
+    const half = Math.floor(cap / 2);
+    const omitted = replies.length - 2 * half;
+    const head = replies.slice(0, half);
+    const tail = replies.slice(replies.length - half);
+    const marker: SlackThreadMessage = {
+      ts: `${head[head.length - 1]?.ts ?? "0"}-truncated`,
+      authorBot: true,
+      authorName: null,
+      text: `<!-- thread truncated: ${omitted} intermediate messages omitted -->`,
+    };
+    return { parent: ctx.parent, replies: [...head, marker, ...tail] };
   }
 }
