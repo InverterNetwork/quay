@@ -7,7 +7,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createArtifactStore } from "../artifacts/store.ts";
 import { openDatabase } from "../db/connection.ts";
@@ -95,6 +95,10 @@ async function main(): Promise<number> {
     // CliIO docs).
     stdout: (c: string | Uint8Array) => process.stdout.write(c),
     stderr: (c: string) => process.stderr.write(c),
+    // `validate-ticket` is the only command that reads stdin. Synchronous
+    // read from fd 0 is fine here — the CLI is one-shot and we have nothing
+    // else to do until the input is consumed.
+    stdin: () => readFileSync(0, "utf8"),
   };
   const result = await dispatch(argv, deps, io);
   return result.exitCode;
