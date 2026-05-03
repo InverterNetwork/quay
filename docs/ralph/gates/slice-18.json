@@ -1,0 +1,22 @@
+{
+  "slice": 18,
+  "name": "slack-fetch-thread",
+  "spec_coverage": "Deployment adapters spec §7 (SlackPort.fetchThreadContext extension), §17 (Slack pagination cap, rate limits), §4 (max_thread_messages config).",
+  "completion_promise": "SLICE_18_COMPLETE",
+  "max_iterations": 30,
+  "attempt_timeout_seconds": 3600,
+  "expected_tests": [
+    "test_slack_adapter_fetch_thread_context_returns_parent_and_replies",
+    "test_slack_adapter_fetch_thread_context_paginates",
+    "test_slack_adapter_fetch_thread_context_truncates_above_cap",
+    "test_slack_adapter_fetch_thread_context_respects_config_override",
+    "test_slack_adapter_fetch_thread_context_returns_full_thread_under_cap",
+    "test_slack_adapter_fetch_thread_context_marks_bot_messages",
+    "test_slack_adapter_fetch_thread_context_resolves_author_names_when_available",
+    "test_slack_adapter_fetch_thread_context_throws_on_thread_not_found",
+    "test_slack_adapter_fetch_thread_context_throws_on_429_with_retry_after",
+    "test_slack_adapter_fetch_thread_context_replaces_slice_14_placeholder",
+    "test_slack_adapter_fetch_thread_context_contract_tests_skipped_without_integration_flag"
+  ],
+  "forbidden_paths": []
+}

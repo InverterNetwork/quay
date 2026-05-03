@@ -1,0 +1,22 @@
+{
+  "slice": 14,
+  "name": "adapter-ports",
+  "spec_coverage": "Deployment adapters spec §7: LinearPort + SlackPort.fetchThreadContext interfaces and in-process fakes; pagination cap behavior in fakes.",
+  "completion_promise": "SLICE_14_COMPLETE",
+  "max_iterations": 25,
+  "attempt_timeout_seconds": 2400,
+  "expected_tests": [
+    "test_linear_port_fake_get_issue_returns_structured_payload",
+    "test_linear_port_fake_get_issue_returns_null_on_404",
+    "test_linear_port_fake_throws_on_draft_issue",
+    "test_linear_port_fake_throws_on_5xx_with_retryable_false",
+    "test_linear_port_fake_throws_on_429_with_retryable_true_and_retry_after",
+    "test_slack_port_fake_fetch_thread_context_returns_parent_and_replies",
+    "test_slack_port_fake_fetch_thread_context_truncates_above_cap",
+    "test_slack_port_fake_fetch_thread_context_respects_config_override",
+    "test_slack_port_fake_fetch_thread_context_returns_full_thread_under_cap",
+    "test_slack_port_fake_fetch_thread_context_throws_on_thread_not_found",
+    "test_slack_port_existing_methods_unchanged"
+  ],
+  "forbidden_paths": []
+}
