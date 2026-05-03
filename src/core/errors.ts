@@ -5,7 +5,8 @@ export type QuayErrorCode =
   | "repo_archived"
   | "repo_has_active_tasks"
   | "branch_collision_unresolvable"
-  | "bootstrap_failed";
+  | "bootstrap_failed"
+  | "ticket_block_invalid";
 
 export class QuayError extends Error {
   override readonly name = "QuayError";
