@@ -18,9 +18,12 @@ import type { CommandRunner } from "../ports/command_runner.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort } from "../ports/github.ts";
 import type { IdGenerator } from "../ports/id_generator.ts";
+import type { LinearPort } from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
 import { enqueue, type EnqueueDeps } from "../core/enqueue.ts";
+import type { ValidatorRunner } from "../core/validator_runner.ts";
+import { handleEnqueueLinearIssue } from "./enqueue_linear_issue.ts";
 import { createRepoService } from "../core/repos/service.ts";
 import {
   cancel_task,
@@ -68,6 +71,13 @@ export interface CliDeps {
   // forwards it here so enqueue copies the configured value into
   // `tasks.retry_budget` instead of the EnqueueDeps default.
   retryBudget?: number;
+  // Adapters spec §4 / §8: the Linear adapter and validator runner are
+  // optional — deployments without `[adapters.linear].enabled` never touch
+  // them. The dispatcher fails closed (usage error) when `--linear-issue`
+  // is invoked without these wired.
+  linear?: LinearPort;
+  validatorRunner?: ValidatorRunner;
+  adaptersConfig?: { linearEnabled: boolean; slackEnabled: boolean };
 }
 
 export interface DispatchResult {
@@ -242,6 +252,14 @@ function handleEnqueue(
   deps: CliDeps,
   io: CliIO,
 ): DispatchResult {
+  // --linear-issue routes to the adapter-driven flow (spec §8). Mutually
+  // exclusive flags are rejected before any adapter / DB call so a bad
+  // invocation (e.g. caller passes both forms) costs nothing.
+  const linearIssue = readFlag(argv, "--linear-issue");
+  if (linearIssue !== null) {
+    return handleEnqueueLinearIssueFlow(argv, deps, io, linearIssue);
+  }
+
   const json = tryParseJsonFlag(argv);
   if (!json.ok) return writeError(io, "usage_error", json.message);
   let input: Record<string, unknown>;
@@ -286,6 +304,69 @@ function handleEnqueue(
   const result = enqueue(enqueueDeps, input);
   io.stdout(`${JSON.stringify(result)}\n`);
   return { exitCode: 0 };
+}
+
+function handleEnqueueLinearIssueFlow(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+  identifier: string,
+): DispatchResult {
+  // Spec §8 / §17: --linear-issue is mutually exclusive with --brief-file,
+  // --external-ref, --slack-thread-ref. The adapter derives those latter two
+  // from the Linear ticket, and accepting overrides on this path would
+  // create a two-sources-of-truth trap. Reject before any side effect.
+  const conflicts = ["--brief-file", "--external-ref", "--slack-thread-ref"];
+  for (const flag of conflicts) {
+    if (readFlag(argv, flag) !== null) {
+      return writeError(
+        io,
+        "usage_error",
+        `--linear-issue is mutually exclusive with ${flag}`,
+        { conflicting_flag: flag },
+      );
+    }
+  }
+  const repoId = readFlag(argv, "--repo");
+  if (repoId === null) {
+    return writeError(io, "usage_error", "enqueue requires --repo <id>");
+  }
+  const cliTags = collectFlagValues(argv, "--tag");
+  if (
+    deps.linear === undefined ||
+    deps.validatorRunner === undefined ||
+    deps.adaptersConfig === undefined
+  ) {
+    return writeError(
+      io,
+      "adapter_not_enabled",
+      "[adapters.linear] is not configured for this deployment",
+      { adapter: "linear" },
+    );
+  }
+  const enqueueDeps: EnqueueDeps = {
+    db: deps.db,
+    clock: deps.clock,
+    ids: deps.ids,
+    git: deps.git,
+    commandRunner: deps.commandRunner,
+    artifactStore: deps.artifactStore,
+    paths: deps.paths,
+  };
+  if (deps.retryBudget !== undefined) {
+    enqueueDeps.retryBudget = deps.retryBudget;
+  }
+  return handleEnqueueLinearIssue(
+    { repoId, identifier, cliTags },
+    {
+      enqueueDeps,
+      linear: deps.linear,
+      slack: deps.slack,
+      validatorRunner: deps.validatorRunner,
+      adaptersConfig: deps.adaptersConfig,
+    },
+    io,
+  );
 }
 
 function handleRepo(

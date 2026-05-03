@@ -20,6 +20,7 @@ import {
   TmuxAdapter,
 } from "../adapters/index.ts";
 import { FileSupervisorLock } from "../core/supervisor_lock.ts";
+import { SpawnedValidatorRunner } from "../core/validator_runner.ts";
 import { SystemClock } from "../ports/clock.ts";
 import { UuidIdGenerator } from "../ports/id_generator.ts";
 import { loadConfig, tickOptionsFromConfig } from "./config.ts";
@@ -86,6 +87,11 @@ async function main(): Promise<number> {
     ...(config.retry_budget !== undefined
       ? { retryBudget: config.retry_budget }
       : {}),
+    // Adapters spec §11: validate-ticket runs as a child process. The runner
+    // is wired here so it's available the moment slice 17's LinearAdapter
+    // lands; until then `quay enqueue --linear-issue` returns
+    // `adapter_not_enabled` because `linear` is undefined.
+    validatorRunner: new SpawnedValidatorRunner(),
   };
 
   const io = {

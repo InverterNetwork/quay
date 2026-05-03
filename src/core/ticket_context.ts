@@ -38,6 +38,22 @@ export function fetchTicketContext(
   deps: TicketContextDeps,
   identifier: string,
 ): TicketContext {
+  return fetchTicketContextWithIssue(deps, identifier).ctx;
+}
+
+export interface TicketContextWithIssue {
+  ctx: TicketContext;
+  issue: LinearIssue;
+}
+
+// Returns the assembled context AND the raw `LinearIssue` payload. Exists
+// for the slice-16 enqueue-linear-issue path, which builds a validator
+// payload that needs `body` from the raw issue (block intact, not the
+// stripped brief). Splitting this avoids a second round-trip to Linear.
+export function fetchTicketContextWithIssue(
+  deps: TicketContextDeps,
+  identifier: string,
+): TicketContextWithIssue {
   if (!deps.config.linearEnabled) {
     throw new QuayError(
       "adapter_not_enabled",
@@ -105,7 +121,7 @@ export function fetchTicketContext(
     slackThread,
   });
 
-  return {
+  const ctx: TicketContext = {
     external_ref: externalRef,
     brief,
     ticket_snapshot,
@@ -113,6 +129,7 @@ export function fetchTicketContext(
     tags: block.tags,
     authors: block.authors,
   };
+  return { ctx, issue };
 }
 
 // --- Brief composition (private; spec §6.1) -----------------------------

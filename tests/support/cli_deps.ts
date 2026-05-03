@@ -4,12 +4,15 @@ import { join } from "node:path";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
 import type { CliDeps } from "../../src/cli/dispatch.ts";
 import { InProcessSupervisorLock } from "../../src/core/supervisor_lock.ts";
+import type { ValidatorRunner } from "../../src/core/validator_runner.ts";
 import type { Harness } from "./harness.ts";
 import { FakeCommandRunner } from "./fakes/command_runner.ts";
 import { FakeGit } from "./fakes/git.ts";
 import { FakeGitHub } from "./fakes/github.ts";
+import { FakeLinearAdapter } from "./fakes/linear.ts";
 import { FakeSlack } from "./fakes/slack.ts";
 import { FakeTmux } from "./fakes/tmux.ts";
+import { FakeValidatorRunner } from "./fakes/validator_runner.ts";
 
 export interface BuiltCliDeps {
   deps: CliDeps;
@@ -17,18 +20,33 @@ export interface BuiltCliDeps {
   github: FakeGitHub;
   tmux: FakeTmux;
   slack: FakeSlack;
+  linear: FakeLinearAdapter;
+  validatorRunner: FakeValidatorRunner;
   commandRunner: FakeCommandRunner;
   reposRoot: string;
   worktreesRoot: string;
 }
 
-export function buildCliDeps(h: Harness): BuiltCliDeps {
+export interface BuildCliDepsOptions {
+  linearEnabled?: boolean;
+  slackEnabled?: boolean;
+  validatorRunner?: ValidatorRunner;
+}
+
+export function buildCliDeps(
+  h: Harness,
+  options: BuildCliDepsOptions = {},
+): BuiltCliDeps {
   const reposRoot = join(h.dataDir, "repos");
   const worktreesRoot = join(h.dataDir, "worktrees");
   const git = new FakeGit(reposRoot);
   const github = new FakeGitHub();
   const tmux = new FakeTmux();
   const slack = new FakeSlack();
+  const linear = new FakeLinearAdapter();
+  const fakeValidatorRunner = new FakeValidatorRunner();
+  const validatorRunner: ValidatorRunner =
+    options.validatorRunner ?? fakeValidatorRunner;
   const commandRunner = new FakeCommandRunner();
   const artifactStore = createArtifactStore({
     db: h.db,
@@ -52,11 +70,19 @@ export function buildCliDeps(h: Harness): BuiltCliDeps {
         worktreesRoot,
         artifactsRoot: h.artifactRoot,
       },
+      linear,
+      validatorRunner,
+      adaptersConfig: {
+        linearEnabled: options.linearEnabled ?? true,
+        slackEnabled: options.slackEnabled ?? true,
+      },
     },
     git,
     github,
     tmux,
     slack,
+    linear,
+    validatorRunner: fakeValidatorRunner,
     commandRunner,
     reposRoot,
     worktreesRoot,

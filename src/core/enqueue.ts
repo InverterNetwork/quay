@@ -41,6 +41,12 @@ export const enqueueInputSchema = z
     external_ref: z.string().nullable().optional(),
     ticket_snapshot: z.string().nullable().optional(),
     slack_thread_ref: z.string().nullable().optional(),
+    // Spec §5: one row per `tags:` entry from the quay-config block, deduped.
+    // Legacy --brief-file callers omit this; new --linear-issue path forwards
+    // the union of block + CLI --tag flags.
+    tags: z.array(z.string()).optional(),
+    // Spec §5: JSON-serialized TicketAuthor[]; nullable on the legacy path.
+    authors_json: z.string().nullable().optional(),
   })
   .strict();
 
@@ -192,8 +198,8 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         .query(
           `INSERT INTO tasks (
              task_id, repo_id, external_ref, state, branch_name, tmux_id, worktree_path,
-             retry_budget, slack_thread_ref, created_at, updated_at
-           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+             retry_budget, slack_thread_ref, authors_json, created_at, updated_at
+           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
@@ -204,9 +210,25 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           worktreePath,
           retryBudget,
           input.slack_thread_ref ?? null,
+          input.authors_json ?? null,
           now,
           now,
         );
+
+      // Spec §8 step 5 / §12: task_tags rows land in the same transaction as
+      // the tasks insert. Dedupe in JS (the spec already deduped inside the
+      // adapter, but a cautious dedupe here keeps the invariant local).
+      if (input.tags !== undefined && input.tags.length > 0) {
+        const seen = new Set<string>();
+        const insertTag = deps.db.query(
+          `INSERT INTO task_tags (task_id, tag, created_at) VALUES (?, ?, ?)`,
+        );
+        for (const raw of input.tags) {
+          if (seen.has(raw)) continue;
+          seen.add(raw);
+          insertTag.run(taskId, raw, now);
+        }
+      }
 
       const attemptRow = deps.db
         .query<{ attempt_id: number }, [string, number, number, string, number]>(
