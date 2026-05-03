@@ -332,12 +332,13 @@ interface WaitingHumanTaskRow {
   task_id: string;
   slack_thread_ref: string | null;
   cancel_requested_at: string | null;
+  authors_json: string | null;
 }
 
 function readWaitingHuman(db: DB): WaitingHumanTaskRow[] {
   return db
     .query<WaitingHumanTaskRow, []>(
-      `SELECT task_id, slack_thread_ref, cancel_requested_at
+      `SELECT task_id, slack_thread_ref, cancel_requested_at, authors_json
          FROM tasks
         WHERE state = 'waiting_human'
         ORDER BY created_at, task_id`,
@@ -1092,7 +1093,8 @@ function processWaitingHumanTask(
   // Step 3: post if no recovery match and no post yet.
   if (art.slack_post_ts === null && art.slack_recovered_post_ts === null) {
     const body = readEscalationBody(art.file_path);
-    const composedBody = `${body}\n\n_${art.escalation_nonce}_`;
+    const mentionPrefix = buildMentionPrefix(task.authors_json);
+    const composedBody = `${mentionPrefix}${body}\n\n_${art.escalation_nonce}_`;
     let postTs: string;
     try {
       postTs = deps.slack.post({ threadRef, body: composedBody }).ts;
@@ -1162,6 +1164,34 @@ function processWaitingHumanTask(
   ingestSlackReply(deps, task, art, firstNonBot);
   results.push({ task_id: task.task_id, action: "slack_reply_ingested" });
   return results;
+}
+
+// Spec deployment-adapters §15 feature 3: prepend `<@slack_id>` mentions for
+// every author the adapter recorded on enqueue. Returns "" for legacy tasks
+// (`authors_json IS NULL`), an empty array, or any malformed payload — the
+// post path falls back to the unprefixed body in those cases.
+function buildMentionPrefix(authorsJson: string | null): string {
+  if (authorsJson === null) return "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(authorsJson);
+  } catch {
+    return "";
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return "";
+  const ids: string[] = [];
+  for (const a of parsed) {
+    if (
+      a !== null &&
+      typeof a === "object" &&
+      typeof (a as { slack_id?: unknown }).slack_id === "string" &&
+      (a as { slack_id: string }).slack_id.length > 0
+    ) {
+      ids.push((a as { slack_id: string }).slack_id);
+    }
+  }
+  if (ids.length === 0) return "";
+  return `${ids.map((id) => `<@${id}>`).join(" ")}\n\n`;
 }
 
 function readEscalationBody(filePath: string): string {
