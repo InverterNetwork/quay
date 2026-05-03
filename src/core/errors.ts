@@ -8,6 +8,8 @@ export type QuayErrorCode =
   | "bootstrap_failed"
   | "ticket_block_invalid"
   | "ticket_not_actionable"
+  | "ticket_not_found"
+  | "adapter_not_enabled"
   | "adapter_error";
 
 export class QuayError extends Error {
