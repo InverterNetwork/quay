@@ -64,6 +64,10 @@ export class TmuxAdapter implements TmuxPort {
     // session — making `tmux has-session` a reliable liveness probe.
     const tmuxCommand = `exec sh -c ${shellQuote(expanded)}`;
 
+    // Step 1: create session with a placeholder command that keeps the
+    // session alive while we wire pipe-pane. `cat` reads stdin (nobody is
+    // typing in a detached session) and produces no output, so it stays
+    // quiet until we respawn the pane in step 3.
     const result = Bun.spawnSync({
       cmd: [
         "tmux",
@@ -73,7 +77,7 @@ export class TmuxAdapter implements TmuxPort {
         input.sessionName,
         "-c",
         input.worktreePath,
-        tmuxCommand,
+        "cat",
       ],
       stdout: "pipe",
       stderr: "pipe",
@@ -85,19 +89,18 @@ export class TmuxAdapter implements TmuxPort {
       );
     }
 
-    // Configure pane piping AFTER the session exists. The `-o` flag is the
-    // "open" side of the toggle (start piping if not already piping). We
-    // build the inner shell command via `shellQuote` for the same reason
-    // we quote the agent invocation: the worktree path is Quay-controlled
-    // but goes through `sh -c` and we want safe behavior even if a future
-    // path scheme introduces metacharacters.
+    // Step 2: wire pipe-pane while the session is definitely alive.
+    // Attaching the pipe before the agent starts means no agent output
+    // escapes before the log sink is connected — this eliminates the
+    // Linux race where a fast-exiting agent (Mode A) tears down the
+    // server before pipe-pane attaches, and the race where the agent's
+    // first printf lands before the pipe is wired (Mode B).
+    //
+    // The `-o` flag is the "open" side of the toggle. We target the
+    // session's only pane with `<session>:<window>.<pane>` — the
+    // canonical form for a freshly created `new-session -d`.
     const logPath = join(input.worktreePath, SESSION_LOG_FILE);
     const pipeCommand = `cat >> ${shellQuote(logPath)}`;
-    // Target the session's active pane explicitly. tmux's `=<name>` exact-
-    // match prefix is a target-SESSION construct, but pipe-pane wants a
-    // target-PANE. The canonical form is `<session>:<window>.<pane>`; for
-    // a freshly created `new-session -d` the only pane is the default
-    // window's index-0 pane.
     const pipe = Bun.spawnSync({
       cmd: [
         "tmux",
@@ -111,13 +114,11 @@ export class TmuxAdapter implements TmuxPort {
       stderr: "pipe",
     });
     if (pipe.exitCode !== 0) {
-      // If pipe-pane fails the session is still spawned and the agent is
-      // running — but we'd silently lose the freshness signal that drives
-      // tick's stale-kill check, leading to long-lived workers being
-      // killed as stale at the threshold. Surface this as a hard spawn
-      // failure so the spawn-substrate-failed path takes over.
+      // If pipe-pane fails the session exists but the freshness signal
+      // that drives tick's stale-kill check would be lost. Surface this
+      // as a hard spawn failure so the spawn-substrate-failed path takes
+      // over.
       const stderr = new TextDecoder().decode(pipe.stderr);
-      // Best-effort: kill the session we just created so we don't leak it.
       try {
         Bun.spawnSync({
           cmd: ["tmux", "kill-session", "-t", `=${input.sessionName}`],
@@ -127,6 +128,39 @@ export class TmuxAdapter implements TmuxPort {
       } catch {}
       throw new Error(
         `tmux pipe-pane for ${input.sessionName} failed (exit ${pipe.exitCode}): ${stderr.trim()}`,
+      );
+    }
+
+    // Step 3: replace the placeholder with the actual agent command.
+    // `respawn-pane -k` kills the current process and starts a new one in
+    // the same pane; the pipe-pane configuration is preserved on the pane
+    // struct. When the agent exits, the pane and session die together —
+    // keeping `tmux has-session` as a reliable liveness probe (spec §12).
+    const launch = Bun.spawnSync({
+      cmd: [
+        "tmux",
+        "respawn-pane",
+        "-k",
+        "-c",
+        input.worktreePath,
+        "-t",
+        `${input.sessionName}:0.0`,
+        tmuxCommand,
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (launch.exitCode !== 0) {
+      const stderr = new TextDecoder().decode(launch.stderr);
+      try {
+        Bun.spawnSync({
+          cmd: ["tmux", "kill-session", "-t", `=${input.sessionName}`],
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+      } catch {}
+      throw new Error(
+        `tmux respawn-pane for ${input.sessionName} failed (exit ${launch.exitCode}): ${stderr.trim()}`,
       );
     }
   }
