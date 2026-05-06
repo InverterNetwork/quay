@@ -86,12 +86,14 @@ export class SlackAdapter implements SlackPort {
   // to Slack.
   private readonly endpoint: string;
   private readonly explicitToken: string | null;
+  private readonly tokenEnvVar: string;
   private readonly timeoutMs: number;
   private readonly transport: SlackTransport;
   private readonly maxThreadMessages: number;
 
   constructor(opts?: {
     token?: string;
+    tokenEnvVar?: string;
     endpoint?: string;
     timeoutMs?: number;
     transport?: SlackTransport;
@@ -99,6 +101,10 @@ export class SlackAdapter implements SlackPort {
   }) {
     this.explicitToken =
       opts?.token !== undefined && opts.token !== "" ? opts.token : null;
+    this.tokenEnvVar =
+      opts?.tokenEnvVar !== undefined && opts.tokenEnvVar !== ""
+        ? opts.tokenEnvVar
+        : "SLACK_TOKEN";
     this.endpoint = opts?.endpoint ?? "https://slack.com/api";
     this.timeoutMs =
       opts?.timeoutMs !== undefined && opts.timeoutMs > 0
@@ -113,10 +119,13 @@ export class SlackAdapter implements SlackPort {
 
   private resolveToken(): string {
     if (this.explicitToken !== null) return this.explicitToken;
-    const fromEnv = process.env.SLACK_TOKEN ?? "";
+    const envVar = this.tokenEnvVar;
+    const fromEnv = process.env[envVar] ?? "";
     if (fromEnv === "") {
-      throw new Error(
-        "SlackAdapter requires SLACK_TOKEN to be set in the environment for any Slack API call",
+      throw new QuayError(
+        "adapter_not_configured",
+        `SlackAdapter requires ${envVar} to be set in the environment for any Slack API call`,
+        { adapter: "slack", env_var: envVar },
       );
     }
     return fromEnv;
@@ -176,6 +185,7 @@ export class SlackAdapter implements SlackPort {
     let cursor: string | null = null;
     let pageCount = 0;
 
+    let pageCapped = false;
     while (true) {
       pageCount += 1;
       const payload: Record<string, unknown> = {
@@ -230,7 +240,10 @@ export class SlackAdapter implements SlackPort {
       // case per Slack's documented thread limit (~1000) is a handful of
       // pages; a runaway pagination signals an upstream change worth
       // surfacing rather than silently spinning.
-      if (pageCount >= 50) break;
+      if (pageCount >= 50) {
+        pageCapped = true;
+        break;
+      }
       cursor = next;
     }
 
@@ -244,18 +257,24 @@ export class SlackAdapter implements SlackPort {
     }
     // Truncation: first floor(cap/2) + canonical marker + last floor(cap/2).
     // Marker text matches `<!-- thread truncated: K intermediate messages omitted -->`
-    // exactly, with K substituted (adapters spec §7 / §17).
+    // exactly when the full thread was fetched, with K substituted (adapters
+    // spec §7 / §17). When the page cap fired before pagination completed,
+    // `collected` is a partial view of the thread — K is a lower bound, and
+    // the marker says so.
     const half = Math.floor(cap / 2);
     const head = collected.slice(0, half).map(toSlackThreadMessage);
     const tail = collected
       .slice(collected.length - half)
       .map(toSlackThreadMessage);
     const omitted = collected.length - 2 * half;
+    const markerText = pageCapped
+      ? `<!-- thread truncated: at least ${omitted} intermediate messages omitted (page cap hit; full thread length unknown) -->`
+      : `<!-- thread truncated: ${omitted} intermediate messages omitted -->`;
     const marker: SlackThreadMessage = {
       ts: `${head[head.length - 1]?.ts ?? "0"}-truncated`,
       authorBot: true,
       authorName: null,
-      text: `<!-- thread truncated: ${omitted} intermediate messages omitted -->`,
+      text: markerText,
     };
     return { parent: parentMsg, replies: [...head, marker, ...tail] };
   }

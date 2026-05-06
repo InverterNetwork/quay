@@ -377,3 +377,187 @@ test("test_linear_adapter_resolves_token_from_env", () => {
     "env-resolved-token",
   );
 });
+
+test("test_linear_adapter_missing_token_throws_adapter_not_configured", () => {
+  // Spec §12: missing `LINEAR_API_KEY` is a deployment misconfiguration
+  // (`adapter_not_configured`), not an upstream `adapter_error`.
+  delete process.env.LINEAR_API_KEY;
+  const handle = recorder(() => jsonResponse(issuePayload({})));
+  const adapter = new LinearAdapter({ transport: handle.transport });
+  let caught: unknown = null;
+  try {
+    adapter.getIssue("ENG-1234");
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).toBeInstanceOf(QuayError);
+  expect((caught as QuayError).code).toBe("adapter_not_configured");
+  expect((caught as QuayError).details).toMatchObject({
+    adapter: "linear",
+    env_var: "LINEAR_API_KEY",
+  });
+  expect(handle.requests.length).toBe(0);
+});
+
+test("test_linear_adapter_honors_token_env_var_override", () => {
+  // Operators can re-point the env-var via [adapters.linear].api_key_env;
+  // the adapter must read the named variable, not LINEAR_API_KEY.
+  delete process.env.LINEAR_API_KEY;
+  process.env.MY_CUSTOM_LINEAR_KEY = "custom-token";
+  try {
+    const handle = recorder(() => jsonResponse(issuePayload({})));
+    const adapter = new LinearAdapter({
+      transport: handle.transport,
+      tokenEnvVar: "MY_CUSTOM_LINEAR_KEY",
+    });
+    adapter.getIssue("ENG-1234");
+    expect(handle.requests[0]!.headers.Authorization).toBe("custom-token");
+  } finally {
+    delete process.env.MY_CUSTOM_LINEAR_KEY;
+  }
+});
+
+test("test_linear_adapter_throws_on_graphql_errors_even_if_issue_present", () => {
+  // Spec §12: any non-empty errors[] is a hard adapter failure. Even when
+  // data.issue is populated (e.g. a deprecated-field warning), the adapter
+  // must throw adapter_error rather than silently return the issue.
+  const validIssue = issuePayload({ identifier: "ENG-1234" });
+  const handle = recorder(() =>
+    jsonResponse({
+      ...validIssue,
+      errors: [{ message: "deprecated field used" }],
+    }),
+  );
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+  let caught: unknown;
+  try {
+    adapter.getIssue("ENG-1234");
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).toBeInstanceOf(QuayError);
+  const err = caught as QuayError;
+  expect(err.code).toBe("adapter_error");
+  expect(err.details?.adapter).toBe("linear");
+  expect(err.message).toContain("deprecated field used");
+});
+
+test("test_linear_adapter_throws_when_pagination_returns_404_mid_fetch", () => {
+  // If a ticket disappears between page 1 and page 2, the adapter must throw
+  // adapter_error{retryable:true} rather than returning a partial result.
+  // The next poll cycle will receive a clean 404 the caller can handle.
+  const handle = recorder((req) => {
+    const after = req.parsedBody.variables.commentsAfter as string | null;
+    if (after === null) {
+      return jsonResponse(
+        issuePayload({
+          identifier: "ENG-1234",
+          comments: {
+            pageInfo: { hasNextPage: true, endCursor: "cursor-page-1" },
+            nodes: [
+              {
+                id: "c1",
+                createdAt: "2026-04-01T10:00:00.000Z",
+                body: "first comment",
+                user: { name: "alice", displayName: "Alice" },
+                botActor: null,
+              },
+            ],
+          },
+        }),
+      );
+    }
+    // Page 2: ticket not found (HTTP 404)
+    return { status: 404, headers: {}, body: "" };
+  });
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+  let caught: unknown;
+  try {
+    adapter.getIssue("ENG-1234");
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).toBeInstanceOf(QuayError);
+  const err = caught as QuayError;
+  expect(err.code).toBe("adapter_error");
+  expect(err.details?.retryable).toBe(true);
+  expect(handle.requests.length).toBe(2);
+});
+
+test("test_linear_adapter_throws_on_malformed_envelope_shapes", () => {
+  // Malformed envelopes (missing data key, data:null, or data without issue
+  // field) must throw adapter_error{retryable:false}. Only {data:{issue:null}}
+  // is the documented Linear 404 shape and must return null cleanly.
+  const adapter = new LinearAdapter({ token: "test-token", transport: recorder(() => ({ status: 200, headers: {}, body: "" })).transport });
+
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["empty object", {}],
+    ["data:null", { data: null }],
+    ["data without issue field", { data: {} }],
+  ];
+
+  for (const [label, body] of cases) {
+    const handle = recorder(() => ({ status: 200, headers: {}, body: JSON.stringify(body) }));
+    const a = new LinearAdapter({ token: "test-token", transport: handle.transport });
+    let caught: unknown;
+    try {
+      a.getIssue("ENG-1234");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught, `expected throw for shape: ${label}`).toBeInstanceOf(QuayError);
+    const err = caught as QuayError;
+    expect(err.code, `expected adapter_error for shape: ${label}`).toBe("adapter_error");
+    expect(err.details?.retryable, `expected retryable:false for shape: ${label}`).toBe(false);
+  }
+
+  // Real 404: {data:{issue:null}} must return null, not throw.
+  const handle404 = recorder(() => jsonResponse({ data: { issue: null } }));
+  const a404 = new LinearAdapter({ token: "test-token", transport: handle404.transport });
+  expect(a404.getIssue("ENG-9999")).toBeNull();
+});
+
+test("test_linear_adapter_throws_when_has_next_page_with_null_cursor", () => {
+  // If Linear returns hasNextPage:true but endCursor:null, continuing
+  // pagination would silently truncate comments. Treat it as a hard failure.
+  const handle = recorder(() =>
+    jsonResponse(
+      issuePayload({
+        identifier: "ENG-1234",
+        comments: {
+          pageInfo: { hasNextPage: true, endCursor: null },
+          nodes: [
+            {
+              id: "c1",
+              createdAt: "2026-04-01T10:00:00.000Z",
+              body: "only comment on page 1",
+              user: { name: "alice", displayName: "Alice" },
+              botActor: null,
+            },
+          ],
+        },
+      }),
+    ),
+  );
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+  let caught: unknown;
+  try {
+    adapter.getIssue("ENG-1234");
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).toBeInstanceOf(QuayError);
+  const err = caught as QuayError;
+  expect(err.code).toBe("adapter_error");
+  expect(err.details?.retryable).toBe(false);
+  expect(err.message).toContain("hasNextPage=true with null endCursor");
+});

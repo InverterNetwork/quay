@@ -131,6 +131,44 @@ test("test_slack_port_fake_fetch_thread_context_throws_on_thread_not_found", () 
   expect((caught as Error).message).toMatch(/thread not found/i);
 });
 
+test("test_slack_port_fake_fetch_thread_context_page_cap_marker_reflects_lower_bound", () => {
+  // Simulate a thread so large that the real adapter would have hit the 50-page
+  // cap before exhausting all replies. The fake is configured with pageCapped=true
+  // to mirror that state. The truncation marker must advertise that the omitted
+  // count is a lower bound, not an exact figure.
+  const fake = new FakeSlack();
+  // 10 000 replies far exceeds what 50 pages of 200 can return; supply enough
+  // that the head+tail slice still leaves a meaningful omitted count.
+  const replies = manyReplies(10_000);
+  fake.configureThreadContext(THREAD_REF, parent(), replies, {
+    pageCapped: true,
+  });
+
+  const ctx = fake.fetchThreadContext(THREAD_REF);
+  // Default cap is 200 → half = 100 → 201 entries (head + marker + tail).
+  expect(ctx.replies).toHaveLength(201);
+
+  const marker = ctx.replies[100]!;
+  // Marker must signal a lower bound, not an exact count.
+  expect(marker.text).toMatch(/at least/);
+  expect(marker.text).toMatch(/page cap hit/);
+  expect(marker.authorBot).toBe(true);
+  expect(marker.authorName).toBeNull();
+
+  // The omitted count between head and tail is 10 000 − 200 = 9 800. It must
+  // appear in the marker so the reader gets a meaningful lower bound.
+  const omittedCount = 10_000 - 2 * 100;
+  expect(marker.text).toContain(String(omittedCount));
+
+  // Head and tail still cover the correct slices of the reply list.
+  expect(ctx.replies.slice(0, 100).map((r) => r.text)).toEqual(
+    replies.slice(0, 100).map((r) => r.text),
+  );
+  expect(ctx.replies.slice(101).map((r) => r.text)).toEqual(
+    replies.slice(replies.length - 100).map((r) => r.text),
+  );
+});
+
 test("test_slack_port_existing_methods_unchanged", () => {
   // Smoke-test the four pre-slice-14 methods on the fake to confirm the
   // interface extension didn't disturb their behavior. The slice-6/8 test

@@ -84,17 +84,23 @@ interface GraphQLEnvelope<T> {
 export class LinearAdapter implements LinearPort {
   private readonly endpoint: string;
   private readonly explicitToken: string | null;
+  private readonly tokenEnvVar: string;
   private readonly timeoutMs: number;
   private readonly transport: LinearTransport;
 
   constructor(opts?: {
     token?: string;
+    tokenEnvVar?: string;
     endpoint?: string;
     timeoutMs?: number;
     transport?: LinearTransport;
   }) {
     this.explicitToken =
       opts?.token !== undefined && opts.token !== "" ? opts.token : null;
+    this.tokenEnvVar =
+      opts?.tokenEnvVar !== undefined && opts.tokenEnvVar !== ""
+        ? opts.tokenEnvVar
+        : "LINEAR_API_KEY";
     this.endpoint = opts?.endpoint ?? DEFAULT_LINEAR_ENDPOINT;
     this.timeoutMs =
       opts?.timeoutMs !== undefined && opts.timeoutMs > 0
@@ -116,9 +122,22 @@ export class LinearAdapter implements LinearPort {
     const allRaw: RawLinearComment[] = [...first.comments.nodes];
     let cursor = first.comments.pageInfo.endCursor;
     let hasNext = first.comments.pageInfo.hasNextPage;
-    while (hasNext && cursor !== null) {
+    while (hasNext) {
+      if (cursor === null) {
+        throw new QuayError(
+          "adapter_error",
+          `Linear ${identifier}: hasNextPage=true with null endCursor`,
+          { adapter: "linear", retryable: false },
+        );
+      }
       const next = this.queryIssuePage(identifier, cursor);
-      if (next === null) break; // ticket disappeared mid-pagination — give up cleanly
+      if (next === null) {
+        throw new QuayError(
+          "adapter_error",
+          `Linear ${identifier}: ticket disappeared mid-pagination`,
+          { adapter: "linear", retryable: true },
+        );
+      }
       allRaw.push(...next.comments.nodes);
       cursor = next.comments.pageInfo.endCursor;
       hasNext = next.comments.pageInfo.hasNextPage;
@@ -139,10 +158,13 @@ export class LinearAdapter implements LinearPort {
 
   private resolveToken(): string {
     if (this.explicitToken !== null) return this.explicitToken;
-    const fromEnv = process.env.LINEAR_API_KEY ?? "";
+    const envVar = this.tokenEnvVar;
+    const fromEnv = process.env[envVar] ?? "";
     if (fromEnv === "") {
-      throw new Error(
-        "LinearAdapter requires LINEAR_API_KEY to be set in the environment for any Linear API call",
+      throw new QuayError(
+        "adapter_not_configured",
+        `LinearAdapter requires ${envVar} to be set in the environment for any Linear API call`,
+        { adapter: "linear", env_var: envVar },
       );
     }
     return fromEnv;
@@ -212,23 +234,33 @@ export class LinearAdapter implements LinearPort {
       );
     }
     if (parsed.errors !== undefined && parsed.errors.length > 0) {
-      // Linear returns `data: { issue: null }` for 404-by-identifier, but
-      // some shapes surface `errors[]` with no data; treat the latter as a
-      // hard adapter failure rather than silently mapping to null.
+      // Per spec §12: any non-empty `errors[]` is a hard adapter failure,
+      // regardless of whether `data.issue` is also populated.
       const messages = parsed.errors
         .map((e) => e.message ?? "(no message)")
         .join("; ");
-      if (parsed.data?.issue == null) {
-        throw new QuayError(
-          "adapter_error",
-          `Linear ${identifier}: GraphQL error: ${messages}`,
-          { adapter: "linear", retryable: false },
-        );
-      }
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: GraphQL error: ${messages}`,
+        { adapter: "linear", retryable: false },
+      );
     }
-    const issue = parsed.data?.issue;
-    if (issue == null) return null;
-    return issue;
+    if (parsed.data === undefined || parsed.data === null) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: missing data envelope`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+    if (!("issue" in parsed.data)) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: response missing issue field`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+    if (parsed.data.issue === null) return null;
+    return parsed.data.issue;
   }
 
   // Default transport: spawns a child Bun process that runs `fetch` and

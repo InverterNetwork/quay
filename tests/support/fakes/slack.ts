@@ -16,6 +16,10 @@ interface FakeMessage {
 interface FakeThreadContext {
   parent: SlackThreadMessage;
   replies: SlackThreadMessage[];
+  // When true, the fake simulates the adapter having hit the pagination page
+  // cap before exhausting all replies — the omitted count in the truncation
+  // marker is a lower bound and the marker text says so.
+  pageCapped?: boolean;
 }
 
 // Default cap matches `[adapters.slack].max_thread_messages` in the spec.
@@ -89,10 +93,12 @@ export class FakeSlack implements SlackPort {
     threadRef: string,
     parent: SlackThreadMessage,
     replies: SlackThreadMessage[],
+    opts?: { pageCapped?: boolean },
   ): void {
     this.threadContexts.set(threadRef, {
       parent,
       replies: [...replies],
+      pageCapped: opts?.pageCapped ?? false,
     });
   }
 
@@ -164,18 +170,22 @@ export class FakeSlack implements SlackPort {
     if (replies.length <= cap) {
       return { parent: ctx.parent, replies: [...replies] };
     }
-    // Truncation: first floor(cap/2) + marker + last floor(cap/2). The
-    // marker text is canonical (spec §7 / §17) — the brief composer
-    // renders it verbatim so the worker sees the omission.
+    // Truncation: first floor(cap/2) + marker + last floor(cap/2). When the
+    // fake is configured with pageCapped=true it mirrors the real adapter's
+    // behaviour: the omitted count is a lower bound and the marker text says
+    // so. Otherwise the canonical marker text is used (spec §7 / §17).
     const half = Math.floor(cap / 2);
     const omitted = replies.length - 2 * half;
     const head = replies.slice(0, half);
     const tail = replies.slice(replies.length - half);
+    const markerText = ctx.pageCapped
+      ? `<!-- thread truncated: at least ${omitted} intermediate messages omitted (page cap hit; full thread length unknown) -->`
+      : `<!-- thread truncated: ${omitted} intermediate messages omitted -->`;
     const marker: SlackThreadMessage = {
       ts: `${head[head.length - 1]?.ts ?? "0"}-truncated`,
       authorBot: true,
       authorName: null,
-      text: `<!-- thread truncated: ${omitted} intermediate messages omitted -->`,
+      text: markerText,
     };
     return { parent: ctx.parent, replies: [...head, marker, ...tail] };
   }

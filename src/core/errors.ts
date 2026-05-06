@@ -10,6 +10,7 @@ export type QuayErrorCode =
   | "ticket_not_actionable"
   | "ticket_not_found"
   | "adapter_not_enabled"
+  | "adapter_not_configured"
   | "adapter_error";
 
 export class QuayError extends Error {
