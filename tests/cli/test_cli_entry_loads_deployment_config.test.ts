@@ -115,6 +115,22 @@ test("CLI accepts repos_root override from the config file", () => {
   expect(stdout.trim()).toBe("[]");
 });
 
+test("CLI fails loudly when configured repos_root does not exist (consumer model)", () => {
+  // Spec §13 consumer model: a configured `repos_root` that doesn't exist is a
+  // misconfiguration (e.g. a typo'd path). Silently creating it would hide the
+  // error until a later `bare_clone_missing`. Quay must refuse to start instead.
+  const dataDir = tempDir();
+  const nonExistentPath = join(tmpdir(), `quay-no-such-repos-${Date.now()}`);
+  const configPath = join(tempDir(), "config.toml");
+  writeFileSync(configPath, `repos_root = "${nonExistentPath}"\n`);
+  const { exitCode, stderr } = runCli(["task", "list"], {
+    QUAY_DATA_DIR: dataDir,
+    QUAY_CONFIG_FILE: configPath,
+  });
+  expect(exitCode).not.toBe(0);
+  expect(stderr).toMatch(/repos_root.*does not exist/);
+});
+
 test("CLI fails loudly when the config file is invalid (does not silently use defaults)", () => {
   const dataDir = tempDir();
   const configPath = join(tempDir(), "config.toml");
