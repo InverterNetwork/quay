@@ -31,7 +31,7 @@ Artifacts published per release:
 
 | File                  | Target                         |
 | --------------------- | ------------------------------ |
-| `quay-linux-amd64`    | Linux x86_64 (rails class)     |
+| `quay-linux-amd64`    | Linux x86_64                   |
 | `quay-linux-arm64`    | Linux aarch64                  |
 | `quay-darwin-amd64`   | macOS Intel                    |
 | `quay-darwin-arm64`   | macOS Apple Silicon            |
@@ -47,6 +47,8 @@ https://github.com/lafawnduh1966/quay/releases/download/<tag>/SHA256SUMS
 Install on a Linux deployment box (`linux-amd64` shown):
 
 ```bash
+set -euo pipefail
+
 TAG=v0.1.0
 BASE=https://github.com/lafawnduh1966/quay/releases/download/${TAG}
 
@@ -54,6 +56,9 @@ curl -fsSL -o quay         "${BASE}/quay-linux-amd64"
 curl -fsSL -o SHA256SUMS   "${BASE}/SHA256SUMS"
 
 # Verify the download against the published manifest before installing.
+# `set -e` above guarantees that a failing sha256sum check aborts the
+# script before `install` runs, so an unverified binary never lands on
+# the host.
 grep " quay-linux-amd64$" SHA256SUMS | sed 's/quay-linux-amd64/quay/' \
   | sha256sum -c -
 
