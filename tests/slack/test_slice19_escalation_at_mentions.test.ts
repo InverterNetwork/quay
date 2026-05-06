@@ -112,6 +112,53 @@ test("test_slack_escalation_no_mentions_when_authors_json_null", () => {
   expect(body.startsWith("ship?")).toBe(true);
 });
 
+test("test_slack_escalation_drops_malformed_slack_ids", () => {
+  // `authors_json` is opaque text in the DB — the parser validates on write,
+  // but a tampered or future-malformed payload must not reach Slack mrkdwn.
+  // IDs that fail the bare `^U[A-Z0-9]+$` shape are silently skipped at the
+  // sink; the prefix is built from the survivors only.
+  h = createHarness();
+  h.clock.set("2026-04-29T10:00:00.000Z");
+  const authors = JSON.stringify([
+    { name: "ok", slack_id: "U06TDC56VJB" },
+    { name: "channel-injection", slack_id: "!channel" }, // would render <@!channel>
+    { name: "lowercase-prefix", slack_id: "u123abc" }, // wrong case
+    { name: "trailing-bracket", slack_id: "U123>" }, // tries to close mrkdwn early
+    { name: "empty", slack_id: "" },
+    { name: "ok-2", slack_id: "U07ABCDE" },
+  ]);
+  const s = setupEscalation({ slug: "s19-malformed", authorsJson: authors });
+
+  tick_once(s.built.deps);
+
+  expect(s.built.slack.postCalls).toHaveLength(1);
+  const body = s.built.slack.postCalls[0]!.body;
+  expect(body.startsWith("<@U06TDC56VJB> <@U07ABCDE>\n\n")).toBe(true);
+  expect(body).not.toContain("!channel");
+  expect(body).not.toContain("u123abc");
+  expect(body).not.toContain("U123>");
+});
+
+test("test_slack_escalation_dedupes_duplicate_slack_ids", () => {
+  // Two author entries pointing at the same Slack user must produce one
+  // mention, not two — the rendered body would otherwise ping the same
+  // human twice.
+  h = createHarness();
+  h.clock.set("2026-04-29T10:00:00.000Z");
+  const authors = JSON.stringify([
+    { name: "Fabian (lead)", slack_id: "U06TDC56VJB" },
+    { name: "Fabian (alt)", slack_id: "U06TDC56VJB" },
+    { name: "Marvin", slack_id: "U07ABCDE" },
+  ]);
+  const s = setupEscalation({ slug: "s19-dupe", authorsJson: authors });
+
+  tick_once(s.built.deps);
+
+  const body = s.built.slack.postCalls[0]!.body;
+  expect(body.startsWith("<@U06TDC56VJB> <@U07ABCDE>\n\n")).toBe(true);
+  expect(body.match(/U06TDC56VJB/g)?.length).toBe(1);
+});
+
 test("test_slack_escalation_no_mentions_when_authors_json_empty_array", () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
