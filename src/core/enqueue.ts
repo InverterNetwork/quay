@@ -93,8 +93,6 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
 
   // Track substrate side effects so rollback knows what to undo.
-  const cloneExistedBeforeCall = deps.git.bareCloneExists(repo.repo_id);
-  let cloneAttemptedThisCall = false;
   let worktreeCreated = false;
   let branchCreated = false;
   let fullBranchName: string | null = null;
@@ -115,13 +113,6 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         deps.git.branchDelete(repo.repo_id, fullBranchName);
       } catch {}
     }
-    // Per §12 enqueue rollback table: only clean up the bare clone if THIS
-    // enqueue created it. A pre-existing bare clone from a prior task stays.
-    if (cloneAttemptedThisCall && !cloneExistedBeforeCall) {
-      try {
-        deps.git.removeBareClone(repo.repo_id);
-      } catch {}
-    }
     // Best-effort artifact file cleanup. SQL rollback removes the rows.
     try {
       rmSync(join(deps.paths.artifactsRoot, taskId), {
@@ -137,10 +128,17 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   };
 
   try {
-    // Step 1: bare clone (first task per repo only).
-    if (!cloneExistedBeforeCall) {
-      cloneAttemptedThisCall = true;
-      deps.git.cloneBare(repo.repo_id, repo.repo_url);
+    // Step 1: validate bare clone exists. Quay is a pure consumer of bare
+    // clones — materializing the clone is the operator's job. If it isn't
+    // present, fail loudly with the expected path so the operator knows
+    // exactly where to create it.
+    if (!deps.git.bareCloneExists(repo.repo_id)) {
+      const expectedPath = join(deps.paths.reposRoot, `${repo.repo_id}.git`);
+      throw new QuayError(
+        "bare_clone_missing",
+        `bare clone for repo "${repo.repo_id}" not found at ${expectedPath}; materialize it before enqueuing (e.g. \`git clone --bare ${repo.repo_url} ${expectedPath} && git -C ${expectedPath} config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'\`)`,
+        { repo_id: repo.repo_id, expected_path: expectedPath, repo_url: repo.repo_url },
+      );
     }
 
     // Step 2: fetch base branch.

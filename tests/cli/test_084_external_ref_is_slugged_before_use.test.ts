@@ -51,6 +51,7 @@ test("test_084_external_ref_is_slugged_before_use", async () => {
     createRepoService({ db: h.db, clock: h.clock }).add({ ...REPO_INPUT });
 
     const built = buildCliDeps(h);
+    built.git.seedBareClone(REPO_INPUT.repo_id);
     const io = bufferIO();
 
     const result = await dispatch(

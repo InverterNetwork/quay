@@ -2,7 +2,6 @@
 // src/adapters/.
 export interface GitPort {
   bareCloneExists(repoId: string): boolean;
-  cloneBare(repoId: string, repoUrl: string): void;
   fetch(repoId: string, ref: string): void;
   // Like `fetch`, but tolerates "remote ref does not exist" — the natural case
   // for newly-enqueued tasks whose `quay/<slug>` branch hasn't been pushed
@@ -22,7 +21,6 @@ export interface GitPort {
   worktreeDetach(worktreePath: string): void;
   worktreeRemove(worktreePath: string): void;
   branchDelete(repoId: string, branch: string): void;
-  removeBareClone(repoId: string): void;
   // Returns the SHA at origin/<branch> in the bare clone after a fetch, or null
   // if the remote ref does not exist.
   remoteHeadSha(repoId: string, branch: string): string | null;

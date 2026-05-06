@@ -42,6 +42,17 @@ function shellGit(cwd: string, ...args: string[]): void {
   }
 }
 
+function materializeBareClone(reposRoot: string, repoId: string, upstream: string): void {
+  const bareDir = join(reposRoot, `${repoId}.git`);
+  const clone = Bun.spawnSync(["git", "clone", "--bare", upstream, bareDir]);
+  if (clone.exitCode !== 0) throw new Error(`clone failed: ${new TextDecoder().decode(clone.stderr)}`);
+  const cfg = Bun.spawnSync(
+    ["git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+    { cwd: bareDir },
+  );
+  if (cfg.exitCode !== 0) throw new Error(`config failed: ${new TextDecoder().decode(cfg.stderr)}`);
+}
+
 const t = gitAvailable ? test : test.skip;
 
 t("worktreeDetach preserves the worktree directory and contents", () => {
@@ -59,7 +70,7 @@ t("worktreeDetach preserves the worktree directory and contents", () => {
   const reposRoot = tempDir("quay-repos-");
   const adapter = new LocalGitAdapter(reposRoot);
 
-  adapter.cloneBare("test-repo", upstream);
+  materializeBareClone(reposRoot, "test-repo", upstream);
   adapter.fetch("test-repo", "main");
 
   const worktreesRoot = tempDir("quay-worktrees-");
@@ -122,7 +133,7 @@ t("worktreeDetach refuses to delete a sibling task's admin dir under the same re
   writeFileSync(join(upstream, "README.md"), "hi\n");
   shellGit(upstream, "add", "README.md");
   shellGit(upstream, "commit", "-q", "-m", "init");
-  adapter.cloneBare("test-repo", upstream);
+  materializeBareClone(reposRoot, "test-repo", upstream);
   adapter.fetch("test-repo", "main");
 
   const worktreesRoot = tempDir("quay-worktrees-cross-");
@@ -184,7 +195,7 @@ t("worktreeDetach refuses to follow a tampered .git pointer", () => {
   writeFileSync(join(upstream, "README.md"), "hi\n");
   shellGit(upstream, "add", "README.md");
   shellGit(upstream, "commit", "-q", "-m", "init");
-  adapter.cloneBare("test-repo", upstream);
+  materializeBareClone(reposRoot, "test-repo", upstream);
   adapter.fetch("test-repo", "main");
 
   const worktreesRoot = tempDir("quay-worktrees-tampered-");

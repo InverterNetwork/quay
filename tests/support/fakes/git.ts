@@ -9,7 +9,6 @@ export interface FakeGitCall {
 }
 
 export interface FakeGitFailures {
-  cloneBare?: (repoId: string) => boolean;
   fetch?: (repoId: string, ref: string) => boolean;
   fetchBranchIfExists?: (repoId: string, branch: string) => boolean;
   worktreeAdd?: (worktreePath: string) => boolean;
@@ -44,17 +43,6 @@ export class FakeGit implements GitPort {
 
   bareCloneExists(repoId: string): boolean {
     return this.bareClones.has(repoId);
-  }
-
-  cloneBare(repoId: string, repoUrl: string): void {
-    this.record("cloneBare", { repoId, repoUrl });
-    if (this.fail.cloneBare?.(repoId)) {
-      // Simulate a partial bare clone left on disk before the failure.
-      mkdirSync(this.bareDir(repoId), { recursive: true });
-      throw new Error(`fake: cloneBare failed for ${repoId}`);
-    }
-    mkdirSync(this.bareDir(repoId), { recursive: true });
-    this.bareClones.add(repoId);
   }
 
   fetch(repoId: string, ref: string): void {
@@ -148,12 +136,6 @@ export class FakeGit implements GitPort {
     this.record("deleteRemoteBranch", { repoId, branch });
     // Idempotent — missing remote ref is not an error.
     this.remoteBranches.get(repoId)?.delete(branch);
-  }
-
-  removeBareClone(repoId: string): void {
-    this.record("removeBareClone", { repoId });
-    rmSync(this.bareDir(repoId), { recursive: true, force: true });
-    this.bareClones.delete(repoId);
   }
 
   remoteHeadSha(repoId: string, branch: string): string | null {

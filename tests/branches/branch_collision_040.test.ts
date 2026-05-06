@@ -36,6 +36,7 @@ test("test_040_branch_collision_adds_task_suffix", () => {
     repos.add({ ...REPO });
 
     const built = buildEnqueueDeps(h);
+    built.git.seedBareClone(REPO.repo_id);
     const taskId = "abcdef0123456789abcdef0123456789";
     h.ids.push(taskId);
     const shortId = taskIdShort(taskId);

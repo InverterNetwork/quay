@@ -66,6 +66,8 @@ test("enqueue dispatch honors deps.retryBudget when set (overrides default)", as
     bufferIO(),
   );
 
+  built.git.seedBareClone("repo-rb");
+
   const briefPath = writeTemp("brief", "b.md");
   const io = bufferIO();
   const result = await dispatch(
@@ -109,6 +111,8 @@ test("enqueue dispatch falls back to enqueue's DEFAULT_RETRY_BUDGET when deps.re
     built.deps,
     bufferIO(),
   );
+
+  built.git.seedBareClone("repo-rb-default");
 
   const briefPath = writeTemp("brief", "b.md");
   const io = bufferIO();

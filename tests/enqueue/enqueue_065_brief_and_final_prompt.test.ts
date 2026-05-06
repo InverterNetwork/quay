@@ -26,6 +26,7 @@ test("test_065_initial_attempt_has_brief_and_final_prompt", () => {
   repos.add({ ...REPO });
 
   const built = buildEnqueueDeps(h);
+  built.git.seedBareClone(REPO.repo_id);
   h.ids.push("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
   const result = enqueue(built.deps, {
