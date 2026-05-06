@@ -24,12 +24,38 @@ import { FileSupervisorLock } from "../core/supervisor_lock.ts";
 import { SpawnedValidatorRunner } from "../core/validator_runner.ts";
 import { SystemClock } from "../ports/clock.ts";
 import { UuidIdGenerator } from "../ports/id_generator.ts";
-import { loadConfig, tickOptionsFromConfig } from "./config.ts";
+import {
+  adaptersConfigFromConfig,
+  linearAdapterOptionsFromConfig,
+  loadConfig,
+  slackAdapterOptionsFromConfig,
+  tickOptionsFromConfig,
+} from "./config.ts";
 import { dispatch, type CliDeps } from "./dispatch.ts";
+import { handleValidateTicket } from "./validate_ticket.ts";
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
+  // `quay validate-ticket` is contractually stateless (ticket-validation §4):
+  // it reads JSON from stdin or a file, applies a TOML schema, and writes
+  // JSON to stdout with a fixed exit-code surface. Routing it through full
+  // CLI startup would couple a pure validator to deployment config and DB
+  // migrations, so a bad ~/.quay/config.toml or unwritable data dir would
+  // break validation. Short-circuit here before any of that runs.
+  if (argv[0] === "validate-ticket") {
+    const result = handleValidateTicket(
+      argv.slice(1),
+      {
+        stdout: (c) => process.stdout.write(c as string | Uint8Array),
+        stderr: (c) => process.stderr.write(c),
+        stdin: () => readFileSync(0, "utf8"),
+      },
+      process.env,
+    );
+    return result.exitCode;
+  }
   const { config } = loadConfig();
+  const adaptersConfig = adaptersConfigFromConfig(config);
   // Spec §13: `data_dir` defaults to `~/.quay`. The QUAY_DATA_DIR env var
   // is the operator's runtime override (handy in tests / containers); the
   // config file's `data_dir` is the deployment-level default. Env wins.
@@ -65,8 +91,8 @@ async function main(): Promise<number> {
     git: new LocalGitAdapter(reposRoot),
     github: new GitHubCliAdapter(reposRoot),
     tmux: new TmuxAdapter(),
-    slack: new SlackAdapter(),
-    linear: new LinearAdapter(),
+    slack: new SlackAdapter(slackAdapterOptionsFromConfig(config)),
+    linear: new LinearAdapter(linearAdapterOptionsFromConfig(config)),
     commandRunner: new ShellCommandRunner(),
     artifactStore,
     supervisorLock: new FileSupervisorLock(
@@ -89,13 +115,13 @@ async function main(): Promise<number> {
     ...(config.retry_budget !== undefined
       ? { retryBudget: config.retry_budget }
       : {}),
-    // Adapters spec §11: validate-ticket runs as a child process.
-    // `quay enqueue --linear-issue` still returns `adapter_not_enabled` until
-    // `[adapters.linear].enabled` flows through into `deps.adaptersConfig` —
-    // the LinearAdapter (slice 17) is constructed unconditionally because
-    // the bot token resolves lazily on first use, but the dispatcher gates
-    // on the per-deployment enablement flag, not on the adapter's existence.
+    // The Linear adapter and validator runner are constructed
+    // unconditionally; the dispatcher gates `--linear-issue` on
+    // `adaptersConfig.linearEnabled`. Tokens resolve lazily on first use,
+    // so a deployment that never enables Linear pays no cost for the
+    // unused adapter object.
     validatorRunner: new SpawnedValidatorRunner(),
+    adaptersConfig,
   };
 
   const io = {

@@ -27,6 +27,28 @@ const positiveInt = z.number().int().positive();
 // Schema mirrors the keys in spec §13. We only declare the keys the
 // production CLI actually consumes; any other key in the file is rejected
 // so a typo'd `max_concurrency` doesn't silently fall back to the default.
+const LinearAdapterConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    api_key_env: z.string().min(1).optional(),
+  })
+  .strict();
+
+const SlackAdapterConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    bot_token_env: z.string().min(1).optional(),
+    max_thread_messages: positiveInt.optional(),
+  })
+  .strict();
+
+const AdaptersConfigSchema = z
+  .object({
+    linear: LinearAdapterConfigSchema.optional(),
+    slack: SlackAdapterConfigSchema.optional(),
+  })
+  .strict();
+
 export const ConfigSchema = z
   .object({
     data_dir: z.string().min(1).optional(),
@@ -42,6 +64,7 @@ export const ConfigSchema = z
     max_non_budget_respawns: positiveInt.optional(),
     tick_lock_path: z.string().min(1).optional(),
     supervisor_lock_stale_seconds: positiveInt.optional(),
+    adapters: AdaptersConfigSchema.optional(),
   })
   .strict();
 
@@ -111,6 +134,38 @@ export function tickOptionsFromConfig(config: QuayConfig): TickOptions {
   if (config.max_non_budget_respawns !== undefined) {
     opts.maxNonBudgetRespawns = config.max_non_budget_respawns;
   }
+  return opts;
+}
+
+// Adapters are opt-in: a deployment without an `[adapters]` section in
+// config.toml gets `linearEnabled=false, slackEnabled=false`, and the
+// dispatcher fails closed for `--linear-issue` (per spec §12).
+export function adaptersConfigFromConfig(
+  config: QuayConfig,
+): { linearEnabled: boolean; slackEnabled: boolean } {
+  return {
+    linearEnabled: config.adapters?.linear?.enabled === true,
+    slackEnabled: config.adapters?.slack?.enabled === true,
+  };
+}
+
+export function linearAdapterOptionsFromConfig(
+  config: QuayConfig,
+): { tokenEnvVar?: string } {
+  const opts: { tokenEnvVar?: string } = {};
+  const envVar = config.adapters?.linear?.api_key_env;
+  if (envVar !== undefined) opts.tokenEnvVar = envVar;
+  return opts;
+}
+
+export function slackAdapterOptionsFromConfig(
+  config: QuayConfig,
+): { tokenEnvVar?: string; maxThreadMessages?: number } {
+  const opts: { tokenEnvVar?: string; maxThreadMessages?: number } = {};
+  const envVar = config.adapters?.slack?.bot_token_env;
+  if (envVar !== undefined) opts.tokenEnvVar = envVar;
+  const cap = config.adapters?.slack?.max_thread_messages;
+  if (cap !== undefined) opts.maxThreadMessages = cap;
   return opts;
 }
 

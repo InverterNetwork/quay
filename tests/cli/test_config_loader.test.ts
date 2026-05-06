@@ -15,7 +15,13 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, tickOptionsFromConfig } from "../../src/cli/config.ts";
+import {
+  adaptersConfigFromConfig,
+  linearAdapterOptionsFromConfig,
+  loadConfig,
+  slackAdapterOptionsFromConfig,
+  tickOptionsFromConfig,
+} from "../../src/cli/config.ts";
 
 let cleanups: Array<() => void> = [];
 
@@ -160,6 +166,59 @@ test("tickOptionsFromConfig only forwards keys that are present", () => {
     maxConcurrent: 6,
     agentInvocation: "claude < {prompt_file}",
   });
+});
+
+test("loads [adapters.linear] and [adapters.slack] sections", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[adapters.linear]
+enabled = true
+api_key_env = "MY_LINEAR_KEY"
+
+[adapters.slack]
+enabled = true
+bot_token_env = "MY_SLACK_TOKEN"
+max_thread_messages = 400
+`,
+  );
+  const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
+  expect(adaptersConfigFromConfig(result.config)).toEqual({
+    linearEnabled: true,
+    slackEnabled: true,
+  });
+  expect(linearAdapterOptionsFromConfig(result.config)).toEqual({
+    tokenEnvVar: "MY_LINEAR_KEY",
+  });
+  expect(slackAdapterOptionsFromConfig(result.config)).toEqual({
+    tokenEnvVar: "MY_SLACK_TOKEN",
+    maxThreadMessages: 400,
+  });
+});
+
+test("absent [adapters] section means both adapters disabled", () => {
+  expect(adaptersConfigFromConfig({})).toEqual({
+    linearEnabled: false,
+    slackEnabled: false,
+  });
+  expect(linearAdapterOptionsFromConfig({})).toEqual({});
+  expect(slackAdapterOptionsFromConfig({})).toEqual({});
+});
+
+test("rejects an unknown key under [adapters.linear]", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[adapters.linear]
+enabled = true
+unknown_field = "x"
+`,
+  );
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /unknown_field|unrecognized|invalid/i,
+  );
 });
 
 test("tickOptionsFromConfig maps every supported key", () => {
