@@ -134,10 +134,14 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     // exactly where to create it.
     if (!deps.git.bareCloneExists(repo.repo_id)) {
       const expectedPath = join(deps.paths.reposRoot, `${repo.repo_id}.git`);
+      // Don't include the registered repo URL in the error: HTTPS remotes can
+      // carry credentials/tokens in the URL, and this error is routinely
+      // serialized to stderr / orchestrator logs. Operators can look the URL
+      // up via `quay repo get <repo_id>` if they need it.
       throw new QuayError(
         "bare_clone_missing",
-        `bare clone for repo "${repo.repo_id}" not found at ${expectedPath}; materialize it before enqueuing (e.g. \`git clone --bare ${repo.repo_url} ${expectedPath}\`)`,
-        { repo_id: repo.repo_id, expected_path: expectedPath, repo_url: repo.repo_url },
+        `bare clone for repo "${repo.repo_id}" not found at ${expectedPath}; materialize it before enqueuing (e.g. \`git clone --bare <repo_url> ${expectedPath}\` — look up <repo_url> via \`quay repo get ${repo.repo_id}\`)`,
+        { repo_id: repo.repo_id, expected_path: expectedPath },
       );
     }
 

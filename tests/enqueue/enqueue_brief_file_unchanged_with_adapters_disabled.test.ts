@@ -63,8 +63,8 @@ test("test_enqueue_brief_file_form_unchanged_when_adapters_disabled", async () =
     built.deps,
     bufferIO(),
   );
-  // AST-76: quay is a pure consumer of bare clones; the operator
-  // (or this test) must materialize the clone before enqueuing.
+  // Quay is a pure consumer of bare clones; the operator (or, here, the
+  // test) must materialize the clone before enqueuing.
   built.git.seedBareClone("repo-bf");
 
   const briefPath = writeTemp("legacy brief body", "brief.md");
