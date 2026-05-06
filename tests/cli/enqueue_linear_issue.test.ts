@@ -128,6 +128,9 @@ async function addRepo(built: ReturnType<typeof buildCliDeps>): Promise<void> {
     bufferIO(),
   );
   expect(r.exitCode).toBe(0);
+  // AST-76: quay is a pure consumer of bare clones; the operator
+  // (or these tests) must materialize the clone before enqueuing.
+  built.git.seedBareClone(REPO_ID);
 }
 
 // ---------------------------------------------------------------------------

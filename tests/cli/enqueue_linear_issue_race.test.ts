@@ -69,6 +69,9 @@ async function addRepo(built: ReturnType<typeof buildCliDeps>): Promise<void> {
     bufferIO(),
   );
   expect(r.exitCode).toBe(0);
+  // AST-76: quay is a pure consumer of bare clones; the operator
+  // (or these tests) must materialize the clone before enqueuing.
+  built.git.seedBareClone(REPO_ID);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +200,11 @@ test("test_enqueue_linear_issue_concurrent_race_converges_to_one_task", async ()
   // Direct enqueue() call with the same external_ref — must throw a unique
   // constraint error and roll back substrate side effects.
   const enqDeps = buildEnqueueDeps(h);
-  // The bare clone already exists (first call seeded it).
+  // FakeGit tracks `bareClones` in memory per-instance, so the seed on
+  // `built.git` from `addRepo(built)` doesn't carry over to this fresh
+  // FakeGit inside `enqDeps`. Seed it explicitly so we exercise the
+  // unique-constraint path, not the AST-76 `bare_clone_missing` path.
+  enqDeps.git.seedBareClone(REPO_ID);
   const worktreesRootBefore = built.worktreesRoot;
   expect(() => {
     enqueue(enqDeps.deps, {
