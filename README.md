@@ -15,6 +15,42 @@ bun test
 bun run typecheck
 ```
 
+## Bootstrapping a repo
+
+Quay is a *consumer* of bare clones, not a manager. Before enqueuing
+tasks against a repo, two things have to happen:
+
+1. **Register repo metadata** with `quay repo add`:
+
+   ```bash
+   quay repo add \
+     --id myrepo \
+     --url git@github.com:owner/myrepo.git \
+     --base-branch main \
+     --package-manager bun \
+     --install-cmd "bun install"
+   ```
+
+2. **Materialize the bare clone** at the path quay expects. By default
+   that's `<data_dir>/repos/<repo_id>.git` (i.e. `~/.quay/repos/myrepo.git`).
+   Override with `repos_root` in `~/.quay/config.toml` to put the cache
+   anywhere — e.g. a shared agent-wide directory:
+
+   ```toml
+   # ~/.quay/config.toml
+   repos_root = "/Users/me/.acc/repos"
+   ```
+
+   Then clone:
+
+   ```bash
+   git clone --bare git@github.com:owner/myrepo.git <repos_root>/myrepo.git
+   ```
+
+   That's the entire contract — vanilla `--bare`, no extra `git config`
+   step. If the clone is missing when you `quay enqueue`, the error
+   prints the exact expected path and command.
+
 ## CLI surface
 
 ```bash
@@ -43,6 +79,7 @@ Resolution order (first match wins): `$QUAY_CONFIG_FILE`, `$QUAY_CONFIG_DIR/conf
 ```toml
 # Tick / supervisor knobs (see docs/quay-spec.md §13 for the full set)
 data_dir = "/var/lib/quay"
+repos_root = "/Users/me/.acc/repos"     # bare-clone cache; defaults to ${data_dir}/repos
 max_concurrent = 4
 retry_budget = 5
 agent_invocation = "claude < {prompt_file}"
