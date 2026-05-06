@@ -63,7 +63,11 @@ async function main(): Promise<number> {
     process.env.QUAY_DATA_DIR ??
     config.data_dir ??
     join(homedir(), ".quay");
-  const reposRoot = join(dataDir, "repos");
+  // Spec §13: `repos_root` defaults to `${data_dir}/repos`. The config
+  // override is honored verbatim (operator-controlled absolute path), with
+  // the same precedence as `worktree_root` — config wins over the derived
+  // default; there is no env override for this knob.
+  const reposRoot = config.repos_root ?? join(dataDir, "repos");
   // Spec §13: `worktree_root` defaults to `${data_dir}/worktrees`. The config
   // override is honored verbatim (operator-controlled absolute path), with
   // the same precedence as `tick_lock_path` — config wins over the derived

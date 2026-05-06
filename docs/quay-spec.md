@@ -1226,6 +1226,7 @@ Single config file (location configurable; default `~/.quay/config.toml`). Loade
 | Key | Default | Purpose |
 |---|---|---|
 | `data_dir` | `~/.quay` | Where SQL, artifacts, lockfile live. |
+| `repos_root` | `${data_dir}/repos` | Where bare clones for registered repos live. Override to share the bare-clone cache across multiple agent tools. |
 | `worktree_root` | `~/.quay/worktrees` | Where per-task worktrees are created. |
 | `max_concurrent` | `2` | Max tasks in `running`. |
 | `max_total` | `5` | Max tasks not in a terminal state. |
