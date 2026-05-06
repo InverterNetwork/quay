@@ -1,0 +1,26 @@
+{
+  "slice": 16,
+  "name": "enqueue-linear-issue",
+  "spec_coverage": "Deployment adapters spec §3 atomicity, §8 CLI surface, §11 validator integration, §12 failure modes, §13 worked example.",
+  "completion_promise": "SLICE_16_COMPLETE",
+  "max_iterations": 40,
+  "attempt_timeout_seconds": 3600,
+  "expected_tests": [
+    "test_enqueue_linear_issue_end_to_end",
+    "test_enqueue_linear_issue_validation_failure_writes_no_db_state",
+    "test_enqueue_linear_issue_combines_with_cli_tags",
+    "test_enqueue_linear_issue_idempotent_on_external_ref",
+    "test_enqueue_linear_issue_mutually_exclusive_with_brief_file",
+    "test_enqueue_linear_issue_mutually_exclusive_with_external_ref",
+    "test_enqueue_linear_issue_mutually_exclusive_with_slack_thread_ref",
+    "test_enqueue_brief_file_form_unchanged_when_adapters_disabled",
+    "test_enqueue_linear_issue_atomicity_failure_before_substrate",
+    "test_enqueue_linear_issue_validator_payload_passes_authors_through",
+    "test_enqueue_linear_issue_validator_payload_omits_slack_thread_when_null",
+    "test_enqueue_linear_issue_invokes_validator_as_child_process",
+    "test_enqueue_linear_issue_fails_when_ticket_has_no_quay_config_block"
+  ],
+  "forbidden_paths": [
+    "src/adapters/linear.ts"
+  ]
+}

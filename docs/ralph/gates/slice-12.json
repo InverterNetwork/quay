@@ -1,0 +1,19 @@
+{
+  "slice": 12,
+  "name": "adapters-schema",
+  "spec_coverage": "Deployment adapters spec §5: task_tags table + tasks.authors_json column.",
+  "completion_promise": "SLICE_12_COMPLETE",
+  "max_iterations": 20,
+  "attempt_timeout_seconds": 1800,
+  "expected_tests": [
+    "test_schema_creates_task_tags_table",
+    "test_schema_task_tags_index_by_tag_exists",
+    "test_schema_task_tags_rejects_duplicate_pair",
+    "test_schema_task_tags_rejects_orphan_task_id",
+    "test_schema_task_tags_cascades_or_rejects_on_task_delete",
+    "test_schema_tasks_has_authors_json_column",
+    "test_schema_tasks_authors_json_defaults_null_for_existing_rows",
+    "test_schema_migration_is_idempotent_on_rerun"
+  ],
+  "forbidden_paths": []
+}

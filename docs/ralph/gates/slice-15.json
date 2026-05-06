@@ -1,0 +1,29 @@
+{
+  "slice": 15,
+  "name": "ticket-context",
+  "spec_coverage": "Deployment adapters spec §6 (TicketContext primitive + composition rules + failure modes), §6.1 (canonical brief format).",
+  "completion_promise": "SLICE_15_COMPLETE",
+  "max_iterations": 30,
+  "attempt_timeout_seconds": 3000,
+  "expected_tests": [
+    "test_fetch_ticket_context_assembles_full_brief_when_both_adapters_enabled",
+    "test_fetch_ticket_context_omits_slack_section_when_no_thread_ref_parsed",
+    "test_fetch_ticket_context_degrades_when_slack_disabled_but_link_parsed",
+    "test_fetch_ticket_context_fails_closed_when_linear_disabled",
+    "test_fetch_ticket_context_fails_closed_on_linear_api_error",
+    "test_fetch_ticket_context_fails_closed_on_slack_fetch_error_when_enabled",
+    "test_fetch_ticket_context_returns_tags_in_block_order",
+    "test_fetch_ticket_context_returns_authors_in_block_order",
+    "test_fetch_ticket_context_includes_user_comments_in_brief",
+    "test_fetch_ticket_context_omits_comments_section_when_no_user_comments",
+    "test_fetch_ticket_context_filters_bot_comments_from_brief",
+    "test_fetch_ticket_context_brief_section_order_is_canonical",
+    "test_fetch_ticket_context_strips_quay_config_block_from_brief",
+    "test_fetch_ticket_context_404_surfaces_as_ticket_not_found",
+    "test_fetch_ticket_context_block_invalid_propagates",
+    "test_fetch_ticket_context_block_missing_returns_error"
+  ],
+  "forbidden_paths": [
+    "src/cli/dispatch.ts"
+  ]
+}

@@ -1,0 +1,40 @@
+# Quay default ticket_schema.toml
+# Override at ${QUAY_CONFIG_DIR:-$HOME/.quay}/ticket_schema.toml.
+# Field set is aligned 1:1 with the quay-config block (per
+# docs/quay-spec-deployment-adapters.md §10) plus body length sanity.
+
+[required.body]
+type = "string"
+min_length = 10
+max_length = 50000
+
+[required.tags]
+type = "list"
+item_type = "string"
+min_count = 1
+charset = "lowercase_alphanum_dash"
+unique = true
+
+[optional.slack_thread]
+type = "string"
+pattern = '^[A-Z0-9]+:\d+\.\d+$'
+description = "Slack thread reference: <channel_id>:<message_ts>. Optional: tickets without an originating Slack discussion can omit it. Escalation degrades cleanly to a no-op when absent (per substrate spec, src/core/tick.ts:1019)."
+
+[required.authors]
+type = "list"
+item_type = "object"
+min_count = 1
+description = "Humans associated with the ticket, ordered by involvement (most-involved first). Mirrors the quay-config block's `authors:` list 1:1."
+
+[required.authors.fields.name]
+type = "string"
+min_length = 1
+
+[required.authors.fields.slack_id]
+type = "string"
+pattern = '^U[A-Z0-9]+$'
+description = "Bare Slack user ID, e.g. U06TDC56VJB. Same format as the block."
+
+[optional.external_ref]
+type = "string"
+description = "Source-system identifier (e.g., 'ITRY-1276'). Stored opaquely by Quay as tasks.external_ref."

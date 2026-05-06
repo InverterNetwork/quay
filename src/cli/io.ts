@@ -7,15 +7,20 @@
 // payload: the lossy decode happens before the bytes reach the CliIO sink,
 // even if the sink is `process.stdout.write` (which itself accepts both).
 // Keeping stderr text-only is fine — error envelopes are always JSON.
+//
+// `stdin` is optional because only the `validate-ticket` command reads from
+// it; existing commands construct CliIO without thinking about input.
 export interface CliIO {
   stdout: (chunk: string | Uint8Array) => void;
   stderr: (chunk: string) => void;
+  stdin?: () => string;
 }
 
 export interface BufferedCliIO extends CliIO {
   out: () => string;
   err: () => string;
   outBytes: () => Uint8Array;
+  setStdin: (s: string) => void;
 }
 
 export function bufferIO(): BufferedCliIO {
@@ -25,6 +30,7 @@ export function bufferIO(): BufferedCliIO {
   // assert against binary artifacts where UTF-8 decode would lose data.
   const chunks: Uint8Array[] = [];
   let err = "";
+  let stdinValue = "";
   const encoder = new TextEncoder();
   return {
     stdout: (c) => {
@@ -32,6 +38,10 @@ export function bufferIO(): BufferedCliIO {
     },
     stderr: (c) => {
       err += c;
+    },
+    stdin: () => stdinValue,
+    setStdin: (s) => {
+      stdinValue = s;
     },
     out: () => {
       // Concatenation cost is fine for tests — no command emits enough

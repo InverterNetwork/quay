@@ -5,11 +5,21 @@
 // adapter parses that encoding once at the boundary and uses the structured
 // pieces internally. Failures throw — tick wraps the throw in `tick_error`
 // and retries on the next cycle (spec §5).
+//
+// Failure-mode mapping for `fetchThreadContext` (adapters spec §7 / §17):
+//   - HTTP 200, `ok: true`           → success (paginate, truncate, return)
+//   - HTTP 200, `ok: false, error`   → throw (caller wraps as adapter_error)
+//   - HTTP 4xx                       → throw (caller wraps as adapter_error)
+//   - HTTP 429                       → throw `adapter_error{retryable:true, retry_after}`
+//   - HTTP 5xx                       → throw `adapter_error{retryable:false}`
+import { QuayError } from "../core/errors.ts";
 import type {
   SlackPort,
   SlackPostInput,
   SlackPostResult,
   SlackReply,
+  SlackThread,
+  SlackThreadMessage,
 } from "../ports/slack.ts";
 
 interface SlackMessage {
@@ -18,6 +28,20 @@ interface SlackMessage {
   bot_id?: string;
   text?: string;
   subtype?: string;
+  username?: string;
+  user_profile?: {
+    display_name?: string | null;
+    real_name?: string | null;
+  } | null;
+  bot_profile?: { name?: string | null } | null;
+}
+
+interface ConversationsRepliesPayload {
+  ok: boolean;
+  error?: string;
+  messages?: SlackMessage[];
+  has_more?: boolean;
+  response_metadata?: { next_cursor?: string };
 }
 
 // Default per-call timeout for the synchronous child fetch. Configurable via
@@ -30,6 +54,29 @@ const DEFAULT_SLACK_TIMEOUT_MS = 30_000;
 // child as wedged and killing it. The child's AbortController is the primary
 // mechanism; this is a backstop if the child's runtime itself hangs.
 const PARENT_TIMEOUT_GRACE_MS = 5_000;
+// Adapters spec §17: default cap on `fetchThreadContext` reply count.
+// Configurable via `[adapters.slack].max_thread_messages`.
+const DEFAULT_MAX_THREAD_MESSAGES = 200;
+// Per-page size for `conversations.replies`. Slack accepts up to 1000; 200
+// is the comfortable middle (matches the existing `listReplies` choice).
+const REPLIES_PAGE_SIZE = 200;
+
+export interface SlackTransportRequest {
+  url: string;
+  method: "GET" | "POST";
+  headers: Record<string, string>;
+  body: string;
+}
+
+export interface SlackTransportResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+export type SlackTransport = (
+  req: SlackTransportRequest,
+) => SlackTransportResponse;
 
 export class SlackAdapter implements SlackPort {
   // The token is resolved lazily on first use so the production CLI can
@@ -39,24 +86,46 @@ export class SlackAdapter implements SlackPort {
   // to Slack.
   private readonly endpoint: string;
   private readonly explicitToken: string | null;
+  private readonly tokenEnvVar: string;
   private readonly timeoutMs: number;
+  private readonly transport: SlackTransport;
+  private readonly maxThreadMessages: number;
 
-  constructor(opts?: { token?: string; endpoint?: string; timeoutMs?: number }) {
+  constructor(opts?: {
+    token?: string;
+    tokenEnvVar?: string;
+    endpoint?: string;
+    timeoutMs?: number;
+    transport?: SlackTransport;
+    maxThreadMessages?: number;
+  }) {
     this.explicitToken =
       opts?.token !== undefined && opts.token !== "" ? opts.token : null;
+    this.tokenEnvVar =
+      opts?.tokenEnvVar !== undefined && opts.tokenEnvVar !== ""
+        ? opts.tokenEnvVar
+        : "SLACK_TOKEN";
     this.endpoint = opts?.endpoint ?? "https://slack.com/api";
     this.timeoutMs =
       opts?.timeoutMs !== undefined && opts.timeoutMs > 0
         ? opts.timeoutMs
         : resolveTimeoutFromEnv();
+    this.transport = opts?.transport ?? this.spawnFetchTransport();
+    this.maxThreadMessages =
+      opts?.maxThreadMessages !== undefined && opts.maxThreadMessages > 0
+        ? opts.maxThreadMessages
+        : DEFAULT_MAX_THREAD_MESSAGES;
   }
 
   private resolveToken(): string {
     if (this.explicitToken !== null) return this.explicitToken;
-    const fromEnv = process.env.SLACK_TOKEN ?? "";
+    const envVar = this.tokenEnvVar;
+    const fromEnv = process.env[envVar] ?? "";
     if (fromEnv === "") {
-      throw new Error(
-        "SlackAdapter requires SLACK_TOKEN to be set in the environment for any Slack API call",
+      throw new QuayError(
+        "adapter_not_configured",
+        `SlackAdapter requires ${envVar} to be set in the environment for any Slack API call`,
+        { adapter: "slack", env_var: envVar },
       );
     }
     return fromEnv;
@@ -104,6 +173,112 @@ export class SlackAdapter implements SlackPort {
     return null;
   }
 
+  fetchThreadContext(threadRef: string): SlackThread {
+    const { channel, ts } = parseThreadRef(threadRef);
+    // Paginate `conversations.replies` to completion (or until we've gone
+    // sufficiently past the cap that further fetches couldn't change the
+    // truncation outcome). The first message of the first page is the
+    // parent; subsequent messages — and all messages on follow-up pages —
+    // are replies. We dedupe defensively in case Slack repeats the parent.
+    const collected: SlackMessage[] = [];
+    let parent: SlackMessage | null = null;
+    let cursor: string | null = null;
+    let pageCount = 0;
+
+    let pageCapped = false;
+    while (true) {
+      pageCount += 1;
+      const payload: Record<string, unknown> = {
+        channel,
+        ts,
+        limit: REPLIES_PAGE_SIZE,
+      };
+      if (cursor !== null) payload.cursor = cursor;
+
+      const env = this.requestEnvelope(
+        "conversations.replies",
+        payload,
+        "GET",
+      );
+      mapEnvelopeErrorsForFetchThreadContext(env);
+
+      let parsed: ConversationsRepliesPayload;
+      try {
+        parsed = JSON.parse(env.body);
+      } catch (err) {
+        throw new Error(
+          `Slack conversations.replies returned unparseable JSON: ${(err as Error).message}`,
+        );
+      }
+      if (!parsed.ok) {
+        throw new Error(
+          `Slack conversations.replies failed: ${parsed.error ?? "unknown error"}`,
+        );
+      }
+      const messages = parsed.messages ?? [];
+      if (parent === null) {
+        if (messages.length === 0) {
+          throw new Error(
+            `Slack thread ${threadRef} returned no messages (thread not found)`,
+          );
+        }
+        parent = messages[0]!;
+        for (let i = 1; i < messages.length; i++) {
+          collected.push(messages[i]!);
+        }
+      } else {
+        for (const m of messages) {
+          if (m.ts === parent.ts) continue; // defensive dedupe
+          collected.push(m);
+        }
+      }
+
+      const next = parsed.response_metadata?.next_cursor ?? "";
+      const hasMore = parsed.has_more === true && next !== "";
+      if (!hasMore) break;
+      // Belt-and-braces page cap. Even at the page size of 200 the worst
+      // case per Slack's documented thread limit (~1000) is a handful of
+      // pages; a runaway pagination signals an upstream change worth
+      // surfacing rather than silently spinning.
+      if (pageCount >= 50) {
+        pageCapped = true;
+        break;
+      }
+      cursor = next;
+    }
+
+    const cap = this.maxThreadMessages;
+    const parentMsg = toSlackThreadMessage(parent!);
+    if (collected.length <= cap) {
+      return {
+        parent: parentMsg,
+        replies: collected.map(toSlackThreadMessage),
+      };
+    }
+    // Truncation: first floor(cap/2) + canonical marker + last floor(cap/2).
+    // Marker text matches `<!-- thread truncated: K intermediate messages omitted -->`
+    // exactly when the full thread was fetched, with K substituted (adapters
+    // spec §7 / §17). When the page cap fired before pagination completed,
+    // `collected` is a partial view of the thread — K is a lower bound, and
+    // the marker says so.
+    const half = Math.floor(cap / 2);
+    const head = collected.slice(0, half).map(toSlackThreadMessage);
+    const tail = collected
+      .slice(collected.length - half)
+      .map(toSlackThreadMessage);
+    const omitted = collected.length - 2 * half;
+    const markerText = pageCapped
+      ? `<!-- thread truncated: at least ${omitted} intermediate messages omitted (page cap hit; full thread length unknown) -->`
+      : `<!-- thread truncated: ${omitted} intermediate messages omitted -->`;
+    const marker: SlackThreadMessage = {
+      ts: `${head[head.length - 1]?.ts ?? "0"}-truncated`,
+      authorBot: true,
+      authorName: null,
+      text: markerText,
+    };
+    return { parent: parentMsg, replies: [...head, marker, ...tail] };
+  }
+
   listReplies(threadRef: string, lowerBoundTs: string): SlackReply[] {
     const replies = this.fetchReplies(threadRef);
     const lb = Number(lowerBoundTs);
@@ -137,73 +312,18 @@ export class SlackAdapter implements SlackPort {
     payload: Record<string, unknown>,
     httpMethod: "POST" | "GET" = "POST",
   ): T {
-    const token = this.resolveToken();
     // Slack's Web API returns JSON with `{ ok: bool, error?: string, ... }`.
     // Quay treats any `ok=false` as a thrown error so tick's per-task error
     // path logs `tick_error`. Network/HTTP failures bubble up the same way.
-    const url =
-      httpMethod === "GET"
-        ? `${this.endpoint}/${method}?${encodeForm(payload)}`
-        : `${this.endpoint}/${method}`;
-    const init: RequestInit =
-      httpMethod === "GET"
-        ? {
-            method: "GET",
-            headers: { Authorization: `Bearer ${token}` },
-          }
-        : {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json; charset=utf-8",
-            },
-            body: JSON.stringify(payload),
-          };
-    // SlackPort is synchronous (every tick handler relies on it) but Bun's
-    // `fetch` is async-only, so we run the HTTP call in a child Bun
-    // process and `spawnSync`-wait on it. ALL request fields (token, URL,
-    // body) are passed via the child's env — argv is visible in `ps` /
-    // `/proc/<pid>/cmdline` for the child's lifetime, so anything routed
-    // through argv leaks the message text (escalation question, blocker
-    // excerpt, dedupe nonce) and the GET query (channel id, parent thread
-    // ts) to any local reader on a multi-tenant host. Only the http method
-    // (POST/GET) stays on argv since it is a fixed enum with no operator
-    // content.
-    //
-    // The child wraps `fetch` in an AbortController gated on
-    // `QUAY_SLACK_TIMEOUT_MS` so a stalled HTTP connection aborts cleanly
-    // and the child exits non-zero. As a backstop, the parent's
-    // `spawnSync` carries a slightly longer `timeout` so a wedged child
-    // runtime can't hold the supervisor lock past the bounded budget.
-    const result = Bun.spawnSync({
-      cmd: [
-        process.execPath,
-        "-e",
-        slackFetchScript(),
-        init.method ?? "GET",
-      ],
-      env: {
-        ...process.env,
-        QUAY_SLACK_TOKEN: token,
-        QUAY_SLACK_URL: url,
-        QUAY_SLACK_BODY:
-          init.body !== undefined && init.body !== null
-            ? String(init.body)
-            : "",
-        QUAY_SLACK_TIMEOUT_MS: String(this.timeoutMs),
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-      timeout: this.timeoutMs + PARENT_TIMEOUT_GRACE_MS,
-    });
-    if (result.exitCode !== 0) {
+    const env = this.requestEnvelope(method, payload, httpMethod);
+    if (env.status < 200 || env.status >= 300) {
       throw new Error(
-        `Slack ${method} child process failed (exit ${result.exitCode}): ${decode(result.stderr).trim()}`,
+        `Slack ${method} HTTP ${env.status}: ${truncate(env.body)}`,
       );
     }
     let parsed: { ok: boolean; error?: string } & Record<string, unknown>;
     try {
-      parsed = JSON.parse(decode(result.stdout));
+      parsed = JSON.parse(env.body);
     } catch (err) {
       throw new Error(
         `Slack ${method} returned unparseable JSON: ${(err as Error).message}`,
@@ -215,6 +335,73 @@ export class SlackAdapter implements SlackPort {
       );
     }
     return parsed as unknown as T;
+  }
+
+  private requestEnvelope(
+    method: string,
+    payload: Record<string, unknown>,
+    httpMethod: "POST" | "GET",
+  ): SlackTransportResponse {
+    const token = this.resolveToken();
+    const url =
+      httpMethod === "GET"
+        ? `${this.endpoint}/${method}?${encodeForm(payload)}`
+        : `${this.endpoint}/${method}`;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+    };
+    let body = "";
+    if (httpMethod === "POST") {
+      headers["Content-Type"] = "application/json; charset=utf-8";
+      body = JSON.stringify(payload);
+    }
+    return this.transport({ url, method: httpMethod, headers, body });
+  }
+
+  // Default transport: spawns a child Bun process that runs `fetch` and
+  // writes a `{status, headers, body}` envelope to stdout. ALL request
+  // fields (token, URL, body) are passed via the child's env — argv is
+  // visible in `ps` / `/proc/<pid>/cmdline`, so anything routed through
+  // argv leaks the message text (escalation question, blocker excerpt,
+  // dedupe nonce) and the GET query (channel id, parent thread ts) to any
+  // local reader on a multi-tenant host.
+  //
+  // The child wraps `fetch` in an AbortController gated on
+  // `QUAY_SLACK_TIMEOUT_MS` so a stalled HTTP connection aborts cleanly
+  // and the child exits non-zero. As a backstop, the parent's
+  // `spawnSync` carries a slightly longer `timeout` so a wedged child
+  // runtime can't hold the supervisor lock past the bounded budget.
+  private spawnFetchTransport(): SlackTransport {
+    const timeoutMs = this.timeoutMs;
+    return (req) => {
+      const result = Bun.spawnSync({
+        cmd: [process.execPath, "-e", slackFetchScript(), req.method],
+        env: {
+          ...process.env,
+          QUAY_SLACK_TOKEN: extractBearer(req.headers),
+          QUAY_SLACK_URL: req.url,
+          QUAY_SLACK_BODY: req.body,
+          QUAY_SLACK_TIMEOUT_MS: String(timeoutMs),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: timeoutMs + PARENT_TIMEOUT_GRACE_MS,
+      });
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `Slack request child process failed (exit ${result.exitCode}): ${decode(result.stderr).trim()}`,
+        );
+      }
+      let envelope: SlackTransportResponse;
+      try {
+        envelope = JSON.parse(decode(result.stdout));
+      } catch (err) {
+        throw new Error(
+          `Slack request returned unparseable envelope: ${(err as Error).message}`,
+        );
+      }
+      return envelope;
+    };
   }
 }
 
@@ -241,6 +428,79 @@ function isBotAuthored(msg: SlackMessage): boolean {
   return false;
 }
 
+function resolveAuthorName(msg: SlackMessage): string | null {
+  // Best-effort author resolution from fields Slack surfaces inline on
+  // `conversations.replies` payloads. We deliberately do not issue a
+  // separate `users.info` round-trip for each unresolved user — it would
+  // turn one Slack call into N for long threads, and the brief composer
+  // tolerates `null` (renders as "(unknown)").
+  if (msg.user_profile) {
+    const display = msg.user_profile.display_name ?? "";
+    if (display !== "") return display;
+    const real = msg.user_profile.real_name ?? "";
+    if (real !== "") return real;
+  }
+  if (msg.bot_profile && typeof msg.bot_profile.name === "string") {
+    if (msg.bot_profile.name !== "") return msg.bot_profile.name;
+  }
+  if (typeof msg.username === "string" && msg.username !== "") {
+    return msg.username;
+  }
+  return null;
+}
+
+function toSlackThreadMessage(m: SlackMessage): SlackThreadMessage {
+  return {
+    ts: m.ts,
+    authorBot: isBotAuthored(m),
+    authorName: resolveAuthorName(m),
+    text: m.text ?? "",
+  };
+}
+
+function mapEnvelopeErrorsForFetchThreadContext(
+  env: SlackTransportResponse,
+): void {
+  if (env.status === 429) {
+    const retryAfter = parseRetryAfter(env.headers);
+    throw new QuayError(
+      "adapter_error",
+      "Slack conversations.replies: rate-limited (429)",
+      { adapter: "slack", retryable: true, retry_after: retryAfter },
+    );
+  }
+  if (env.status >= 500 && env.status < 600) {
+    throw new QuayError(
+      "adapter_error",
+      `Slack conversations.replies: upstream ${env.status} ${truncate(env.body)}`,
+      { adapter: "slack", retryable: false, status: env.status },
+    );
+  }
+  if (env.status < 200 || env.status >= 300) {
+    // 4xx — auth, scope, or bad request. Surface as a plain Error so
+    // ticketContext.fetch wraps as adapter_error{slack} per spec §12.
+    throw new Error(
+      `Slack conversations.replies: HTTP ${env.status} ${truncate(env.body)}`,
+    );
+  }
+}
+
+function parseRetryAfter(headers: Record<string, string>): number | null {
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() !== "retry-after") continue;
+    const seconds = Number(v);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.floor(seconds);
+    return null;
+  }
+  return null;
+}
+
+function extractBearer(headers: Record<string, string>): string {
+  const auth = headers.Authorization ?? headers.authorization ?? "";
+  if (auth.startsWith("Bearer ")) return auth.slice("Bearer ".length);
+  return auth;
+}
+
 function encodeForm(payload: Record<string, unknown>): string {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(payload)) {
@@ -253,6 +513,11 @@ function encodeForm(payload: Record<string, unknown>): string {
 function decode(buf: Buffer | Uint8Array | undefined): string {
   if (!buf) return "";
   return new TextDecoder().decode(buf);
+}
+
+function truncate(s: string): string {
+  if (s.length <= 500) return s;
+  return `${s.slice(0, 500)}... (truncated, ${s.length} bytes total)`;
 }
 
 function resolveTimeoutFromEnv(): number {
@@ -269,8 +534,8 @@ function resolveTimeoutFromEnv(): number {
 // bounds how long the child waits on `fetch` before aborting and
 // exiting non-zero — the supervisor lock is held for the duration of
 // this call, so an unbounded fetch would block `quay cancel` and the
-// next tick. Errors print to stderr and exit non-zero. Embedded as a
-// string so the parent never needs a separate file.
+// next tick. Stdout receives a `{status, headers, body}` envelope so the
+// parent can branch on HTTP status / Retry-After header.
 function slackFetchScript(): string {
   return `
 const [method] = process.argv.slice(1);
@@ -300,7 +565,9 @@ if (method !== "GET" && body) {
 fetch(url, init)
   .then(async (r) => {
     const text = await r.text();
-    process.stdout.write(text);
+    const respHeaders = {};
+    r.headers.forEach((v, k) => { respHeaders[k] = v; });
+    process.stdout.write(JSON.stringify({ status: r.status, headers: respHeaders, body: text }));
   })
   .catch((err) => {
     const isAbort =

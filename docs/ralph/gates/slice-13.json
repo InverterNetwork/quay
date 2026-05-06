@@ -1,0 +1,24 @@
+{
+  "slice": 13,
+  "name": "quay-config-parser",
+  "spec_coverage": "Deployment adapters spec §10: quay-config fenced-block contract.",
+  "completion_promise": "SLICE_13_COMPLETE",
+  "max_iterations": 30,
+  "attempt_timeout_seconds": 2400,
+  "expected_tests": [
+    "test_quay_config_block_parses_tags_and_slack_thread",
+    "test_quay_config_block_returns_null_when_block_missing",
+    "test_quay_config_block_errors_on_malformed_yaml",
+    "test_quay_config_block_errors_on_unknown_required_field_type",
+    "test_quay_config_block_ignores_unknown_keys",
+    "test_quay_config_block_decodes_slack_p_format_correctly",
+    "test_quay_config_block_errors_on_malformed_slack_url",
+    "test_quay_config_block_rejects_duplicate_blocks",
+    "test_quay_config_block_strips_from_brief",
+    "test_quay_config_block_parses_authors_in_order",
+    "test_quay_config_block_errors_on_empty_authors",
+    "test_quay_config_block_errors_on_malformed_slack_id",
+    "test_quay_config_block_errors_on_missing_authors"
+  ],
+  "forbidden_paths": []
+}

@@ -1,0 +1,21 @@
+{
+  "slice": 17,
+  "name": "linear-adapter",
+  "spec_coverage": "Deployment adapters spec §7 (LinearPort), §17 (Linear permissions, draft rejection, rate limits), §12 (failure modes).",
+  "completion_promise": "SLICE_17_COMPLETE",
+  "max_iterations": 30,
+  "attempt_timeout_seconds": 3600,
+  "expected_tests": [
+    "test_linear_adapter_get_issue_returns_structured_payload",
+    "test_linear_adapter_get_issue_returns_null_on_404",
+    "test_linear_adapter_throws_on_5xx_with_useful_message",
+    "test_linear_adapter_throws_on_429_with_retry_after",
+    "test_linear_adapter_paginates_comments_to_completion",
+    "test_linear_adapter_marks_bot_authored_comments",
+    "test_linear_adapter_rejects_draft_issues",
+    "test_linear_adapter_does_not_fetch_labels_field",
+    "test_linear_adapter_resolves_token_from_env",
+    "test_linear_adapter_contract_tests_skipped_without_integration_flag"
+  ],
+  "forbidden_paths": []
+}

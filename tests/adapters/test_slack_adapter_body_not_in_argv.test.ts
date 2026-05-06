@@ -35,7 +35,14 @@ function interceptSpawnSync(stubResponseBody: string): void {
   const original = Bun.spawnSync.bind(Bun);
   // Capture the spawn cmd + env, then return a minimal fake "child success"
   // result so the adapter parses a valid Slack body and the test assertions
-  // can run synchronously.
+  // can run synchronously. The child writes a `{status, headers, body}`
+  // envelope to stdout (slice 18), so the stub wraps the response body in
+  // an envelope here.
+  const envelope = JSON.stringify({
+    status: 200,
+    headers: {},
+    body: stubResponseBody,
+  });
   (Bun as unknown as { spawnSync: typeof Bun.spawnSync }).spawnSync = ((
     opts: Parameters<typeof Bun.spawnSync>[0],
   ) => {
@@ -43,7 +50,7 @@ function interceptSpawnSync(stubResponseBody: string): void {
     captured.push({ cmd: [...o.cmd], env: { ...o.env } });
     return {
       exitCode: 0,
-      stdout: new TextEncoder().encode(stubResponseBody),
+      stdout: new TextEncoder().encode(envelope),
       stderr: new TextEncoder().encode(""),
       success: true,
       signalCode: null,

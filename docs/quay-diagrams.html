@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Quay — system diagrams</title>
+<style>
+  :root {
+    --fg: #1c1d21;
+    --muted: #5c6370;
+    --bg: #fbfbf8;
+    --card: #ffffff;
+    --border: #e2e2dc;
+    --accent: #3a5fcd;
+    --code: #f3f1ea;
+  }
+  html, body { background: var(--bg); color: var(--fg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    max-width: 1100px;
+    margin: 2.5rem auto 6rem;
+    padding: 0 1.5rem;
+    line-height: 1.55;
+  }
+  h1 { font-size: 1.9rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.35rem; margin: 2.5rem 0 .25rem; border-bottom: 1px solid var(--border); padding-bottom: .25rem; }
+  h3 { font-size: 1.05rem; margin: 1.2rem 0 .25rem; color: var(--muted); }
+  p, li { color: var(--fg); }
+  .lede { color: var(--muted); margin: 0 0 2rem; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin: 1rem 0 1.5rem;
+    overflow-x: auto;
+  }
+  .mermaid { background: transparent; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: .9em; }
+  ul { padding-left: 1.2rem; }
+  .toc { columns: 2; column-gap: 2rem; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .legend { font-size: .85rem; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  th, td { border: 1px solid var(--border); padding: .35rem .6rem; text-align: left; vertical-align: top; }
+  th { background: var(--code); }
+</style>
+</head>
+<body>
+
+<h1>Quay — system diagrams</h1>
+<p class="lede">A walk through Quay's architecture: actors, persistence, lifecycle, and the high-leverage flows where invariants live. Source of truth is <code>docs/quay-spec.md</code>; this file is descriptive, not normative.</p>
+
+<div class="toc card">
+<strong>Contents</strong>
+<ul>
+  <li><a href="#actors">1. Actors and boundaries</a></li>
+  <li><a href="#components">2. Component map</a></li>
+  <li><a href="#schema">3. Database schema (ER)</a></li>
+  <li><a href="#states">4. Task state machine</a></li>
+  <li><a href="#tick">5. Tick cycle</a></li>
+  <li><a href="#spawn">6. Spawn / promotion lifecycle</a></li>
+  <li><a href="#deadworker">7. Dead-worker classifier</a></li>
+  <li><a href="#claim">8. Claim &amp; submit-brief flow</a></li>
+  <li><a href="#slack">9. Slack escalation sequence</a></li>
+  <li><a href="#cancel">10. Cancel finalizer</a></li>
+  <li><a href="#retries">11. Retry / budget decision</a></li>
+  <li><a href="#ci">12. CI status classifier</a></li>
+  <li><a href="#fs">13. Filesystem &amp; locking</a></li>
+  <li><a href="#enqueue">14. Enqueue bootstrap</a></li>
+</ul>
+</div>
+
+<h2 id="actors">1. Actors and boundaries</h2>
+<p>Three actors run the loop. Anything that crosses a boundary becomes an artifact; in-actor work does not.</p>
+<div class="card">
+<pre class="mermaid">
+flowchart LR
+  subgraph external["External world"]
+    Linear[(Linear / ticket source)]
+    GitHub[(GitHub: PR, CI, reviews)]
+    Slack[(Slack: threads, replies)]
+  end
+
+  Hermes["Orchestrator (Hermes)<br/>business context, brief composition,<br/>escalation policy"]
+  Quay["Quay CLI + tick<br/>substrate, state machine,<br/>artifact store, polling"]
+  Worker["Worker (ephemeral)<br/>tmux session in a worktree<br/>edits code, opens PR, exits"]
+
+  Linear -- ticket snapshot --> Hermes
+  Hermes -- "brief, ticket_snapshot,<br/>submit-brief, escalate-human,<br/>cancel" --> Quay
+  Quay -- "preamble + brief<br/>(.quay-prompt.md)" --> Worker
+  Worker -- ".quay-blocked.md,<br/>session_log, push, gh pr create" --> Quay
+  Quay -- "polls PR, CI, reviews,<br/>mergeable" <--> GitHub
+  Quay -- "post escalation,<br/>poll replies" <--> Slack
+  Worker -- "git push, gh pr create" --> GitHub
+  Hermes -. "pulls task list" .-> Quay
+</pre>
+</div>
+<p class="legend">Quay never initiates outbound to Hermes. Hermes polls; state is the signal. Worker has no Linear/Slack/orchestrator access.</p>
+
+<h2 id="components">2. Component map</h2>
+<p>How the implementation is partitioned.</p>
+<div class="card">
+<pre class="mermaid">
+flowchart TB
+  CLI["src/cli/<br/>(slice 10)"]
+  subgraph core["src/core/ — service API"]
+    Enqueue[enqueue.ts]
+    Tick[tick.ts]
+    Classifier[classifier.ts]
+    Retries[retries.ts]
+    Claims[claims.ts]
+    Cancel[cancel.ts]
+    NonBudget[non_budget_respawn.ts]
+    CI[ci_status.ts]
+    Slug[branch_slug.ts]
+    Lock[supervisor_lock.ts]
+    FP[failpoints.ts]
+  end
+  subgraph ports["src/ports/ — interfaces"]
+    Tmux[TmuxPort]
+    Git[GitPort]
+    GH[GitHubPort]
+    SP[SlackPort]
+    Clock[Clock]
+    Id[IdGenerator]
+    Cmd[CommandRunner]
+  end
+  subgraph adapters["src/adapters/ (slice 10)"]
+    RTmux[real tmux]
+    RGit[real git]
+    RGH[real gh]
+    RSlack[real Slack]
+    RCmd["/bin/sh -c"]
+  end
+  subgraph fakes["tests/support/fakes/"]
+    FTmux[fake tmux]
+    FGit[fake git]
+    FGH[fake gh]
+    FSlack[fake Slack]
+    FClock[fake clock]
+    FId[fake id]
+    FCmd[fake runner]
+  end
+  subgraph store["persistence"]
+    SQLite[(quay.db<br/>SQLite + bun:sqlite)]
+    Artifacts[(~/.quay/artifacts/)]
+    Worktrees[(~/.quay/worktrees/)]
+    Bare[(~/.quay/repos/«id».git)]
+    LockF[/tick.lock/]
+  end
+
+  CLI --> core
+  core --> ports
+  ports -.-> adapters
+  ports -.-> fakes
+  core --> SQLite
+  core --> Artifacts
+  Enqueue --> Worktrees
+  Enqueue --> Bare
+  Lock --> LockF
+</pre>
+</div>
+
+<h2 id="schema">3. Database schema (ER)</h2>
+<p>Every transition is one SQL transaction. Side effects live outside it.</p>
+<div class="card">
+<pre class="mermaid">
+erDiagram
+  repos ||--o{ tasks : has
+  preambles ||--o{ attempts : "preamble_id"
+  retry_templates ||--o{ attempts : "template_id (nullable)"
+  tasks ||--o{ attempts : has
+  tasks ||--o{ artifacts : "task-level + per-attempt"
+  tasks ||--o{ events : "transition log"
+  attempts ||--o{ artifacts : "per-attempt"
+  attempts ||--o{ events : "attempt-scoped"
+  artifacts ||--o{ events : "payload_artifact_id"
+
+  repos {
+    text repo_id PK
+    text repo_url
+    text base_branch
+    text package_manager
+    text install_cmd
+    text test_cmd
+    text ci_workflow_name
+    text contribution_guide_path
+    text archived_at "soft delete"
+    text created_at
+  }
+  preambles {
+    int  preamble_id PK
+    text body
+    text created_at
+  }
+  retry_templates {
+    int  template_id PK
+    text kind "ci_fail|crash|stale|wall_clock|malformed_signal|review|conflict"
+    text body
+    text created_at
+  }
+  tasks {
+    text task_id PK
+    text repo_id FK
+    text external_ref "verbatim, opaque"
+    text state "queued..cancelled"
+    text branch_name
+    text tmux_id
+    text worktree_path
+    int  pr_number
+    text pr_url
+    text head_sha
+    text base_sha
+    int  attempts_consumed
+    int  retry_budget
+    int  budget_exhausted "0/1 flag"
+    text tick_error "transient"
+    text slack_thread_ref
+    text claim_id "UUIDv4 fence"
+    text claimed_at
+    int  claim_expirations_consecutive
+    text last_review_id_acted_on
+    text last_conflict_observation "head:base"
+    int  non_budget_respawns_consumed
+    int  next_escalation_seq
+    text cancel_requested_at "durable trigger"
+    int  cancel_close_pr
+    int  cancel_keep_worktree
+    int  spawn_failures_consecutive
+  }
+  attempts {
+    int  attempt_id PK
+    text task_id FK
+    int  attempt_number "UNIQUE(task,n)"
+    int  preamble_id FK
+    int  template_id FK
+    text reason "initial|ci_fail|..."
+    int  consumed_budget "0|1"
+    text tmux_session "NULL while scheduled"
+    text spawned_at "NULL while scheduled"
+    text remote_sha_at_spawn
+    text remote_sha_at_exit
+    int  pr_existed_at_spawn
+    text ended_at
+    text exit_kind
+    text kill_intent "stale|wall_clock|cancel"
+  }
+  artifacts {
+    int  artifact_id PK
+    text task_id FK
+    int  attempt_id FK
+    text kind
+    text file_path
+    text content_hash "recovery dedupe"
+    int  escalation_seq
+    text escalation_nonce
+    text slack_pre_post_fence_ts
+    text slack_post_ts
+    text slack_recovered_post_ts
+    text captured_at
+  }
+  events {
+    int  event_id PK
+    text task_id FK
+    int  attempt_id FK
+    text event_type
+    text from_state
+    text to_state
+    int  payload_artifact_id FK
+    text occurred_at
+  }
+</pre>
+</div>
+<p class="legend">Critical indexes: partial unique <code>(task_id) WHERE spawned_at IS NULL</code> (one pending attempt per task); partial unique <code>(task_id, attempt_id, kind, content_hash) WHERE content_hash IS NOT NULL AND attempt_id IS NOT NULL</code> (recovery idempotency).</p>
+
+<h2 id="states">4. Task state machine</h2>
+<p>One chokepoint validates every transition. Every respawn (orchestrator-driven or Quay-driven) routes back through <code>queued</code>; tick is the single spawn point.</p>
+<div class="card">
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> queued : enqueue<br/>(bootstrap synchronously)
+  queued --> running : tick promotes<br/>(capacity OK)
+  running --> pr_open : dead, PR exists, progress
+  running --> queued : crash / no_progress / stale /<br/>wall_clock / malformed_signal /<br/>ci_fail (later from pr-open)
+  running --> awaiting_next_brief : blocker_written
+  running --> queued : spawn_failed (rollback budget)
+  running --> worktree_error : spawn_failures &gt;= cap
+
+  pr_open --> done : CI pass
+  pr_open --> queued : CI fail (budget) /<br/>review CHANGES_REQUESTED (non-budget) /<br/>conflict (non-budget)
+  pr_open --> merged : PR merged
+  pr_open --> closed_unmerged : PR closed
+
+  done --> merged : PR merged
+  done --> closed_unmerged : PR closed
+  done --> queued : review (non-budget) / conflict (non-budget)
+
+  awaiting_next_brief --> claimed : claim
+  claimed --> queued : submit-brief
+  claimed --> waiting_human : escalate-human
+  claimed --> awaiting_next_brief : release-claim /<br/>claim timeout
+  claimed --> orchestrator_loop : timeout cap reached
+
+  waiting_human --> awaiting_next_brief : reply ingested
+
+  pr_open --> non_budget_loop : non-budget cap (N+1)
+  done --> non_budget_loop : non-budget cap (N+1)
+
+  state "cancel_requested_at set" as cancel_intent
+  cancel_intent --> cancelled : finalizer
+
+  merged --> [*]
+  closed_unmerged --> [*]
+  cancelled --> [*]
+</pre>
+</div>
+<p class="legend">Parked (manual recovery via <code>quay cancel</code>): <code>worktree_error</code>, <code>orchestrator_loop</code>, <code>non_budget_loop</code>. <code>budget_exhausted</code> is a flag, not a state — set when entering <code>awaiting-next-brief</code> with <code>attempts_consumed &gt;= retry_budget</code>.</p>
+
+<h2 id="tick">5. Tick cycle</h2>
+<p>One pass of <code>quay tick</code>. The supervisor lockfile serializes all side-effecting work and blocks <code>quay cancel</code>.</p>
+<div class="card">
+<pre class="mermaid">
+flowchart TD
+  A[quay tick fires] --> B{acquire<br/>tick.lock?}
+  B -- no, held --> X[exit 0]
+  B -- yes --> C[load active tasks]
+  C --> D[for each task in own try/except]
+  D --> E{cancel_requested_at<br/>set?}
+  E -- yes --> F[run cancel_finalizer]
+  F --> N[next task]
+  E -- no --> G{state}
+  G -- queued --> Q[promote if capacity:<br/>fetch, snapshot remote SHA + PR-exists,<br/>SQL: spawned_at, attempts_consumed if budget,<br/>state=running, write spawned event<br/>then substrate spawn]
+  G -- running --> R[dead-worker classifier<br/>or staleness/wall-clock kill]
+  G -- pr_open --> P1[poll PR/checks/mergeable]
+  G -- done --> P2[poll PR/review/mergeable]
+  G -- waiting_human --> S[Slack handler:<br/>fence, nonce-recover, post, poll replies]
+  G -- claimed --> CL{claim_age &gt;<br/>timeout?}
+  CL -- yes --> CLA[auto-release; ++expirations;<br/>orchestrator_loop if cap]
+  CL -- no --> N
+  G -- awaiting_next_brief --> N
+  G -- terminal/parked --> N
+  Q --> N
+  R --> N
+  P1 --> N
+  P2 --> N
+  S --> N
+  CLA --> N
+  N --> D
+  D --> Z[release lock]
+  Z --> Y[stdout: NDJSON,<br/>one line per task touched]
+</pre>
+</div>
+<p class="legend">Per-task error isolation: a failure in one task logs <code>tick_error</code> and continues. A tick never aborts a cycle because of one task. Every tick-owned mutating SQL also includes <code>AND cancel_requested_at IS NULL</code> as belt-and-suspenders.</p>
+
+<h2 id="spawn">6. Spawn / promotion lifecycle</h2>
+<p>Attempts have two phases. Scheduling and promotion are decoupled, which is what makes capacity, budget, and recovery work uniformly across initial and respawn paths.</p>
+<div class="card">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant Trig as Trigger<br/>(enqueue / submit-brief / classifier)
+  participant DB as SQLite (one txn)
+  participant Tick as quay tick
+  participant Git as GitPort
+  participant GH as GitHubPort
+  participant Tmux as TmuxPort
+  participant FS as worktree
+
+  Trig->>DB: insert attempts row<br/>(spawned_at NULL, tmux_session NULL,<br/>consumed_budget per reason)·<br/>state=queued · brief + final_prompt artifacts
+  Note over Trig,DB: SCHEDULED phase<br/>(one pending attempt per task — partial unique idx)
+
+  loop next ticks
+    Tick->>DB: SELECT queued tasks
+    Tick->>Tick: capacity_available()?
+    Tick->>Git: fetch origin «branch»
+    Git-->>Tick: ok
+    Tick->>Git: rev-parse origin/«branch»
+    Tick->>GH: gh pr view «branch»
+    GH-->>Tick: pr exists? (0/1)
+    Tick->>DB: BEGIN<br/>UPDATE attempts SET spawned_at=now,<br/>remote_sha_at_spawn, pr_existed_at_spawn ·<br/>UPDATE tasks SET state=running,<br/>attempts_consumed += consumed_budget ·<br/>INSERT spawned event<br/>WHERE state='queued' AND cancel_requested_at IS NULL<br/>COMMIT
+    Note over Tick,DB: PROMOTED phase<br/>budget consumed here (not at trigger)
+    Tick->>FS: write .quay-prompt.md<br/>(preamble + "\n\n" + brief)
+    Tick->>Tmux: tmux new-session -d "exec sh -c '«agent»'"
+    Tmux-->>Tick: session name
+    Tick->>DB: UPDATE attempts SET tmux_session=?
+    Note over Tick,DB: RECORDED — recovery has a deterministic name
+
+    alt crash between substrate spawn and record
+      Note over Tick,Tmux: recovery on next tick —<br/>tmux_session IS NULL<br/>→ kill canonical session,<br/>collect log,<br/>run dead-worker classifier<br/>(evidence-first · spawn_failed only as no-evidence default)
+    end
+  end
+</pre>
+</div>
+
+<h2 id="deadworker">7. Dead-worker classifier</h2>
+<p>Single classifier serves both the normal "dead worker" branch and the spawn-window <code>tmux_session IS NULL</code> recovery. Worker-alive precedes PR check; PR creation itself counts as progress.</p>
+<div class="card">
+<pre class="mermaid">
+flowchart TD
+  Start[Worker observed dead] --> KI{kill_intent set?}
+  KI -- wall_clock --> RW[exit_kind=killed_wall_clock<br/>schedule wall_clock retry]
+  KI -- stale --> RS[exit_kind=killed_stale<br/>schedule stale retry]
+  KI -- cancel --> RC[run cancel_finalizer]
+  KI -- none --> Log[collect session log]
+  Log --> Sig{.quay-blocked.md<br/>present?}
+  Sig -- valid --> Bl[ingest blocker artifact;<br/>state → awaiting-next-brief;<br/>set budget_exhausted if cap reached]
+  Sig -- malformed --> Mf[persist malformed_signal;<br/>schedule malformed_signal retry<br/>state → queued]
+  Sig -- absent --> Fetch[git fetch origin branch;<br/>read remote_sha_at_exit;<br/>gh pr view → pr_exists_at_exit]
+  Fetch --> Prog{progress?<br/>remote advanced<br/>OR PR created this attempt}
+  Prog -- yes, PR exists --> PrO[exit_kind=pr_opened<br/>state → pr-open]
+  Prog -- no, PR exists --> NoProg[exit_kind=no_progress<br/>schedule crash retry<br/>state → queued]
+  Prog -- no, no PR --> Crash[exit_kind=crashed<br/>schedule crash retry<br/>state → queued]
+</pre>
+</div>
+<p class="legend">"Progress" = <em>remote</em> advanced OR new PR opened during this attempt. Local-only commits do not count. <code>spawn_failed</code> only fires as the no-evidence default in the spawn-window recovery; it rolls back the budget increment. Evidence-found recovery preserves budget.</p>
+
+<h2 id="claim">8. Claim &amp; submit-brief flow</h2>
+<p>The orchestrator pull loop is a thin shell around <code>task list</code> + atomic <code>task claim</code>. Every claim mints a fresh UUID; every claim-scoped write is fenced by it.</p>
+<div class="card">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant Cron as cron
+  participant Pull as pull script
+  participant Quay as quay CLI
+  participant DB as SQLite
+  participant Hermes as Hermes (LLM)
+
+  Cron->>Pull: every N min
+  Pull->>Quay: task list --state awaiting-next-brief
+  Quay->>DB: SELECT tasks WHERE state='awaiting-next-brief'
+  Quay-->>Pull: JSON array
+  loop for each task_id
+    Pull->>Quay: task claim «id»
+    Quay->>DB: UPDATE tasks SET state='claimed-by-orchestrator',<br/>claim_id=new_uuid, claimed_at=now()<br/>WHERE state='awaiting-next-brief'<br/>AND cancel_requested_at IS NULL
+    alt rowcount=1
+      Quay-->>Pull: {task_id, claim_id}
+      Pull->>Hermes: invoke --task-id «id»
+      Hermes->>Quay: task get / artifact get
+      Hermes->>Quay: submit-brief --claim-id «uuid» --reason blocker_resolved<br/>OR escalate-human --claim-id «uuid»
+      Quay->>DB: UPDATE WHERE state='claimed-by-orchestrator'<br/>AND claim_id=? AND cancel_requested_at IS NULL
+      alt rowcount=1
+        DB-->>Quay: ok · clear claim_id · reset expirations
+        Quay-->>Hermes: ok
+      else mismatch
+        Quay-->>Hermes: error: claim_lost / cancelled / wrong_state
+      end
+    else rowcount=0
+      Quay-->>Pull: error (someone else got it)
+    end
+  end
+
+  Note over Pull,DB: If Hermes crashes mid-work,<br/>tick auto-releases after claim_timeout_seconds.<br/>After max_claim_expirations consecutive timeouts<br/>→ state=orchestrator_loop (parked).
+</pre>
+</div>
+
+<h2 id="slack">9. Slack escalation sequence</h2>
+<p>Tick is the <em>only</em> Slack writer. The CLI persists artifact + state and returns; the actual API call lands within one tick interval. Crash recovery uses a per-escalation nonce.</p>
+<div class="card">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant Op as Hermes
+  participant CLI as escalate-human
+  participant DB as SQLite
+  participant Tick as tick (waiting_human handler)
+  participant Slack as Slack API
+
+  Op->>CLI: escalate-human --claim-id ... --question-file q.md
+  CLI->>DB: BEGIN<br/>fence: state=claimed AND claim_id=? AND cancel NULL<br/>++next_escalation_seq → seq<br/>nonce = quay-esc-«short»-«seq»-«rand8»<br/>INSERT slack_escalation_post artifact<br/>(content_hash over body||seq||nonce ·<br/>fence_ts/post_ts/recovered_ts NULL)<br/>UPDATE tasks SET state='waiting_human', claim_id=NULL<br/>COMMIT
+  CLI-->>Op: {ok}
+
+  Note over Tick,Slack: next tick — under tick.lock
+  Tick->>DB: SELECT latest slack_escalation_post for task
+  alt fence_ts NULL
+    Tick->>Slack: conversations.replies (read latest ts)
+    Slack-->>Tick: «fence_ts»
+    Tick->>DB: UPDATE artifact SET slack_pre_post_fence_ts=«fence»
+  end
+  alt recovered_ts NULL
+    Tick->>Slack: conversations.replies — search bot msgs containing nonce
+    alt match
+      Slack-->>Tick: bot_ts
+      Tick->>DB: UPDATE artifact SET slack_recovered_post_ts=bot_ts<br/>(also slack_post_ts if NULL)
+    else no match
+      Tick->>Slack: chat.postMessage<br/>body = question + "\n\n_«nonce»_"
+      Slack-->>Tick: returned_ts
+      Tick->>DB: UPDATE artifact SET slack_post_ts=ts,<br/>slack_recovered_post_ts=ts
+    end
+  end
+  Tick->>Slack: poll replies WHERE ts > (recovered_ts ?? fence_ts)
+  alt non-bot reply found
+    Slack-->>Tick: reply
+    Tick->>DB: INSERT slack_reply artifact (content_hash) ·<br/>state → awaiting-next-brief
+  else nothing yet
+    Tick-->>Tick: skip · retry next tick
+  end
+</pre>
+</div>
+<p class="legend">If tick crashes after the Slack post but before persisting the ts, the next tick finds the bot message by nonce — never duplicate posts. <code>slack_recovered_post_ts</code> is set exactly once and never updated.</p>
+
+<h2 id="cancel">10. Cancel finalizer</h2>
+<p>Single canonical sequence used by both <code>quay cancel</code> (synchronous) and tick recovery. Idempotent on already-cancelled.</p>
+<div class="card">
+<pre class="mermaid">
+flowchart TD
+  A["quay cancel «id»"] --> B["acquire tick.lock<br/>(blocks if tick in flight)"]
+  B --> C["BEGIN txn<br/>cancel_requested_at = now,<br/>cancel_close_pr, cancel_keep_worktree;<br/>if state=running:<br/>  attempts.kill_intent='cancel'<br/>COMMIT"]
+  C --> D[run finalizer synchronously]
+  D --> E["Step 1: ensure no live worker<br/>tmux kill canonical session<br/>(idempotent)"]
+  E --> F[Step 2: best-effort collect session log]
+  F --> G["Step 3: cleanup per matrix<br/>--close-pr → gh pr close;<br/>delete local branch;<br/>remote branch delete unless PR open;<br/>remove worktree (or retain if --keep-worktree)"]
+  G --> H["Step 4: BEGIN txn<br/>attempts.exit_kind=killed_cancel<br/>(only if ended_at NULL);<br/>clear kill_intent;<br/>state='cancelled';<br/>clear claim_id, claimed_at;<br/>write cancelled event<br/>COMMIT"]
+  H --> I[Step 5: reset transient counters<br/>tick_error, claim_expirations,<br/>spawn_failures]
+  I --> J[release tick.lock]
+
+  X[crash between any step] -.-> Y[next tick:<br/>cancel_requested_at IS NOT NULL<br/>→ re-enter at step 1]
+  Y -.-> E
+
+  classDef bad fill:#ffeaea,stroke:#aa3333;
+  class X bad
+</pre>
+</div>
+<p class="legend">Top-of-tick cancel check applies to <em>every</em> non-terminal state — even <code>done</code>, <code>waiting_human</code>, parked. Re-running on <code>cancelled</code> is a no-op success. <code>cancel_requested_at</code> is never cleared (forensic record).</p>
+
+<h2 id="retries">11. Retry / budget decision</h2>
+<p>Triggers schedule; promotion consumes. Two distinct accounting tracks: budget vs. non-budget.</p>
+<div class="card">
+<pre class="mermaid">
+flowchart TD
+  T[trigger detected]
+  T --> Kind{trigger kind}
+
+  Kind -- "ci_fail / crash / stale /<br/>wall_clock / malformed_signal /<br/>blocker_resolved / initial" --> Budg{attempts_consumed<br/>&lt; retry_budget?}
+  Budg -- yes --> Sched["INSERT attempts<br/>(spawned_at NULL,<br/>consumed_budget=1);<br/>state=queued"]
+  Budg -- no --> Exh[persist last_failure artifact;<br/>budget_exhausted=true;<br/>state=awaiting-next-brief]
+
+  Kind -- "review / conflict<br/>(non-budget)" --> Inc[++ non_budget_respawns_consumed<br/>in same txn]
+  Inc --> Cap{post-increment<br/>&gt; cap?}
+  Cap -- yes --> Park["no schedule;<br/>state=non_budget_loop<br/>(parked)"]
+  Cap -- no --> SchedNB["INSERT attempts<br/>(consumed_budget=0);<br/>record dedupe key<br/>(last_review_id_acted_on /<br/>last_conflict_observation);<br/>state=queued"]
+
+  Kind -- "advice_answered<br/>(after Slack reply)" --> AA["INSERT attempts<br/>(consumed_budget=0);<br/>state=queued<br/>(NOT counted in non-budget cap)"]
+
+  Sched --> Promote[tick promotes when capacity:<br/>++attempts_consumed<br/>iff consumed_budget=1]
+  SchedNB --> Promote
+  AA --> Promote
+</pre>
+</div>
+<p class="legend">Budget-consuming spawn reasons: <code>initial</code>, <code>blocker_resolved</code>, <code>ci_fail</code>, <code>crash</code>, <code>stale</code>, <code>wall_clock</code>, <code>malformed_signal</code>. Non-consuming: <code>advice_answered</code>, <code>review</code>, <code>conflict</code>. Spawn-failure no-evidence path rolls back the budget increment from promotion.</p>
+
+<h2 id="ci">12. CI status classifier</h2>
+<p>Computed per tick; SHA mismatch = no-op + <code>tick_error</code>.</p>
+<div class="card">
+<pre class="mermaid">
+flowchart TD
+  A[tick observes pr-open or done] --> B[gh pr view --json headRefOid]
+  B --> C[gh pr checks ...]
+  C --> D{headRefOid<br/>matches checks SHA?}
+  D -- no --> E[log tick_error;<br/>no transition; no budget change]
+
+  D -- yes --> F{ci_workflow_name<br/>configured?}
+  F -- yes --> G[filter checks by<br/>workflow == ci_workflow_name]
+  F -- no --> H[gh pr checks --required]
+
+  G --> J{filtered set status}
+  H --> K{required set status}
+
+  J -- empty --> Pe1[pending]
+  J -- any fail --> Fe1[fail]
+  J -- any pending, no fail --> Pe1
+  J -- all pass/skipping --> Pa1[pass]
+
+  K -- empty --> Pa2["pass<br/>(no required checks → project doesn't gate)"]
+  K -- any fail --> Fe2[fail]
+  K -- any pending, no fail --> Pe2[pending]
+  K -- all pass/skipping --> Pa2
+
+  Pa1 --> Done[pr-open → done]
+  Pa2 --> Done
+  Fe1 --> Sch["snapshot ci_failure_excerpt;<br/>schedule ci_fail retry (budget);<br/>state=queued"]
+  Fe2 --> Sch
+  Pe1 --> Skip[skip this tick]
+  Pe2 --> Skip
+</pre>
+</div>
+
+<h2 id="fs">13. Filesystem &amp; locking</h2>
+<div class="card">
+<pre class="mermaid">
+flowchart LR
+  subgraph data_dir["~/.quay/ (data_dir)"]
+    DB[(quay.db)]
+    Lock[/tick.lock<br/>holds PID;<br/>stale-PID takeover after grace/]
+    subgraph repos["repos/"]
+      Bare[("«repo_id».git/<br/>bare clone, persistent")]
+    end
+    subgraph wts["worktrees/"]
+      WT["«task_id»/<br/>ephemeral;<br/>removed on terminal"]
+      Prompt[".quay-prompt.md<br/>(preamble + brief)"]
+      Sig[".quay-blocked.md<br/>(worker → Quay signal)"]
+      Log[".quay-session.log<br/>(tmux pipe-pane)"]
+      WT --- Prompt
+      WT --- Sig
+      WT --- Log
+    end
+    subgraph art["artifacts/"]
+      AT["«task_id»/<br/>persistent across terminal"]
+      TS["ticket_snapshot.md<br/>(task-level)"]
+      AA["«attempt_id»/<br/>brief, final_prompt,<br/>blocker, session_log,<br/>ci_failure_excerpt,<br/>review_comments,<br/>conflict_slice,<br/>slack_escalation_post,<br/>slack_reply,<br/>last_failure,<br/>malformed_signal"]
+      AT --- TS
+      AT --- AA
+    end
+  end
+
+  CT["quay tick"] -. holds .-> Lock
+  CC["quay cancel"] -. acquires before intent .-> Lock
+  CE["quay enqueue"] -. does NOT acquire<br/>(brand-new task only) .-> Lock
+  CS["quay submit-brief /<br/>release-claim /<br/>escalate-human /<br/>task claim"] -. SQL-only;<br/>fenced by claim_id +<br/>cancel_requested_at .-> DB
+</pre>
+</div>
+<p class="legend">Crash-safe ingestion: artifact write → SQL commit → file delete. If interrupted, content_hash on the next tick reuses the existing artifact row (recovery idempotency index). Spawn-side worktree sweep clears leftover <code>.quay-*</code> before each new spawn.</p>
+
+<h2 id="enqueue">14. Enqueue bootstrap</h2>
+<p>Synchronous — atomic from the orchestrator's perspective. No half-bootstrapped <code>queued</code> state.</p>
+<div class="card">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant Orch as orchestrator
+  participant CLI as quay enqueue
+  participant Git as git
+  participant GH as gh
+  participant FS as filesystem
+  participant DB as SQLite
+
+  Orch->>CLI: --repo, --brief-file,<br/>--ticket-snapshot-file,<br/>[--external-ref, --slack-thread-ref]
+  CLI->>DB: SELECT repos WHERE repo_id=?<br/>AND archived_at IS NULL
+  alt unknown or archived
+    CLI-->>Orch: error (no task created)
+  end
+  alt first task for repo
+    CLI->>Git: git clone --bare «url»<br/>~/.quay/repos/«repo_id».git
+  end
+  CLI->>Git: git fetch origin «base_branch»
+  CLI->>CLI: branch slug from external_ref<br/>(per §13 rules)<br/>fallback: task-«short»
+  par collision checks
+    CLI->>Git: show-ref refs/heads/«branch»
+    CLI->>Git: ls-remote origin «branch»
+    CLI->>GH: gh pr list --head «branch» --state open
+  end
+  alt any collide
+    CLI->>CLI: append -«task_id_short» ·<br/>re-check · abort if still collides
+  end
+  CLI->>Git: git worktree add -b «branch_name»<br/>~/.quay/worktrees/«task_id»<br/>origin/«base_branch»
+  CLI->>FS: cd worktree
+  CLI->>FS: run install_cmd via /bin/sh -c
+  alt install fails
+    CLI->>Git: worktree remove --force
+    CLI->>Git: branch -D
+    CLI-->>Orch: error (no task created)
+  end
+  CLI->>DB: BEGIN<br/>INSERT tasks (state=queued,<br/>branch_name, tmux_id, retry_budget) ·<br/>INSERT attempts #1 (reason=initial,<br/>consumed_budget=1, spawned_at NULL) ·<br/>INSERT artifacts: ticket_snapshot,<br/>brief, final_prompt ·<br/>COMMIT
+  alt SQL or artifact write fails
+    CLI->>FS: rm artifacts/«task_id»/
+    CLI->>Git: worktree remove --force · branch -D
+    CLI-->>Orch: error
+  end
+  CLI-->>Orch: {task_id, state: queued}
+</pre>
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "neutral",
+    flowchart: { curve: "basis", htmlLabels: true },
+    sequence: { actorMargin: 60, messageAlign: "left" },
+    er: { layoutDirection: "LR" },
+  });
+</script>
+
+</body>
+</html>

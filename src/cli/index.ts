@@ -7,27 +7,55 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createArtifactStore } from "../artifacts/store.ts";
 import { openDatabase } from "../db/connection.ts";
 import { runMigrations } from "../db/migrate.ts";
 import {
   GitHubCliAdapter,
+  LinearAdapter,
   LocalGitAdapter,
   ShellCommandRunner,
   SlackAdapter,
   TmuxAdapter,
 } from "../adapters/index.ts";
 import { FileSupervisorLock } from "../core/supervisor_lock.ts";
+import { SpawnedValidatorRunner } from "../core/validator_runner.ts";
 import { SystemClock } from "../ports/clock.ts";
 import { UuidIdGenerator } from "../ports/id_generator.ts";
-import { loadConfig, tickOptionsFromConfig } from "./config.ts";
+import {
+  adaptersConfigFromConfig,
+  linearAdapterOptionsFromConfig,
+  loadConfig,
+  slackAdapterOptionsFromConfig,
+  tickOptionsFromConfig,
+} from "./config.ts";
 import { dispatch, type CliDeps } from "./dispatch.ts";
+import { handleValidateTicket } from "./validate_ticket.ts";
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
+  // `quay validate-ticket` is contractually stateless (ticket-validation §4):
+  // it reads JSON from stdin or a file, applies a TOML schema, and writes
+  // JSON to stdout with a fixed exit-code surface. Routing it through full
+  // CLI startup would couple a pure validator to deployment config and DB
+  // migrations, so a bad ~/.quay/config.toml or unwritable data dir would
+  // break validation. Short-circuit here before any of that runs.
+  if (argv[0] === "validate-ticket") {
+    const result = handleValidateTicket(
+      argv.slice(1),
+      {
+        stdout: (c) => process.stdout.write(c as string | Uint8Array),
+        stderr: (c) => process.stderr.write(c),
+        stdin: () => readFileSync(0, "utf8"),
+      },
+      process.env,
+    );
+    return result.exitCode;
+  }
   const { config } = loadConfig();
+  const adaptersConfig = adaptersConfigFromConfig(config);
   // Spec §13: `data_dir` defaults to `~/.quay`. The QUAY_DATA_DIR env var
   // is the operator's runtime override (handy in tests / containers); the
   // config file's `data_dir` is the deployment-level default. Env wins.
@@ -63,7 +91,8 @@ async function main(): Promise<number> {
     git: new LocalGitAdapter(reposRoot),
     github: new GitHubCliAdapter(reposRoot),
     tmux: new TmuxAdapter(),
-    slack: new SlackAdapter(),
+    slack: new SlackAdapter(slackAdapterOptionsFromConfig(config)),
+    linear: new LinearAdapter(linearAdapterOptionsFromConfig(config)),
     commandRunner: new ShellCommandRunner(),
     artifactStore,
     supervisorLock: new FileSupervisorLock(
@@ -86,6 +115,13 @@ async function main(): Promise<number> {
     ...(config.retry_budget !== undefined
       ? { retryBudget: config.retry_budget }
       : {}),
+    // The Linear adapter and validator runner are constructed
+    // unconditionally; the dispatcher gates `--linear-issue` on
+    // `adaptersConfig.linearEnabled`. Tokens resolve lazily on first use,
+    // so a deployment that never enables Linear pays no cost for the
+    // unused adapter object.
+    validatorRunner: new SpawnedValidatorRunner(),
+    adaptersConfig,
   };
 
   const io = {
@@ -95,6 +131,10 @@ async function main(): Promise<number> {
     // CliIO docs).
     stdout: (c: string | Uint8Array) => process.stdout.write(c),
     stderr: (c: string) => process.stderr.write(c),
+    // `validate-ticket` is the only command that reads stdin. Synchronous
+    // read from fd 0 is fine here — the CLI is one-shot and we have nothing
+    // else to do until the input is consumed.
+    stdin: () => readFileSync(0, "utf8"),
   };
   const result = await dispatch(argv, deps, io);
   return result.exitCode;

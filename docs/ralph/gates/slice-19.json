@@ -1,0 +1,18 @@
+{
+  "slice": 19,
+  "name": "escalation-mentions",
+  "spec_coverage": "Deployment adapters spec §15 feature 3 (Slack escalation @-mentions for ticket authors); reads tasks.authors_json populated in slice 16.",
+  "completion_promise": "SLICE_19_COMPLETE",
+  "max_iterations": 20,
+  "attempt_timeout_seconds": 1800,
+  "expected_tests": [
+    "test_slack_escalation_at_mentions_authors_when_authors_json_set",
+    "test_slack_escalation_no_mentions_when_authors_json_null",
+    "test_slack_escalation_no_mentions_when_authors_json_empty_array",
+    "test_slack_escalation_existing_fence_capture_unchanged",
+    "test_slack_escalation_existing_recovery_probe_unchanged",
+    "test_slack_escalation_existing_reply_ingestion_unchanged",
+    "test_slack_escalation_mention_prefix_preserves_escalation_nonce"
+  ],
+  "forbidden_paths": []
+}

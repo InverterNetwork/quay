@@ -4,13 +4,24 @@
 # Exit codes:
 #   0 — all checks passed; slice is mergeable.
 #   1 — at least one check failed; details in docs/ralph/blockers/GATE-slice-N-*.md.
-#   2 — usage / setup error (missing config, not in repo, etc).
+#   2 — usage / setup error (missing config, not in repo, invalid BASE_REF, etc).
 
 set -euo pipefail
 
 SLICE="${1:?slice number required}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+# BASE_REF is the commit the slice's implementation should be diffed
+# against. Defaults to `main` for the historical run-overnight.sh
+# driver (which branches off main per slice). The new
+# run-on-branch.sh driver overrides this to point at the prior
+# slice's commit, so it can run multiple slices on a single branch
+# without the read-only checks tripping on the slice docs that
+# already exist on the branch.
+BASE_REF="${BASE_REF:-main}"
+git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 \
+  || { echo "gate.sh: BASE_REF '$BASE_REF' is not a valid git ref" >&2; exit 2; }
 
 CONFIG="docs/ralph/gates/slice-${SLICE}.json"
 [[ -f "$CONFIG" ]] || { echo "Missing gate config: $CONFIG" >&2; exit 2; }
@@ -85,72 +96,78 @@ The slice prompt names these tests as required. They were not found by grep:
 ${formatted}"
 fi
 
-# 4. spec is unchanged vs main
-if git rev-parse --verify main >/dev/null 2>&1; then
-  if ! git diff --quiet main -- docs/quay-spec.md; then
-    add_reason "### \`docs/quay-spec.md\` was modified
+# 4. spec is unchanged vs BASE_REF (default: main)
+if ! git diff --quiet "$BASE_REF" -- docs/quay-spec.md; then
+  add_reason "### \`docs/quay-spec.md\` was modified
 
 The spec is read-only inside slices. Use a SPEC-GAP blocker instead.
 
 \`\`\`
-$(git diff --stat main -- docs/quay-spec.md)
+$(git diff --stat "$BASE_REF" -- docs/quay-spec.md)
 \`\`\`"
-  fi
-  if ! git diff --quiet main -- docs/quay-tdd-implementation-plan.md; then
-    add_reason "### \`docs/quay-tdd-implementation-plan.md\` was modified
+fi
+if ! git diff --quiet "$BASE_REF" -- docs/quay-spec-ticket-validation.md; then
+  add_reason "### \`docs/quay-spec-ticket-validation.md\` was modified
+
+The validator spec is read-only inside slices. Use a SPEC-GAP blocker instead."
+fi
+if ! git diff --quiet "$BASE_REF" -- docs/quay-spec-deployment-adapters.md; then
+  add_reason "### \`docs/quay-spec-deployment-adapters.md\` was modified
+
+The deployment-adapters spec is read-only inside slices. Use a SPEC-GAP blocker instead."
+fi
+if ! git diff --quiet "$BASE_REF" -- docs/quay-tdd-implementation-plan.md; then
+  add_reason "### \`docs/quay-tdd-implementation-plan.md\` was modified
 
 The plan is read-only inside slices."
-  fi
-  if ! git diff --quiet main -- docs/ralph/; then
-    # Only blockers/ may be added; everything else under docs/ralph/
-    # is read-only. Use --relative so output is cwd-rooted.
-    bad="$(git diff --relative --name-only main -- docs/ralph/ | grep -v '^docs/ralph/blockers/' || true)"
-    if [[ -n "$bad" ]]; then
-      add_reason "### Files under \`docs/ralph/\` were modified outside \`blockers/\`
+fi
+if ! git diff --quiet "$BASE_REF" -- docs/ralph/; then
+  # Only blockers/ may be added; everything else under docs/ralph/
+  # is read-only. Use --relative so output is cwd-rooted.
+  bad="$(git diff --relative --name-only "$BASE_REF" -- docs/ralph/ | grep -v '^docs/ralph/blockers/' || true)"
+  if [[ -n "$bad" ]]; then
+    add_reason "### Files under \`docs/ralph/\` were modified outside \`blockers/\`
 
 \`\`\`
 ${bad}
 \`\`\`"
-    fi
   fi
-  if ! git diff --quiet main -- scripts/; then
-    add_reason "### \`scripts/\` was modified
+fi
+if ! git diff --quiet "$BASE_REF" -- scripts/; then
+  add_reason "### \`scripts/\` was modified
 
 Driver scripts are read-only inside slices.
 
 \`\`\`
-$(git diff --stat main -- scripts/)
+$(git diff --stat "$BASE_REF" -- scripts/)
 \`\`\`"
-  fi
 fi
 
 # 5. forbidden paths from gate config (slice-specific).
-# Check committed diff vs main AND untracked files in the working tree —
+# Check committed diff vs BASE_REF AND untracked files in the working tree —
 # untracked files do not appear in `git diff` but are still present and
 # could violate the slice's path restrictions.
-if git rev-parse --verify main >/dev/null 2>&1; then
-  # Scope to the quay/ subtree so unrelated changes elsewhere in the
-  # enclosing repo don't show up as forbidden-path drift. Use
-  # --relative so output paths match cwd-relative gate-config patterns
-  # (e.g. "src/cli/" instead of "quay/src/cli/").
-  committed_changed="$(git diff --relative --name-only main..HEAD -- . || true)"
-  untracked="$(git ls-files --others --exclude-standard -- . || true)"
-  changed="$(printf '%s\n%s\n' "$committed_changed" "$untracked" | awk 'NF && !seen[$0]++')"
-  while IFS= read -r pattern; do
-    [[ -z "$pattern" ]] && continue
-    while IFS= read -r path; do
-      [[ -z "$path" ]] && continue
-      hit=0
-      if [[ "$path" == "$pattern" ]]; then hit=1; fi
-      if [[ "$pattern" == */ && "$path" == "$pattern"* ]]; then hit=1; fi
-      if (( hit )); then
-        add_reason "### Diff touches forbidden path \`$path\`
+# Scope to the quay/ subtree so unrelated changes elsewhere in the
+# enclosing repo don't show up as forbidden-path drift. Use
+# --relative so output paths match cwd-relative gate-config patterns
+# (e.g. "src/cli/" instead of "quay/src/cli/").
+committed_changed="$(git diff --relative --name-only "$BASE_REF"..HEAD -- . || true)"
+untracked="$(git ls-files --others --exclude-standard -- . || true)"
+changed="$(printf '%s\n%s\n' "$committed_changed" "$untracked" | awk 'NF && !seen[$0]++')"
+while IFS= read -r pattern; do
+  [[ -z "$pattern" ]] && continue
+  while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    hit=0
+    if [[ "$path" == "$pattern" ]]; then hit=1; fi
+    if [[ "$pattern" == */ && "$path" == "$pattern"* ]]; then hit=1; fi
+    if (( hit )); then
+      add_reason "### Diff touches forbidden path \`$path\`
 
 Matched gate-config pattern \`$pattern\`. This slice should not be modifying that area."
-      fi
-    done <<< "$changed"
-  done < <(jq -r '.forbidden_paths[]?' "$CONFIG")
-fi
+    fi
+  done <<< "$changed"
+done < <(jq -r '.forbidden_paths[]?' "$CONFIG")
 
 # 5b. Refuse to pass if the working tree is dirty (under quay/).
 # The driver commits WIP before invoking the gate; a dirty tree here

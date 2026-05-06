@@ -332,12 +332,13 @@ interface WaitingHumanTaskRow {
   task_id: string;
   slack_thread_ref: string | null;
   cancel_requested_at: string | null;
+  authors_json: string | null;
 }
 
 function readWaitingHuman(db: DB): WaitingHumanTaskRow[] {
   return db
     .query<WaitingHumanTaskRow, []>(
-      `SELECT task_id, slack_thread_ref, cancel_requested_at
+      `SELECT task_id, slack_thread_ref, cancel_requested_at, authors_json
          FROM tasks
         WHERE state = 'waiting_human'
         ORDER BY created_at, task_id`,
@@ -1092,7 +1093,8 @@ function processWaitingHumanTask(
   // Step 3: post if no recovery match and no post yet.
   if (art.slack_post_ts === null && art.slack_recovered_post_ts === null) {
     const body = readEscalationBody(art.file_path);
-    const composedBody = `${body}\n\n_${art.escalation_nonce}_`;
+    const mentionPrefix = buildMentionPrefix(task.authors_json);
+    const composedBody = `${mentionPrefix}${body}\n\n_${art.escalation_nonce}_`;
     let postTs: string;
     try {
       postTs = deps.slack.post({ threadRef, body: composedBody }).ts;
@@ -1162,6 +1164,48 @@ function processWaitingHumanTask(
   ingestSlackReply(deps, task, art, firstNonBot);
   results.push({ task_id: task.task_id, action: "slack_reply_ingested" });
   return results;
+}
+
+// Bare Slack user-ID format, identical to the parser's check
+// (src/core/quay_config_block.ts). Re-validated at the sink: `authors_json`
+// is opaque text in the DB, so a tampered or future-malformed payload must
+// not reach Slack mrkdwn — `<@!channel>` and similar shapes would render
+// as a different control directive than a user mention.
+const SLACK_USER_ID = /^U[A-Z0-9]+$/;
+
+// Prepend `<@slack_id>` mentions for every author the adapter recorded on
+// enqueue. Returns "" for legacy tasks (`authors_json IS NULL`), an empty
+// array, or any malformed payload — the post path falls back to the
+// unprefixed body in those cases. IDs that don't match the bare Slack
+// user-ID shape are dropped (defense-in-depth against persisted-data
+// tampering); if every ID is invalid, the prefix collapses to "".
+function buildMentionPrefix(authorsJson: string | null): string {
+  if (authorsJson === null) return "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(authorsJson);
+  } catch {
+    return "";
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return "";
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const a of parsed) {
+    if (
+      a === null ||
+      typeof a !== "object" ||
+      typeof (a as { slack_id?: unknown }).slack_id !== "string"
+    ) {
+      continue;
+    }
+    const id = (a as { slack_id: string }).slack_id;
+    if (!SLACK_USER_ID.test(id)) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  if (ids.length === 0) return "";
+  return `${ids.map((id) => `<@${id}>`).join(" ")}\n\n`;
 }
 
 function readEscalationBody(filePath: string): string {
