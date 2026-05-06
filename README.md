@@ -21,9 +21,7 @@ bun run build         # → dist/quay (~58 MB)
 ./dist/quay --version # → e.g. 0.1.0+abcdef1 (or 0.1.0+abcdef1+dirty on an unclean tree)
 ```
 
-### Future: download from GitHub releases
-
-> **Coming soon (release pipeline pending):** The snippet below 404s today — no binary has been published yet. Use the build-from-source path above until a release is cut.
+### Download a release binary
 
 ```bash
 curl -sL https://github.com/lafawnduh1966/quay/releases/download/v0.1.0/quay-darwin-arm64 \
