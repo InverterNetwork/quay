@@ -102,6 +102,24 @@ export function handleEnqueueLinearIssue(
       authors_json: authorsJson,
     });
   } catch (err) {
+    // Idempotency under concurrent invocation (spec §3): if two pollers race
+    // past the preflight lookupExistingTask() and both reach the INSERT, the
+    // unique index on (repo_id, external_ref) ensures only one succeeds. The
+    // loser gets SQLITE_CONSTRAINT_UNIQUE; we re-fetch the winner's row and
+    // return it as if the preflight had found it. enqueue() already rolls back
+    // the substrate side effects (worktree, branch) before re-throwing, so no
+    // cleanup is needed here.
+    if (isUniqueConstraintError(err) && ctx.external_ref !== null) {
+      const recovered = lookupExistingTask(
+        deps.enqueueDeps.db,
+        args.repoId,
+        ctx.external_ref,
+      );
+      if (recovered !== null) {
+        io.stdout(`${JSON.stringify(recovered)}\n`);
+        return { exitCode: 0 };
+      }
+    }
     return emitError(io, err);
   }
 
@@ -191,4 +209,17 @@ function emitError(io: CliIO, err: unknown): DispatchResult {
   const payload = toCliError(err);
   io.stderr(`${JSON.stringify(payload)}\n`);
   return { exitCode: 1 };
+}
+
+// SQLite raises a constraint error whose message contains "UNIQUE constraint
+// failed" when a unique index is violated. Match that string so we don't
+// swallow unrelated errors.
+function isUniqueConstraintError(err: unknown): boolean {
+  if (err instanceof Error) {
+    return (
+      err.message.includes("UNIQUE constraint failed") ||
+      err.message.includes("constraint failed")
+    );
+  }
+  return false;
 }
