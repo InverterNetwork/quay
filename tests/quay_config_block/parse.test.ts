@@ -246,3 +246,63 @@ test("test_quay_config_block_errors_on_missing_authors", () => {
   );
   expectBlockInvalid(() => parseQuayConfigBlock(body));
 });
+
+test("test_quay_config_block_parses_crlf_body", () => {
+  // A body transmitted with CRLF line endings must parse identically to the
+  // equivalent LF body — the fence regexes must not be silently bypassed.
+  const lfBody = block(
+    [
+      "tags:",
+      "  - auth-session",
+      "authors:",
+      "  - name: Fabian Scherer",
+      "    slack_id: U06TDC56VJB",
+    ].join("\n"),
+  );
+  const crlfBody = lfBody.replace(/\n/g, "\r\n");
+  const parsed = parseQuayConfigBlock(crlfBody);
+  expect(parsed).not.toBeNull();
+  expect(parsed!.tags).toEqual(["auth-session"]);
+  expect(parsed!.authors).toEqual([
+    { name: "Fabian Scherer", slack_id: "U06TDC56VJB" },
+  ]);
+});
+
+test("test_quay_config_block_errors_on_unterminated_fence", () => {
+  // An opening fence with no matching closing fence is invalid, not absent.
+  const body = "```quay-config\ntags:\n  - foo\nauthors:\n  - name: A\n    slack_id: U001\n";
+  const err = expectBlockInvalid(() => parseQuayConfigBlock(body));
+  expect(err.details?.detail).toMatch(/unterminated fence/);
+});
+
+test("test_quay_config_block_errors_on_valid_block_followed_by_unterminated_fence", () => {
+  // A correctly closed block followed by an unterminated opener must also
+  // error — the unterminated opener is invalid, so the body as a whole is.
+  const inner = [
+    "tags:",
+    "  - foo",
+    "authors:",
+    "  - name: A",
+    "    slack_id: U001",
+  ].join("\n");
+  const body = `${block(inner)}\n\nSome prose.\n\n\`\`\`quay-config\ntags:\n  - bar\n`;
+  const err = expectBlockInvalid(() => parseQuayConfigBlock(body));
+  expect(err.details?.detail).toMatch(/unterminated fence/);
+});
+
+test("test_quay_config_block_parses_bare_cr_body", () => {
+  // Bodies with lone CR line endings (classic Mac) must also parse correctly.
+  const lfBody = block(
+    [
+      "tags:",
+      "  - foo",
+      "authors:",
+      "  - name: A",
+      "    slack_id: U001",
+    ].join("\n"),
+  );
+  const crBody = lfBody.replace(/\n/g, "\r");
+  const parsed = parseQuayConfigBlock(crBody);
+  expect(parsed).not.toBeNull();
+  expect(parsed!.tags).toEqual(["foo"]);
+});

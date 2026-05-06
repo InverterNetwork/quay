@@ -29,7 +29,9 @@ interface FencedBlock {
 }
 
 function findFencedBlocks(body: string): FencedBlock[] {
-  const lines = body.split("\n");
+  // Normalize line endings so CRLF bodies match the fence regexes.
+  const normalized = body.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = normalized.split("\n");
   const blocks: FencedBlock[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -46,8 +48,14 @@ function findFencedBlocks(body: string): FencedBlock[] {
         i++;
       }
       if (closeLine === -1) {
-        // Unterminated fence — treat as no recognized block.
-        break;
+        throw new QuayError(
+          "ticket_block_invalid",
+          "quay-config block: unterminated fence (opening ``` quay-config has no matching closing ```)",
+          {
+            detail:
+              "unterminated fence (opening ``` quay-config has no matching closing ```)",
+          },
+        );
       }
       blocks.push({
         openLine,
