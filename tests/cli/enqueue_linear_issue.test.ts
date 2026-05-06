@@ -128,6 +128,9 @@ async function addRepo(built: ReturnType<typeof buildCliDeps>): Promise<void> {
     bufferIO(),
   );
   expect(r.exitCode).toBe(0);
+  // Quay is a pure consumer of bare clones; the operator (or, here, the
+  // test) must materialize the clone before enqueuing.
+  built.git.seedBareClone(REPO_ID);
 }
 
 // ---------------------------------------------------------------------------
@@ -523,8 +526,8 @@ test("test_enqueue_linear_issue_atomicity_failure_before_substrate", async () =>
     .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM task_tags`)
     .get();
   expect(tags?.n).toBe(0);
-  // No git side-effects.
-  expect(built.git.countCalls("cloneBare")).toBe(0);
+  // No git substrate calls — dispatch failed before enqueue ran.
+  expect(built.git.countCalls("fetch")).toBe(0);
   expect(built.git.countCalls("worktreeAdd")).toBe(0);
   // No worktree directory (should not have been created).
   expect(existsSync(join(built.worktreesRoot, "ENG-1276"))).toBe(false);

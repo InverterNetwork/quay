@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isValidGitRef } from "../../../src/core/branch_slug.ts";
 import type { GitPort } from "../../../src/ports/git.ts";
@@ -9,7 +9,6 @@ export interface FakeGitCall {
 }
 
 export interface FakeGitFailures {
-  cloneBare?: (repoId: string) => boolean;
   fetch?: (repoId: string, ref: string) => boolean;
   fetchBranchIfExists?: (repoId: string, branch: string) => boolean;
   worktreeAdd?: (worktreePath: string) => boolean;
@@ -43,18 +42,10 @@ export class FakeGit implements GitPort {
   }
 
   bareCloneExists(repoId: string): boolean {
-    return this.bareClones.has(repoId);
-  }
-
-  cloneBare(repoId: string, repoUrl: string): void {
-    this.record("cloneBare", { repoId, repoUrl });
-    if (this.fail.cloneBare?.(repoId)) {
-      // Simulate a partial bare clone left on disk before the failure.
-      mkdirSync(this.bareDir(repoId), { recursive: true });
-      throw new Error(`fake: cloneBare failed for ${repoId}`);
-    }
-    mkdirSync(this.bareDir(repoId), { recursive: true });
-    this.bareClones.add(repoId);
+    // Mirror the real adapter: both the in-memory record AND a HEAD file must
+    // exist. This ensures an empty directory at the expected path routes through
+    // the bare_clone_missing error path, matching production behavior.
+    return this.bareClones.has(repoId) && existsSync(join(this.bareDir(repoId), "HEAD"));
   }
 
   fetch(repoId: string, ref: string): void {
@@ -150,12 +141,6 @@ export class FakeGit implements GitPort {
     this.remoteBranches.get(repoId)?.delete(branch);
   }
 
-  removeBareClone(repoId: string): void {
-    this.record("removeBareClone", { repoId });
-    rmSync(this.bareDir(repoId), { recursive: true, force: true });
-    this.bareClones.delete(repoId);
-  }
-
   remoteHeadSha(repoId: string, branch: string): string | null {
     this.record("remoteHeadSha", { repoId, branch });
     return this.remoteHeads.get(`${repoId}\0${branch}`) ?? null;
@@ -186,7 +171,11 @@ export class FakeGit implements GitPort {
     this.openPrBranches.set(repoId, new Set(branches));
   }
   seedBareClone(repoId: string): void {
-    mkdirSync(this.bareDir(repoId), { recursive: true });
+    const dir = this.bareDir(repoId);
+    mkdirSync(dir, { recursive: true });
+    // Touch a HEAD file to mirror the real adapter's tightened bareCloneExists
+    // check: an empty directory at the path is not a valid bare clone.
+    writeFileSync(join(dir, "HEAD"), "ref: refs/heads/main\n");
     this.bareClones.add(repoId);
   }
   countCalls(op: string): number {

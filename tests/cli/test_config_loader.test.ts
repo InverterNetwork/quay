@@ -87,6 +87,23 @@ test("rejects a non-positive integer for retry_budget", () => {
   );
 });
 
+test("accepts repos_root and parses it into config", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(path, `repos_root = "/some/path"\n`);
+  const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
+  expect(result.config.repos_root).toBe("/some/path");
+});
+
+test("rejects an empty string for repos_root", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(path, `repos_root = ""\n`);
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /repos_root/,
+  );
+});
+
 test("rejects an empty string for worktree_root", () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");

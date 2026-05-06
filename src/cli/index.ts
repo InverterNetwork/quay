@@ -7,7 +7,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createArtifactStore } from "../artifacts/store.ts";
 import { openDatabase } from "../db/connection.ts";
@@ -63,15 +63,37 @@ async function main(): Promise<number> {
     process.env.QUAY_DATA_DIR ??
     config.data_dir ??
     join(homedir(), ".quay");
-  const reposRoot = join(dataDir, "repos");
+  // Spec §13: `repos_root` defaults to `${data_dir}/repos`. The config
+  // override is honored verbatim (operator-controlled absolute path), with
+  // the same precedence as `worktree_root` — config wins over the derived
+  // default; there is no env override for this knob.
+  //
+  // Consumer model: quay does NOT create an operator-configured `repos_root`.
+  // If the operator explicitly sets `repos_root` in config, that directory must
+  // already exist — a missing path indicates a misconfiguration (e.g. a typo'd
+  // path), and silently materializing it would hide the error until a later
+  // `bare_clone_missing`. The derived default (`${data_dir}/repos`) is still
+  // mkdir'd because it's quay's own data dir.
+  const reposRootIsDerived = config.repos_root === undefined;
+  const reposRoot = config.repos_root ?? join(dataDir, "repos");
   // Spec §13: `worktree_root` defaults to `${data_dir}/worktrees`. The config
   // override is honored verbatim (operator-controlled absolute path), with
   // the same precedence as `tick_lock_path` — config wins over the derived
   // default; there is no env override for this knob.
   const worktreesRoot = config.worktree_root ?? join(dataDir, "worktrees");
   const artifactsRoot = join(dataDir, "artifacts");
-  for (const d of [dataDir, reposRoot, worktreesRoot, artifactsRoot]) {
+  // Always mkdir quay-owned dirs. Only mkdir reposRoot when it is the derived
+  // default; an explicitly configured path must already exist.
+  const dirsQuayOwns = [dataDir, worktreesRoot, artifactsRoot];
+  if (reposRootIsDerived) dirsQuayOwns.push(reposRoot);
+  for (const d of dirsQuayOwns) {
     mkdirSync(d, { recursive: true });
+  }
+  if (!reposRootIsDerived && !existsSync(reposRoot)) {
+    process.stderr.write(
+      `${JSON.stringify({ error: "repos_root_missing", message: `repos_root "${reposRoot}" does not exist; quay does not create operator-configured paths. Create the directory yourself, then retry.` })}\n`,
+    );
+    return 2;
   }
   const db = openDatabase(join(dataDir, "quay.db"));
   const migrationsDir = resolveMigrationsDir();

@@ -26,46 +26,26 @@ export class LocalGitAdapter implements GitPort {
   }
 
   bareCloneExists(repoId: string): boolean {
-    return existsSync(this.bareDir(repoId));
-  }
-
-  cloneBare(repoId: string, repoUrl: string): void {
-    const result = run([
-      "git",
-      "clone",
-      "--bare",
-      repoUrl,
-      this.bareDir(repoId),
-    ]);
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `git clone --bare failed for ${repoId}: ${result.stderr.trim()}`,
-      );
-    }
-    // Bare clones don't get a fetch refspec by default, so subsequent
-    // `git fetch origin <ref>` would only update FETCH_HEAD and the
-    // `origin/<base_branch>` ref worktree-add resolves against would never
-    // exist. Configure the standard `+refs/heads/*:refs/remotes/origin/*`
-    // refspec so fetches populate remote-tracking refs.
-    const cfg = runIn(this.bareDir(repoId), [
-      "git",
-      "config",
-      "remote.origin.fetch",
-      "+refs/heads/*:refs/remotes/origin/*",
-    ]);
-    if (cfg.exitCode !== 0) {
-      throw new Error(
-        `git config remote.origin.fetch failed for ${repoId}: ${cfg.stderr.trim()}`,
-      );
-    }
+    const dir = this.bareDir(repoId);
+    return existsSync(dir) && existsSync(join(dir, "HEAD"));
   }
 
   fetch(repoId: string, ref: string): void {
+    // Use an explicit `<src>:<dst>` refspec so this works regardless of
+    // whether `remote.origin.fetch` is configured on the bare clone. A
+    // vanilla `git clone --bare` does NOT set that config by default, so
+    // `git fetch origin <ref>` would only update FETCH_HEAD and never
+    // populate `refs/remotes/origin/<ref>` — which the worktree-add path
+    // needs. The explicit form bypasses the config entirely. The leading
+    // `+` allows non-fast-forward updates to the remote-tracking ref, the
+    // same semantics the canonical `+refs/heads/*:refs/remotes/origin/*`
+    // refspec would provide.
+    const refspec = `+${ref}:refs/remotes/origin/${ref}`;
     const result = runIn(this.bareDir(repoId), [
       "git",
       "fetch",
       "origin",
-      ref,
+      refspec,
     ]);
     if (result.exitCode !== 0) {
       throw new Error(
@@ -76,17 +56,21 @@ export class LocalGitAdapter implements GitPort {
 
   fetchBranchIfExists(repoId: string, branch: string): void {
     // Tolerant counterpart of `fetch` for refs that may not yet exist on
-    // origin. Git's normal stderr for that case is "couldn't find remote
-    // ref refs/heads/<branch>"; we match the stable substring and treat as
-    // a no-op so the caller's downstream `remoteHeadSha` returns null and
+    // origin. Git's stderr for that case is "couldn't find remote ref
+    // refs/heads/<branch>"; we match the stable substring and treat as a
+    // no-op so the caller's downstream `remoteHeadSha` returns null and
     // the spawn/classify flow records that as "no remote progress" rather
     // than blowing up with a tick error. Anything else (network, auth,
     // malformed args) still throws.
+    //
+    // Same explicit `<src>:<dst>` refspec as `fetch` for the same reason —
+    // works on a clone without `remote.origin.fetch` configured.
+    const refspec = `+${branch}:refs/remotes/origin/${branch}`;
     const result = runIn(this.bareDir(repoId), [
       "git",
       "fetch",
       "origin",
-      branch,
+      refspec,
     ]);
     if (result.exitCode === 0) return;
     if (result.stderr.toLowerCase().includes("couldn't find remote ref")) {
@@ -352,13 +336,6 @@ export class LocalGitAdapter implements GitPort {
           `git branch -D ${branch} failed for ${repoId}: ${result.stderr.trim()}`,
         );
       }
-    }
-  }
-
-  removeBareClone(repoId: string): void {
-    const dir = this.bareDir(repoId);
-    if (existsSync(dir)) {
-      rmSync(dir, { recursive: true, force: true });
     }
   }
 

@@ -60,6 +60,7 @@ test("test_039_branch_slug_examples", () => {
     repos.add({ ...REPO });
 
     const built = buildEnqueueDeps(h);
+    built.git.seedBareClone(REPO.repo_id);
     h.ids.push(c.taskId);
 
     const result = enqueue(built.deps, {

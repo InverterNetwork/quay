@@ -5,6 +5,7 @@ export type QuayErrorCode =
   | "repo_archived"
   | "repo_has_active_tasks"
   | "branch_collision_unresolvable"
+  | "bare_clone_missing"
   | "bootstrap_failed"
   | "ticket_block_invalid"
   | "ticket_not_actionable"

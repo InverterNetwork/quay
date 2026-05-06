@@ -99,6 +99,7 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
     bufferIO(),
   );
   expect(dispatchAdd.exitCode).toBe(0);
+  built.git.seedBareClone("repo-enqueue-flag");
 
   const briefPath = writeTemp("do the thing", "brief.md");
   const ticketPath = writeTemp("ticket body", "ticket.md");
@@ -420,6 +421,7 @@ test("artifact get returns file contents for a known kind", async () => {
     built.deps,
     bufferIO(),
   );
+  built.git.seedBareClone("repo-art");
 
   const briefPath = writeTemp("artifact body", "b.md");
   const enqIo = bufferIO();

@@ -48,6 +48,7 @@ test("test_057_enqueue_bootstrap_failure_leaves_no_task_row", () => {
   h = createHarness();
   {
     const { built } = setupRepo();
+    built.git.seedBareClone(REPO.repo_id);
     built.commandRunner.failNext("install boom");
     h.ids.push("11111111aaaaaaaaaaaaaaaaaaaaaaaa");
 
@@ -76,36 +77,11 @@ test("test_057_enqueue_bootstrap_failure_leaves_no_task_row", () => {
   }
   h.cleanup();
 
-  // Sub-case 2: clone fails on a fresh repo. Partial bare clone is removed.
+  // Sub-case 2: worktree add fails. No worktree to remove, branch wasn't created.
   h = createHarness();
   {
     const { built } = setupRepo();
-    built.git.fail.cloneBare = () => true;
-    h.ids.push("22222222aaaaaaaaaaaaaaaaaaaaaaaa");
-
-    let caught: unknown;
-    try {
-      enqueue(built.deps, {
-        repo_id: REPO.repo_id,
-        brief: "anything",
-        ticket_snapshot: "ticket",
-      });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(Error);
-
-    assertNoTaskOrAttempt(h);
-    // Bare clone removal attempted.
-    expect(built.git.countCalls("removeBareClone")).toBe(1);
-    expect(built.git.bareCloneExists(REPO.repo_id)).toBe(false);
-  }
-  h.cleanup();
-
-  // Sub-case 3: worktree add fails. No worktree to remove, branch wasn't created.
-  h = createHarness();
-  {
-    const { built } = setupRepo();
+    built.git.seedBareClone(REPO.repo_id);
     built.git.fail.worktreeAdd = () => true;
     h.ids.push("33333333aaaaaaaaaaaaaaaaaaaaaaaa");
 
@@ -128,10 +104,11 @@ test("test_057_enqueue_bootstrap_failure_leaves_no_task_row", () => {
   }
   h.cleanup();
 
-  // Sub-case 4: artifact-store write failure during the SQL transaction step.
+  // Sub-case 3: artifact-store write failure during the SQL transaction step.
   h = createHarness();
   {
     const { built } = setupRepo();
+    built.git.seedBareClone(REPO.repo_id);
     h.ids.push("44444444aaaaaaaaaaaaaaaaaaaaaaaa");
     // Force an artifact-store failure by making the artifact root unwritable
     // partway through. Simpler: monkey-patch writeArtifact to throw on second call.

@@ -28,6 +28,7 @@ test("enqueue_worktree_branch_matches_sql_branch_name", () => {
   repos.add({ ...REPO });
 
   const built = buildEnqueueDeps(h);
+  built.git.seedBareClone(REPO.repo_id);
   h.ids.push("aaaaaaaabbbbccccddddeeeeeeeeffff");
 
   const result = enqueue(built.deps, {

@@ -168,7 +168,7 @@ Flag:        budget_exhausted (set on awaiting-next-brief; orchestrator reads vi
 
 - `quay tick` acquires it at start, holds it for the entire cycle, and releases on exit. If the lock is already held when a tick fires, the new tick exits immediately without action; the next scheduled fire retries.
 - `quay cancel` acquires it **before** writing `cancel_requested_at` and holds it through the entire cancel finalizer (including `gh pr close`, branch deletes, worktree removal, the SQL terminal transition). If the lock is held by an in-flight tick, `quay cancel` blocks until the tick finishes (worst case ~one tick duration). The lock is the primary mechanism that prevents tick-owned side effects from racing with cancel-owned side effects on the same task.
-- `quay enqueue` does substrate work (`git clone --bare`, `git fetch`, `git worktree add`, `install_cmd`) but only against a brand-new task that no concurrent tick or cancel can have observed yet. It does NOT acquire the supervisor lock; its substrate operations are safe against concurrent ticks because git's own object-store locks serialize bare-clone access. (This is a v1 simplification; if `enqueue` ever evolves to touch existing-task state, it must move under the supervisor lock too.)
+- `quay enqueue` does substrate work (`git fetch`, `git worktree add`, `install_cmd`) but only against a brand-new task that no concurrent tick or cancel can have observed yet. It does NOT acquire the supervisor lock; its substrate operations are safe against concurrent ticks because git's own object-store locks serialize bare-clone access. (This is a v1 simplification; if `enqueue` ever evolves to touch existing-task state, it must move under the supervisor lock too.) Note: enqueue does NOT clone; it validates that the bare clone already exists at `<repos_root>/<repo_id>.git` (via `bareCloneExists`) and errors with `bare_clone_missing` if the clone is absent. Materialization is the operator's responsibility.
 - `quay submit-brief`, `quay escalate-human`, `quay task claim`, `quay task release-claim` perform SQL-only writes (after §5 made Slack posting tick-only) and rely on their ownership-fence predicates instead of the supervisor lock. They are safe against concurrent ticks because their writes are predicated on `state` + `claim_id` + `cancel_requested_at IS NULL`, which atomically reject any in-flight intent the SQL writer didn't see.
 
 **Belt-and-suspenders SQL predicate.** Even with the supervisor lock, every tick-owned mutating SQL transaction includes `AND cancel_requested_at IS NULL` in its `WHERE` clause. This catches:
@@ -992,7 +992,7 @@ No `--json` flag exists or is needed; JSON is the only output format. The pull-l
 
 | Command | Purpose | Caller |
 |---|---|---|
-| `quay enqueue --repo <id> --brief-file <path> --ticket-snapshot-file <path> [--external-ref <id>] [--slack-thread-ref <channel:ts>]` | Register a new task in `queued`. **Synchronously bootstraps the worktree:** ensures the bare clone exists (clones if first task for this repo), runs `git fetch origin <base_branch>`, creates the worktree via `git worktree add`, runs `install_cmd`. Snapshots the ticket and captures the brief. Optionally records a default Slack thread for future escalations. **Does not spawn the worker.** The next `quay tick` promotes the task to `running` when capacity allows. Errors and aborts (no task created) if any bootstrap step fails. | Orchestrator |
+| `quay enqueue --repo <id> --brief-file <path> --ticket-snapshot-file <path> [--external-ref <id>] [--slack-thread-ref <channel:ts>]` | Register a new task in `queued`. **Synchronously bootstraps the worktree:** validates the bare clone exists at `<repos_root>/<repo_id>.git` (operator-materialized; quay does not clone), runs `git fetch origin <base_branch>`, creates the worktree via `git worktree add`, runs `install_cmd`. Snapshots the ticket and captures the brief. Optionally records a default Slack thread for future escalations. **Does not spawn the worker.** The next `quay tick` promotes the task to `running` when capacity allows. Errors and aborts (no task created) if any bootstrap step fails. | Orchestrator |
 | `quay task claim <task_id>` | Atomically transition `awaiting-next-brief` → `claimed-by-orchestrator` and **mint a fresh `claim_id`** (UUID v4). Predicate: `state = 'awaiting-next-brief' AND cancel_requested_at IS NULL`. Returns `{"task_id": "...", "claim_id": "<uuid>"}` on stdout. The orchestrator MUST store `claim_id` and pass it back as `--claim-id <claim_id>` on every subsequent claim-scoped write. Errors if the task is not in `awaiting-next-brief` or has been cancelled. | Orchestrator |
 | `quay task release-claim <task_id> --claim-id <claim_id>` | Ownership-fenced release: predicate is `state = 'claimed-by-orchestrator' AND claim_id = ?`. On match: clears `claim_id` and transitions to `awaiting-next-brief`. On mismatch: errors with `claim_lost` (the prior claim was timed out and re-claimed by someone else; the caller must abandon and re-claim). Releasing a task already in `awaiting-next-brief` is an idempotent no-op success (no claim_id check needed for that case). | Orchestrator |
 | `quay submit-brief <task_id> --claim-id <claim_id> --brief-file <path> --reason <blocker_resolved\|advice_answered>` | Submit a new brief. **Requires `--claim-id` matching the live `tasks.claim_id`** (ownership fence) and `cancel_requested_at IS NULL`. On `claim_id` mismatch: errors with `claim_lost`. On `cancel_requested_at IS NOT NULL`: errors with `cancelled`. On wrong state otherwise: `wrong_state`. On success: persists the brief as an artifact, transitions the task to `queued`, clears `claim_id`, resets `claim_expirations_consecutive` to 0. Tick promotes `queued → running` on its next cycle when capacity allows; budget is consumed at that promotion (unless reason is `advice_answered`). Errors with `budget_exhausted` if `task.budget_exhausted = true` and reason is `blocker_resolved`; orchestrator must use `escalate-human` or `cancel` instead. **Note:** there is no `--reason initial`; the initial brief is supplied at `enqueue` and `attempts.reason = 'initial'` is set internally by Quay on the first spawn. | Orchestrator |
@@ -1128,7 +1128,7 @@ Quay creates the worktree at enqueue time, **before** the task enters `queued`. 
 
 `quay enqueue` runs all of these before returning, in order. If any step fails, enqueue errors and **no task row is created** (atomic from the orchestrator's perspective).
 
-1. **Bare clone (first task per repo only):** if `~/.quay/repos/<repo_id>.git` doesn't exist, run `git clone --bare <repo_url>`. Subsequent enqueues against the same repo reuse it.
+1. **Validate bare clone exists:** Check that `<repos_root>/<repo_id>.git` exists (via `bareCloneExists`); if missing, throw `QuayError("bare_clone_missing")` with the expected path and a copy-pasteable `git clone --bare <repo_url> <expected_path>` remediation hint. Quay never runs `git clone` — materialization is the operator's responsibility.
 2. **Fetch:** `git fetch origin <base_branch>` against the bare clone to refresh the base.
 3. **Branch name resolution:** compute the branch slug from `external_ref` per the §13 git-safe slug rules (or fall back to `task-<task_id_short>` if no `external_ref`); the candidate branch name is `quay/<slug>`. Check for collisions against **both** the local bare clone *and* the remote (the cancellation rules at §5 retain the remote branch when a PR is open, even though the local branch is always deleted, so a local-only check is insufficient — a stale remote PR could otherwise be reused by an unrelated task):
    - Local check: `git -C <bare> show-ref --verify refs/heads/<branch>`.
@@ -1150,7 +1150,7 @@ Quay creates the worktree at enqueue time, **before** the task enters `queued`. 
 
 | Failed step | Rollback action |
 |---|---|
-| 1 (bare clone, first task only) | If a partial bare clone exists at `~/.quay/repos/<repo_id>.git`, `rm -rf` it. If the bare clone already existed before this enqueue (subsequent task), do nothing. |
+| 1 (validate bare clone) | No rollback needed — quay never creates the bare clone, so there is nothing to undo. |
 | 2 (fetch) | Read-only against the bare clone; no rollback needed. |
 | 3 (branch resolution) | In-memory; can't fail destructively. |
 | 4 (worktree add) | `git worktree add` is atomic — partial worktree shouldn't exist. If a stray worktree from a prior crash exists, `git worktree prune` first. |
@@ -1226,6 +1226,7 @@ Single config file (location configurable; default `~/.quay/config.toml`). Loade
 | Key | Default | Purpose |
 |---|---|---|
 | `data_dir` | `~/.quay` | Where SQL, artifacts, lockfile live. |
+| `repos_root` | `${data_dir}/repos` | Where bare clones for registered repos live. Override to share the bare-clone cache across multiple agent tools. |
 | `worktree_root` | `~/.quay/worktrees` | Where per-task worktrees are created. |
 | `max_concurrent` | `2` | Max tasks in `running`. |
 | `max_total` | `5` | Max tasks not in a terminal state. |
@@ -1239,6 +1240,15 @@ Single config file (location configurable; default `~/.quay/config.toml`). Loade
 | `tick_lock_path` | `${data_dir}/tick.lock` | **Supervisor lockfile** — held by `quay tick` for the duration of a cycle and by `quay cancel` for intent-write + finalizer. Name retained for compatibility; semantically protects all supervisor side effects (tmux, gh mutations, Slack, FS, branch ops). |
 | `supervisor_lock_stale_seconds` | `30` | Grace period after which a lockfile whose owning PID is no longer alive is considered stale and reclaimable. Prevents a hung-then-killed tick from indefinitely blocking `quay cancel`. |
 | `agent_invocation` | (e.g. `claude --prompt-file {prompt_file}`) | The CLI invocation pattern for spawning the worker. The literal token `{prompt_file}` is substituted with the path to `.quay-prompt.md` at spawn time. |
+
+### Repo materialization
+
+Quay is a **consumer** of bare clones, not a manager. It never runs `git clone`.
+
+- The operator (or a sibling tool) is responsible for materializing `<repos_root>/<repo_id>.git` before the first `quay enqueue` for that repo.
+- The required bootstrap command is `git clone --bare <repo_url> <repos_root>/<repo_id>.git`. No additional `git config` is needed — quay uses an explicit `<src>:<dst>` refspec on its fetches, which works on a vanilla bare clone without `remote.origin.fetch` configured.
+- A missing clone causes `bare_clone_missing` from `quay enqueue`; the error body includes the expected path and the exact `git clone --bare` command as a copy-pasteable remediation hint.
+- See the README's "Bootstrapping a repo" section for the operator-facing workflow.
 
 ### Per-repo config (`repos` table)
 
@@ -1445,7 +1455,7 @@ The v1 test suite must cover the following cases. Each is a state-machine integr
 34. **`quay submit-brief` on a task in `running` (not `claimed-by-orchestrator`).** Errors cleanly.
 35. **Capacity cap (`max_concurrent` reached).** New task registered as `queued`; tick promotes when a slot opens.
 36. **Total cap (`max_total` reached).** `quay enqueue` errors with the current task list.
-37. **First enqueue against a repo creates the bare clone; second enqueue reuses it.** Asserts: `~/.quay/repos/<repo_id>.git` exists after first enqueue; second enqueue does not re-clone (verified by mtime or by network mock).
+37. **First enqueue against a repo whose bare clone is missing throws `bare_clone_missing` with the expected path; subsequent enqueues with the clone present succeed.** Asserts: enqueue without a pre-materialized bare clone at `<repos_root>/<repo_id>.git` errors with `QuayError("bare_clone_missing")`, includes the expected path and a remediation hint; once the clone is materialized by the operator (or test setup), enqueue completes successfully.
 38. **`install_cmd` runs once per worktree, not once per attempt.** Asserts: install runs before attempt 1; subsequent retries on the same worktree (`ci_fail`, `blocker_resolved`) do not re-run install.
 39. **Branch naming uses the §13 git-safe slug.** Enqueue with `--external-ref ITRY-900` → branch named `quay/ITRY-900`. Enqueue with `--external-ref feat/ABC.123` → `quay/feat/ABC.123`. Enqueue with no `external_ref` (or one that normalizes to empty, e.g. `...`) → `quay/task-<task_id_short>`.
 40. **Branch-name collision on re-enqueue after cancel — remote-only retention.** After a `cancelled` task whose **local** branch was deleted but **remote** branch was retained (because a PR was open at cancel time per §5 cleanup rules), re-enqueuing the same `external_ref` must NOT reuse the same branch name. Asserts: branch resolution checks remote heads (`git ls-remote`) and open PRs (`gh pr list --head <branch> --state open`) in addition to the local bare clone; the new task gets `quay/<branch_slug>-<task_id_short>`; the new worker's first push does NOT update the prior PR.

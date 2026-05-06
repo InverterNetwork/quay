@@ -52,6 +52,7 @@ const AdaptersConfigSchema = z
 export const ConfigSchema = z
   .object({
     data_dir: z.string().min(1).optional(),
+    repos_root: z.string().min(1).optional(),
     worktree_root: z.string().min(1).optional(),
     max_concurrent: positiveInt.optional(),
     retry_budget: positiveInt.optional(),
