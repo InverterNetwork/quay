@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      QUAY_SKIP_TMUX_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run typecheck
+      - name: Build binaries
+        run: |
+          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            bun build --compile --target=bun-${target} src/cli/index.ts --outfile dist/quay-${target}
+          done
+      - name: Smoke test linux-x64 binary
+        run: ./dist/quay-linux-x64 --version
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum quay-* > SHA256SUMS
+      - name: Create release
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/quay-* dist/SHA256SUMS

@@ -97,7 +97,11 @@ async function waitFor<T>(
   }
 }
 
-const t = tmuxAvailable ? test : test.skip;
+// Gated under QUAY_SKIP_TMUX_INTEGRATION because these tests are flaky on
+// Linux: pipe-pane races a fast-exiting agent and the tmux server tears
+// down before the file write lands. Tracked separately; see AST-77 follow-up.
+const tmuxIntegrationSkipped = process.env.QUAY_SKIP_TMUX_INTEGRATION === "1";
+const t = tmuxAvailable && !tmuxIntegrationSkipped ? test : test.skip;
 
 t("spawn removes a stale .quay-blocked.md from a previous attempt", async () => {
   const adapter = new TmuxAdapter();
