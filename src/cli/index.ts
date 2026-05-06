@@ -8,8 +8,12 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { createArtifactStore } from "../artifacts/store.ts";
+import {
+  EMBEDDED_MIGRATIONS,
+  EMBEDDED_TICKET_SCHEMA,
+  QUAY_VERSION,
+} from "../build/embedded.generated.ts";
 import { openDatabase } from "../db/connection.ts";
 import { runMigrations } from "../db/migrate.ts";
 import {
@@ -36,6 +40,14 @@ import { handleValidateTicket } from "./validate_ticket.ts";
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
+  // `quay --version` and `-v` MUST short-circuit before any DB / config /
+  // migration work: the version stamp is meaningful even on a host where
+  // ~/.quay/config.toml is malformed, the data dir is unwritable, or the
+  // box has never been initialised.
+  if (argv[0] === "--version" || argv[0] === "-v") {
+    process.stdout.write(`${QUAY_VERSION}\n`);
+    return 0;
+  }
   // `quay validate-ticket` is contractually stateless (ticket-validation §4):
   // it reads JSON from stdin or a file, applies a TOML schema, and writes
   // JSON to stdout with a fixed exit-code surface. Routing it through full
@@ -51,6 +63,7 @@ async function main(): Promise<number> {
         stdin: () => readFileSync(0, "utf8"),
       },
       process.env,
+      { embeddedSchema: EMBEDDED_TICKET_SCHEMA },
     );
     return result.exitCode;
   }
@@ -96,8 +109,7 @@ async function main(): Promise<number> {
     return 2;
   }
   const db = openDatabase(join(dataDir, "quay.db"));
-  const migrationsDir = resolveMigrationsDir();
-  runMigrations(db, migrationsDir);
+  runMigrations(db, EMBEDDED_MIGRATIONS);
   const clock = new SystemClock();
   const ids = new UuidIdGenerator();
   const artifactStore = createArtifactStore({
@@ -160,11 +172,6 @@ async function main(): Promise<number> {
   };
   const result = await dispatch(argv, deps, io);
   return result.exitCode;
-}
-
-function resolveMigrationsDir(): string {
-  // Resolve relative to repo root regardless of where the CLI was invoked.
-  return fileURLToPath(new URL("../../migrations", import.meta.url));
 }
 
 main().then((code) => process.exit(code)).catch((err) => {

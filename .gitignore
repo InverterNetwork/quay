@@ -1,5 +1,9 @@
 node_modules/
 dist/
+
+# Codegen output of scripts/embed.ts. Regenerated on `bun install`
+# (prepare hook) and `bun run build`; never committed.
+src/build/embedded.generated.ts
 *.db
 *.db-journal
 *.db-wal

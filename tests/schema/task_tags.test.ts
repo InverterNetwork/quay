@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertTask } from "../support/fixtures.ts";
-import { runMigrations } from "../../src/db/migrate.ts";
+import { loadMigrationsFromDir, runMigrations } from "../../src/db/migrate.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const MIGRATIONS_DIR = join(REPO_ROOT, "migrations");
@@ -218,7 +218,7 @@ test("test_schema_tasks_authors_json_defaults_null_for_existing_rows", () => {
 
   const taskId = insertTask(h.db);
 
-  runMigrations(h.db, MIGRATIONS_DIR);
+  runMigrations(h.db, loadMigrationsFromDir(MIGRATIONS_DIR));
 
   // Post-migration: column exists, existing row is NULL.
   const colsAfter = h.db
@@ -249,7 +249,7 @@ test("test_schema_migration_is_idempotent_on_rerun", () => {
   expect(appliedFirst).toContain("0002_deployment_adapters.sql");
 
   // Rerun: returns no newly-applied files and does not throw on duplicate DDL.
-  const newlyApplied = runMigrations(h.db, MIGRATIONS_DIR);
+  const newlyApplied = runMigrations(h.db, loadMigrationsFromDir(MIGRATIONS_DIR));
   expect(newlyApplied).toEqual([]);
 
   const appliedSecond = h.db

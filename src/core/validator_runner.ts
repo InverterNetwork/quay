@@ -28,6 +28,18 @@ const DEFAULT_VALIDATOR_BIN = fileURLToPath(
   new URL("../cli/validate_ticket_bin.ts", import.meta.url),
 );
 
+// True when running inside a `bun build --compile` binary. In that context,
+// `Bun.embeddedFiles` is populated and `DEFAULT_VALIDATOR_BIN` resolves to a
+// virtual /$bunfs/... path that no spawned process can read. We must instead
+// recurse through the running binary itself.
+function isCompiledBinary(): boolean {
+  return (
+    typeof Bun !== "undefined" &&
+    Array.isArray(Bun.embeddedFiles) &&
+    Bun.embeddedFiles.length > 0
+  );
+}
+
 export interface SpawnedValidatorRunnerOptions {
   binPath?: string;
   bunPath?: string;
@@ -39,9 +51,20 @@ export class SpawnedValidatorRunner implements ValidatorRunner {
   constructor(private readonly opts: SpawnedValidatorRunnerOptions = {}) {}
 
   run(payload: unknown): ValidatorRunResult {
-    const binPath = this.opts.binPath ?? DEFAULT_VALIDATOR_BIN;
-    const bunPath = this.opts.bunPath ?? "bun";
-    const args: string[] = [bunPath, "run", binPath, "--ticket-json", "-"];
+    let args: string[];
+    if (this.opts.binPath !== undefined || this.opts.bunPath !== undefined) {
+      // Explicit overrides (used by tests) always win.
+      const binPath = this.opts.binPath ?? DEFAULT_VALIDATOR_BIN;
+      const bunPath = this.opts.bunPath ?? "bun";
+      args = [bunPath, "run", binPath, "--ticket-json", "-"];
+    } else if (isCompiledBinary()) {
+      // Inside a compiled binary, recurse through the running executable.
+      // cli/index.ts short-circuits `validate-ticket` in-process with the
+      // embedded schema, so no `bun` on PATH is required.
+      args = [process.execPath, "validate-ticket", "--ticket-json", "-"];
+    } else {
+      args = ["bun", "run", DEFAULT_VALIDATOR_BIN, "--ticket-json", "-"];
+    }
     if (this.opts.schemaFile !== undefined) {
       args.push("--schema-file", this.opts.schemaFile);
     }

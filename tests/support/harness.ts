@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openDatabase, type DB } from "../../src/db/connection.ts";
-import { runMigrations } from "../../src/db/migrate.ts";
+import { loadMigrationsFromDir, runMigrations } from "../../src/db/migrate.ts";
 import { FakeClock } from "./fakes/clock.ts";
 import { FakeIdGenerator } from "./fakes/id_generator.ts";
 
@@ -33,7 +33,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
   const db = openDatabase(dbPath);
 
   const migrationsDir = options.migrationsDir ?? DEFAULT_MIGRATIONS_DIR;
-  runMigrations(db, migrationsDir);
+  runMigrations(db, loadMigrationsFromDir(migrationsDir));
 
   const clock = new FakeClock();
   const ids = new FakeIdGenerator();

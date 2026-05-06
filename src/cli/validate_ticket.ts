@@ -13,8 +13,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadSchema, SchemaLoadError } from "../validator/load_schema.ts";
-import type { TicketDraft } from "../validator/types.ts";
+import {
+  loadSchema,
+  parseSchema,
+  SchemaLoadError,
+} from "../validator/load_schema.ts";
+import type { TicketDraft, TicketSchema } from "../validator/types.ts";
 import { validateTicket } from "../validator/validate.ts";
 import type { CliIO } from "./io.ts";
 
@@ -27,6 +31,17 @@ export interface ValidateTicketResult {
   exitCode: number;
 }
 
+export interface ValidateTicketDeps {
+  // The shipped-default schema as a TOML string. The compiled binary has
+  // no `config/ticket_schema.toml` on disk, so we fall back to this when
+  // the on-disk lookups (override > QUAY_CONFIG_DIR > $HOME/.quay >
+  // SHIPPED_DEFAULT_SCHEMA) all miss. In dev / tests SHIPPED_DEFAULT_SCHEMA
+  // resolves to a real file, so this path is only exercised under --compile.
+  embeddedSchema?: string;
+}
+
+const EMBEDDED_SCHEMA_PATH = "<embedded:ticket_schema.toml>";
+
 const SHIPPED_DEFAULT_SCHEMA = fileURLToPath(
   new URL("../../config/ticket_schema.toml", import.meta.url),
 );
@@ -35,6 +50,7 @@ export function handleValidateTicket(
   argv: string[],
   io: CliIO,
   env: NodeJS.ProcessEnv | ValidateTicketEnv = process.env,
+  deps: ValidateTicketDeps = {},
 ): ValidateTicketResult {
   const flags = parseFlags(argv);
   if (!flags.ok) {
@@ -43,35 +59,48 @@ export function handleValidateTicket(
   const opts = flags.value;
 
   const schemaPath = resolveSchemaPath(opts.schemaFile, env);
+  let schema: TicketSchema;
   if (schemaPath === null) {
-    return writeStderr(
-      io,
-      "schema_error",
-      "no ticket schema found: --schema-file not provided, no file at ${QUAY_CONFIG_DIR}/ticket_schema.toml, and no shipped default available",
-      2,
-    );
-  }
-  if (!existsSync(schemaPath)) {
-    return writeStderr(
-      io,
-      "schema_error",
-      `ticket schema file not found: ${schemaPath}`,
-      2,
-      { schema_file: schemaPath },
-    );
-  }
-
-  let schema;
-  try {
-    schema = loadSchema(schemaPath);
-  } catch (err) {
-    if (err instanceof SchemaLoadError) {
-      return writeStderr(io, "schema_error", err.message, 2, {
-        schema_file: err.schemaPath,
-      });
+    if (deps.embeddedSchema === undefined || deps.embeddedSchema === "") {
+      return writeStderr(
+        io,
+        "schema_error",
+        "no ticket schema found: --schema-file not provided, no file at ${QUAY_CONFIG_DIR}/ticket_schema.toml, and no shipped default available",
+        2,
+      );
     }
-    const message = err instanceof Error ? err.message : String(err);
-    return writeStderr(io, "schema_error", message, 2);
+    try {
+      schema = parseSchema(deps.embeddedSchema, EMBEDDED_SCHEMA_PATH);
+    } catch (err) {
+      if (err instanceof SchemaLoadError) {
+        return writeStderr(io, "schema_error", err.message, 2, {
+          schema_file: err.schemaPath,
+        });
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      return writeStderr(io, "schema_error", message, 2);
+    }
+  } else {
+    if (!existsSync(schemaPath)) {
+      return writeStderr(
+        io,
+        "schema_error",
+        `ticket schema file not found: ${schemaPath}`,
+        2,
+        { schema_file: schemaPath },
+      );
+    }
+    try {
+      schema = loadSchema(schemaPath);
+    } catch (err) {
+      if (err instanceof SchemaLoadError) {
+        return writeStderr(io, "schema_error", err.message, 2, {
+          schema_file: err.schemaPath,
+        });
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      return writeStderr(io, "schema_error", message, 2);
+    }
   }
 
   const inputRead = readInput(opts.ticketJson, io);
