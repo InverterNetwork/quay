@@ -81,11 +81,7 @@ async function waitFor<T>(
   }
 }
 
-// Gated under QUAY_SKIP_TMUX_INTEGRATION because these tests are flaky on
-// Linux: pipe-pane races a fast-exiting agent and the tmux server tears
-// down before the file write lands. Tracked separately; see AST-77 follow-up.
-const tmuxIntegrationSkipped = process.env.QUAY_SKIP_TMUX_INTEGRATION === "1";
-const t = tmuxAvailable && !tmuxIntegrationSkipped ? test : test.skip;
+const t = tmuxAvailable ? test : test.skip;
 
 t("pipe-pane writes agent output to <worktree>/.quay-session.log", async () => {
   const adapter = new TmuxAdapter();
