@@ -2,10 +2,23 @@
 
 Bun + TypeScript implementation of the Quay task lifecycle service.
 
-- Behavior contract: [`docs/quay-spec.md`](docs/quay-spec.md)
-- Validator contract: [`docs/quay-spec-ticket-validation.md`](docs/quay-spec-ticket-validation.md)
-- Linear/Slack adapters: [`docs/quay-spec-deployment-adapters.md`](docs/quay-spec-deployment-adapters.md)
-- Build order: [`docs/quay-tdd-implementation-plan.md`](docs/quay-tdd-implementation-plan.md)
+## Documentation
+
+Start with the user-facing docs:
+
+- User docs index: [`docs/user/index.md`](docs/user/index.md)
+- Quickstart: [`docs/user/quickstart.md`](docs/user/quickstart.md)
+- CLI reference: [`docs/user/cli-reference.md`](docs/user/cli-reference.md)
+- Troubleshooting: [`docs/user/troubleshooting.md`](docs/user/troubleshooting.md)
+
+The older specs and design notes are still useful implementation history, but
+they have not been maintained all the way. Treat them as internal references,
+not as the current user contract:
+
+- Original lifecycle spec: [`docs/quay-spec.md`](docs/quay-spec.md)
+- Validator spec: [`docs/quay-spec-ticket-validation.md`](docs/quay-spec-ticket-validation.md)
+- Linear/Slack adapter spec: [`docs/quay-spec-deployment-adapters.md`](docs/quay-spec-deployment-adapters.md)
+- Build order notes: [`docs/quay-tdd-implementation-plan.md`](docs/quay-tdd-implementation-plan.md)
 
 ## Install
 
@@ -40,8 +53,7 @@ is safe.
 ### Upgrading
 
 `quay tick` holds a supervisor lock at `${data_dir}/tick.lock` for the
-duration of each pass (per `docs/quay-spec.md` §11). To roll a new
-binary forward:
+duration of each pass. To roll a new binary forward:
 
 1. Stop the tick driver (cron entry, systemd timer, or whatever
    schedules `quay tick`).
@@ -60,7 +72,7 @@ deployed.
 bun install            # also runs scripts/embed.ts (prepare hook)
 bun test
 bun run typecheck
-bun run quay -- --help # invoke the CLI from TS source
+bun run quay -- task list # invoke the CLI from TS source
 ```
 
 `scripts/embed.ts` regenerates `src/build/embedded.generated.ts` (the
@@ -115,7 +127,7 @@ quay validate-ticket [--ticket-json <p|->] [--schema-file <p>] [--quiet]
                                            # standalone validator: JSON in, JSON out
 quay task get <task_id> | task list        # read commands (deterministic JSON)
 quay submit-brief | escalate-human | cancel
-quay artifact get <artifact_id>            # raw bytes to stdout
+quay artifact get <task_id> <kind>         # raw bytes to stdout
 ```
 
 `quay validate-ticket` runs stateless — it does not open the DB or apply
@@ -130,14 +142,14 @@ Resolution order (first match wins): `$QUAY_CONFIG_FILE`, `$QUAY_CONFIG_DIR/conf
 (defaults apply); an unparseable or schema-invalid file is a hard error.
 
 ```toml
-# Tick / supervisor knobs (see docs/quay-spec.md §13 for the full set)
+# Tick / supervisor knobs (see docs/user/configuration.md for the full set)
 data_dir = "/var/lib/quay"
 repos_root = "/Users/me/.acc/repos"     # bare-clone cache; defaults to ${data_dir}/repos
 max_concurrent = 4
 retry_budget = 5
 agent_invocation = "claude < {prompt_file}"
 
-# Linear/Slack adapters (see docs/quay-spec-deployment-adapters.md §4)
+# Linear/Slack adapters (see docs/user/linear-and-slack.md)
 [adapters.linear]
 enabled = true
 api_key_env = "LINEAR_API_KEY"          # name of the env var holding the bot token
@@ -157,8 +169,8 @@ token (e.g. `LINEAR_API_KEY` unset) surfaces as `adapter_not_configured`.
 Resolution order (first match wins): `--schema-file <path>`,
 `$QUAY_CONFIG_DIR/ticket_schema.toml`, `$HOME/.quay/ticket_schema.toml`,
 shipped default at [`config/ticket_schema.toml`](config/ticket_schema.toml).
-The default mirrors the `quay-config` block 1:1 — one source of truth for
-tag/author shape across the validator and the adapter.
+The default mirrors the `quay-config` block used by the Linear adapter, so
+tag/author shape stays consistent across validation and enqueue.
 
 ### Environment variables
 
