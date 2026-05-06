@@ -28,6 +28,68 @@ import type {
   TicketContext,
 } from "../ports/ticket_context.ts";
 
+// ---------------------------------------------------------------------------
+// Prompt-injection hardening
+// ---------------------------------------------------------------------------
+
+const MAX_BYTES_DEFAULT = 16 * 1024; // 16 KB
+const TRUNCATION_SUFFIX = " ... [truncated]";
+// Pre-computed byte length of the suffix so the cap arithmetic is exact.
+const TRUNCATION_SUFFIX_BYTES = new TextEncoder().encode(TRUNCATION_SUFFIX).byteLength;
+
+/**
+ * Sanitises untrusted string content before it is interpolated into the
+ * agent prompt brief.
+ *
+ * Rules applied (in order):
+ *  1. Length cap — input is measured in UTF-8 bytes. If it exceeds
+ *     `opts.maxBytes` (default 16 384), it is truncated to 15 360 bytes and
+ *     the suffix " … [truncated]" is appended.
+ *  2. Newline stripping — every CRLF, CR, and LF is replaced with " ␤ "
+ *     (space + pilcrow symbol + space). This prevents any content from
+ *     forging Markdown headings, code-fences, or new sections.
+ *  3. Mention neutralisation — every occurrence of the literal two-character
+ *     sequence "<@" is replaced with "<​@" (a zero-width space is
+ *     inserted after the angle-bracket). This makes `<@UADMIN>` look
+ *     identical visually while being distinct from a real bot-tagging
+ *     directive in the prompt.
+ */
+export function escapeUntrusted(
+  s: string,
+  opts?: { maxBytes?: number },
+): string {
+  const cap = opts?.maxBytes ?? MAX_BYTES_DEFAULT;
+  // headBytes is the number of content bytes that fit within the cap once the
+  // suffix occupies its own bytes.
+  const headBytes = cap - TRUNCATION_SUFFIX_BYTES;
+
+  // Step 1: length cap (UTF-8 byte budget).
+  const encoded = new TextEncoder().encode(s);
+  let working: string;
+  if (encoded.byteLength > cap) {
+    // Slice to headBytes bytes. TextDecoder with `ignoreBOM` and no `fatal`
+    // mode handles partial multi-byte sequences by replacing them with U+FFFD,
+    // but we want clean truncation — iterate back until we find a valid
+    // boundary.
+    let boundary = headBytes;
+    while (boundary > 0 && (encoded[boundary]! & 0xc0) === 0x80) {
+      boundary--;
+    }
+    const head = new TextDecoder().decode(encoded.slice(0, boundary));
+    working = head + TRUNCATION_SUFFIX;
+  } else {
+    working = s;
+  }
+
+  // Step 2: strip newlines.
+  working = working.replace(/\r\n|\r|\n/g, " ␤ ");
+
+  // Step 3: neutralise <@ mention syntax.
+  working = working.replace(/<@/g, "<​@");
+
+  return working;
+}
+
 export interface TicketContextDeps {
   linear: LinearPort;
   slack: SlackPort;
@@ -145,7 +207,7 @@ interface ComposeBriefArgs {
 function composeBrief(args: ComposeBriefArgs): string {
   const sections: string[] = [];
 
-  sections.push(`# ${args.externalRef} — ${args.issue.title}`);
+  sections.push(`# ${args.externalRef} — ${escapeUntrusted(args.issue.title)}`);
   sections.push(composeContributors(args.authors));
   sections.push(composeTicketContext(args.issue.body));
 
@@ -165,21 +227,25 @@ function composeContributors(authors: TicketAuthor[]): string {
   const lines = ["## Contributors", ""];
   authors.forEach((a, idx) => {
     const primary = idx === 0 ? " *(primary)*" : "";
-    lines.push(`- **${a.name}** (\`<@${a.slack_id}>\`)${primary}`);
+    lines.push(`- **${escapeUntrusted(a.name)}** (\`<@${a.slack_id}>\`)${primary}`);
   });
   return lines.join("\n");
 }
 
 function composeTicketContext(body: string): string {
   const stripped = stripQuayConfigBlock(body).trim();
-  const content = stripped.length === 0 ? "_(no description)_" : stripped;
+  const content =
+    stripped.length === 0 ? "_(no description)_" : escapeUntrusted(stripped);
   return `## Ticket Context\n\n${content}`;
 }
 
 function composeTicketComments(comments: LinearComment[]): string {
   const blocks: string[] = ["## Ticket Comments"];
   for (const c of comments) {
-    blocks.push(`**${c.authorName}** — ${c.createdAt}:\n${c.body}`);
+    const authorName = escapeUntrusted(c.authorName);
+    const createdAt = escapeUntrusted(c.createdAt);
+    const body = escapeUntrusted(c.body);
+    blocks.push(`**${authorName}** — ${createdAt}:\n${body}`);
   }
   return blocks.join("\n\n");
 }
@@ -210,11 +276,11 @@ function formatSlackMessage(
   msg: SlackThreadMessage,
   isParent: boolean,
 ): string {
-  const author = msg.authorName ?? "(unknown)";
+  const author = escapeUntrusted(msg.authorName ?? "(unknown)");
   let attribution = `**${author}**`;
   if (msg.authorBot) attribution += " *(bot)*";
   if (isParent) attribution += " *(parent)*";
-  return `${attribution}:\n${msg.text}`;
+  return `${attribution}:\n${escapeUntrusted(msg.text)}`;
 }
 
 function slackTsToIso(ts: string): string {
