@@ -23,6 +23,9 @@ bun run build         # → dist/quay (~58 MB)
 
 ### Download a release binary
 
+Available once `v0.1.0` is tagged and the release workflow has published
+binaries; until then, use the build-from-source path above.
+
 ```bash
 curl -sL https://github.com/lafawnduh1966/quay/releases/download/v0.1.0/quay-darwin-arm64 \
   -o /usr/local/bin/quay
