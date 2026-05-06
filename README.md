@@ -23,15 +23,57 @@ bun run build         # → dist/quay (~58 MB)
 
 ### Download a release binary
 
-Available once `v0.1.0` is tagged and the release workflow has published
-binaries; until then, use the build-from-source path above.
+Quay is delivered as prebuilt binaries on tagged GitHub Releases. Each
+`v*` tag triggers `.github/workflows/release.yml`, which builds four
+artifacts and a SHA256SUMS manifest, then attaches them to the release.
+
+Artifacts published per release:
+
+| File                  | Target                         |
+| --------------------- | ------------------------------ |
+| `quay-linux-amd64`    | Linux x86_64 (rails class)     |
+| `quay-linux-arm64`    | Linux aarch64                  |
+| `quay-darwin-amd64`   | macOS Intel                    |
+| `quay-darwin-arm64`   | macOS Apple Silicon            |
+| `SHA256SUMS`          | `sha256` of every binary above |
+
+Stable URL pattern (used by the hermes-agent installer):
+
+```
+https://github.com/lafawnduh1966/quay/releases/download/<tag>/quay-<os>-<arch>
+https://github.com/lafawnduh1966/quay/releases/download/<tag>/SHA256SUMS
+```
+
+Install on a Linux deployment box (`linux-amd64` shown):
 
 ```bash
-curl -sL https://github.com/lafawnduh1966/quay/releases/download/v0.1.0/quay-darwin-arm64 \
-  -o /usr/local/bin/quay
-chmod +x /usr/local/bin/quay
-quay --version
+TAG=v0.1.0
+BASE=https://github.com/lafawnduh1966/quay/releases/download/${TAG}
+
+curl -fsSL -o quay         "${BASE}/quay-linux-amd64"
+curl -fsSL -o SHA256SUMS   "${BASE}/SHA256SUMS"
+
+# Verify the download against the published manifest before installing.
+grep " quay-linux-amd64$" SHA256SUMS | sed 's/quay-linux-amd64/quay/' \
+  | sha256sum -c -
+
+install -m 0755 quay /usr/local/bin/quay
+quay --version    # → 0.1.0+<short-sha>
 ```
+
+The binary is single-file and statically compiled; nothing else needs
+to be installed on the host (no Bun, no Node).
+
+#### Verification policy
+
+Releases ship checksums (SHA256SUMS) but are not GPG- or cosign-signed.
+Trust is anchored on (a) HTTPS to `github.com` and (b) the GitHub
+Actions workflow being the only producer of release artifacts (the
+`release` job has `contents: write` and uploads happen via
+`gh release create` on `v*` tag pushes — no manual uploads). Consumers,
+the hermes-agent installer in particular, MUST fetch and check
+`SHA256SUMS` against the binary they downloaded; a release tag without
+a matching `SHA256SUMS` entry is invalid and must be rejected.
 
 First invocation creates `~/.quay/` (or `$QUAY_DATA_DIR`) and applies
 the embedded migrations. Migrations are idempotent; re-running `quay`
