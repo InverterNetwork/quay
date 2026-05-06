@@ -7,6 +7,7 @@ export interface TicketAuthor {
 
 export interface TicketContext {
   external_ref: string;
+  repo: string;
   brief: string;
   ticket_snapshot: string;
   slack_thread_ref: string | null;

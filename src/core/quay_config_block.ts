@@ -11,6 +11,7 @@ export interface QuayConfigAuthor {
 }
 
 export interface QuayConfigBlock {
+  repo: string;
   tags: string[];
   slack_thread_ref: string | null;
   authors: QuayConfigAuthor[];
@@ -20,6 +21,7 @@ const FENCE_OPEN = /^[ \t]*```quay-config[ \t]*$/;
 const FENCE_CLOSE = /^[ \t]*```[ \t]*$/;
 const SLACK_URL = /^https:\/\/[^.]+\.slack\.com\/archives\/([^/]+)\/p(\d+)$/;
 const SLACK_USER_ID = /^U[A-Z0-9]+$/;
+const REPO_ID = /^[a-z0-9-]+$/;
 const KEY_VALUE = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/;
 
 interface FencedBlock {
@@ -265,6 +267,19 @@ function isPlainObject(
 }
 
 function validateBlock(yaml: { [key: string]: YamlValue }): QuayConfigBlock {
+  // repo (required)
+  if (!("repo" in yaml) || yaml.repo === null) {
+    throw blockError("repo is required");
+  }
+  const rawRepo = yaml.repo;
+  if (typeof rawRepo !== "string" || rawRepo.length === 0) {
+    throw blockError("repo must be a non-empty string");
+  }
+  if (!REPO_ID.test(rawRepo)) {
+    throw blockError("repo must contain only lowercase letters, digits, and hyphens");
+  }
+  const repo = rawRepo;
+
   // tags
   const rawTags = yaml.tags;
   if (!Array.isArray(rawTags)) {
@@ -337,5 +352,5 @@ function validateBlock(yaml: { [key: string]: YamlValue }): QuayConfigBlock {
     authors.push({ name, slack_id });
   }
 
-  return { tags, slack_thread_ref, authors };
+  return { repo, tags, slack_thread_ref, authors };
 }

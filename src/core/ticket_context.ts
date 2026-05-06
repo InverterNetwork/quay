@@ -186,6 +186,7 @@ export function fetchTicketContextWithIssue(
 
   const ctx: TicketContext = {
     external_ref: externalRef,
+    repo: block.repo,
     brief,
     ticket_snapshot,
     slack_thread_ref: slackThreadRef,

@@ -28,7 +28,7 @@ function quayConfigBlock(opts: {
   authors?: { name: string; slack_id: string }[];
 } = {}): string {
   const authors = opts.authors ?? [{ name: "Alice", slack_id: "U001" }];
-  const lines: string[] = [`${FENCE}quay-config`, "tags:", "  - test"];
+  const lines: string[] = [`${FENCE}quay-config`, "repo: test-repo", "tags:", "  - test"];
   if (opts.slack_thread !== null && opts.slack_thread !== undefined) {
     lines.push(`slack_thread: ${opts.slack_thread}`);
   }

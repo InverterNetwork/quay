@@ -323,10 +323,9 @@ function handleEnqueueLinearIssueFlow(
       );
     }
   }
+  // --repo is optional on the --linear-issue path; when absent the target repo
+  // is read from the ticket's validated `repo` field. An explicit --repo wins.
   const repoId = readFlag(argv, "--repo");
-  if (repoId === null) {
-    return writeError(io, "usage_error", "enqueue requires --repo <id>");
-  }
   const cliTags = collectFlagValues(argv, "--tag");
   if (
     deps.linear === undefined ||
