@@ -7,13 +7,64 @@ Bun + TypeScript implementation of the Quay task lifecycle service.
 - Linear/Slack adapters: [`docs/quay-spec-deployment-adapters.md`](docs/quay-spec-deployment-adapters.md)
 - Build order: [`docs/quay-tdd-implementation-plan.md`](docs/quay-tdd-implementation-plan.md)
 
-## Quick start
+## Install
+
+Quay ships as a single, statically-compiled Bun binary. No runtime is
+required on the target host — `bun build --compile` bundles the
+TypeScript source, all migration SQL, and the shipped default
+`ticket_schema.toml` into one executable.
 
 ```bash
+# Build locally from a checkout (requires Bun ≥ 1.1):
 bun install
+bun run build         # → dist/quay (~58 MB)
+./dist/quay --version # → e.g. 0.1.0+abcdef1
+```
+
+Released binaries are intended to be downloaded from the GitHub
+releases page and dropped on `$PATH`:
+
+```bash
+# Once a release is published:
+curl -sL https://github.com/lafawnduh1966/quay/releases/download/v0.1.0/quay-darwin-arm64 \
+  -o /usr/local/bin/quay
+chmod +x /usr/local/bin/quay
+quay --version
+```
+
+First invocation creates `~/.quay/` (or `$QUAY_DATA_DIR`) and applies
+the embedded migrations. Migrations are idempotent; re-running `quay`
+is safe.
+
+### Upgrading
+
+`quay tick` holds a supervisor lock at `${data_dir}/tick.lock` for the
+duration of each pass (per `docs/quay-spec.md` §11). To roll a new
+binary forward:
+
+1. Stop the tick driver (cron entry, systemd timer, or whatever
+   schedules `quay tick`).
+2. Replace the binary at its install path.
+3. Re-enable the driver. The next tick picks up the new version; the
+   supervisor lock guarantees no overlap with an in-flight pass.
+
+The binary embeds its build version (`quay --version` returns
+`<package version>+<git short SHA>`) so an operator on a remote box
+can confirm what's deployed.
+
+### Building from source for development
+
+```bash
+bun install            # also runs scripts/embed.ts (prepare hook)
 bun test
 bun run typecheck
+bun run quay -- --help # invoke the CLI from TS source
 ```
+
+`scripts/embed.ts` regenerates `src/build/embedded.generated.ts` (the
+in-binary copy of migrations + shipped schema + version stamp). The
+generated file is gitignored; `bun install` and `bun run build` both
+regenerate it.
 
 ## Bootstrapping a repo
 

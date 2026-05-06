@@ -2,17 +2,33 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DB } from "./connection.ts";
 
-export function runMigrations(db: DB, migrationsDir: string): string[] {
+export interface Migration {
+  name: string;
+  sql: string;
+}
+
+// Read migrations from a directory, sorted by filename. Used by tests and
+// the dev path; the production CLI ships a baked-in list via embed.ts.
+export function loadMigrationsFromDir(migrationsDir: string): Migration[] {
+  const files = readdirSync(migrationsDir)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+  return files.map((name) => ({
+    name,
+    sql: readFileSync(join(migrationsDir, name), "utf8"),
+  }));
+}
+
+export function runMigrations(
+  db: DB,
+  migrations: readonly Migration[],
+): string[] {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       name TEXT PRIMARY KEY,
       applied_at TEXT NOT NULL
     );
   `);
-
-  const files = readdirSync(migrationsDir)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
 
   const applied = new Set<string>(
     db
@@ -23,14 +39,13 @@ export function runMigrations(db: DB, migrationsDir: string): string[] {
 
   const newlyApplied: string[] = [];
 
-  for (const file of files) {
-    if (applied.has(file)) continue;
-    const sql = readFileSync(join(migrationsDir, file), "utf8");
+  for (const { name, sql } of migrations) {
+    if (applied.has(name)) continue;
     db.exec("BEGIN");
     try {
       db.exec(sql);
       db.query("INSERT INTO schema_migrations(name, applied_at) VALUES (?, ?)").run(
-        file,
+        name,
         new Date().toISOString(),
       );
       db.exec("COMMIT");
@@ -38,7 +53,7 @@ export function runMigrations(db: DB, migrationsDir: string): string[] {
       db.exec("ROLLBACK");
       throw err;
     }
-    newlyApplied.push(file);
+    newlyApplied.push(name);
   }
 
   return newlyApplied;
