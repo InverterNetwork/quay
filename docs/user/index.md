@@ -15,6 +15,8 @@ verify against the CLI implementation and tests, then fix the docs.
 - [Installation](installation.md): build and install the binary.
 - [Configuration](configuration.md): `config.toml`, data directories, defaults,
   and adapter settings.
+- [External Services Setup](external-services.md): GitHub, Slack, Linear,
+  worker credentials, and scheduler environment setup.
 - [Repositories](repositories.md): register repos and materialize bare clones.
 - [Enqueueing Tasks](enqueueing-tasks.md): manual briefs and Linear-backed
   enqueue.

@@ -38,6 +38,9 @@ to external tools depending on the workflow:
 - The configured worker command: default is `claude --permission-mode bypassPermissions < {prompt_file}`.
 - Any command used by a repo's `install_cmd`.
 
+For GitHub, Slack, Linear, worker credential, and scheduler environment setup,
+see [External Services Setup](external-services.md).
+
 `quay --version` and `quay validate-ticket` short-circuit before database,
 config, and migration setup.
 

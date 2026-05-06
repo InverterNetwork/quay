@@ -2,6 +2,9 @@
 
 Linear and Slack integrations are opt-in deployment adapters.
 
+For complete token, scope, channel membership, and scheduler environment setup,
+see [External Services Setup](external-services.md).
+
 ## Configuration
 
 ```toml

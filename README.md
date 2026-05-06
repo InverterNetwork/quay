@@ -8,6 +8,7 @@ Start with the user-facing docs:
 
 - User docs index: [`docs/user/index.md`](docs/user/index.md)
 - Quickstart: [`docs/user/quickstart.md`](docs/user/quickstart.md)
+- External services setup: [`docs/user/external-services.md`](docs/user/external-services.md)
 - CLI reference: [`docs/user/cli-reference.md`](docs/user/cli-reference.md)
 - Troubleshooting: [`docs/user/troubleshooting.md`](docs/user/troubleshooting.md)
 
