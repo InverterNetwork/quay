@@ -13,6 +13,7 @@ import {
   stripQuayConfigBlock,
   type QuayConfigBlock,
 } from "./quay_config_block.ts";
+import { normalizeTags } from "./tag_normalize.ts";
 import type {
   LinearComment,
   LinearIssue,
@@ -188,7 +189,7 @@ export function fetchTicketContextWithIssue(
     brief,
     ticket_snapshot,
     slack_thread_ref: slackThreadRef,
-    tags: block.tags,
+    tags: normalizeTags(block.tags),
     authors: block.authors,
   };
   return { ctx, issue };

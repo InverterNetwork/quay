@@ -8,6 +8,7 @@
 // nothing to roll back because nothing was started.
 
 import { enqueue, type EnqueueDeps, type EnqueueResult } from "../core/enqueue.ts";
+import { mergeNormalizedTags } from "../core/tag_normalize.ts";
 import { fetchTicketContextWithIssue } from "../core/ticket_context.ts";
 import type { ValidatorRunner } from "../core/validator_runner.ts";
 import type { LinearIssue, LinearPort } from "../ports/linear.ts";
@@ -69,7 +70,14 @@ export function handleEnqueueLinearIssue(
     return emitError(io, err);
   }
 
-  const validatorPayload = buildValidatorPayload(ctx, issue);
+  // Block tags are already normalised inside `fetchTicketContextWithIssue`;
+  // merge in the CLI `--tag` values (lower-cased + deduped against the block
+  // set, first occurrence wins) and route the merged set through the
+  // validator. Without this, an operator typo like `--tag CamelCase` would
+  // bypass the schema's charset rule and land in `tasks` raw.
+  const mergedTags = mergeNormalizedTags(ctx.tags, args.cliTags);
+
+  const validatorPayload = buildValidatorPayload(ctx, issue, mergedTags);
 
   let validation;
   try {
@@ -87,7 +95,6 @@ export function handleEnqueueLinearIssue(
     return { exitCode: 1 };
   }
 
-  const mergedTags = unionTags(ctx.tags, args.cliTags);
   const authorsJson = serializeAuthors(ctx.authors);
 
   let result: EnqueueResult;
@@ -128,17 +135,20 @@ export function handleEnqueueLinearIssue(
 }
 
 // Spec §11 mapping: explicit. `body` is the raw Linear ticket body (block
-// intact, NOT the composed brief). `tags`/`authors`/`external_ref` pass
-// through 1:1. `slack_thread` is OMITTED entirely when the ref is null —
-// not passed as `null` — because the validator's schema declares it
-// `[optional]` and absence is the canonical "no thread" signal.
+// intact, NOT the composed brief). `tags` is the normalised union of
+// block + CLI `--tag` values so charset/count rules apply uniformly to
+// everything that lands in the task. `slack_thread` is OMITTED entirely
+// when the ref is null — not passed as `null` — because the validator's
+// schema declares it `[optional]` and absence is the canonical "no thread"
+// signal.
 export function buildValidatorPayload(
   ctx: TicketContext,
   issue: LinearIssue,
+  mergedTags: string[],
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     body: issue.body,
-    tags: ctx.tags,
+    tags: mergedTags,
     authors: ctx.authors,
     external_ref: ctx.external_ref,
   };
@@ -146,17 +156,6 @@ export function buildValidatorPayload(
     payload.slack_thread = ctx.slack_thread_ref;
   }
   return payload;
-}
-
-export function unionTags(blockTags: string[], cliTags: string[]): string[] {
-  const seen = new Set<string>();
-  const merged: string[] = [];
-  for (const t of [...blockTags, ...cliTags]) {
-    if (seen.has(t)) continue;
-    seen.add(t);
-    merged.push(t);
-  }
-  return merged;
 }
 
 function serializeAuthors(authors: TicketAuthor[]): string {

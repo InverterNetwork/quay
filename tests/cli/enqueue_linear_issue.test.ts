@@ -283,6 +283,93 @@ test("test_enqueue_linear_issue_combines_with_cli_tags", async () => {
   expect(tags.map((r) => r.tag)).toEqual(["auth-session", "cache", "urgent"]);
 });
 
+test("test_enqueue_linear_issue_normalizes_block_and_cli_tag_case", async () => {
+  // Block tags `Auth-Session` / CLI tag `URGENT` must converge to the
+  // canonical lower-case set the validator and the `tasks` table expect.
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      block: {
+        tags: ["Auth-Session", "Cache"],
+        slack_thread: null,
+        authors: [{ name: "F", slack_id: "U001ABCDE" }],
+      },
+    }),
+  );
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      REPO_ID,
+      "--linear-issue",
+      "ENG-1276",
+      "--tag",
+      "URGENT",
+      "--tag",
+      "CACHE",
+    ],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(0);
+  const enqResult = JSON.parse(io.out().trim());
+
+  const tags = h.db
+    .query<{ tag: string }, [string]>(
+      `SELECT tag FROM task_tags WHERE task_id = ? ORDER BY tag`,
+    )
+    .all(enqResult.task_id);
+  expect(tags.map((r) => r.tag)).toEqual(["auth-session", "cache", "urgent"]);
+});
+
+test("test_enqueue_linear_issue_forwards_merged_tags_to_validator", async () => {
+  // Block + CLI tags must reach the validator as one merged, lower-cased,
+  // exact-deduped list — so the schema's charset/count rules apply
+  // uniformly to everything that ends up persisted, not just the block.
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      block: {
+        tags: ["Auth-Session", "cache"],
+        slack_thread: null,
+        authors: [{ name: "F", slack_id: "U001ABCDE" }],
+      },
+    }),
+  );
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      REPO_ID,
+      "--linear-issue",
+      "ENG-1276",
+      "--tag",
+      "URGENT",
+      "--tag",
+      "Cache",
+    ],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(0);
+
+  expect(built.validatorRunner.runCalls).toHaveLength(1);
+  const sent = built.validatorRunner.runCalls[0]!.payload as {
+    tags: string[];
+  };
+  expect(sent.tags).toEqual(["auth-session", "cache", "urgent"]);
+});
+
 test("test_enqueue_linear_issue_idempotent_on_external_ref", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
