@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isValidGitRef } from "../../../src/core/branch_slug.ts";
 import type { GitPort } from "../../../src/ports/git.ts";
@@ -42,7 +42,10 @@ export class FakeGit implements GitPort {
   }
 
   bareCloneExists(repoId: string): boolean {
-    return this.bareClones.has(repoId);
+    // Mirror the real adapter: both the in-memory record AND a HEAD file must
+    // exist. This ensures an empty directory at the expected path routes through
+    // the bare_clone_missing error path, matching production behavior.
+    return this.bareClones.has(repoId) && existsSync(join(this.bareDir(repoId), "HEAD"));
   }
 
   fetch(repoId: string, ref: string): void {
@@ -168,7 +171,11 @@ export class FakeGit implements GitPort {
     this.openPrBranches.set(repoId, new Set(branches));
   }
   seedBareClone(repoId: string): void {
-    mkdirSync(this.bareDir(repoId), { recursive: true });
+    const dir = this.bareDir(repoId);
+    mkdirSync(dir, { recursive: true });
+    // Touch a HEAD file to mirror the real adapter's tightened bareCloneExists
+    // check: an empty directory at the path is not a valid bare clone.
+    writeFileSync(join(dir, "HEAD"), "ref: refs/heads/main\n");
     this.bareClones.add(repoId);
   }
   countCalls(op: string): number {

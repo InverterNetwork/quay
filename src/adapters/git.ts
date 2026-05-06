@@ -26,7 +26,8 @@ export class LocalGitAdapter implements GitPort {
   }
 
   bareCloneExists(repoId: string): boolean {
-    return existsSync(this.bareDir(repoId));
+    const dir = this.bareDir(repoId);
+    return existsSync(dir) && existsSync(join(dir, "HEAD"));
   }
 
   fetch(repoId: string, ref: string): void {
