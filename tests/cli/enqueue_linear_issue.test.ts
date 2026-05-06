@@ -48,18 +48,20 @@ const SLACK_URL = "https://inverter.slack.com/archives/C0123ABC/p170000012300000
 const SLACK_THREAD_REF = "C0123ABC:1700000123.000001";
 
 interface BlockOpts {
+  repo?: string;
   tags?: string[];
   slack_thread?: string | null;
   authors?: { name: string; slack_id: string }[];
 }
 
 function quayConfigBlock(opts: BlockOpts = {}): string {
+  const repo = opts.repo ?? REPO_ID;
   const tags = opts.tags ?? ["auth-session", "cache"];
   const authors = opts.authors ?? [
     { name: "Fabian Scherer", slack_id: "U06TDC56VJB" },
     { name: "Marvin Gross", slack_id: "U07ABCDEFGH" },
   ];
-  const lines: string[] = [`${FENCE}quay-config`, "tags:"];
+  const lines: string[] = [`${FENCE}quay-config`, `repo: ${repo}`, "tags:"];
   for (const t of tags) lines.push(`  - ${t}`);
   if (opts.slack_thread !== null && opts.slack_thread !== undefined) {
     lines.push(`slack_thread: ${opts.slack_thread}`);
@@ -659,6 +661,132 @@ test("test_enqueue_linear_issue_fails_when_ticket_has_no_quay_config_block", asy
   // Validator was not invoked (the block parser fails first).
   expect(built.validatorRunner.runCalls).toEqual([]);
   // No DB writes.
+  const tasks = h.db
+    .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM tasks`)
+    .get();
+  expect(tasks?.n).toBe(0);
+});
+
+test("test_enqueue_linear_issue_uses_ticket_repo_when_no_cli_repo", async () => {
+  // When --repo is omitted, the ticket's `repo` field drives enqueue.
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built); // registers REPO_ID
+
+  built.linear.setIssue(
+    makeIssue({
+      block: {
+        repo: REPO_ID, // ticket carries the repo
+        tags: ["auth-session"],
+        slack_thread: null,
+        authors: [{ name: "Fabian Scherer", slack_id: "U06TDC56VJB" }],
+      },
+    }),
+  );
+
+  const io = bufferIO();
+  // No --repo flag; the adapter must read it from the ticket.
+  const result = await dispatch(
+    ["enqueue", "--linear-issue", "ENG-1276"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const enqResult = JSON.parse(io.out().trim());
+  expect(enqResult.state).toBe("queued");
+
+  // The task must have landed under REPO_ID (the ticket-supplied repo).
+  const taskRow = h.db
+    .query<{ repo_id: string }, [string]>(
+      `SELECT repo_id FROM tasks WHERE task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(taskRow?.repo_id).toBe(REPO_ID);
+});
+
+test("test_enqueue_linear_issue_explicit_repo_overrides_ticket_repo", async () => {
+  // Explicit --repo wins over the ticket's repo field.
+  const OVERRIDE_REPO = "override-repo";
+  h = createHarness();
+  const built = buildCliDeps(h);
+  // Register both repos.
+  await addRepo(built); // REPO_ID
+  await dispatch(
+    [
+      "repo", "add",
+      "--id", OVERRIDE_REPO,
+      "--url", "git@example.com:owner/override.git",
+      "--base-branch", "main",
+      "--package-manager", "bun",
+      "--install-cmd", "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.git.seedBareClone(OVERRIDE_REPO);
+
+  built.linear.setIssue(
+    makeIssue({
+      block: {
+        repo: REPO_ID, // ticket says REPO_ID
+        tags: ["foo"],
+        slack_thread: null,
+        authors: [{ name: "F", slack_id: "U001ABCDE" }],
+      },
+    }),
+  );
+
+  const io = bufferIO();
+  // Explicit --repo overrides the ticket value.
+  const result = await dispatch(
+    ["enqueue", "--repo", OVERRIDE_REPO, "--linear-issue", "ENG-1276"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const enqResult = JSON.parse(io.out().trim());
+  const taskRow = h.db
+    .query<{ repo_id: string }, [string]>(
+      `SELECT repo_id FROM tasks WHERE task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(taskRow?.repo_id).toBe(OVERRIDE_REPO);
+});
+
+test("test_enqueue_linear_issue_ticket_missing_repo_fails_via_validator", async () => {
+  // When the ticket's quay-config block is missing `repo`, the block parser
+  // throws ticket_block_invalid before the validator is invoked.
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  // Build a block without `repo` by constructing the raw YAML manually.
+  const bodyWithoutRepo =
+    `## Context\n\nNeeds work.\n\n\`\`\`quay-config\ntags:\n  - foo\nauthors:\n  - name: F\n    slack_id: U001ABCDE\n\`\`\`\n`;
+
+  built.linear.setIssue({
+    identifier: "ENG-1276",
+    url: "https://linear.app/inverter/issue/ENG-1276",
+    title: "Missing repo",
+    body: bodyWithoutRepo,
+    comments: [],
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--linear-issue", "ENG-1276"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  // Block parser catches missing repo before the validator runs.
+  expect(err.error).toBe("ticket_block_invalid");
+  expect(built.validatorRunner.runCalls).toEqual([]);
   const tasks = h.db
     .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM tasks`)
     .get();

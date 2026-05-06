@@ -20,7 +20,8 @@ import { toCliError } from "./errors.ts";
 import type { DB } from "../db/connection.ts";
 
 export interface EnqueueLinearIssueArgs {
-  repoId: string;
+  // Explicit --repo flag value; null means "read repo from the ticket".
+  repoId: string | null;
   identifier: string;
   cliTags: string[];
 }
@@ -38,19 +39,20 @@ export function handleEnqueueLinearIssue(
   deps: EnqueueLinearIssueDeps,
   io: CliIO,
 ): DispatchResult {
-  // Idempotency check happens BEFORE any adapter call (spec §8: "Calling
-  // --linear-issue ENG-1234 twice returns the same task_id"). Cheap, and
-  // means a re-poll of an already-enqueued ticket doesn't burn Linear /
-  // Slack API quota.
+  // Idempotency check: when an explicit --repo was given we can check before
+  // fetching the ticket. When repo comes from the ticket, we defer the check
+  // until after context assembly.
   const externalRef = args.identifier.toUpperCase();
-  const existing = lookupExistingTask(
-    deps.enqueueDeps.db,
-    args.repoId,
-    externalRef,
-  );
-  if (existing !== null) {
-    io.stdout(`${JSON.stringify(existing)}\n`);
-    return { exitCode: 0 };
+  if (args.repoId !== null) {
+    const existing = lookupExistingTask(
+      deps.enqueueDeps.db,
+      args.repoId,
+      externalRef,
+    );
+    if (existing !== null) {
+      io.stdout(`${JSON.stringify(existing)}\n`);
+      return { exitCode: 0 };
+    }
   }
 
   let ctx: TicketContext;
@@ -68,6 +70,24 @@ export function handleEnqueueLinearIssue(
     issue = fetched.issue;
   } catch (err) {
     return emitError(io, err);
+  }
+
+  // Explicit --repo wins; ticket-supplied repo is the fallback.
+  // This precedence lets operators override the target for one-off runs
+  // without editing the ticket.
+  const resolvedRepoId = args.repoId ?? ctx.repo;
+
+  // Deferred idempotency check for the ticket-repo path (no --repo given).
+  if (args.repoId === null) {
+    const existing = lookupExistingTask(
+      deps.enqueueDeps.db,
+      resolvedRepoId,
+      externalRef,
+    );
+    if (existing !== null) {
+      io.stdout(`${JSON.stringify(existing)}\n`);
+      return { exitCode: 0 };
+    }
   }
 
   // Block tags are already normalised inside `fetchTicketContextWithIssue`;
@@ -100,7 +120,7 @@ export function handleEnqueueLinearIssue(
   let result: EnqueueResult;
   try {
     result = enqueue(deps.enqueueDeps, {
-      repo_id: args.repoId,
+      repo_id: resolvedRepoId,
       brief: ctx.brief,
       external_ref: ctx.external_ref,
       ticket_snapshot: ctx.ticket_snapshot,
@@ -119,7 +139,7 @@ export function handleEnqueueLinearIssue(
     if (isUniqueConstraintError(err) && ctx.external_ref !== null) {
       const recovered = lookupExistingTask(
         deps.enqueueDeps.db,
-        args.repoId,
+        resolvedRepoId,
         ctx.external_ref,
       );
       if (recovered !== null) {
@@ -148,6 +168,7 @@ export function buildValidatorPayload(
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     body: issue.body,
+    repo: ctx.repo,
     tags: mergedTags,
     authors: ctx.authors,
     external_ref: ctx.external_ref,

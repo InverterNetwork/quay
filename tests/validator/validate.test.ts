@@ -51,6 +51,7 @@ function shippedDefaultEnv(): { QUAY_CONFIG_DIR: string } {
 const VALID_DRAFT = {
   body:
     "Refactor the auth-session cache to evict entries when a user logs out. Context: stale entries persist for 30 minutes after revocation.",
+  repo: "my-repo",
   tags: ["auth-session", "cache"],
   authors: [{ name: "Fabian Scherer", slack_id: "U06TDC56VJB" }],
 };
@@ -485,6 +486,7 @@ test("test_validate_ticket_hermes_first_draft_missing_tags_fails", () => {
   const firstDraft = {
     body:
       "Refactor the auth-session cache to evict entries when a user logs out.\n\nContext: the cache currently retains entries for 30 minutes regardless of session lifecycle, which means revoked sessions can still grant access until the entry expires naturally.",
+    repo: "my-repo",
     tags: [],
     slack_thread: "C0AEN8KDRT2:1777622349.373109",
     authors: [{ name: "Fabian Scherer", slack_id: "U06TDC56VJB" }],
@@ -521,11 +523,49 @@ test("shipped default schema parses and matches §6 field set", () => {
   );
   const schema = loadSchema(repoConfig);
   expect(Object.keys(schema.required).sort()).toEqual(
-    ["authors", "body", "tags"],
+    ["authors", "body", "repo", "tags"],
   );
   expect(Object.keys(schema.optional).sort()).toEqual(
     ["external_ref", "slack_thread"],
   );
+});
+
+test("test_validate_ticket_repo_missing_emits_missing_error", () => {
+  // repo is a required field; omitting it must produce a MISSING error on
+  // field "repo". This is the canonical repo_missing signal.
+  const { repo: _omitted, ...withoutRepo } = VALID_DRAFT;
+  const { io, run } = pipeJson(withoutRepo);
+  const result = run();
+  expect(result.exitCode).toBe(1);
+  const out = JSON.parse(io.out().trim());
+  expect(out.valid).toBe(false);
+  const missing = out.errors.filter(
+    (e: { field: string; code: string }) =>
+      e.field === "repo" && e.code === "MISSING",
+  );
+  expect(missing).toHaveLength(1);
+});
+
+test("test_validate_ticket_repo_charset_violation_emits_charset_error", () => {
+  // repo must satisfy lowercase_alphanum_dash. Uppercase or spaces must fail.
+  const { io, run } = pipeJson({ ...VALID_DRAFT, repo: "My_Repo" });
+  const result = run();
+  expect(result.exitCode).toBe(1);
+  const out = JSON.parse(io.out().trim());
+  expect(out.valid).toBe(false);
+  const charsetErr = out.errors.find(
+    (e: { field: string; code: string }) =>
+      e.field === "repo" && e.code === "CHARSET",
+  );
+  expect(charsetErr).toBeDefined();
+});
+
+test("test_validate_ticket_repo_present_and_valid_passes", () => {
+  // VALID_DRAFT already includes repo; confirm the happy path is intact.
+  const { io, run } = pipeJson(VALID_DRAFT);
+  const result = run();
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(io.out().trim())).toEqual({ valid: true });
 });
 
 // silence "unused" complaints for helpers used only conditionally

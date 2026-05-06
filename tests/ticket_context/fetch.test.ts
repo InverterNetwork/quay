@@ -21,17 +21,19 @@ import { FakeSlack } from "../support/fakes/slack.ts";
 const FENCE = "```";
 
 interface BlockOpts {
+  repo?: string;
   tags?: string[];
   slack_thread?: string | null;
   authors?: { name: string; slack_id: string }[];
 }
 
 function quayConfigBlock(opts: BlockOpts = {}): string {
+  const repo = opts.repo ?? "test-repo";
   const tags = opts.tags ?? ["auth-session", "cache"];
   const authors = opts.authors ?? [
     { name: "Fabian Scherer", slack_id: "U06TDC56VJB" },
   ];
-  const lines: string[] = [`${FENCE}quay-config`, "tags:"];
+  const lines: string[] = [`${FENCE}quay-config`, `repo: ${repo}`, "tags:"];
   for (const t of tags) lines.push(`  - ${t}`);
   if (opts.slack_thread !== null && opts.slack_thread !== undefined) {
     lines.push(`slack_thread: ${opts.slack_thread}`);

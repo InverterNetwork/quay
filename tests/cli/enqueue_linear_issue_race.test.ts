@@ -33,6 +33,7 @@ const FENCE = "```";
 function makeIssue(identifier: string): LinearIssue {
   const blockText = [
     `${FENCE}quay-config`,
+    `repo: ${REPO_ID}`,
     "tags:",
     "  - race-test",
     "authors:",

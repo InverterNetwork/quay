@@ -35,6 +35,7 @@ test("test_quay_config_block_parses_tags_and_slack_thread", () => {
 
 ${block(
   [
+    "repo: test-repo",
     "tags:",
     "  - auth-session",
     "  - cache",
@@ -49,6 +50,7 @@ Trailing prose.`;
 
   const parsed = parseQuayConfigBlock(body);
   expect(parsed).not.toBeNull();
+  expect(parsed!.repo).toBe("test-repo");
   expect(parsed!.tags).toEqual(["auth-session", "cache"]);
   expect(parsed!.slack_thread_ref).toBe("C0123ABC:1700000123.000001");
   expect(parsed!.authors).toEqual([
@@ -86,6 +88,7 @@ test("test_quay_config_block_errors_on_unknown_required_field_type", () => {
   // and is the simpler case to construct in YAML.
   const body = block(
     [
+      "repo: test-repo",
       "tags: just-a-string",
       "authors:",
       "  - name: A",
@@ -100,6 +103,7 @@ test("test_quay_config_block_ignores_unknown_keys", () => {
   // it without complaining and ignore the value.
   const body = block(
     [
+      "repo: test-repo",
       "preamble_override: some-future-thing",
       "tags:",
       "  - foo",
@@ -110,17 +114,19 @@ test("test_quay_config_block_ignores_unknown_keys", () => {
   );
   const parsed = parseQuayConfigBlock(body);
   expect(parsed).not.toBeNull();
+  expect(parsed!.repo).toBe("test-repo");
   expect(parsed!.tags).toEqual(["foo"]);
   expect(parsed!.authors).toEqual([{ name: "A", slack_id: "U001" }]);
   // The block type does not surface unknown keys.
   expect(Object.keys(parsed!).sort()).toEqual(
-    ["authors", "slack_thread_ref", "tags"].sort(),
+    ["authors", "repo", "slack_thread_ref", "tags"].sort(),
   );
 });
 
 test("test_quay_config_block_decodes_slack_p_format_correctly", () => {
   const body = block(
     [
+      "repo: test-repo",
       "tags:",
       "  - foo",
       "slack_thread: https://inverter.slack.com/archives/C0123ABC/p1700000123000001",
@@ -136,6 +142,7 @@ test("test_quay_config_block_decodes_slack_p_format_correctly", () => {
 test("test_quay_config_block_errors_on_malformed_slack_url", () => {
   const body = block(
     [
+      "repo: test-repo",
       "tags:",
       "  - foo",
       "slack_thread: https://example.com/not-slack",
@@ -150,6 +157,7 @@ test("test_quay_config_block_errors_on_malformed_slack_url", () => {
 
 test("test_quay_config_block_rejects_duplicate_blocks", () => {
   const inner = [
+    "repo: test-repo",
     "tags:",
     "  - foo",
     "authors:",
@@ -168,6 +176,7 @@ Some context text.
 
 ${block(
   [
+    "repo: test-repo",
     "tags:",
     "  - foo",
     "authors:",
@@ -192,6 +201,7 @@ ${block(
 test("test_quay_config_block_parses_authors_in_order", () => {
   const body = block(
     [
+      "repo: test-repo",
       "tags:",
       "  - foo",
       "authors:",
@@ -214,6 +224,7 @@ test("test_quay_config_block_parses_authors_in_order", () => {
 test("test_quay_config_block_errors_on_empty_authors", () => {
   const body = block(
     [
+      "repo: test-repo",
       "tags:",
       "  - foo",
       "authors: []",
@@ -225,6 +236,7 @@ test("test_quay_config_block_errors_on_empty_authors", () => {
 test("test_quay_config_block_errors_on_malformed_slack_id", () => {
   const body = block(
     [
+      "repo: test-repo",
       "tags:",
       "  - foo",
       "authors:",
@@ -239,6 +251,7 @@ test("test_quay_config_block_errors_on_malformed_slack_id", () => {
 test("test_quay_config_block_errors_on_missing_authors", () => {
   const body = block(
     [
+      "repo: test-repo",
       "tags:",
       "  - foo",
       "slack_thread: https://inverter.slack.com/archives/C0123ABC/p1700000123000001",
@@ -252,6 +265,7 @@ test("test_quay_config_block_parses_crlf_body", () => {
   // equivalent LF body — the fence regexes must not be silently bypassed.
   const lfBody = block(
     [
+      "repo: test-repo",
       "tags:",
       "  - auth-session",
       "authors:",
@@ -262,6 +276,7 @@ test("test_quay_config_block_parses_crlf_body", () => {
   const crlfBody = lfBody.replace(/\n/g, "\r\n");
   const parsed = parseQuayConfigBlock(crlfBody);
   expect(parsed).not.toBeNull();
+  expect(parsed!.repo).toBe("test-repo");
   expect(parsed!.tags).toEqual(["auth-session"]);
   expect(parsed!.authors).toEqual([
     { name: "Fabian Scherer", slack_id: "U06TDC56VJB" },
@@ -270,7 +285,7 @@ test("test_quay_config_block_parses_crlf_body", () => {
 
 test("test_quay_config_block_errors_on_unterminated_fence", () => {
   // An opening fence with no matching closing fence is invalid, not absent.
-  const body = "```quay-config\ntags:\n  - foo\nauthors:\n  - name: A\n    slack_id: U001\n";
+  const body = "```quay-config\nrepo: test-repo\ntags:\n  - foo\nauthors:\n  - name: A\n    slack_id: U001\n";
   const err = expectBlockInvalid(() => parseQuayConfigBlock(body));
   expect(err.details?.detail).toMatch(/unterminated fence/);
 });
@@ -279,13 +294,14 @@ test("test_quay_config_block_errors_on_valid_block_followed_by_unterminated_fenc
   // A correctly closed block followed by an unterminated opener must also
   // error — the unterminated opener is invalid, so the body as a whole is.
   const inner = [
+    "repo: test-repo",
     "tags:",
     "  - foo",
     "authors:",
     "  - name: A",
     "    slack_id: U001",
   ].join("\n");
-  const body = `${block(inner)}\n\nSome prose.\n\n\`\`\`quay-config\ntags:\n  - bar\n`;
+  const body = `${block(inner)}\n\nSome prose.\n\n\`\`\`quay-config\nrepo: test-repo\ntags:\n  - bar\n`;
   const err = expectBlockInvalid(() => parseQuayConfigBlock(body));
   expect(err.details?.detail).toMatch(/unterminated fence/);
 });
@@ -294,6 +310,7 @@ test("test_quay_config_block_parses_bare_cr_body", () => {
   // Bodies with lone CR line endings (classic Mac) must also parse correctly.
   const lfBody = block(
     [
+      "repo: test-repo",
       "tags:",
       "  - foo",
       "authors:",
@@ -304,5 +321,6 @@ test("test_quay_config_block_parses_bare_cr_body", () => {
   const crBody = lfBody.replace(/\n/g, "\r");
   const parsed = parseQuayConfigBlock(crBody);
   expect(parsed).not.toBeNull();
+  expect(parsed!.repo).toBe("test-repo");
   expect(parsed!.tags).toEqual(["foo"]);
 });
