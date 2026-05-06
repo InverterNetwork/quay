@@ -43,7 +43,7 @@ async function main(): Promise<number> {
   // `quay --version` and `-v` MUST short-circuit before any DB / config /
   // migration work: the version stamp is meaningful even on a host where
   // ~/.quay/config.toml is malformed, the data dir is unwritable, or the
-  // box has never been initialised. AST-77 calls this out as an AC.
+  // box has never been initialised.
   if (argv[0] === "--version" || argv[0] === "-v") {
     process.stdout.write(`${QUAY_VERSION}\n`);
     return 0;

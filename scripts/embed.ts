@@ -41,12 +41,17 @@ function readPackageVersion(): string {
 
 function readGitSha(): string {
   try {
-    const out = execFileSync("git", ["rev-parse", "--short=7", "HEAD"], {
+    const sha = execFileSync("git", ["rev-parse", "--short=7", "HEAD"], {
       cwd: REPO_ROOT,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-    });
-    return out.trim();
+    }).trim();
+    const dirty = execFileSync("git", ["status", "--porcelain"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return dirty.length > 0 ? `${sha}+dirty` : sha;
   } catch {
     return "unknown";
   }

@@ -45,7 +45,6 @@ import type { SupervisorLock } from "../core/supervisor_lock.ts";
 import { toCliError, serviceErrorToCli } from "./errors.ts";
 import { getTask, listTasks } from "./format.ts";
 import type { CliIO } from "./io.ts";
-import { handleValidateTicket } from "./validate_ticket.ts";
 
 export interface CliPaths {
   reposRoot: string;
@@ -88,7 +87,6 @@ export async function dispatch(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
-  env: NodeJS.ProcessEnv = process.env,
 ): Promise<DispatchResult> {
   if (argv.length === 0) {
     return writeError(io, "usage_error", "no command provided", { argv });
@@ -113,8 +111,6 @@ export async function dispatch(
         return handleEscalateHuman(rest, deps, io);
       case "artifact":
         return handleArtifact(rest, deps, io);
-      case "validate-ticket":
-        return handleValidateTicket(rest, io, env);
       default:
         return writeError(io, "usage_error", `unknown command: ${head}`, {
           command: head,

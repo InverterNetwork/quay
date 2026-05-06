@@ -18,14 +18,14 @@ TypeScript source, all migration SQL, and the shipped default
 # Build locally from a checkout (requires Bun ≥ 1.1):
 bun install
 bun run build         # → dist/quay (~58 MB)
-./dist/quay --version # → e.g. 0.1.0+abcdef1
+./dist/quay --version # → e.g. 0.1.0+abcdef1 (or 0.1.0+abcdef1+dirty on an unclean tree)
 ```
 
-Released binaries are intended to be downloaded from the GitHub
-releases page and dropped on `$PATH`:
+### Future: download from GitHub releases
+
+> **Coming soon (release pipeline pending):** The snippet below 404s today — no binary has been published yet. Use the build-from-source path above until a release is cut.
 
 ```bash
-# Once a release is published:
 curl -sL https://github.com/lafawnduh1966/quay/releases/download/v0.1.0/quay-darwin-arm64 \
   -o /usr/local/bin/quay
 chmod +x /usr/local/bin/quay
@@ -49,8 +49,9 @@ binary forward:
    supervisor lock guarantees no overlap with an in-flight pass.
 
 The binary embeds its build version (`quay --version` returns
-`<package version>+<git short SHA>`) so an operator on a remote box
-can confirm what's deployed.
+`<package version>+<git short SHA>`, or `+<sha>+dirty` if built from
+an unclean tree) so an operator on a remote box can confirm what's
+deployed.
 
 ### Building from source for development
 
