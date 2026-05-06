@@ -136,7 +136,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       const expectedPath = join(deps.paths.reposRoot, `${repo.repo_id}.git`);
       throw new QuayError(
         "bare_clone_missing",
-        `bare clone for repo "${repo.repo_id}" not found at ${expectedPath}; materialize it before enqueuing (e.g. \`git clone --bare ${repo.repo_url} ${expectedPath} && git -C ${expectedPath} config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'\`)`,
+        `bare clone for repo "${repo.repo_id}" not found at ${expectedPath}; materialize it before enqueuing (e.g. \`git clone --bare ${repo.repo_url} ${expectedPath}\`)`,
         { repo_id: repo.repo_id, expected_path: expectedPath, repo_url: repo.repo_url },
       );
     }

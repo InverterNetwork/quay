@@ -30,11 +30,21 @@ export class LocalGitAdapter implements GitPort {
   }
 
   fetch(repoId: string, ref: string): void {
+    // Use an explicit `<src>:<dst>` refspec so this works regardless of
+    // whether `remote.origin.fetch` is configured on the bare clone. A
+    // vanilla `git clone --bare` does NOT set that config by default, so
+    // `git fetch origin <ref>` would only update FETCH_HEAD and never
+    // populate `refs/remotes/origin/<ref>` — which the worktree-add path
+    // needs. The explicit form bypasses the config entirely. The leading
+    // `+` allows non-fast-forward updates to the remote-tracking ref, the
+    // same semantics the canonical `+refs/heads/*:refs/remotes/origin/*`
+    // refspec would provide.
+    const refspec = `+${ref}:refs/remotes/origin/${ref}`;
     const result = runIn(this.bareDir(repoId), [
       "git",
       "fetch",
       "origin",
-      ref,
+      refspec,
     ]);
     if (result.exitCode !== 0) {
       throw new Error(
@@ -45,17 +55,21 @@ export class LocalGitAdapter implements GitPort {
 
   fetchBranchIfExists(repoId: string, branch: string): void {
     // Tolerant counterpart of `fetch` for refs that may not yet exist on
-    // origin. Git's normal stderr for that case is "couldn't find remote
-    // ref refs/heads/<branch>"; we match the stable substring and treat as
-    // a no-op so the caller's downstream `remoteHeadSha` returns null and
+    // origin. Git's stderr for that case is "couldn't find remote ref
+    // refs/heads/<branch>"; we match the stable substring and treat as a
+    // no-op so the caller's downstream `remoteHeadSha` returns null and
     // the spawn/classify flow records that as "no remote progress" rather
     // than blowing up with a tick error. Anything else (network, auth,
     // malformed args) still throws.
+    //
+    // Same explicit `<src>:<dst>` refspec as `fetch` for the same reason —
+    // works on a clone without `remote.origin.fetch` configured.
+    const refspec = `+${branch}:refs/remotes/origin/${branch}`;
     const result = runIn(this.bareDir(repoId), [
       "git",
       "fetch",
       "origin",
-      branch,
+      refspec,
     ]);
     if (result.exitCode === 0) return;
     if (result.stderr.toLowerCase().includes("couldn't find remote ref")) {
