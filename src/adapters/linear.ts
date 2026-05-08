@@ -1,13 +1,11 @@
 // Real Linear adapter. Reads issues + comments via Linear's GraphQL API.
 // Bot token is sourced from `LINEAR_API_KEY` (adapters spec §4 / §7).
 //
-// LinearPort is async: the adapter calls `fetch` directly in-process. The
-// earlier shape spawned a child Bun process and `spawnSync`-waited on it to
-// keep the port synchronous, but `process.execPath` resolves to the quay
-// binary itself in a `bun build --compile` build, so the spawn dispatched
-// `quay -e <script>` and crashed every Linear call in the shipped binary
-// (AST-85). Tests inject a synchronous in-process `transport` that returns
-// a resolved Promise; the network path is gated behind `QUAY_INTEGRATION_TESTS`
+// The adapter calls `fetch` in-process. An out-of-process spawn would not
+// survive `bun build --compile`: `process.execPath` is the compiled quay
+// binary, not bun, so spawning `process.execPath -e <script>` re-enters
+// quay's CLI dispatcher with `-e` and fails. Tests inject an in-process
+// `transport`; the network path is gated behind `QUAY_INTEGRATION_TESTS`
 // so the unit suite never needs the env var or the network.
 //
 // Failure-mode mapping (adapters spec §12):
@@ -263,11 +261,8 @@ export class LinearAdapter implements LinearPort {
   }
 }
 
-// Default transport: in-process `fetch` with an `AbortController` bounded by
-// `timeoutMs` so a stalled connection cannot wedge the supervisor's bounded
-// budget. Returns the same `{status, headers, body}` envelope shape the
-// previous spawnSync-based transport produced; tests inject a stub that
-// matches this signature and the rest of the adapter is oblivious.
+// `AbortController` bounds each request to `timeoutMs` so a stalled
+// connection cannot wedge the supervisor's bounded budget.
 function buildDefaultTransport(timeoutMs: number): LinearTransport {
   return async (req) => {
     const controller = new AbortController();
@@ -279,13 +274,10 @@ function buildDefaultTransport(timeoutMs: number): LinearTransport {
         signal: controller.signal,
       };
       if (req.method !== "GET" && req.body !== "") init.body = req.body;
-      const r = await fetch(req.url, init);
-      const text = await r.text();
-      const headers: Record<string, string> = {};
-      r.headers.forEach((v, k) => {
-        headers[k] = v;
-      });
-      return { status: r.status, headers, body: text };
+      const response = await fetch(req.url, init);
+      const body = await response.text();
+      const headers = Object.fromEntries(response.headers.entries());
+      return { status: response.status, headers, body };
     } catch (err) {
       const e = err as Error & { name?: string };
       const name = e?.name ?? "";
