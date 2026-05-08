@@ -6,12 +6,10 @@
 // pieces internally. Failures throw — tick wraps the throw in `tick_error`
 // and retries on the next cycle (spec §5).
 //
-// The adapter calls `fetch` in-process. An out-of-process spawn would not
-// survive `bun build --compile`: `process.execPath` is the compiled quay
-// binary, not bun, so spawning `process.execPath -e <script>` re-enters
-// quay's CLI dispatcher with `-e` and fails (the same bug AST-85 fixed
-// for Linear). Tests inject an in-process `transport` that returns a
-// `SlackTransportResponse` (sync or Promise — both work).
+// The transport calls `fetch` in-process. An out-of-process spawn cannot be
+// reintroduced: `process.execPath` is the compiled quay binary in
+// `bun build --compile`, so spawning `process.execPath -e <script>` re-enters
+// quay's CLI dispatcher with `-e` and fails.
 //
 // Failure-mode mapping for `fetchThreadContext` (adapters spec §7 / §17):
 //   - HTTP 200, `ok: true`           → success (paginate, truncate, return)

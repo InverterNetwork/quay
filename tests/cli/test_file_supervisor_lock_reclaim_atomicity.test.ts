@@ -364,6 +364,9 @@ test("two reclaimers serialize through the reclaim-lock — only one passes thro
   const reclaimLockPath = `${mutexPath}.reclaim-lock`;
 
   let bAttempted = false;
+  // Wrapper around the Promise so TS doesn't collapse its narrowing to
+  // `null` after the closure-only assignment below; reading via
+  // `bPromiseHolder.value` keeps the union type intact at the call site.
   const bPromiseHolder: { value: Promise<{ acquired: boolean }> | null } = {
     value: null,
   };
