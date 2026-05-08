@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_review_feedback_schedules_non_budget_respawn", () => {
+test("test_review_feedback_schedules_non_budget_respawn", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T14:00:00.000Z");
 
@@ -63,7 +63,7 @@ test("test_review_feedback_schedules_non_budget_respawn", () => {
     },
   });
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([
     { task_id: taskId, action: "review_respawn_scheduled" },
   ]);

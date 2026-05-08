@@ -18,7 +18,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_083_advice_answered_does_not_increment_non_budget_counter", () => {
+test("test_083_advice_answered_does_not_increment_non_budget_counter", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T18:00:00.000Z");
 
@@ -56,7 +56,7 @@ test("test_083_advice_answered_does_not_increment_non_budget_counter", () => {
       ],
     },
   });
-  tick_once(built.deps);
+  await tick_once(built.deps);
   const aCounter = h.db
     .query<{ n: number }, [string]>(
       `SELECT non_budget_respawns_consumed AS n FROM tasks WHERE task_id = ?`,

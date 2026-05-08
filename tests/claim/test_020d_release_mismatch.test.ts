@@ -11,7 +11,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_020d_release_claim_mismatch_is_claim_lost", () => {
+test("test_020d_release_claim_mismatch_is_claim_lost", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-release-mismatch");
@@ -29,7 +29,7 @@ test("test_020d_release_claim_mismatch_is_claim_lost", () => {
   // Tick auto-releases A's claim after timeout.
   h.clock.set("2026-04-28T11:00:00.000Z");
   const built = buildTickDeps(h);
-  tick_once(built.deps);
+  await tick_once(built.deps);
 
   // B claims and gets a fresh claim_id.
   const claimB = claim_task({ db: h.db, clock: h.clock }, { taskId });

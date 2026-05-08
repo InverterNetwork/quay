@@ -11,7 +11,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_016_claim_timeout_auto_releases", () => {
+test("test_016_claim_timeout_auto_releases", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-claim-timeout");
@@ -28,7 +28,7 @@ test("test_016_claim_timeout_auto_releases", () => {
   // Advance the clock past claim_timeout_seconds (default 1800s).
   h.clock.set("2026-04-28T11:00:00.000Z");
   const built = buildTickDeps(h);
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: taskId, action: "claim_expired" }]);
 
   const task = h.db

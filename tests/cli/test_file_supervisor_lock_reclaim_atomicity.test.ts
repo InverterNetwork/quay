@@ -41,7 +41,7 @@ function tempLockfile(): string {
   return join(dir, "tick.lock");
 }
 
-test("reclaim does not clobber a fresh mutex linked between read and unlink", () => {
+test("reclaim does not clobber a fresh mutex linked between read and unlink", async () => {
   // Simulated race: A reads the stale mutex. Before A acquires the
   // mutex, the test injects a fresh mutex at the canonical path
   // (modeling B having reclaimed and linked its own mutex). A's
@@ -103,7 +103,7 @@ test("reclaim does not clobber a fresh mutex linked between read and unlink", ()
   //       still showed dead — and the third-party fresh mutex remains
   //       at canonical untouched.
   // In NEITHER case does the fresh mutex (livePid) get unlinked.
-  lockA.tryRun(() => {});
+  await lockA.tryRun(() => {});
 
   // The decisive assertion: whatever happened, the canonical mutex path
   // either does not exist, OR contains a payload whose PID is one of
@@ -127,7 +127,7 @@ function unlinkSync(p: string): void {
   u(p);
 }
 
-test("rename-aside path: when both reclaimers see the same stale mutex, only the inode that survived the rename is unlinked", () => {
+test("rename-aside path: when both reclaimers see the same stale mutex, only the inode that survived the rename is unlinked", async () => {
   // Direct verification of the new contract: the inode the reclaimer
   // unlinks is the one it moved aside, NOT whatever happens to live at
   // the canonical mutex path at unlink time. We assert this by writing
@@ -151,14 +151,14 @@ test("rename-aside path: when both reclaimers see the same stale mutex, only the
     lockfilePath: path,
     isAlive: (pid) => pid !== stalePid, // anything else (real PID, etc.) is alive
   });
-  const result = lock.tryRun(() => {});
+  const result = await lock.tryRun(() => {});
   // The lock was acquired (stale dead → takeover succeeds).
   expect(result.acquired).toBe(true);
   // The mutex was released after tryRun; canonical path is empty.
   expect(existsSync(mutexPath)).toBe(false);
 });
 
-test("reclaim leaves a live-owner mutex in place after the rename-aside check", () => {
+test("reclaim leaves a live-owner mutex in place after the rename-aside check", async () => {
   // The mutex's recorded owner is alive: tryReclaimMutex must not
   // unlink it. With the rename-aside flow this means after the
   // reclaim attempt, the canonical mutex path still carries the live
@@ -182,7 +182,7 @@ test("reclaim leaves a live-owner mutex in place after the rename-aside check", 
     isAlive: (pid) => pid === liveOwnerPid,
     staleMutexMs: 0, // age never short-circuits in this test
   });
-  const result = lock.tryRun(() => {});
+  const result = await lock.tryRun(() => {});
   expect(result.acquired).toBe(false);
   // Mutex still names the live owner. (The reclaim moved it aside,
   // observed live, and put it back.)
@@ -191,7 +191,7 @@ test("reclaim leaves a live-owner mutex in place after the rename-aside check", 
   expect(owner.pid).toBe(liveOwnerPid);
 });
 
-test("legit-holder takeover-mutex is NEVER moved or unlinked (no empty-canonical window)", () => {
+test("legit-holder takeover-mutex is NEVER moved or unlinked (no empty-canonical window)", async () => {
   // Reviewer's specific scenario: process B legitimately holds the
   // takeover mutex. Process A's tryReclaimMutex must not even
   // briefly empty the canonical mutex path — otherwise process C can
@@ -263,7 +263,7 @@ test("legit-holder takeover-mutex is NEVER moved or unlinked (no empty-canonical
     },
   });
 
-  const result = lockA.tryRun(() => {});
+  const result = await lockA.tryRun(() => {});
   expect(result.acquired).toBe(false);
   // The legit holder's mutex was never moved aside, never unlinked,
   // never replaced with a different inode during the decision.
@@ -276,7 +276,7 @@ test("legit-holder takeover-mutex is NEVER moved or unlinked (no empty-canonical
   expect(owner.pid).toBe(liveOwnerPid);
 });
 
-test("a leaked .reclaim-lock dir fails closed: subsequent reclaim refuses, no path-based stale recovery", () => {
+test("a leaked .reclaim-lock dir fails closed: subsequent reclaim refuses, no path-based stale recovery", async () => {
   // Per the v5 protocol the reclaim-lock has NO stale auto-recovery.
   // Path-based stale recovery (`stat` + `rmdir`-by-path) would
   // re-introduce the original race the reclaim-lock was meant to
@@ -318,7 +318,7 @@ test("a leaked .reclaim-lock dir fails closed: subsequent reclaim refuses, no pa
     lockfilePath: path,
     isAlive: () => false,
   });
-  const result = lock.tryRun(() => {});
+  const result = await lock.tryRun(() => {});
   // No stale auto-recovery: the leaked reclaim-lock blocks takeover
   // until an operator removes it.
   expect(result.acquired).toBe(false);
@@ -332,11 +332,11 @@ test("a leaked .reclaim-lock dir fails closed: subsequent reclaim refuses, no pa
   // reclaim-lock and the next acquire works.
   const { rmdirSync: rmdirTest } = require("node:fs") as typeof import("node:fs");
   rmdirTest(reclaimLockPath);
-  const recovered = lock.tryRun(() => {});
+  const recovered = await lock.tryRun(() => {});
   expect(recovered.acquired).toBe(true);
 });
 
-test("two reclaimers serialize through the reclaim-lock — only one passes through the critical section at a time", () => {
+test("two reclaimers serialize through the reclaim-lock — only one passes through the critical section at a time", async () => {
   // Direct simulation of the stale-to-fresh race this test covers: A
   // enters tryReclaimMutex (reads stale), and during A's decision a
   // second process B *also* tries to reclaim. Without serialization, B
@@ -364,7 +364,9 @@ test("two reclaimers serialize through the reclaim-lock — only one passes thro
   const reclaimLockPath = `${mutexPath}.reclaim-lock`;
 
   let bAttempted = false;
-  const bAcquiredHolder: { value: boolean | null } = { value: null };
+  const bPromiseHolder: { value: Promise<{ acquired: boolean }> | null } = {
+    value: null,
+  };
   const lockA = new FileSupervisorLock({
     lockfilePath: path,
     isAlive: (pid) => {
@@ -372,6 +374,10 @@ test("two reclaimers serialize through the reclaim-lock — only one passes thro
       // observably inside the reclaim-lock critical section. This is
       // the precise window the race scenario targets: A has
       // read the stale mutex and is about to act on it.
+      //
+      // `tryRun` is async, but its file-level side effects (mkdir/link)
+      // run synchronously at the top of the method body. Capture the
+      // Promise here; resolve it after A's `tryRun` settles.
       if (!bAttempted && existsSync(reclaimLockPath)) {
         bAttempted = true;
         const lockB = new FileSupervisorLock({
@@ -381,21 +387,24 @@ test("two reclaimers serialize through the reclaim-lock — only one passes thro
           // the only thing preventing B from racing A.
           isAlive: () => false,
         });
-        bAcquiredHolder.value = lockB.tryRun(() => {}).acquired;
+        bPromiseHolder.value = lockB.tryRun(() => {});
       }
       return pid !== stalePid;
     },
   });
-  const aResult = lockA.tryRun(() => {});
+  const aResult = await lockA.tryRun(() => {});
+  const bResult = bPromiseHolder.value === null
+    ? null
+    : await bPromiseHolder.value;
   // A acquired (its reclaim was serialized; B did not interfere).
   expect(aResult.acquired).toBe(true);
   // B fired (the reclaim-lock dir was observable mid-decision).
   expect(bAttempted).toBe(true);
   // And B refused: it could not enter A's serialized critical section.
-  expect(bAcquiredHolder.value).toBe(false);
+  expect(bResult?.acquired).toBe(false);
 });
 
-test("stale-then-fresh race: a freshening between A's read and A's unlink CANNOT happen under the reclaim-lock", () => {
+test("stale-then-fresh race: a freshening between A's read and A's unlink CANNOT happen under the reclaim-lock", async () => {
   // Stale-then-fresh race scenario: A reads a stale mutex, B freshens
   // between A's read and A's unlink, A unlinks B's fresh mutex. The
   // v4 protocol prevents this because the reclaim-lock is acquired
@@ -425,7 +434,7 @@ test("stale-then-fresh race: a freshening between A's read and A's unlink CANNOT
     lockfilePath: path,
     isAlive: (pid) => pid !== stalePid,
   });
-  const aResult = lockA.tryRun(() => {
+  const aResult = await lockA.tryRun(() => {
     // Inside A's takeover, the takeover-mutex was released after the
     // reclaim+swap completed. Any concurrent reclaim attempt now
     // would simply create a fresh mutex via the normal acquire path;

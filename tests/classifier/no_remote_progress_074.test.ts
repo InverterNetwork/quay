@@ -11,7 +11,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_074_no_remote_progress_is_no_progress", () => {
+test("test_074_no_remote_progress_is_no_progress", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T17:00:00.000Z");
 
@@ -36,7 +36,7 @@ test("test_074_no_remote_progress_is_no_progress", () => {
   built.git.setRemoteHeadSha(repoId, t.branchName, "abc123"); // unchanged
   built.github.setPrExists(repoId, t.branchName, true);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: t.taskId, action: "no_progress" }]);
 
   // Classified as no_progress, not pr-open.

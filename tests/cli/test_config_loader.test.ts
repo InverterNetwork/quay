@@ -1,6 +1,6 @@
 // Spec §13 deployment config: `quay tick` and the production CLI must read
 // `~/.quay/config.toml` (or the operator's override) and forward the knobs
-// to `tick_once()` + the supervisor lock. Without this wiring, every
+// to `await tick_once()` + the supervisor lock. Without this wiring, every
 // production deployment runs with the hard-coded defaults regardless of
 // what the operator sets.
 //
@@ -39,14 +39,14 @@ afterEach(() => {
   }
 });
 
-test("missing config file returns an empty config (defaults apply)", () => {
+test("missing config file returns an empty config (defaults apply)", async () => {
   const home = tempDir();
   const result = loadConfig({ env: {}, homeDir: home });
   expect(result.config).toEqual({});
   expect(result.configPath).toBeNull();
 });
 
-test("loads a well-formed config.toml from QUAY_CONFIG_FILE override", () => {
+test("loads a well-formed config.toml from QUAY_CONFIG_FILE override", async () => {
   const dir = tempDir();
   const path = join(dir, "custom.toml");
   writeFileSync(
@@ -78,7 +78,7 @@ max_non_budget_respawns = 30
   expect(result.config.worktree_root).toBe("/var/lib/quay/worktrees");
 });
 
-test("rejects a non-positive integer for retry_budget", () => {
+test("rejects a non-positive integer for retry_budget", async () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");
   writeFileSync(path, `retry_budget = 0\n`);
@@ -87,7 +87,7 @@ test("rejects a non-positive integer for retry_budget", () => {
   );
 });
 
-test("accepts repos_root and parses it into config", () => {
+test("accepts repos_root and parses it into config", async () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");
   writeFileSync(path, `repos_root = "/some/path"\n`);
@@ -95,7 +95,7 @@ test("accepts repos_root and parses it into config", () => {
   expect(result.config.repos_root).toBe("/some/path");
 });
 
-test("rejects an empty string for repos_root", () => {
+test("rejects an empty string for repos_root", async () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");
   writeFileSync(path, `repos_root = ""\n`);
@@ -104,7 +104,7 @@ test("rejects an empty string for repos_root", () => {
   );
 });
 
-test("rejects an empty string for worktree_root", () => {
+test("rejects an empty string for worktree_root", async () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");
   writeFileSync(path, `worktree_root = ""\n`);
@@ -113,21 +113,21 @@ test("rejects an empty string for worktree_root", () => {
   );
 });
 
-test("QUAY_CONFIG_DIR resolves to <dir>/config.toml", () => {
+test("QUAY_CONFIG_DIR resolves to <dir>/config.toml", async () => {
   const dir = tempDir();
   writeFileSync(join(dir, "config.toml"), `max_concurrent = 7\n`);
   const result = loadConfig({ env: { QUAY_CONFIG_DIR: dir } });
   expect(result.config.max_concurrent).toBe(7);
 });
 
-test("QUAY_DATA_DIR resolves to <dir>/config.toml when QUAY_CONFIG_DIR is unset", () => {
+test("QUAY_DATA_DIR resolves to <dir>/config.toml when QUAY_CONFIG_DIR is unset", async () => {
   const dir = tempDir();
   writeFileSync(join(dir, "config.toml"), `max_concurrent = 9\n`);
   const result = loadConfig({ env: { QUAY_DATA_DIR: dir } });
   expect(result.config.max_concurrent).toBe(9);
 });
 
-test("falls back to ~/.quay/config.toml when no env vars are set", () => {
+test("falls back to ~/.quay/config.toml when no env vars are set", async () => {
   const home = tempDir();
   mkdirSync(join(home, ".quay"));
   writeFileSync(
@@ -138,7 +138,7 @@ test("falls back to ~/.quay/config.toml when no env vars are set", () => {
   expect(result.config.agent_invocation).toBe("claude --from-default-path");
 });
 
-test("rejects an unknown key (typo'd config refuses to silently fall back)", () => {
+test("rejects an unknown key (typo'd config refuses to silently fall back)", async () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");
   // `max_concurrency` is a plausible typo of `max_concurrent`. The
@@ -150,7 +150,7 @@ test("rejects an unknown key (typo'd config refuses to silently fall back)", () 
   );
 });
 
-test("rejects a non-positive integer for max_concurrent", () => {
+test("rejects a non-positive integer for max_concurrent", async () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");
   writeFileSync(path, `max_concurrent = 0\n`);
@@ -159,7 +159,7 @@ test("rejects a non-positive integer for max_concurrent", () => {
   );
 });
 
-test("rejects malformed TOML with a useful pointer to the file", () => {
+test("rejects malformed TOML with a useful pointer to the file", async () => {
   const dir = tempDir();
   const path = join(dir, "broken.toml");
   // Unclosed string literal — fails Bun.TOML.parse.
@@ -169,7 +169,7 @@ test("rejects malformed TOML with a useful pointer to the file", () => {
   );
 });
 
-test("tickOptionsFromConfig only forwards keys that are present", () => {
+test("tickOptionsFromConfig only forwards keys that are present", async () => {
   // Empty config → empty options (every default in tick.ts applies).
   expect(tickOptionsFromConfig({})).toEqual({});
 
@@ -185,7 +185,7 @@ test("tickOptionsFromConfig only forwards keys that are present", () => {
   });
 });
 
-test("loads [adapters.linear] and [adapters.slack] sections", () => {
+test("loads [adapters.linear] and [adapters.slack] sections", async () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");
   writeFileSync(
@@ -214,7 +214,7 @@ max_thread_messages = 400
   });
 });
 
-test("absent [adapters] section means both adapters disabled", () => {
+test("absent [adapters] section means both adapters disabled", async () => {
   expect(adaptersConfigFromConfig({})).toEqual({
     linearEnabled: false,
     slackEnabled: false,
@@ -223,7 +223,7 @@ test("absent [adapters] section means both adapters disabled", () => {
   expect(slackAdapterOptionsFromConfig({})).toEqual({});
 });
 
-test("rejects an unknown key under [adapters.linear]", () => {
+test("rejects an unknown key under [adapters.linear]", async () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");
   writeFileSync(
@@ -238,7 +238,7 @@ unknown_field = "x"
   );
 });
 
-test("tickOptionsFromConfig maps every supported key", () => {
+test("tickOptionsFromConfig maps every supported key", async () => {
   const opts = tickOptionsFromConfig({
     max_concurrent: 1,
     agent_invocation: "x",

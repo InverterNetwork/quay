@@ -118,7 +118,7 @@ export class FakeSlack implements SlackPort {
 
   // Port impl ------------------------------------------------------------
 
-  post(input: SlackPostInput): SlackPostResult {
+  async post(input: SlackPostInput): Promise<SlackPostResult> {
     this.postCalls.push({ ...input });
     const failure = this.postFailureQueue.shift();
     if (failure) throw failure;
@@ -126,7 +126,7 @@ export class FakeSlack implements SlackPort {
     return { ts };
   }
 
-  fenceTs(threadRef: string): string {
+  async fenceTs(threadRef: string): Promise<string> {
     this.fenceCalls.push(threadRef);
     const failure = this.fenceFailureQueue.shift();
     if (failure) throw failure;
@@ -135,7 +135,10 @@ export class FakeSlack implements SlackPort {
     return thread[thread.length - 1]!.ts;
   }
 
-  searchByNonce(threadRef: string, nonce: string): SlackReply | null {
+  async searchByNonce(
+    threadRef: string,
+    nonce: string,
+  ): Promise<SlackReply | null> {
     this.searchCalls.push({ threadRef, nonce });
     const failure = this.searchFailureQueue.shift();
     if (failure) throw failure;
@@ -148,7 +151,10 @@ export class FakeSlack implements SlackPort {
     return null;
   }
 
-  listReplies(threadRef: string, lowerBoundTs: string): SlackReply[] {
+  async listReplies(
+    threadRef: string,
+    lowerBoundTs: string,
+  ): Promise<SlackReply[]> {
     this.listCalls.push({ threadRef, lowerBoundTs });
     const failure = this.listFailureQueue.shift();
     if (failure) throw failure;
@@ -159,7 +165,7 @@ export class FakeSlack implements SlackPort {
       .map((m) => ({ ts: m.ts, authorBot: m.authorBot, text: m.text }));
   }
 
-  fetchThreadContext(threadRef: string): SlackThread {
+  async fetchThreadContext(threadRef: string): Promise<SlackThread> {
     this.fetchThreadContextCalls.push(threadRef);
     const ctx = this.threadContexts.get(threadRef);
     if (!ctx) {

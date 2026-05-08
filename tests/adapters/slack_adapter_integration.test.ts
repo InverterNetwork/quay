@@ -7,12 +7,12 @@ import { SlackAdapter } from "../../src/adapters/slack.ts";
 
 const integration = process.env.QUAY_INTEGRATION_TESTS === "1";
 
-describe.skipIf(!integration)("SlackAdapter contract (integration)", () => {
-  test("instantiates without error", () => {
+describe.skipIf(!integration)("SlackAdapter contract (integration)", async () => {
+  test("instantiates without error", async () => {
     expect(new SlackAdapter()).toBeDefined();
   });
 
-  test("fetchThreadContext against a known sandbox thread returns a structured payload", () => {
+  test("fetchThreadContext against a known sandbox thread returns a structured payload", async () => {
     // Operators wire a sandbox thread ref via QUAY_SLACK_SANDBOX_THREAD_REF
     // (formatted as `<channel>:<ts>`) when running this opt-in suite.
     // Without it, this is a no-op so the gate stays useful even on partial
@@ -21,14 +21,14 @@ describe.skipIf(!integration)("SlackAdapter contract (integration)", () => {
     const ref = process.env.QUAY_SLACK_SANDBOX_THREAD_REF;
     if (ref === undefined || ref === "") return;
     const adapter = new SlackAdapter();
-    const ctx = adapter.fetchThreadContext(ref);
+    const ctx = await adapter.fetchThreadContext(ref);
     expect(ctx.parent).toBeDefined();
     expect(typeof ctx.parent.ts).toBe("string");
     expect(Array.isArray(ctx.replies)).toBe(true);
   });
 });
 
-test("test_slack_adapter_fetch_thread_context_contract_tests_skipped_without_integration_flag", () => {
+test("test_slack_adapter_fetch_thread_context_contract_tests_skipped_without_integration_flag", async () => {
   // Pin the gate itself: this asserts the integration block does not run
   // by default. Mirrors the linear adapter's `_skipped_without_integration_flag`
   // test. Live calls against `https://slack.com/api/conversations.replies`
@@ -37,7 +37,7 @@ test("test_slack_adapter_fetch_thread_context_contract_tests_skipped_without_int
   expect(integration).toBe(false);
 });
 
-test("slack adapter contract block is skipped by default", () => {
+test("slack adapter contract block is skipped by default", async () => {
   // Existing pre-slice-18 gate test, kept for the original assertion.
   expect(integration).toBe(false);
 });

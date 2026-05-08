@@ -14,7 +14,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_076_stale_check_sha_logs_tick_error_without_transition", () => {
+test("test_076_stale_check_sha_logs_tick_error_without_transition", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T11:00:00.000Z");
 
@@ -45,7 +45,7 @@ test("test_076_stale_check_sha_logs_tick_error_without_transition", () => {
     },
   });
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toHaveLength(1);
   expect(results[0]?.task_id).toBe(taskId);
   expect(results[0]?.action).toBe("tick_error");
@@ -91,7 +91,7 @@ test("test_076_stale_check_sha_logs_tick_error_without_transition", () => {
     },
   });
 
-  const retryResults = tick_once(built.deps);
+  const retryResults = await tick_once(built.deps);
   expect(retryResults).toEqual([{ task_id: taskId, action: "ci_pending" }]);
   const recovered = h.db
     .query<{ tick_error: string | null }, [string]>(

@@ -10,7 +10,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_tick_missing_final_prompt_logs_error_without_spawn", () => {
+test("test_tick_missing_final_prompt_logs_error_without_spawn", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-missing-prompt");
   const taskId = insertTask(h.db, { taskId: "task-missing-prompt", repoId });
@@ -23,7 +23,7 @@ test("test_tick_missing_final_prompt_logs_error_without_spawn", () => {
 
   const built = buildTickDeps(h);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
 
   expect(results).toHaveLength(1);
   expect(results[0]!.task_id).toBe(taskId);

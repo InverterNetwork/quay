@@ -38,14 +38,14 @@ import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
 export interface SupervisorLock {
-  // Acquire the lock, blocking the calling thread until acquired (or a stale
-  // owner is reclaimed). Throws if the same lock instance is already held by
-  // this process — that's a programmer error, never expected at runtime.
-  run<T>(fn: () => T): T;
+  // Acquire the lock, awaiting until acquired (or a stale owner is reclaimed).
+  // Throws if the same lock instance is already held by this process — that's
+  // a programmer error, never expected at runtime.
+  run<T>(fn: () => T | Promise<T>): Promise<T>;
   // Try to acquire the lock. If another live owner holds it, do not run `fn`
-  // and return `{ acquired: false }`. Otherwise run `fn` under the lock and
-  // return `{ acquired: true, value }`.
-  tryRun<T>(fn: () => T): TryRunResult<T>;
+  // and resolve to `{ acquired: false }`. Otherwise run `fn` under the lock
+  // and resolve to `{ acquired: true, value }`.
+  tryRun<T>(fn: () => T | Promise<T>): Promise<TryRunResult<T>>;
 }
 
 export type TryRunResult<T> =
@@ -55,23 +55,23 @@ export type TryRunResult<T> =
 export class InProcessSupervisorLock implements SupervisorLock {
   private held = false;
 
-  run<T>(fn: () => T): T {
+  async run<T>(fn: () => T | Promise<T>): Promise<T> {
     if (this.held) {
       throw new Error("supervisor lock is already held in this process");
     }
     this.held = true;
     try {
-      return fn();
+      return await fn();
     } finally {
       this.held = false;
     }
   }
 
-  tryRun<T>(fn: () => T): TryRunResult<T> {
+  async tryRun<T>(fn: () => T | Promise<T>): Promise<TryRunResult<T>> {
     if (this.held) return { acquired: false };
     this.held = true;
     try {
-      return { acquired: true, value: fn() };
+      return { acquired: true, value: await fn() };
     } finally {
       this.held = false;
     }
@@ -107,7 +107,7 @@ export interface FileSupervisorLockOptions {
   // live owner; `sleep(ms)` controls how `run()` polls between attempts.
   now?: () => number;
   isAlive?: (pid: number) => boolean;
-  sleep?: (ms: number) => void;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export class FileSupervisorLock implements SupervisorLock {
@@ -118,7 +118,7 @@ export class FileSupervisorLock implements SupervisorLock {
   private readonly staleMutexMs: number;
   private readonly now: () => number;
   private readonly isAlive: (pid: number) => boolean;
-  private readonly sleep: (ms: number) => void;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(opts: FileSupervisorLockOptions) {
     this.lockfilePath = opts.lockfilePath;
@@ -127,31 +127,31 @@ export class FileSupervisorLock implements SupervisorLock {
     this.staleMutexMs = opts.staleMutexMs ?? 5_000;
     this.now = opts.now ?? (() => Date.now());
     this.isAlive = opts.isAlive ?? defaultIsAlive;
-    this.sleep = opts.sleep ?? defaultBlockingSleep;
+    this.sleep = opts.sleep ?? defaultAsyncSleep;
   }
 
-  run<T>(fn: () => T): T {
+  async run<T>(fn: () => T | Promise<T>): Promise<T> {
     if (this.heldBy) {
       throw new Error("supervisor lock is already held in this process");
     }
     for (;;) {
       if (this.tryAcquire()) break;
-      this.sleep(this.pollIntervalMs);
+      await this.sleep(this.pollIntervalMs);
     }
     this.heldBy = true;
     try {
-      return fn();
+      return await fn();
     } finally {
       this.release();
     }
   }
 
-  tryRun<T>(fn: () => T): TryRunResult<T> {
+  async tryRun<T>(fn: () => T | Promise<T>): Promise<TryRunResult<T>> {
     if (this.heldBy) return { acquired: false };
     if (!this.tryAcquire()) return { acquired: false };
     this.heldBy = true;
     try {
-      return { acquired: true, value: fn() };
+      return { acquired: true, value: await fn() };
     } finally {
       this.release();
     }
@@ -525,11 +525,6 @@ function defaultIsAlive(pid: number): boolean {
   }
 }
 
-function defaultBlockingSleep(ms: number): void {
-  // Synchronous sleep so the poll loop matches the synchronous `run(fn)`
-  // contract. `Atomics.wait` on a fresh SharedArrayBuffer is the standard
-  // cross-runtime synchronous sleep that doesn't pin a CPU.
-  const sab = new SharedArrayBuffer(4);
-  const view = new Int32Array(sab);
-  Atomics.wait(view, 0, 0, ms);
+function defaultAsyncSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

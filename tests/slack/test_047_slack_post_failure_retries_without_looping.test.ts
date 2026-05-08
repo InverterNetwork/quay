@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_047_slack_post_failure_retries_without_looping", () => {
+test("test_047_slack_post_failure_retries_without_looping", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-047");
@@ -55,7 +55,7 @@ test("test_047_slack_post_failure_retries_without_looping", () => {
   // Tick #1: Slack API throws. Tick logs tick_error and skips. No tight
   // loop: exactly one post attempt within this tick.
   built.slack.failPostOnce("rate_limited");
-  const r1 = tick_once(built.deps);
+  const r1 = await tick_once(built.deps);
   expect(built.slack.postCalls).toHaveLength(1);
 
   const tickErrorEvents = h.db
@@ -98,7 +98,7 @@ test("test_047_slack_post_failure_retries_without_looping", () => {
   expect(midArt!.slack_pre_post_fence_ts).not.toBeNull();
 
   // Tick #2: failure cleared, retry succeeds.
-  const r2 = tick_once(built.deps);
+  const r2 = await tick_once(built.deps);
   expect(built.slack.postCalls).toHaveLength(2);
   expect(
     r2.find((r) => r.task_id === taskId && r.action === "slack_posted"),

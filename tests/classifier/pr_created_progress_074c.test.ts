@@ -11,7 +11,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_074c_pr_created_during_attempt_counts_as_progress", () => {
+test("test_074c_pr_created_during_attempt_counts_as_progress", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T18:00:00.000Z");
 
@@ -38,7 +38,7 @@ test("test_074c_pr_created_during_attempt_counts_as_progress", () => {
   built.git.setRemoteHeadSha(repoId, t.branchName, "pushed-by-prev"); // unchanged
   built.github.setPrExists(repoId, t.branchName, true); // PR opened this attempt
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: t.taskId, action: "pr_opened" }]);
 
   // PR creation counts as progress even with unchanged remote SHA.

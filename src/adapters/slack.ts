@@ -6,6 +6,13 @@
 // pieces internally. Failures throw — tick wraps the throw in `tick_error`
 // and retries on the next cycle (spec §5).
 //
+// The adapter calls `fetch` in-process. An out-of-process spawn would not
+// survive `bun build --compile`: `process.execPath` is the compiled quay
+// binary, not bun, so spawning `process.execPath -e <script>` re-enters
+// quay's CLI dispatcher with `-e` and fails (the same bug AST-85 fixed
+// for Linear). Tests inject an in-process `transport` that returns a
+// `SlackTransportResponse` (sync or Promise — both work).
+//
 // Failure-mode mapping for `fetchThreadContext` (adapters spec §7 / §17):
 //   - HTTP 200, `ok: true`           → success (paginate, truncate, return)
 //   - HTTP 200, `ok: false, error`   → throw (caller wraps as adapter_error)
@@ -44,16 +51,10 @@ interface ConversationsRepliesPayload {
   response_metadata?: { next_cursor?: string };
 }
 
-// Default per-call timeout for the synchronous child fetch. Configurable via
-// QUAY_SLACK_TIMEOUT_MS at the deployment level; the adapter forwards it to
-// the child so a stalled Slack connection cannot hold the supervisor lock
-// indefinitely (spec §5: tick must record `tick_error` and continue, not
-// block the next cycle).
+// Default per-call timeout. Configurable via QUAY_SLACK_TIMEOUT_MS at the
+// deployment level so a stalled Slack connection cannot hold the supervisor
+// lock indefinitely (spec §5: tick must record `tick_error` and continue).
 const DEFAULT_SLACK_TIMEOUT_MS = 30_000;
-// How long the parent waits past the child's own timeout before treating the
-// child as wedged and killing it. The child's AbortController is the primary
-// mechanism; this is a backstop if the child's runtime itself hangs.
-const PARENT_TIMEOUT_GRACE_MS = 5_000;
 // Adapters spec §17: default cap on `fetchThreadContext` reply count.
 // Configurable via `[adapters.slack].max_thread_messages`.
 const DEFAULT_MAX_THREAD_MESSAGES = 200;
@@ -76,7 +77,7 @@ export interface SlackTransportResponse {
 
 export type SlackTransport = (
   req: SlackTransportRequest,
-) => SlackTransportResponse;
+) => Promise<SlackTransportResponse> | SlackTransportResponse;
 
 export class SlackAdapter implements SlackPort {
   // The token is resolved lazily on first use so the production CLI can
@@ -110,7 +111,7 @@ export class SlackAdapter implements SlackPort {
       opts?.timeoutMs !== undefined && opts.timeoutMs > 0
         ? opts.timeoutMs
         : resolveTimeoutFromEnv();
-    this.transport = opts?.transport ?? this.spawnFetchTransport();
+    this.transport = opts?.transport ?? buildDefaultTransport(this.timeoutMs);
     this.maxThreadMessages =
       opts?.maxThreadMessages !== undefined && opts.maxThreadMessages > 0
         ? opts.maxThreadMessages
@@ -131,14 +132,14 @@ export class SlackAdapter implements SlackPort {
     return fromEnv;
   }
 
-  post(input: SlackPostInput): SlackPostResult {
+  async post(input: SlackPostInput): Promise<SlackPostResult> {
     const { channel, ts: parentTs } = parseThreadRef(input.threadRef);
     const body = {
       channel,
       thread_ts: parentTs,
       text: input.body,
     };
-    const data = this.callSync<{ ts: string }>("chat.postMessage", body);
+    const data = await this.callOk<{ ts: string }>("chat.postMessage", body);
     if (typeof data.ts !== "string" || data.ts.length === 0) {
       throw new Error(
         `Slack chat.postMessage returned no ts for thread ${input.threadRef}`,
@@ -147,8 +148,8 @@ export class SlackAdapter implements SlackPort {
     return { ts: data.ts };
   }
 
-  fenceTs(threadRef: string): string {
-    const replies = this.fetchReplies(threadRef);
+  async fenceTs(threadRef: string): Promise<string> {
+    const replies = await this.fetchReplies(threadRef);
     if (replies.length === 0) {
       // Empty thread (no parent reachable) — return a sentinel "earlier than
       // anything" ts so any subsequent post is strictly later. Slack ts are
@@ -158,12 +159,15 @@ export class SlackAdapter implements SlackPort {
     return replies[replies.length - 1]!.ts;
   }
 
-  searchByNonce(threadRef: string, nonce: string): SlackReply | null {
+  async searchByNonce(
+    threadRef: string,
+    nonce: string,
+  ): Promise<SlackReply | null> {
     // Spec §5 Sequence B step 3: scan the thread for a *bot-authored* message
     // whose body contains the per-escalation nonce. Not search.messages —
     // workspaces frequently disable that scope, and conversations.replies is
     // the same data source we already use for reply ingestion.
-    const replies = this.fetchReplies(threadRef);
+    const replies = await this.fetchReplies(threadRef);
     for (const m of replies) {
       if (!isBotAuthored(m)) continue;
       if ((m.text ?? "").includes(nonce)) {
@@ -173,7 +177,7 @@ export class SlackAdapter implements SlackPort {
     return null;
   }
 
-  fetchThreadContext(threadRef: string): SlackThread {
+  async fetchThreadContext(threadRef: string): Promise<SlackThread> {
     const { channel, ts } = parseThreadRef(threadRef);
     // Paginate `conversations.replies` to completion (or until we've gone
     // sufficiently past the cap that further fetches couldn't change the
@@ -195,7 +199,7 @@ export class SlackAdapter implements SlackPort {
       };
       if (cursor !== null) payload.cursor = cursor;
 
-      const env = this.requestEnvelope(
+      const env = await this.requestEnvelope(
         "conversations.replies",
         payload,
         "GET",
@@ -279,8 +283,11 @@ export class SlackAdapter implements SlackPort {
     return { parent: parentMsg, replies: [...head, marker, ...tail] };
   }
 
-  listReplies(threadRef: string, lowerBoundTs: string): SlackReply[] {
-    const replies = this.fetchReplies(threadRef);
+  async listReplies(
+    threadRef: string,
+    lowerBoundTs: string,
+  ): Promise<SlackReply[]> {
+    const replies = await this.fetchReplies(threadRef);
     const lb = Number(lowerBoundTs);
     return replies
       .filter((m) => Number(m.ts) > lb)
@@ -293,13 +300,13 @@ export class SlackAdapter implements SlackPort {
 
   // -- helpers ----------------------------------------------------------
 
-  private fetchReplies(threadRef: string): SlackMessage[] {
+  private async fetchReplies(threadRef: string): Promise<SlackMessage[]> {
     const { channel, ts } = parseThreadRef(threadRef);
     // conversations.replies is paginated. v1 fetches a single page; threads
     // longer than ~200 messages would need cursor handling. The spec
     // explicitly defers paging optimization — escalation threads in practice
     // sit in the low double digits.
-    const data = this.callSync<{ messages: SlackMessage[] }>(
+    const data = await this.callOk<{ messages: SlackMessage[] }>(
       "conversations.replies",
       { channel, ts, limit: 200 },
       "GET",
@@ -307,15 +314,15 @@ export class SlackAdapter implements SlackPort {
     return Array.isArray(data.messages) ? data.messages : [];
   }
 
-  private callSync<T>(
+  private async callOk<T>(
     method: string,
     payload: Record<string, unknown>,
     httpMethod: "POST" | "GET" = "POST",
-  ): T {
+  ): Promise<T> {
     // Slack's Web API returns JSON with `{ ok: bool, error?: string, ... }`.
     // Quay treats any `ok=false` as a thrown error so tick's per-task error
     // path logs `tick_error`. Network/HTTP failures bubble up the same way.
-    const env = this.requestEnvelope(method, payload, httpMethod);
+    const env = await this.requestEnvelope(method, payload, httpMethod);
     if (env.status < 200 || env.status >= 300) {
       throw new Error(
         `Slack ${method} HTTP ${env.status}: ${truncate(env.body)}`,
@@ -337,11 +344,11 @@ export class SlackAdapter implements SlackPort {
     return parsed as unknown as T;
   }
 
-  private requestEnvelope(
+  private async requestEnvelope(
     method: string,
     payload: Record<string, unknown>,
     httpMethod: "POST" | "GET",
-  ): SlackTransportResponse {
+  ): Promise<SlackTransportResponse> {
     const token = this.resolveToken();
     const url =
       httpMethod === "GET"
@@ -355,54 +362,39 @@ export class SlackAdapter implements SlackPort {
       headers["Content-Type"] = "application/json; charset=utf-8";
       body = JSON.stringify(payload);
     }
-    return this.transport({ url, method: httpMethod, headers, body });
+    return await this.transport({ url, method: httpMethod, headers, body });
   }
+}
 
-  // Default transport: spawns a child Bun process that runs `fetch` and
-  // writes a `{status, headers, body}` envelope to stdout. ALL request
-  // fields (token, URL, body) are passed via the child's env — argv is
-  // visible in `ps` / `/proc/<pid>/cmdline`, so anything routed through
-  // argv leaks the message text (escalation question, blocker excerpt,
-  // dedupe nonce) and the GET query (channel id, parent thread ts) to any
-  // local reader on a multi-tenant host.
-  //
-  // The child wraps `fetch` in an AbortController gated on
-  // `QUAY_SLACK_TIMEOUT_MS` so a stalled HTTP connection aborts cleanly
-  // and the child exits non-zero. As a backstop, the parent's
-  // `spawnSync` carries a slightly longer `timeout` so a wedged child
-  // runtime can't hold the supervisor lock past the bounded budget.
-  private spawnFetchTransport(): SlackTransport {
-    const timeoutMs = this.timeoutMs;
-    return (req) => {
-      const result = Bun.spawnSync({
-        cmd: [process.execPath, "-e", slackFetchScript(), req.method],
-        env: {
-          ...process.env,
-          QUAY_SLACK_TOKEN: extractBearer(req.headers),
-          QUAY_SLACK_URL: req.url,
-          QUAY_SLACK_BODY: req.body,
-          QUAY_SLACK_TIMEOUT_MS: String(timeoutMs),
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-        timeout: timeoutMs + PARENT_TIMEOUT_GRACE_MS,
-      });
-      if (result.exitCode !== 0) {
-        throw new Error(
-          `Slack request child process failed (exit ${result.exitCode}): ${decode(result.stderr).trim()}`,
-        );
+// `AbortController` bounds each request to `timeoutMs` so a stalled
+// connection cannot wedge the supervisor's bounded budget.
+function buildDefaultTransport(timeoutMs: number): SlackTransport {
+  return async (req) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const init: RequestInit = {
+        method: req.method,
+        headers: req.headers,
+        signal: controller.signal,
+      };
+      if (req.method !== "GET" && req.body !== "") init.body = req.body;
+      const response = await fetch(req.url, init);
+      const body = await response.text();
+      const headers = Object.fromEntries(response.headers.entries());
+      return { status: response.status, headers, body };
+    } catch (err) {
+      const e = err as Error & { name?: string };
+      const name = e?.name ?? "";
+      const msg = e?.message ?? String(err);
+      if (name === "AbortError" || name === "TimeoutError" || /aborted|abort/i.test(msg)) {
+        throw new Error(`Slack request timed out after ${timeoutMs}ms`);
       }
-      let envelope: SlackTransportResponse;
-      try {
-        envelope = JSON.parse(decode(result.stdout));
-      } catch (err) {
-        throw new Error(
-          `Slack request returned unparseable envelope: ${(err as Error).message}`,
-        );
-      }
-      return envelope;
-    };
-  }
+      throw new Error(`Slack request failed: ${msg}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
 
 function parseThreadRef(threadRef: string): { channel: string; ts: string } {
@@ -495,12 +487,6 @@ function parseRetryAfter(headers: Record<string, string>): number | null {
   return null;
 }
 
-function extractBearer(headers: Record<string, string>): string {
-  const auth = headers.Authorization ?? headers.authorization ?? "";
-  if (auth.startsWith("Bearer ")) return auth.slice("Bearer ".length);
-  return auth;
-}
-
 function encodeForm(payload: Record<string, unknown>): string {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(payload)) {
@@ -508,11 +494,6 @@ function encodeForm(payload: Record<string, unknown>): string {
     params.append(k, String(v));
   }
   return params.toString();
-}
-
-function decode(buf: Buffer | Uint8Array | undefined): string {
-  if (!buf) return "";
-  return new TextDecoder().decode(buf);
 }
 
 function truncate(s: string): string {
@@ -526,60 +507,4 @@ function resolveTimeoutFromEnv(): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_SLACK_TIMEOUT_MS;
   return Math.floor(parsed);
-}
-
-// Child-process script: argv = [_, _, method]; everything sensitive
-// (token, URL with query string, body) comes in via env vars so it
-// never appears in `ps` / `/proc/<pid>/cmdline`. `QUAY_SLACK_TIMEOUT_MS`
-// bounds how long the child waits on `fetch` before aborting and
-// exiting non-zero — the supervisor lock is held for the duration of
-// this call, so an unbounded fetch would block `quay cancel` and the
-// next tick. Stdout receives a `{status, headers, body}` envelope so the
-// parent can branch on HTTP status / Retry-After header.
-function slackFetchScript(): string {
-  return `
-const [method] = process.argv.slice(1);
-const token = process.env.QUAY_SLACK_TOKEN || "";
-const url = process.env.QUAY_SLACK_URL || "";
-const body = process.env.QUAY_SLACK_BODY || "";
-if (!token) {
-  process.stderr.write("QUAY_SLACK_TOKEN not set in child env");
-  process.exit(1);
-}
-if (!url) {
-  process.stderr.write("QUAY_SLACK_URL not set in child env");
-  process.exit(1);
-}
-const timeoutMs = Number(process.env.QUAY_SLACK_TIMEOUT_MS || "30000");
-const controller = new AbortController();
-const timer = setTimeout(() => controller.abort(), timeoutMs);
-const init = {
-  method,
-  headers: { Authorization: "Bearer " + token },
-  signal: controller.signal,
-};
-if (method !== "GET" && body) {
-  init.headers["Content-Type"] = "application/json; charset=utf-8";
-  init.body = body;
-}
-fetch(url, init)
-  .then(async (r) => {
-    const text = await r.text();
-    const respHeaders = {};
-    r.headers.forEach((v, k) => { respHeaders[k] = v; });
-    process.stdout.write(JSON.stringify({ status: r.status, headers: respHeaders, body: text }));
-  })
-  .catch((err) => {
-    const isAbort =
-      (err && (err.name === "AbortError" || err.name === "TimeoutError")) ||
-      /aborted|abort/i.test(String(err && err.message ? err.message : err));
-    if (isAbort) {
-      process.stderr.write("Slack request timed out after " + timeoutMs + "ms");
-    } else {
-      process.stderr.write(String(err && err.message ? err.message : err));
-    }
-    process.exit(1);
-  })
-  .finally(() => clearTimeout(timer));
-`;
 }

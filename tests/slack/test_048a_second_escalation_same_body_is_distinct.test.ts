@@ -16,7 +16,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_048a_second_escalation_same_body_is_distinct", () => {
+test("test_048a_second_escalation_same_body_is_distinct", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-048a");
@@ -58,9 +58,9 @@ test("test_048a_second_escalation_same_body_is_distinct", () => {
   if (!esc1.ok) throw new Error("expected escalate 1");
   expect(esc1.value.escalation_seq).toBe(1);
 
-  tick_once(built.deps); // post #1
+  await tick_once(built.deps); // post #1
   built.slack.appendHumanReply("C48a:0.1", "yes ship it");
-  tick_once(built.deps); // ingest reply → awaiting-next-brief
+  await tick_once(built.deps); // ingest reply → awaiting-next-brief
 
   const stateAfterIngest = h.db
     .query<{ state: string }, [string]>(`SELECT state FROM tasks WHERE task_id = ?`)
@@ -115,7 +115,7 @@ test("test_048a_second_escalation_same_body_is_distinct", () => {
   expect(artifacts[0]!.escalation_nonce).not.toBe(artifacts[1]!.escalation_nonce);
 
   // Tick again to perform the second post.
-  tick_once(built.deps);
+  await tick_once(built.deps);
 
   expect(built.slack.postCalls).toHaveLength(2);
   expect(built.slack.postCalls[0]!.body).toContain(esc1.value.escalation_nonce);

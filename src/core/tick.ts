@@ -162,7 +162,10 @@ interface CurrentAttemptRow {
   kill_intent: string | null;
 }
 
-export function tick_once(deps: TickDeps, options: TickOptions = {}): TickTaskResult[] {
+export async function tick_once(
+  deps: TickDeps,
+  options: TickOptions = {},
+): Promise<TickTaskResult[]> {
   const max = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const agentInvocation = options.agentInvocation ?? DEFAULT_AGENT_INVOCATION;
   // Spec §5: a tick that fires while another tick (or `quay cancel`) holds
@@ -170,7 +173,7 @@ export function tick_once(deps: TickDeps, options: TickOptions = {}): TickTaskRe
   // scheduled fire retries. `tryRun` returns `acquired: false` in that case;
   // we surface it as an empty result list rather than throwing, so cron
   // observes a clean exit.
-  const attempt = deps.supervisorLock.tryRun(() => {
+  const attempt = await deps.supervisorLock.tryRun(async () => {
     const results: TickTaskResult[] = [];
 
     // Top-of-loop cancel check (spec §5 + §14). Cancel intent is durable on
@@ -252,7 +255,7 @@ export function tick_once(deps: TickDeps, options: TickOptions = {}): TickTaskRe
 
     for (const task of waitingHumanSnapshot) {
       try {
-        const taskResults = processWaitingHumanTask(deps, task);
+        const taskResults = await processWaitingHumanTask(deps, task);
         for (const r of taskResults) results.push(r);
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
@@ -1012,10 +1015,10 @@ function loadLatestEscalationArtifact(
   );
 }
 
-function processWaitingHumanTask(
+async function processWaitingHumanTask(
   deps: TickDeps,
   task: WaitingHumanTaskRow,
-): TickTaskResult[] {
+): Promise<TickTaskResult[]> {
   if (task.cancel_requested_at !== null) return [];
   if (task.slack_thread_ref === null) {
     // No thread to post into; nothing to do.
@@ -1032,7 +1035,7 @@ function processWaitingHumanTask(
 
   // Step 1: capture the pre-post fence if not yet captured.
   if (art.slack_pre_post_fence_ts === null) {
-    const fenceTs = deps.slack.fenceTs(threadRef);
+    const fenceTs = await deps.slack.fenceTs(threadRef);
     const upd = deps.db
       .query(
         `UPDATE artifacts
@@ -1050,7 +1053,7 @@ function processWaitingHumanTask(
 
   // Step 2: try to recover an existing post via the nonce.
   if (art.slack_recovered_post_ts === null) {
-    const match = deps.slack.searchByNonce(threadRef, art.escalation_nonce);
+    const match = await deps.slack.searchByNonce(threadRef, art.escalation_nonce);
     if (match !== null) {
       // Persist recovered ts (and slack_post_ts if NULL) in one txn.
       // Predicate: cancel_requested_at IS NULL on the task row.
@@ -1097,7 +1100,7 @@ function processWaitingHumanTask(
     const composedBody = `${mentionPrefix}${body}\n\n_${art.escalation_nonce}_`;
     let postTs: string;
     try {
-      postTs = deps.slack.post({ threadRef, body: composedBody }).ts;
+      postTs = (await deps.slack.post({ threadRef, body: composedBody })).ts;
     } catch (err) {
       // Slack API failure: log tick_error and skip; next tick retries.
       // The artifact stays without slack_post_ts so the recovery loop
@@ -1150,7 +1153,7 @@ function processWaitingHumanTask(
   if (lowerBound === null) {
     return results;
   }
-  const replies = deps.slack.listReplies(threadRef, lowerBound);
+  const replies = await deps.slack.listReplies(threadRef, lowerBound);
   const lb = Number(lowerBound);
   const firstNonBot = replies.find(
     (r) => !r.authorBot && Number(r.ts) > lb,

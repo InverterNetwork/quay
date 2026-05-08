@@ -31,10 +31,10 @@ export interface SlackThread {
 }
 
 export interface SlackPort {
-  post(input: SlackPostInput): SlackPostResult;
-  fenceTs(threadRef: string): string;
-  searchByNonce(threadRef: string, nonce: string): SlackReply | null;
-  listReplies(threadRef: string, lowerBoundTs: string): SlackReply[];
+  post(input: SlackPostInput): Promise<SlackPostResult>;
+  fenceTs(threadRef: string): Promise<string>;
+  searchByNonce(threadRef: string, nonce: string): Promise<SlackReply | null>;
+  listReplies(threadRef: string, lowerBoundTs: string): Promise<SlackReply[]>;
   // Returns the original conversation (parent + every reply, ordered) for
   // brief composition. Distinct from `listReplies`, which filters to
   // replies after a fence for `waiting_human` ingestion. Truncation above
@@ -42,5 +42,5 @@ export interface SlackPort {
   // the marker is part of the returned `replies` payload (spec §7).
   // Throws on thread-not-found, 4xx/5xx, 429, and network/auth errors;
   // the caller (`ticketContext.fetch`) wraps as `adapter_error{adapter:"slack"}`.
-  fetchThreadContext(threadRef: string): SlackThread;
+  fetchThreadContext(threadRef: string): Promise<SlackThread>;
 }

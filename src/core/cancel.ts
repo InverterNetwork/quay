@@ -2,7 +2,7 @@
 // §14 invariants on durable intent + crash recovery).
 //
 // Two entry points:
-//   - cancel_task(...): synchronous CLI path. Acquires the supervisor lock,
+//   - cancel_task(...): CLI path. Acquires the supervisor lock,
 //     writes durable task-level cancel intent (`tasks.cancel_requested_at` +
 //     flags + per-attempt `kill_intent = 'cancel'` when running), kills the
 //     running tmux session if applicable, and runs the finalizer to terminal.
@@ -130,10 +130,10 @@ function loadRunningAttempt(db: DB, taskId: string): AttemptRow | null {
   );
 }
 
-export function cancel_task(
+export async function cancel_task(
   deps: CancelDeps,
   input: CancelTaskInput,
-): CancelResult {
+): Promise<CancelResult> {
   return deps.supervisorLock.run(() => cancelUnderLock(deps, input));
 }
 

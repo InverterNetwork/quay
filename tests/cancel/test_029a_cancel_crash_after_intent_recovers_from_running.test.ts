@@ -29,7 +29,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_029a_cancel_crash_after_intent_recovers_from_running", () => {
+test("test_029a_cancel_crash_after_intent_recovers_from_running", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-029a");
@@ -52,9 +52,9 @@ test("test_029a_cancel_crash_after_intent_recovers_from_running", () => {
     throw new Error("simulated crash after cancel intent commit");
   });
 
-  expect(() => cancel_task(built.deps, { taskId: t.taskId })).toThrow(
-    /simulated crash/,
-  );
+  await expect(
+    cancel_task(built.deps, { taskId: t.taskId }),
+  ).rejects.toThrow(/simulated crash/);
 
   // Mid-cancel forensic state: intent durable, kill_intent set, tmux dead,
   // task still in `running` because the finalizer never reached step 4.
@@ -94,7 +94,7 @@ test("test_029a_cancel_crash_after_intent_recovers_from_running", () => {
   // Clear the failpoint — recovery proceeds normally.
   clearAllFailpoints();
 
-  const tickResults = tick_once(built.deps);
+  const tickResults = await tick_once(built.deps);
   expect(tickResults).toEqual([
     { task_id: t.taskId, action: "cancel_finalized" },
   ]);

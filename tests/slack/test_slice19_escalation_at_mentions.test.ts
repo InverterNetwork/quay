@@ -81,7 +81,7 @@ function setupEscalation(opts: {
   };
 }
 
-test("test_slack_escalation_at_mentions_authors_when_authors_json_set", () => {
+test("test_slack_escalation_at_mentions_authors_when_authors_json_set", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const authors = JSON.stringify([
@@ -90,7 +90,7 @@ test("test_slack_escalation_at_mentions_authors_when_authors_json_set", () => {
   ]);
   const s = setupEscalation({ slug: "s19a", authorsJson: authors });
 
-  tick_once(s.built.deps);
+  await tick_once(s.built.deps);
 
   expect(s.built.slack.postCalls).toHaveLength(1);
   const body = s.built.slack.postCalls[0]!.body;
@@ -99,12 +99,12 @@ test("test_slack_escalation_at_mentions_authors_when_authors_json_set", () => {
   expect(body).toContain("ship?");
 });
 
-test("test_slack_escalation_no_mentions_when_authors_json_null", () => {
+test("test_slack_escalation_no_mentions_when_authors_json_null", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const s = setupEscalation({ slug: "s19b", authorsJson: null });
 
-  tick_once(s.built.deps);
+  await tick_once(s.built.deps);
 
   expect(s.built.slack.postCalls).toHaveLength(1);
   const body = s.built.slack.postCalls[0]!.body;
@@ -112,7 +112,7 @@ test("test_slack_escalation_no_mentions_when_authors_json_null", () => {
   expect(body.startsWith("ship?")).toBe(true);
 });
 
-test("test_slack_escalation_drops_malformed_slack_ids", () => {
+test("test_slack_escalation_drops_malformed_slack_ids", async () => {
   // `authors_json` is opaque text in the DB — the parser validates on write,
   // but a tampered or future-malformed payload must not reach Slack mrkdwn.
   // IDs that fail the bare `^U[A-Z0-9]+$` shape are silently skipped at the
@@ -129,7 +129,7 @@ test("test_slack_escalation_drops_malformed_slack_ids", () => {
   ]);
   const s = setupEscalation({ slug: "s19-malformed", authorsJson: authors });
 
-  tick_once(s.built.deps);
+  await tick_once(s.built.deps);
 
   expect(s.built.slack.postCalls).toHaveLength(1);
   const body = s.built.slack.postCalls[0]!.body;
@@ -139,7 +139,7 @@ test("test_slack_escalation_drops_malformed_slack_ids", () => {
   expect(body).not.toContain("U123>");
 });
 
-test("test_slack_escalation_dedupes_duplicate_slack_ids", () => {
+test("test_slack_escalation_dedupes_duplicate_slack_ids", async () => {
   // Two author entries pointing at the same Slack user must produce one
   // mention, not two — the rendered body would otherwise ping the same
   // human twice.
@@ -152,19 +152,19 @@ test("test_slack_escalation_dedupes_duplicate_slack_ids", () => {
   ]);
   const s = setupEscalation({ slug: "s19-dupe", authorsJson: authors });
 
-  tick_once(s.built.deps);
+  await tick_once(s.built.deps);
 
   const body = s.built.slack.postCalls[0]!.body;
   expect(body.startsWith("<@U06TDC56VJB> <@U07ABCDE>\n\n")).toBe(true);
   expect(body.match(/U06TDC56VJB/g)?.length).toBe(1);
 });
 
-test("test_slack_escalation_no_mentions_when_authors_json_empty_array", () => {
+test("test_slack_escalation_no_mentions_when_authors_json_empty_array", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const s = setupEscalation({ slug: "s19c", authorsJson: "[]" });
 
-  tick_once(s.built.deps);
+  await tick_once(s.built.deps);
 
   expect(s.built.slack.postCalls).toHaveLength(1);
   const body = s.built.slack.postCalls[0]!.body;
@@ -172,7 +172,7 @@ test("test_slack_escalation_no_mentions_when_authors_json_empty_array", () => {
   expect(body.startsWith("ship?")).toBe(true);
 });
 
-test("test_slack_escalation_existing_fence_capture_unchanged", () => {
+test("test_slack_escalation_existing_fence_capture_unchanged", async () => {
   const authors = JSON.stringify([{ name: "Fabian", slack_id: "U06TDC56VJB" }]);
 
   for (const [slug, authorsJson] of [
@@ -184,7 +184,7 @@ test("test_slack_escalation_existing_fence_capture_unchanged", () => {
     h.clock.set("2026-04-29T10:00:00.000Z");
     const s = setupEscalation({ slug, authorsJson });
 
-    tick_once(s.built.deps);
+    await tick_once(s.built.deps);
 
     const art = h.db
       .query<{ slack_pre_post_fence_ts: string | null }, [number]>(
@@ -196,7 +196,7 @@ test("test_slack_escalation_existing_fence_capture_unchanged", () => {
   }
 });
 
-test("test_slack_escalation_existing_recovery_probe_unchanged", () => {
+test("test_slack_escalation_existing_recovery_probe_unchanged", async () => {
   const authors = JSON.stringify([{ name: "Fabian", slack_id: "U06TDC56VJB" }]);
 
   for (const [slug, authorsJson] of [
@@ -212,12 +212,12 @@ test("test_slack_escalation_existing_recovery_probe_unchanged", () => {
     setFailpoint("after_slack_post", () => {
       throw new Error("simulated crash");
     });
-    tick_once(s.built.deps);
+    await tick_once(s.built.deps);
     setFailpoint("after_slack_post", null);
 
     const searchBefore = s.built.slack.searchCalls.length;
     // Tick again — recovery probe runs and matches by nonce. No second post.
-    const r = tick_once(s.built.deps);
+    const r = await tick_once(s.built.deps);
     const searchAfter = s.built.slack.searchCalls.length;
     expect(searchAfter).toBeGreaterThan(searchBefore);
     expect(s.built.slack.postCalls).toHaveLength(1);
@@ -226,7 +226,7 @@ test("test_slack_escalation_existing_recovery_probe_unchanged", () => {
   }
 });
 
-test("test_slack_escalation_existing_reply_ingestion_unchanged", () => {
+test("test_slack_escalation_existing_reply_ingestion_unchanged", async () => {
   const authors = JSON.stringify([{ name: "Fabian", slack_id: "U06TDC56VJB" }]);
 
   for (const [slug, authorsJson] of [
@@ -239,13 +239,13 @@ test("test_slack_escalation_existing_reply_ingestion_unchanged", () => {
     const s = setupEscalation({ slug, authorsJson });
 
     // Tick #1: post.
-    tick_once(s.built.deps);
+    await tick_once(s.built.deps);
     expect(s.built.slack.postCalls.length).toBeGreaterThanOrEqual(1);
 
     s.built.slack.appendHumanReply(s.threadRef, "go ahead");
 
     // Tick #2: ingest.
-    const r = tick_once(s.built.deps);
+    const r = await tick_once(s.built.deps);
     const actions = r.filter((x) => x.task_id === s.taskId).map((x) => x.action);
     expect(actions).toContain("slack_reply_ingested");
 
@@ -265,7 +265,7 @@ test("test_slack_escalation_existing_reply_ingestion_unchanged", () => {
   }
 });
 
-test("test_slack_escalation_mention_prefix_preserves_escalation_nonce", () => {
+test("test_slack_escalation_mention_prefix_preserves_escalation_nonce", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const authors = JSON.stringify([
@@ -274,7 +274,7 @@ test("test_slack_escalation_mention_prefix_preserves_escalation_nonce", () => {
   ]);
   const s = setupEscalation({ slug: "s19g", authorsJson: authors });
 
-  tick_once(s.built.deps);
+  await tick_once(s.built.deps);
 
   expect(s.built.slack.postCalls).toHaveLength(1);
   const body = s.built.slack.postCalls[0]!.body;

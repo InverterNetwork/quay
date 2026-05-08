@@ -18,7 +18,7 @@ afterEach(() => {
   clearAllFailpoints();
 });
 
-test("test_048c_inter_window_chatter_excluded_after_recovery", () => {
+test("test_048c_inter_window_chatter_excluded_after_recovery", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-048c");
@@ -60,7 +60,7 @@ test("test_048c_inter_window_chatter_excluded_after_recovery", () => {
   // fails before posting. Lets us inject inter-window chatter before the
   // post on the next tick.
   built.slack.failSearchOnce();
-  tick_once(built.deps);
+  await tick_once(built.deps);
   expect(built.slack.postCalls).toHaveLength(0);
 
   const fenceTs = h.db
@@ -83,7 +83,7 @@ test("test_048c_inter_window_chatter_excluded_after_recovery", () => {
   expect(Number(chatterTs2)).toBeGreaterThan(Number(chatterTs1));
 
   // Tick #2: post + persist (no failures this time).
-  tick_once(built.deps);
+  await tick_once(built.deps);
   expect(built.slack.postCalls).toHaveLength(1);
 
   const tsAfterPost = h.db
@@ -102,7 +102,7 @@ test("test_048c_inter_window_chatter_excluded_after_recovery", () => {
 
   // Tick #3: should not ingest any of the chatter — they all sit at ts <
   // recovered_ts. Task stays in waiting_human.
-  tick_once(built.deps);
+  await tick_once(built.deps);
   const stateMid = h.db
     .query<{ state: string }, [string]>(
       `SELECT state FROM tasks WHERE task_id = ?`,
@@ -129,7 +129,7 @@ test("test_048c_inter_window_chatter_excluded_after_recovery", () => {
   );
 
   // Tick #4: ingest only the real reply.
-  tick_once(built.deps);
+  await tick_once(built.deps);
   const stateFinal = h.db
     .query<{ state: string }, [string]>(
       `SELECT state FROM tasks WHERE task_id = ?`,

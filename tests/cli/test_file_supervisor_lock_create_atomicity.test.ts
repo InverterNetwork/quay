@@ -43,7 +43,7 @@ function tempLockfile(): string {
   return join(dir, "tick.lock");
 }
 
-test("createExclusive writes payload as part of the create — never an empty file window", () => {
+test("createExclusive writes payload as part of the create — never an empty file window", async () => {
   // The lockfile must contain a parseable payload from the moment it
   // exists. This test peeks at the file the instant it appears (right
   // when we're about to start `fn`) and asserts the payload is already
@@ -52,7 +52,7 @@ test("createExclusive writes payload as part of the create — never an empty fi
   const lock = new FileSupervisorLock({ lockfilePath: path });
 
   let payloadSeenInsideFn: { pid: number; taken_at_ms: number } | null = null;
-  lock.run(() => {
+  await lock.run(() => {
     // Inside fn the file must exist with our payload — there should be no
     // observable window in which the file is present but empty.
     expect(existsSync(path)).toBe(true);
@@ -67,7 +67,7 @@ test("createExclusive writes payload as part of the create — never an empty fi
   expect(existsSync(path)).toBe(false);
 });
 
-test("a leftover scratch file from a prior crash does not block a new acquire", () => {
+test("a leftover scratch file from a prior crash does not block a new acquire", async () => {
   // If a previous process died after writing scratch but before linking
   // it, the canonical lockfile was never created and the dir contains
   // nothing but the orphan scratch. A new acquire must still succeed.
@@ -83,13 +83,13 @@ test("a leftover scratch file from a prior crash does not block a new acquire", 
 
   const lock = new FileSupervisorLock({ lockfilePath: path });
   let ran = false;
-  lock.run(() => {
+  await lock.run(() => {
     ran = true;
   });
   expect(ran).toBe(true);
 });
 
-test("EEXIST fallback path still kicks in when the canonical path already has a payload", () => {
+test("EEXIST fallback path still kicks in when the canonical path already has a payload", async () => {
   // Pre-seed the canonical lockfile with a live owner; createExclusive
   // must observe EEXIST and fall through to the live-owner-bail path
   // rather than throwing. The new scratch+link sequence preserves this
@@ -106,20 +106,20 @@ test("EEXIST fallback path still kicks in when the canonical path already has a 
     lockfilePath: path,
     isAlive: (pid) => pid === otherPid,
   });
-  const result = lock.tryRun(() => {});
+  const result = await lock.tryRun(() => {});
   expect(result.acquired).toBe(false);
   // Pre-existing lockfile is intact.
   expect(JSON.parse(readFileSync(path, "utf8")).pid).toBe(otherPid);
 });
 
-test("createExclusive cleans up its own scratch on success (no scratch leak)", () => {
+test("createExclusive cleans up its own scratch on success (no scratch leak)", async () => {
   // After a successful acquire+release, the directory should not contain
   // any leftover scratch artifacts. A scratch leak per acquire would
   // accumulate over time across many ticks.
   const path = tempLockfile();
   const dir = join(path, "..");
   const lock = new FileSupervisorLock({ lockfilePath: path });
-  lock.run(() => {});
+  await lock.run(() => {});
   // Lockfile released on exit. No scratch files should remain either.
   const { readdirSync } = require("node:fs") as typeof import("node:fs");
   const remaining = readdirSync(dir);
