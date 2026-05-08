@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_001_tick_promotes_queued_to_running", () => {
+test("test_001_tick_promotes_queued_to_running", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T10:00:00.000Z");
 
@@ -33,7 +33,7 @@ test("test_001_tick_promotes_queued_to_running", () => {
   built.git.setRemoteHeadSha(repoId, `quay/${taskId}`, "deadbeef");
   built.github.setPrExists(repoId, `quay/${taskId}`, false);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
 
   expect(results).toHaveLength(1);
   expect(results[0]).toEqual({ task_id: taskId, action: "spawned" });

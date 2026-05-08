@@ -1,8 +1,8 @@
-// Regression: SlackAdapter posts/reads through a child Bun process that
-// runs `fetch`. Without a timeout, a stalled Slack connection holds the
-// supervisor lock for the duration of `quay tick` (or `quay cancel`),
-// blocking every other supervisor side effect indefinitely instead of
-// logging `tick_error` and continuing on the next cycle.
+// Regression: SlackAdapter posts/reads through `fetch`. Without a timeout,
+// a stalled Slack connection holds the supervisor lock for the duration of
+// `quay tick` (or `quay cancel`), blocking every other supervisor side
+// effect indefinitely instead of logging `tick_error` and continuing on
+// the next cycle.
 //
 // We pin the bounded behavior here: stand up a localhost HTTP server that
 // holds connections open without responding, point SlackAdapter at it with
@@ -37,7 +37,7 @@ afterAll(() => {
   }
 });
 
-test("post aborts within the configured timeout when Slack never responds", () => {
+test("post aborts within the configured timeout when Slack never responds", async () => {
   const timeoutMs = 250;
   const adapter = new SlackAdapter({
     endpoint: `http://127.0.0.1:${server.port}`,
@@ -45,20 +45,19 @@ test("post aborts within the configured timeout when Slack never responds", () =
     timeoutMs,
   });
   const start = Date.now();
-  expect(() =>
+  await expect(
     adapter.post({ threadRef: "C123:1.000000", body: "hello" }),
-  ).toThrow(/timed out|aborted|abort/i);
+  ).rejects.toThrow(/timed out|aborted|abort/i);
   const elapsed = Date.now() - start;
-  // Generous upper bound: child must abort and exit well before tick's
-  // own cycle completes. A regression that drops the timeout would hang
-  // until the parent grace deadline (~5s+timeoutMs), so a 4s ceiling is
+  // Generous upper bound: a regression that drops the timeout would hang
+  // indefinitely against this never-responding server, so a 4s ceiling is
   // a strong signal the abort path is wired.
   expect(elapsed).toBeLessThan(4_000);
 });
 
-test("listReplies aborts within the configured timeout when Slack never responds", () => {
-  // GET path goes through the same child fetch — pin the timeout there
-  // too so we don't regress one method while leaving the other unbounded.
+test("listReplies aborts within the configured timeout when Slack never responds", async () => {
+  // GET path goes through the same fetch — pin the timeout there too so
+  // we don't regress one method while leaving the other unbounded.
   const timeoutMs = 250;
   const adapter = new SlackAdapter({
     endpoint: `http://127.0.0.1:${server.port}`,
@@ -66,9 +65,9 @@ test("listReplies aborts within the configured timeout when Slack never responds
     timeoutMs,
   });
   const start = Date.now();
-  expect(() => adapter.listReplies("C123:1.000000", "0")).toThrow(
-    /timed out|aborted|abort/i,
-  );
+  await expect(
+    adapter.listReplies("C123:1.000000", "0"),
+  ).rejects.toThrow(/timed out|aborted|abort/i);
   const elapsed = Date.now() - start;
   expect(elapsed).toBeLessThan(4_000);
 });

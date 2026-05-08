@@ -29,7 +29,7 @@ function insertRepoWithWorkflow(
   return repoId;
 }
 
-test("test_066_named_workflow_only_controls_ci_status", () => {
+test("test_066_named_workflow_only_controls_ci_status", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T08:00:00.000Z");
 
@@ -64,7 +64,7 @@ test("test_066_named_workflow_only_controls_ci_status", () => {
     },
   });
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: taskId, action: "ci_passed" }]);
 
   const task = h.db
@@ -103,7 +103,7 @@ test("test_066_named_workflow_only_controls_ci_status", () => {
     },
   });
 
-  const results2 = tick_once(built.deps);
+  const results2 = await tick_once(built.deps);
   // The first task is now in `done`; its done handler runs but produces
   // nothing actionable (no merged/closed/conflict/review). So results only
   // include the second task's CI fail.

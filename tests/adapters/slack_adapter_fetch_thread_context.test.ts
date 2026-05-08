@@ -109,7 +109,7 @@ function manyReplies(count: number): Array<Record<string, unknown>> {
   return out;
 }
 
-test("test_slack_adapter_fetch_thread_context_returns_parent_and_replies", () => {
+test("test_slack_adapter_fetch_thread_context_returns_parent_and_replies", async () => {
   // Single-page thread: parent + three replies (last one bot-authored).
   // Asserts the canonical shape — parent split out, replies in arrival
   // order, all fields surfaced.
@@ -129,7 +129,7 @@ test("test_slack_adapter_fetch_thread_context_returns_parent_and_replies", () =>
     token: "test-token",
     transport: handle.transport,
   });
-  const ctx = adapter.fetchThreadContext(THREAD_REF);
+  const ctx = await adapter.fetchThreadContext(THREAD_REF);
   expect(ctx.parent.ts).toBe("1700.001");
   expect(ctx.parent.text).toBe("Original ask in the thread.");
   expect(ctx.replies.map((r) => r.ts)).toEqual([
@@ -148,7 +148,7 @@ test("test_slack_adapter_fetch_thread_context_returns_parent_and_replies", () =>
   expect(handle.requests[0]!.headers.Authorization).toBe("Bearer test-token");
 });
 
-test("test_slack_adapter_fetch_thread_context_paginates", () => {
+test("test_slack_adapter_fetch_thread_context_paginates", async () => {
   // Two-page thread: first page returns parent + first batch with
   // has_more=true and a next_cursor; second page returns the rest. The
   // adapter must stitch them in order and only count one parent.
@@ -179,7 +179,7 @@ test("test_slack_adapter_fetch_thread_context_paginates", () => {
     token: "test-token",
     transport: handle.transport,
   });
-  const ctx = adapter.fetchThreadContext(THREAD_REF);
+  const ctx = await adapter.fetchThreadContext(THREAD_REF);
   expect(ctx.parent.ts).toBe("1700.001");
   expect(ctx.replies.map((r) => r.ts)).toEqual([
     "1700.000001",
@@ -191,7 +191,7 @@ test("test_slack_adapter_fetch_thread_context_paginates", () => {
   expect(handle.requests).toHaveLength(2);
 });
 
-test("test_slack_adapter_fetch_thread_context_truncates_above_cap", () => {
+test("test_slack_adapter_fetch_thread_context_truncates_above_cap", async () => {
   // 500 replies + default cap (200) → first 100 + canonical marker + last
   // 100, K = 300. Marker text must match spec §7 exactly.
   const replies = manyReplies(500);
@@ -206,7 +206,7 @@ test("test_slack_adapter_fetch_thread_context_truncates_above_cap", () => {
     token: "test-token",
     transport: handle.transport,
   });
-  const ctx = adapter.fetchThreadContext(THREAD_REF);
+  const ctx = await adapter.fetchThreadContext(THREAD_REF);
   expect(ctx.replies).toHaveLength(201);
   expect(ctx.replies.slice(0, 100).map((r) => r.text)).toEqual(
     replies.slice(0, 100).map((r) => r.text as string),
@@ -222,7 +222,7 @@ test("test_slack_adapter_fetch_thread_context_truncates_above_cap", () => {
   );
 });
 
-test("test_slack_adapter_fetch_thread_context_respects_config_override", () => {
+test("test_slack_adapter_fetch_thread_context_respects_config_override", async () => {
   // 60 replies + cap 50 → first 25 + marker + last 25, K = 10.
   const replies = manyReplies(60);
   const handle = recorder(() =>
@@ -237,7 +237,7 @@ test("test_slack_adapter_fetch_thread_context_respects_config_override", () => {
     transport: handle.transport,
     maxThreadMessages: 50,
   });
-  const ctx = adapter.fetchThreadContext(THREAD_REF);
+  const ctx = await adapter.fetchThreadContext(THREAD_REF);
   expect(ctx.replies).toHaveLength(51);
   expect(ctx.replies.slice(0, 25).map((r) => r.text)).toEqual(
     replies.slice(0, 25).map((r) => r.text as string),
@@ -253,7 +253,7 @@ test("test_slack_adapter_fetch_thread_context_respects_config_override", () => {
   );
 });
 
-test("test_slack_adapter_fetch_thread_context_returns_full_thread_under_cap", () => {
+test("test_slack_adapter_fetch_thread_context_returns_full_thread_under_cap", async () => {
   // 50 replies vs default cap of 200 → no truncation, no marker.
   const replies = manyReplies(50);
   const handle = recorder(() =>
@@ -267,7 +267,7 @@ test("test_slack_adapter_fetch_thread_context_returns_full_thread_under_cap", ()
     token: "test-token",
     transport: handle.transport,
   });
-  const ctx = adapter.fetchThreadContext(THREAD_REF);
+  const ctx = await adapter.fetchThreadContext(THREAD_REF);
   expect(ctx.replies).toHaveLength(50);
   expect(ctx.replies.map((r) => r.text)).toEqual(
     replies.map((r) => r.text as string),
@@ -277,7 +277,7 @@ test("test_slack_adapter_fetch_thread_context_returns_full_thread_under_cap", ()
   }
 });
 
-test("test_slack_adapter_fetch_thread_context_marks_bot_messages", () => {
+test("test_slack_adapter_fetch_thread_context_marks_bot_messages", async () => {
   // Mix of human + bot replies → bots flagged via either `bot_id` (the
   // canonical Slack signal) or `subtype: "bot_message"`. Either signal
   // alone must light up `authorBot: true`.
@@ -312,7 +312,7 @@ test("test_slack_adapter_fetch_thread_context_marks_bot_messages", () => {
     token: "test-token",
     transport: handle.transport,
   });
-  const ctx = adapter.fetchThreadContext(THREAD_REF);
+  const ctx = await adapter.fetchThreadContext(THREAD_REF);
   expect(ctx.replies.map((r) => r.authorBot)).toEqual([
     false,
     true,
@@ -321,7 +321,7 @@ test("test_slack_adapter_fetch_thread_context_marks_bot_messages", () => {
   ]);
 });
 
-test("test_slack_adapter_fetch_thread_context_resolves_author_names_when_available", () => {
+test("test_slack_adapter_fetch_thread_context_resolves_author_names_when_available", async () => {
   // Various author surfacings: user_profile.display_name (preferred),
   // user_profile.real_name fallback, bot_profile.name for app messages,
   // bare username for legacy bot messages, and `null` when the payload
@@ -383,7 +383,7 @@ test("test_slack_adapter_fetch_thread_context_resolves_author_names_when_availab
     token: "test-token",
     transport: handle.transport,
   });
-  const ctx = adapter.fetchThreadContext(THREAD_REF);
+  const ctx = await adapter.fetchThreadContext(THREAD_REF);
   expect(ctx.replies.map((r) => r.authorName)).toEqual([
     "Fabian",
     "Marvin Gross",
@@ -393,7 +393,7 @@ test("test_slack_adapter_fetch_thread_context_resolves_author_names_when_availab
   ]);
 });
 
-test("test_slack_adapter_fetch_thread_context_throws_on_thread_not_found", () => {
+test("test_slack_adapter_fetch_thread_context_throws_on_thread_not_found", async () => {
   // Slack signals "thread not found" via HTTP 200 with `ok: false,
   // error: "thread_not_found"`. The adapter must throw — the caller
   // (`ticketContext.fetch`) then wraps as `adapter_error{adapter:"slack"}`.
@@ -406,7 +406,7 @@ test("test_slack_adapter_fetch_thread_context_throws_on_thread_not_found", () =>
   });
   let caught: unknown;
   try {
-    adapter.fetchThreadContext(THREAD_REF);
+    await adapter.fetchThreadContext(THREAD_REF);
   } catch (e) {
     caught = e;
   }
@@ -414,7 +414,7 @@ test("test_slack_adapter_fetch_thread_context_throws_on_thread_not_found", () =>
   expect((caught as Error).message).toMatch(/thread_not_found/);
 });
 
-test("test_slack_adapter_fetch_thread_context_throws_on_429_with_retry_after", () => {
+test("test_slack_adapter_fetch_thread_context_throws_on_429_with_retry_after", async () => {
   // Slack rate-limit: HTTP 429 with `Retry-After: 60` → adapter must
   // surface a QuayError("adapter_error", retryable: true, retry_after: 60).
   // Hermes (the polling layer) decides whether to back off or skip.
@@ -429,7 +429,7 @@ test("test_slack_adapter_fetch_thread_context_throws_on_429_with_retry_after", (
   });
   let caught: unknown;
   try {
-    adapter.fetchThreadContext(THREAD_REF);
+    await adapter.fetchThreadContext(THREAD_REF);
   } catch (e) {
     caught = e;
   }
@@ -441,7 +441,7 @@ test("test_slack_adapter_fetch_thread_context_throws_on_429_with_retry_after", (
   expect(err.details?.retry_after).toBe(60);
 });
 
-test("test_slack_adapter_fetch_thread_context_replaces_slice_14_placeholder", () => {
+test("test_slack_adapter_fetch_thread_context_replaces_slice_14_placeholder", async () => {
   // Slice 14 left this method as `throw new Error("not implemented; landed
   // in slice 18")`. Pin that the real adapter no longer throws "not
   // implemented" — it issues a real API call (here against the injected
@@ -457,7 +457,7 @@ test("test_slack_adapter_fetch_thread_context_replaces_slice_14_placeholder", ()
     token: "test-token",
     transport: handle.transport,
   });
-  const ctx = adapter.fetchThreadContext(THREAD_REF);
+  const ctx = await adapter.fetchThreadContext(THREAD_REF);
   expect(ctx.parent.ts).toBe("1700.001");
   expect(ctx.replies).toHaveLength(1);
   // Confirms the placeholder "not implemented" path is gone.

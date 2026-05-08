@@ -38,7 +38,7 @@ function snapshotState(h: Harness, taskId: string) {
   return { task: task!, eventCount: events!.n };
 }
 
-test("test_026_cancel_terminal_state_semantics", () => {
+test("test_026_cancel_terminal_state_semantics", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-026");
@@ -65,7 +65,7 @@ test("test_026_cancel_terminal_state_semantics", () => {
   const built = buildTickDeps(h);
   const before = snapshotState(h, cancelledId);
 
-  const r1 = cancel_task(built.deps, { taskId: cancelledId });
+  const r1 = await cancel_task(built.deps, { taskId: cancelledId });
   expect(r1.ok).toBe(true);
   if (!r1.ok) throw new Error("expected ok");
   expect(r1.value.outcome).toBe("already_cancelled");
@@ -93,7 +93,7 @@ test("test_026_cancel_terminal_state_semantics", () => {
     spawnedAt: "2026-04-28T08:00:00.000Z",
   });
   const mergedBefore = snapshotState(h, mergedId);
-  const r2 = cancel_task(built.deps, { taskId: mergedId });
+  const r2 = await cancel_task(built.deps, { taskId: mergedId });
   expect(r2.ok).toBe(false);
   if (r2.ok) throw new Error("expected error");
   expect(r2.error.code).toBe("wrong_state");
@@ -116,7 +116,7 @@ test("test_026_cancel_terminal_state_semantics", () => {
     spawnedAt: "2026-04-28T08:00:00.000Z",
   });
   const closedBefore = snapshotState(h, closedId);
-  const r3 = cancel_task(built.deps, { taskId: closedId });
+  const r3 = await cancel_task(built.deps, { taskId: closedId });
   expect(r3.ok).toBe(false);
   if (r3.ok) throw new Error("expected error");
   expect(r3.error.code).toBe("wrong_state");

@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_promotion_consumes_budget_once", () => {
+test("test_promotion_consumes_budget_once", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-budget");
   const taskId = insertTask(h.db, { taskId: "task-once", repoId });
@@ -32,7 +32,7 @@ test("test_promotion_consumes_budget_once", () => {
   built.github.setPrExists(repoId, `quay/${taskId}`, false);
 
   // First tick: promotion increments attempts_consumed by exactly one.
-  const first = tick_once(built.deps);
+  const first = await tick_once(built.deps);
   expect(first.map((r) => r.action)).toEqual(["spawned"]);
   let consumed = h.db
     .query<{ n: number }, [string]>(
@@ -43,7 +43,7 @@ test("test_promotion_consumes_budget_once", () => {
 
   // Second tick: the same attempt cannot be promoted again — predicate
   // requires state = 'queued', and the task is now 'running'. Budget stays at 1.
-  const second = tick_once(built.deps);
+  const second = await tick_once(built.deps);
   expect(second).toHaveLength(0); // no queued tasks left
   consumed = h.db
     .query<{ n: number }, [string]>(

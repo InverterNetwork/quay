@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_035_capacity_cap_prevents_extra_spawn", () => {
+test("test_035_capacity_cap_prevents_extra_spawn", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-cap");
   const tasks = ["task-a", "task-b", "task-c"];
@@ -36,7 +36,7 @@ test("test_035_capacity_cap_prevents_extra_spawn", () => {
     built.github.setPrExists(repoId, `quay/${id}`, false);
   }
 
-  const results = tick_once(built.deps, { maxConcurrent: 2 });
+  const results = await tick_once(built.deps, { maxConcurrent: 2 });
 
   expect(results).toHaveLength(3);
   const promoted = results.filter((r) => r.action === "spawned").length;

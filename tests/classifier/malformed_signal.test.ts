@@ -16,7 +16,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_malformed_blocker_schedules_malformed_signal_retry", () => {
+test("test_malformed_blocker_schedules_malformed_signal_retry", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T19:00:00.000Z");
 
@@ -35,7 +35,7 @@ test("test_malformed_blocker_schedules_malformed_signal_retry", () => {
   const built = buildTickDeps(h);
   built.tmux.markDead(t.sessionName!);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: t.taskId, action: "malformed_signal" }]);
 
   // Persisted as a malformed_signal artifact, raw bytes preserved.

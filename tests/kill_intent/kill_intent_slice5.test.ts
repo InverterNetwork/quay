@@ -11,7 +11,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_022_wall_clock_kill_schedules_retry", () => {
+test("test_022_wall_clock_kill_schedules_retry", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T02:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-wall-clock");
@@ -26,7 +26,7 @@ test("test_022_wall_clock_kill_schedules_retry", () => {
   built.tmux.liveSessions.add(t.sessionName!);
   built.tmux.setLogFreshness(t.sessionName!, "2026-04-28T01:59:00.000Z");
 
-  expect(tick_once(built.deps)).toEqual([
+  expect(await tick_once(built.deps)).toEqual([
     { task_id: t.taskId, action: "kill_intent_set" },
   ]);
   const intent = h.db
@@ -37,7 +37,7 @@ test("test_022_wall_clock_kill_schedules_retry", () => {
   expect(intent!.kill_intent).toBe("wall_clock");
   expect(built.tmux.killCalls).toEqual([t.sessionName!]);
 
-  expect(tick_once(built.deps)).toEqual([
+  expect(await tick_once(built.deps)).toEqual([
     { task_id: t.taskId, action: "wall_clock_killed" },
   ]);
   const pending = h.db
@@ -55,7 +55,7 @@ test("test_022_wall_clock_kill_schedules_retry", () => {
   expect(ended).toEqual({ exit_kind: "killed_wall_clock", kill_intent: null });
 });
 
-test("test_stale_kill_schedules_retry_once", () => {
+test("test_stale_kill_schedules_retry_once", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T00:20:00.000Z");
   const repoId = insertRepo(h.db, "repo-stale");
@@ -70,8 +70,8 @@ test("test_stale_kill_schedules_retry_once", () => {
   built.tmux.liveSessions.add(t.sessionName!);
   built.tmux.setLogFreshness(t.sessionName!, "2026-04-28T00:00:00.000Z");
 
-  tick_once(built.deps);
-  tick_once(built.deps);
+  await tick_once(built.deps);
+  await tick_once(built.deps);
 
   const pending = h.db
     .query<{ n: number }, [string]>(

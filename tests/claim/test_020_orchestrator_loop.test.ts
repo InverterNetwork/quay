@@ -11,7 +11,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_020_claim_expiration_cap_parks_orchestrator_loop", () => {
+test("test_020_claim_expiration_cap_parks_orchestrator_loop", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-loop");
@@ -29,7 +29,7 @@ test("test_020_claim_expiration_cap_parks_orchestrator_loop", () => {
     const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
     if (!claim.ok) throw new Error(`expected claim to succeed on cycle ${i + 1}`);
     h.clock.advanceMs(60 * 60 * 1000);
-    const results = tick_once(built.deps);
+    const results = await tick_once(built.deps);
     if (i < cycles - 1) {
       expect(results).toEqual([{ task_id: taskId, action: "claim_expired" }]);
     } else {
@@ -62,6 +62,6 @@ test("test_020_claim_expiration_cap_parks_orchestrator_loop", () => {
   expect(parked!.n).toBe(1);
 
   // Subsequent ticks do not touch a parked task.
-  const followup = tick_once(built.deps);
+  const followup = await tick_once(built.deps);
   expect(followup).toEqual([]);
 });

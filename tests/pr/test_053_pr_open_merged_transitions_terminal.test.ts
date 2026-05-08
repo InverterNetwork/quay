@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_053_pr_open_merged_transitions_terminal", () => {
+test("test_053_pr_open_merged_transitions_terminal", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T12:00:00.000Z");
 
@@ -58,7 +58,7 @@ test("test_053_pr_open_merged_transitions_terminal", () => {
     },
   });
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: taskId, action: "pr_merged" }]);
 
   const task = h.db

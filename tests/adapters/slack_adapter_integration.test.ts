@@ -7,12 +7,12 @@ import { SlackAdapter } from "../../src/adapters/slack.ts";
 
 const integration = process.env.QUAY_INTEGRATION_TESTS === "1";
 
-describe.skipIf(!integration)("SlackAdapter contract (integration)", () => {
+describe.skipIf(!integration)("SlackAdapter contract (integration)", async () => {
   test("instantiates without error", () => {
     expect(new SlackAdapter()).toBeDefined();
   });
 
-  test("fetchThreadContext against a known sandbox thread returns a structured payload", () => {
+  test("fetchThreadContext against a known sandbox thread returns a structured payload", async () => {
     // Operators wire a sandbox thread ref via QUAY_SLACK_SANDBOX_THREAD_REF
     // (formatted as `<channel>:<ts>`) when running this opt-in suite.
     // Without it, this is a no-op so the gate stays useful even on partial
@@ -21,7 +21,7 @@ describe.skipIf(!integration)("SlackAdapter contract (integration)", () => {
     const ref = process.env.QUAY_SLACK_SANDBOX_THREAD_REF;
     if (ref === undefined || ref === "") return;
     const adapter = new SlackAdapter();
-    const ctx = adapter.fetchThreadContext(ref);
+    const ctx = await adapter.fetchThreadContext(ref);
     expect(ctx.parent).toBeDefined();
     expect(typeof ctx.parent.ts).toBe("string");
     expect(Array.isArray(ctx.replies)).toBe(true);

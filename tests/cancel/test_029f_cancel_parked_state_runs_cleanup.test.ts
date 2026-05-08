@@ -59,7 +59,7 @@ function insertParkedTask(
   });
 }
 
-test("test_029f_cancel_parked_state_runs_cleanup", () => {
+test("test_029f_cancel_parked_state_runs_cleanup", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-029f");
@@ -83,7 +83,7 @@ test("test_029f_cancel_parked_state_runs_cleanup", () => {
     built.git.setRemoteBranches(repoId, Array.from(remote));
     built.github.setPrIsOpen(repoId, branchName, false);
 
-    const result = cancel_task(built.deps, { taskId });
+    const result = await cancel_task(built.deps, { taskId });
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");
     expect(result.value.outcome).toBe("cancelled");

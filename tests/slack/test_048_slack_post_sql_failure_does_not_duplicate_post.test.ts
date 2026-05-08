@@ -17,7 +17,7 @@ afterEach(() => {
   clearAllFailpoints();
 });
 
-test("test_048_slack_post_sql_failure_does_not_duplicate_post", () => {
+test("test_048_slack_post_sql_failure_does_not_duplicate_post", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-048");
@@ -58,13 +58,13 @@ test("test_048_slack_post_sql_failure_does_not_duplicate_post", () => {
   setFailpoint("after_slack_post", () => {
     throw new Error("simulated crash after_slack_post");
   });
-  tick_once(built.deps);
+  await tick_once(built.deps);
   expect(built.slack.postCalls).toHaveLength(1);
   setFailpoint("after_slack_post", null);
 
   // Tick #2: nonce recovery, no replies yet. Still waiting_human, no second
   // post made.
-  tick_once(built.deps);
+  await tick_once(built.deps);
   expect(built.slack.postCalls).toHaveLength(1);
   const stillWaiting = h.db
     .query<{ state: string }, [string]>(`SELECT state FROM tasks WHERE task_id = ?`)
@@ -75,7 +75,7 @@ test("test_048_slack_post_sql_failure_does_not_duplicate_post", () => {
   const replyTs = built.slack.appendHumanReply("C77:0.7", "ship X");
 
   // Tick #3: ingest reply, transition to awaiting-next-brief.
-  const r3 = tick_once(built.deps);
+  const r3 = await tick_once(built.deps);
   const actions3 = r3.filter((r) => r.task_id === taskId).map((r) => r.action);
   expect(actions3).toContain("slack_reply_ingested");
 

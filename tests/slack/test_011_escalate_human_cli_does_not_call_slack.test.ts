@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_011_escalate_human_cli_does_not_call_slack", () => {
+test("test_011_escalate_human_cli_does_not_call_slack", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-011");
@@ -77,7 +77,7 @@ test("test_011_escalate_human_cli_does_not_call_slack", () => {
   expect(artBefore!.slack_recovered_post_ts).toBeNull();
 
   // Tick now performs the post under the supervisor lock.
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
 
   expect(built.slack.fenceCalls).toHaveLength(1);
   expect(built.slack.searchCalls).toHaveLength(1);

@@ -11,7 +11,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_073_retry_attempt_does_not_create_duplicate_pr", () => {
+test("test_073_retry_attempt_does_not_create_duplicate_pr", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T16:00:00.000Z");
 
@@ -38,7 +38,7 @@ test("test_073_retry_attempt_does_not_create_duplicate_pr", () => {
   built.git.setRemoteHeadSha(repoId, t.branchName, "new-sha");
   built.github.setPrExists(repoId, t.branchName, true);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: t.taskId, action: "pr_opened" }]);
 
   // Task transitions to pr-open without scheduling a retry.

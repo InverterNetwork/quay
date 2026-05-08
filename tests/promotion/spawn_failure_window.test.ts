@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_spawn_failure_window_leaves_running_with_null_session_for_recovery", () => {
+test("test_spawn_failure_window_leaves_running_with_null_session_for_recovery", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T11:00:00.000Z");
 
@@ -37,7 +37,7 @@ test("test_spawn_failure_window_leaves_running_with_null_session_for_recovery", 
   // death between the SQL promotion commit and the tmux session record.
   built.tmux.failSpawnNext();
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toHaveLength(1);
   expect(results[0]!.task_id).toBe(taskId);
   expect(results[0]!.action).toBe("spawn_substrate_failed");
@@ -83,7 +83,7 @@ test("test_spawn_failure_window_leaves_running_with_null_session_for_recovery", 
   // A second tick runs slice-5 recovery: the no-evidence spawn-window default
   // marks spawn_failed, rolls back budget, and schedules a clean retry. It
   // still must not promote a duplicate in the same tick.
-  const again = tick_once(built.deps);
+  const again = await tick_once(built.deps);
   expect(again).toEqual([{ task_id: taskId, action: "spawn_failed" }]);
   expect(built.tmux.spawnCalls).toHaveLength(0);
   const recovered = h.db

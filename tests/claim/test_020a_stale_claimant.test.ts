@@ -12,7 +12,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_020a_stale_claimant_cannot_submit_brief", () => {
+test("test_020a_stale_claimant_cannot_submit_brief", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-stale");
@@ -31,7 +31,7 @@ test("test_020a_stale_claimant_cannot_submit_brief", () => {
   // Tick auto-releases A's claim after the timeout.
   h.clock.set("2026-04-28T11:00:00.000Z");
   const built = buildTickDeps(h);
-  tick_once(built.deps);
+  await tick_once(built.deps);
 
   // Orchestrator B claims and gets claim_id_B.
   const claimB = claim_task({ db: h.db, clock: h.clock }, { taskId });

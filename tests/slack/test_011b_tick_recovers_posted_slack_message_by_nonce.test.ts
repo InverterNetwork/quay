@@ -18,7 +18,7 @@ afterEach(() => {
   clearAllFailpoints();
 });
 
-test("test_011b_tick_recovers_posted_slack_message_by_nonce", () => {
+test("test_011b_tick_recovers_posted_slack_message_by_nonce", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-011b");
@@ -61,7 +61,7 @@ test("test_011b_tick_recovers_posted_slack_message_by_nonce", () => {
   });
 
   // Tick #1 — Slack accepts the post; the failpoint kills the persist phase.
-  const r1 = tick_once(built.deps);
+  const r1 = await tick_once(built.deps);
   expect(built.slack.postCalls).toHaveLength(1);
   // Slack records the bot message even though we crashed before SQL persist.
   expect(r1.find((r) => r.task_id === taskId && r.action === "tick_error"))
@@ -88,7 +88,7 @@ test("test_011b_tick_recovers_posted_slack_message_by_nonce", () => {
   setFailpoint("after_slack_post", null);
 
   // Tick #2 — recovery via nonce. Must NOT repost.
-  const r2 = tick_once(built.deps);
+  const r2 = await tick_once(built.deps);
   expect(built.slack.postCalls).toHaveLength(1);
   expect(built.slack.searchCalls.length).toBeGreaterThanOrEqual(2);
   const actions2 = r2.filter((r) => r.task_id === taskId).map((r) => r.action);

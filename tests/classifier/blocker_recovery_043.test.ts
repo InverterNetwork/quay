@@ -21,7 +21,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_043_blocker_crash_after_artifact_write_converges", () => {
+test("test_043_blocker_crash_after_artifact_write_converges", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T15:00:00.000Z");
 
@@ -45,7 +45,7 @@ test("test_043_blocker_crash_after_artifact_write_converges", () => {
     throw new Error("simulated crash after blocker artifact write");
   });
 
-  const first = tick_once(built.deps);
+  const first = await tick_once(built.deps);
   expect(first).toHaveLength(1);
   expect(first[0]!.task_id).toBe(t.taskId);
   expect(first[0]!.action).toBe("tick_error");
@@ -85,7 +85,7 @@ test("test_043_blocker_crash_after_artifact_write_converges", () => {
   // writes the missing event/state, deletes the file.
   clearAllFailpoints();
 
-  const second = tick_once(built.deps);
+  const second = await tick_once(built.deps);
   expect(second).toEqual([{ task_id: t.taskId, action: "blocker_ingested" }]);
 
   // Exactly one blocker artifact row — the recovery did NOT insert a duplicate.

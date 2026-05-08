@@ -26,12 +26,12 @@ function tempLockfile(): string {
   return join(dir, "tick.lock");
 }
 
-test("FileSupervisorLock acquires a free lock and writes its PID", () => {
+test("FileSupervisorLock acquires a free lock and writes its PID", async () => {
   const path = tempLockfile();
   const lock = new FileSupervisorLock({ lockfilePath: path });
   let inside = false;
   let observedPid: number = -1;
-  lock.run(() => {
+  await lock.run(() => {
     inside = true;
     observedPid = JSON.parse(readFileSync(path, "utf8")).pid;
   });
@@ -41,7 +41,7 @@ test("FileSupervisorLock acquires a free lock and writes its PID", () => {
   expect(existsSync(path)).toBe(false);
 });
 
-test("FileSupervisorLock.tryRun returns acquired:false when held by another live PID", () => {
+test("FileSupervisorLock.tryRun returns acquired:false when held by another live PID", async () => {
   const path = tempLockfile();
   // Simulate another process by writing a payload with a different PID and
   // forcing isAlive=true for that PID.
@@ -55,7 +55,7 @@ test("FileSupervisorLock.tryRun returns acquired:false when held by another live
     isAlive: (pid) => pid === otherPid,
   });
   let ran = false;
-  const result = lock.tryRun(() => {
+  const result = await lock.tryRun(() => {
     ran = true;
   });
   expect(result.acquired).toBe(false);
@@ -65,7 +65,7 @@ test("FileSupervisorLock.tryRun returns acquired:false when held by another live
   expect(payload.pid).toBe(otherPid);
 });
 
-test("FileSupervisorLock.tryRun acquires when the recorded PID is dead and beyond the grace window", () => {
+test("FileSupervisorLock.tryRun acquires when the recorded PID is dead and beyond the grace window", async () => {
   const path = tempLockfile();
   const deadPid = 999_999;
   // Mtime intentionally older than the 30 s default grace.
@@ -81,14 +81,14 @@ test("FileSupervisorLock.tryRun acquires when the recorded PID is dead and beyon
     isAlive: () => false,
   });
   let ran = false;
-  const result = lock.tryRun(() => {
+  const result = await lock.tryRun(() => {
     ran = true;
   });
   expect(result.acquired).toBe(true);
   expect(ran).toBe(true);
 });
 
-test("FileSupervisorLock.tryRun refuses to take over a dead-PID lock within the grace window", () => {
+test("FileSupervisorLock.tryRun refuses to take over a dead-PID lock within the grace window", async () => {
   const path = tempLockfile();
   const deadPid = 999_999;
   writeFileSync(
@@ -104,11 +104,11 @@ test("FileSupervisorLock.tryRun refuses to take over a dead-PID lock within the 
     staleSeconds: 30,
     isAlive: () => false,
   });
-  const result = lock.tryRun(() => {});
+  const result = await lock.tryRun(() => {});
   expect(result.acquired).toBe(false);
 });
 
-test("FileSupervisorLock.run blocks then acquires after the holder releases", () => {
+test("FileSupervisorLock.run blocks then acquires after the holder releases", async () => {
   const path = tempLockfile();
   // First instance acquires and "leaves" — simulate another live process by
   // writing a current PID + taken_at, then teach our lock to flip isAlive
@@ -131,19 +131,19 @@ test("FileSupervisorLock.run blocks then acquires after the holder releases", ()
     pollIntervalMs: 5,
   });
   let ran = false;
-  lock.run(() => {
+  await lock.run(() => {
     ran = true;
   });
   expect(ran).toBe(true);
   expect(aliveProbeCount).toBeGreaterThanOrEqual(3);
 });
 
-test("FileSupervisorLock release deletes the lockfile only if it still owns it", () => {
+test("FileSupervisorLock release deletes the lockfile only if it still owns it", async () => {
   const path = tempLockfile();
   const lock = new FileSupervisorLock({ lockfilePath: path });
   // Acquire, then before releasing have someone else "take over" — release
   // must not delete that other owner's lock.
-  lock.run(() => {
+  await lock.run(() => {
     writeFileSync(
       path,
       JSON.stringify({ pid: process.pid + 1, taken_at_ms: Date.now() }),
@@ -155,7 +155,7 @@ test("FileSupervisorLock release deletes the lockfile only if it still owns it",
   expect(payload.pid).not.toBe(process.pid);
 });
 
-test("FileSupervisorLock takeover is atomic against contending acquirers", () => {
+test("FileSupervisorLock takeover is atomic against contending acquirers", async () => {
   // Two acquirers (A and B) both observe a dead-PID stale lock and both
   // try to take over. The naive `unlink + create` sequence would let both
   // succeed: A unlinks → A creates → B unlinks A's fresh lock → B
@@ -184,11 +184,11 @@ test("FileSupervisorLock takeover is atomic against contending acquirers", () =>
   });
 
   let bResult: { acquired: boolean } | null = null;
-  const aResult = lockA.tryRun(() => {
+  const aResult = await lockA.tryRun(async () => {
     // A is now inside fn(). The lockfile has A's payload with a fresh
     // taken_at_ms. B observes A's payload, finds it within the grace
     // window, and must refuse takeover.
-    bResult = lockB.tryRun(() => {});
+    bResult = await lockB.tryRun(() => {});
   });
 
   expect(aResult.acquired).toBe(true);
@@ -196,7 +196,7 @@ test("FileSupervisorLock takeover is atomic against contending acquirers", () =>
   expect(bResult!.acquired).toBe(false);
 });
 
-test("FileSupervisorLock refuses takeover when the file changed between pre-mutex read and mutex acquire", () => {
+test("FileSupervisorLock refuses takeover when the file changed between pre-mutex read and mutex acquire", async () => {
   // Direct race: acquirer-A reads stale P_old, then before A acquires
   // the takeover mutex, a concurrent acquirer B successfully takes over
   // and writes a fresh payload P_new. A's mutex acquire eventually
@@ -229,7 +229,7 @@ test("FileSupervisorLock refuses takeover when the file changed between pre-mute
       return false;
     },
   });
-  const result = lockA.tryRun(() => {});
+  const result = await lockA.tryRun(() => {});
   // Under-mutex re-read sees the new payload, doesn't match A's
   // `expected` (P_old), so A bails without ever modifying canonical.
   expect(result.acquired).toBe(false);
@@ -238,7 +238,7 @@ test("FileSupervisorLock refuses takeover when the file changed between pre-mute
   expect(remaining.taken_at_ms).toBe(newOwnerTakenAt);
 });
 
-test("FileSupervisorLock takeover never empties the canonical path (no third-acquirer race window)", () => {
+test("FileSupervisorLock takeover never empties the canonical path (no third-acquirer race window)", async () => {
   // Three-acquirer race the previous rename-based protocol allowed:
   //   A reads stale P_old.
   //   B takes over → canonical now has P_B; B is in fn().
@@ -272,7 +272,7 @@ test("FileSupervisorLock takeover never empties the canonical path (no third-acq
     },
   });
 
-  const result = lock.tryRun(() => {
+  const result = await lock.tryRun(() => {
     if (!existsSync(path)) observedMissing = true;
   });
 
@@ -280,7 +280,7 @@ test("FileSupervisorLock takeover never empties the canonical path (no third-acq
   expect(observedMissing).toBe(false);
 });
 
-test("FileSupervisorLock reclaims a takeover-mutex whose owner PID is dead and beyond grace", () => {
+test("FileSupervisorLock reclaims a takeover-mutex whose owner PID is dead and beyond grace", async () => {
   // Stale-takeover-mutex recovery: a previous takeover holder crashed
   // before unlinking the mutex file. The mutex content names a dead PID
   // with an old timestamp. A new acquirer must reclaim.
@@ -301,12 +301,12 @@ test("FileSupervisorLock reclaims a takeover-mutex whose owner PID is dead and b
     lockfilePath: path,
     isAlive: (pid) => pid !== deadMutexHolder && pid !== stalePid,
   });
-  const result = lock.tryRun(() => {});
+  const result = await lock.tryRun(() => {});
   expect(result.acquired).toBe(true);
   expect(existsSync(mutexPath)).toBe(false);
 });
 
-test("FileSupervisorLock refuses to reclaim a takeover-mutex whose owner PID is alive (paused-but-alive)", () => {
+test("FileSupervisorLock refuses to reclaim a takeover-mutex whose owner PID is alive (paused-but-alive)", async () => {
   // Reviewer scenario A: takeover holder is paused (long GC, page
   // fault, SIGSTOP), not crashed. PID is still alive. Pure age-based
   // reclaim would let another acquirer steal the mutex; the holder
@@ -334,14 +334,14 @@ test("FileSupervisorLock refuses to reclaim a takeover-mutex whose owner PID is 
     isAlive: (pid) => pid === liveMutexHolder,
     staleMutexMs: 0,
   });
-  const result = lock.tryRun(() => {});
+  const result = await lock.tryRun(() => {});
   expect(result.acquired).toBe(false);
   expect(existsSync(mutexPath)).toBe(true);
   const owner = JSON.parse(readFileSync(mutexPath, "utf8"));
   expect(owner.pid).toBe(liveMutexHolder);
 });
 
-test("FileSupervisorLock takeover-mutex carries owner content from the instant it exists", () => {
+test("FileSupervisorLock takeover-mutex carries owner content from the instant it exists", async () => {
   // Reviewer scenario B: the previous mkdir-then-write protocol had a
   // window where the mutex directory existed without owner.json. A
   // paused acquirer in that window could let a contending acquirer
@@ -380,13 +380,13 @@ test("FileSupervisorLock takeover-mutex carries owner content from the instant i
       return pid !== stalePid;
     },
   });
-  const result = lock.tryRun(() => {});
+  const result = await lock.tryRun(() => {});
   expect(result.acquired).toBe(true);
   expect(mutexHadOwnerFromFirstSighting).toBe(true);
   expect(existsSync(mutexPath)).toBe(false);
 });
 
-test("FileSupervisorLock takeover-mutex contention: only one of two concurrent acquirers wins via linkSync", () => {
+test("FileSupervisorLock takeover-mutex contention: only one of two concurrent acquirers wins via linkSync", async () => {
   // Two contending takeovers both attempt to acquire the mutex. The
   // hard-link protocol must elect exactly one — the other observes the
   // winner's payload and bails (live owner = process.pid). The losing
@@ -409,12 +409,12 @@ test("FileSupervisorLock takeover-mutex contention: only one of two concurrent a
   });
 
   let bResult: { acquired: boolean } | null = null;
-  const aResult = lockA.tryRun(() => {
+  const aResult = await lockA.tryRun(async () => {
     // While A is inside fn(), the mutex is already released (held only
     // for the takeover swap), so B's tryRun does its own takeover. A's
     // canonical lock is now in place; B should observe A as a live owner
     // of the canonical lockfile and refuse takeover.
-    bResult = lockB.tryRun(() => {});
+    bResult = await lockB.tryRun(() => {});
   });
 
   expect(aResult.acquired).toBe(true);
@@ -422,13 +422,13 @@ test("FileSupervisorLock takeover-mutex contention: only one of two concurrent a
   expect(bResult!.acquired).toBe(false);
 });
 
-test("FileSupervisorLock.run throws on reentrant acquire", () => {
+test("FileSupervisorLock.run throws on reentrant acquire", async () => {
   const path = tempLockfile();
   const lock = new FileSupervisorLock({ lockfilePath: path });
   let caught: unknown = null;
-  lock.run(() => {
+  await lock.run(async () => {
     try {
-      lock.run(() => {});
+      await lock.run(() => {});
     } catch (err) {
       caught = err;
     }

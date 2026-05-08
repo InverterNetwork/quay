@@ -18,7 +18,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_081_cancel_with_open_pr_retains_remote_branch", () => {
+test("test_081_cancel_with_open_pr_retains_remote_branch", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-081");
@@ -63,7 +63,7 @@ test("test_081_cancel_with_open_pr_retains_remote_branch", () => {
   built.git.setRemoteBranches(repoId, [branchName]);
   built.github.setPrIsOpen(repoId, branchName, true);
 
-  const result = cancel_task(built.deps, { taskId }); // default flags
+  const result = await cancel_task(built.deps, { taskId }); // default flags
   expect(result.ok).toBe(true);
 
   // Task terminal.
@@ -93,7 +93,7 @@ test("test_081_cancel_with_open_pr_retains_remote_branch", () => {
   expect(built.git.worktrees.has(worktreePath)).toBe(false);
 });
 
-test("test_cancel_keep_worktree_detaches_before_branch_delete", () => {
+test("test_cancel_keep_worktree_detaches_before_branch_delete", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-081-keep");
@@ -137,7 +137,7 @@ test("test_cancel_keep_worktree_detaches_before_branch_delete", () => {
   built.git.setRemoteBranches(repoId, [branchName]);
   built.github.setPrIsOpen(repoId, branchName, false);
 
-  const result = cancel_task(built.deps, { taskId, keepWorktree: true });
+  const result = await cancel_task(built.deps, { taskId, keepWorktree: true });
   expect(result.ok).toBe(true);
 
   const final = h.db

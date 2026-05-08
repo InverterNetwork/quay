@@ -26,7 +26,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_031c_cancel_races_mid_spawn_converges", () => {
+test("test_031c_cancel_races_mid_spawn_converges", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-031c");
@@ -48,7 +48,7 @@ test("test_031c_cancel_races_mid_spawn_converges", () => {
   // Tick under the supervisor lock: promote queued → running, then perform
   // the substrate spawn (creating a live tmux session). Cancel cannot run
   // concurrently because the lock is held for the full cycle.
-  const tickResults = tick_once(built.deps);
+  const tickResults = await tick_once(built.deps);
   expect(tickResults).toEqual([{ task_id: taskId, action: "spawned" }]);
 
   const sessionName = `quay-task-${
@@ -72,7 +72,7 @@ test("test_031c_cancel_races_mid_spawn_converges", () => {
 
   // Now cancel acquires the supervisor lock (released by tick). The
   // finalizer kills the freshly spawned worker and marks cancelled.
-  const result = cancel_task(built.deps, { taskId });
+  const result = await cancel_task(built.deps, { taskId });
   expect(result.ok).toBe(true);
   if (!result.ok) throw new Error("expected ok");
   expect(result.value.outcome).toBe("cancelled");
