@@ -205,7 +205,7 @@ export interface TicketContextDeps {
 export function fetchTicketContext(
   deps: TicketContextDeps,
   identifier: string,
-): TicketContext;
+): Promise<TicketContext>;
 ```
 
 **Composition rules:**
@@ -338,11 +338,11 @@ export interface LinearPort {
   // Returns null on 404 (no such issue).
   // Throws on draft issues (`ticket_not_actionable`), 5xx (`adapter_error{retryable:false}`),
   // 429 (`adapter_error{retryable:true, retry_after}`), and network/auth errors.
-  getIssue(identifier: string): LinearIssue | null;
+  getIssue(identifier: string): Promise<LinearIssue | null>;
 }
 ```
 
-The Linear adapter implements `LinearPort` against Linear's GraphQL API. Bot token via `LINEAR_API_KEY`. Synchronous (matches the existing `SlackAdapter` pattern using a child fetch with timeout, per `src/adapters/slack.ts:28-32`).
+The Linear adapter implements `LinearPort` against Linear's GraphQL API. Bot token via `LINEAR_API_KEY`. Async, calling `fetch` in-process under an `AbortController` bounded by `QUAY_LINEAR_TIMEOUT_MS` (default 30s). An out-of-process spawn was tried first to keep the port synchronous, but `process.execPath` resolves to the compiled quay binary in a `bun build --compile` build — spawning `process.execPath -e <script>` re-enters the CLI dispatcher and fails (AST-85). The `SlackAdapter` retains the legacy spawn pattern for now and is broken the same way under a compiled binary; tracked separately as AST-86.
 
 **Comments fetch.** `getIssue` returns the issue *and* all its comments in a single GraphQL query (Linear's GraphQL surfaces `comments` as a connected field on `Issue`, which is one round-trip with proper field selection). Comments are paginated under the hood; the adapter walks all pages and returns the full list, in chronological order. Bot/integration comments (e.g., GitHub-PR-link comments, Slack-link integrations) are returned with `authorIsBot: true`; the brief composer in §6.1 filters them out, but `ticket_snapshot` archives them all for traceability.
 
