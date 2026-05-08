@@ -106,12 +106,30 @@ export async function dispatch(
   }
 
   const [head, ...rest] = argv;
-  // Explicit top-level help: `quay --help` / `-h` / `help` → stdout, exit 0.
-  // We match on the first token only; deeper `<cmd> --help` invocations are
-  // routed through the per-command handlers below.
-  if (rest.length === 0 && isHelpToken(head as string)) {
-    io.stdout(topLevelHelp());
-    return { exitCode: 0 };
+  // Explicit top-level help.
+  //
+  //   quay --help / -h / help              → top-level overview, stdout.
+  //   quay help <cmd> [<sub>] [...]        → per-command help for that path,
+  //                                          mirroring `git help log`.
+  //
+  // Per-command `<cmd> --help` invocations fall through to the relevant
+  // handler so each one can short-circuit to its own usage block.
+  if (isHelpToken(head as string)) {
+    if (rest.length === 0) {
+      io.stdout(topLevelHelp());
+      return { exitCode: 0 };
+    }
+    if (head === "help") {
+      // Fall back to top-level help if the path isn't registered, rather
+      // than emit a confusing `usage_error: no help for: ...`.
+      const block = commandHelp(rest);
+      if (block !== null) {
+        io.stdout(block);
+        return { exitCode: 0 };
+      }
+      io.stdout(topLevelHelp());
+      return { exitCode: 0 };
+    }
   }
   try {
     // Per-command --help: route to the relevant handler so each one can
@@ -193,10 +211,7 @@ async function handleTask(
   }
   const [sub, ...rest] = argv;
   // `quay task --help` (or `-h` / `help`) prints the noun's usage on stdout.
-  if (isHelpToken(sub as string)) {
-    io.stdout(commandHelp(["task"]) ?? "");
-    return { exitCode: 0 };
-  }
+  if (isHelpToken(sub as string)) return printHelp(io, ["task"]);
   // Per-subcommand --help is recognised by the leaf handlers via wantsHelp().
   switch (sub) {
     case "list":
@@ -215,7 +230,14 @@ async function handleTask(
       if (wantsHelp(rest)) return printHelp(io, ["task", "release-claim"]);
       return handleReleaseClaim(rest, deps, io);
     default:
-      return writeError(io, "usage_error", `unknown task subcommand: ${sub}`);
+      // A typo'd subcommand benefits from the noun's usage block as much as
+      // a missing one — surface it on stderr alongside the structured envelope.
+      return writeErrorWithUsage(
+        io,
+        ["task"],
+        "usage_error",
+        `unknown task subcommand: ${sub}`,
+      );
   }
 }
 
@@ -453,10 +475,7 @@ function handleRepo(
     );
   }
   const [sub, ...rest] = argv;
-  if (isHelpToken(sub as string)) {
-    io.stdout(commandHelp(["repo"]) ?? "");
-    return { exitCode: 0 };
-  }
+  if (isHelpToken(sub as string)) return printHelp(io, ["repo"]);
   const service = createRepoService({ db: deps.db, clock: deps.clock });
   switch (sub) {
     case "add":
@@ -485,7 +504,14 @@ function handleRepo(
       if (wantsHelp(rest)) return printHelp(io, ["repo", "import"]);
       return handleRepoImport(rest, service, io);
     default:
-      return writeError(io, "usage_error", `unknown repo subcommand: ${sub}`);
+      // Mirror bare `quay repo`: structured envelope plus the noun's usage
+      // block so a typo gets the same recovery hint as the missing-sub case.
+      return writeErrorWithUsage(
+        io,
+        ["repo"],
+        "usage_error",
+        `unknown repo subcommand: ${sub}`,
+      );
   }
 }
 
@@ -827,12 +853,14 @@ function handleArtifact(
       "artifact subcommand required (get)",
     );
   }
-  if (isHelpToken(argv[0] as string)) {
-    io.stdout(commandHelp(["artifact"]) ?? "");
-    return { exitCode: 0 };
-  }
+  if (isHelpToken(argv[0] as string)) return printHelp(io, ["artifact"]);
   if (argv[0] !== "get") {
-    return writeError(io, "usage_error", "artifact subcommand required (get)");
+    return writeErrorWithUsage(
+      io,
+      ["artifact"],
+      "usage_error",
+      `unknown artifact subcommand: ${argv[0]}`,
+    );
   }
   const rest = argv.slice(1);
   if (wantsHelp(rest)) return printHelp(io, ["artifact", "get"]);

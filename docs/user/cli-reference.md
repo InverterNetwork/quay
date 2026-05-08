@@ -11,6 +11,27 @@ spec docs may lag behind this list.
 - `quay tick` prints newline-delimited JSON, one action per line.
 - `quay artifact get` streams raw artifact bytes unless `--path` is used.
 
+## Help
+
+Every command supports `--help`, `-h`, or a bare `help` subcommand to print
+a plain-text usage block:
+
+```bash
+quay --help                # top-level command list
+quay help                  # same as --help
+quay help repo             # equivalent to `quay repo --help`
+quay repo --help           # per-noun usage + subcommand list
+quay repo add --help       # leaf-command usage with required flags
+```
+
+Help requested explicitly (`--help` / `-h` / `help`) goes to **stdout** and
+exits 0. Misuse — bare `quay`, bare `quay <noun>`, an unknown command, or a
+typo'd subcommand — still emits the structured `{error: "usage_error"}`
+envelope on stderr (so machine consumers like `hermes-agent` keep parsing
+it), and additionally appends the relevant usage block (or a one-line
+`Run \`quay --help\` for usage.` hint for unknown top-level commands).
+Misuse always exits non-zero.
+
 ## Global
 
 ```bash

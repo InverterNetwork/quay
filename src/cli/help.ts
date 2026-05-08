@@ -245,9 +245,39 @@ export function isHelpToken(s: string): boolean {
   return s === "--help" || s === "-h" || s === "help";
 }
 
-// Returns true if any element of argv is a help token.
+// Returns true if argv asks for help.
+//
+// Naively `argv.some(isHelpToken)` would mis-fire when `help` / `-h` /
+// `--help` is the *value* of a preceding flag (e.g. `quay enqueue
+// --external-ref help`). We walk argv and skip the values of value-taking
+// long flags, mirroring the dispatch positional walker.
+//
+// Recognised forms:
+//   * `--help`  (and `--help=anything`)
+//   * `-h`      only as a standalone token
+//   * `help`    only as a positional token
 export function wantsHelp(argv: string[]): boolean {
-  return argv.some(isHelpToken);
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === undefined) continue;
+    if (a.startsWith("--")) {
+      if (a === "--help" || a.startsWith("--help=")) return true;
+      // Value-taking long flags: a `--flag value` pair consumes both tokens
+      // so we skip the value before continuing. `--flag=value` is
+      // self-contained. A following token that is itself a `--flag` does
+      // NOT get consumed (matches dispatch.positionalAt semantics).
+      if (!a.includes("=")) {
+        const next = argv[i + 1];
+        if (next !== undefined && !next.startsWith("--")) i += 1;
+      }
+      continue;
+    }
+    // Non-flag token: only `-h` / `help` count as a help request here. A
+    // token that is the value of a preceding `--flag` was already skipped
+    // above, so any token reaching this branch is a positional.
+    if (a === "-h" || a === "help") return true;
+  }
+  return false;
 }
 
 // Top-level help text, for `quay --help` and friends.

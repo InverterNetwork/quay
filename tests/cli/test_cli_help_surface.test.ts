@@ -189,6 +189,116 @@ test("unknown top-level command emits JSON envelope plus one-line hint", async (
   expect(io.err()).toContain("quay --help");
 });
 
+test("flag values that look like help tokens do not trigger help", async () => {
+  // PR #23 review #1: naive `argv.some(isHelpToken)` would short-circuit a
+  // command whose flag VALUE happens to be `help` / `-h` / `--help`. None of
+  // these are realistic operator values, but they're easy to type and the
+  // failure mode (silent help instead of running the command) is invisible
+  // until the operator notices the missing side effect.
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  // Pre-register a repo so enqueue can fully resolve.
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "repo-help-value",
+      "--url",
+      "git@example.com:o/r.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+
+  // External-ref equal to "help" must not short-circuit.
+  const ioList = bufferIO();
+  const listResult = await dispatch(
+    ["task", "list", "--external-ref", "help"],
+    built.deps,
+    ioList,
+  );
+  expect(listResult.exitCode).toBe(0);
+  // Stdout is the (empty) task list, NOT the help block. The usage block
+  // would contain "Usage:"; the empty list is just `[]`.
+  expect(ioList.out().trim()).toBe("[]");
+  expect(ioList.out()).not.toContain("Usage:");
+
+  // --state value of "help" same story.
+  const ioState = bufferIO();
+  const stateResult = await dispatch(
+    ["task", "list", "--state", "help"],
+    built.deps,
+    ioState,
+  );
+  expect(stateResult.exitCode).toBe(0);
+  expect(ioState.out()).not.toContain("Usage:");
+});
+
+test("quay help <cmd> mirrors quay <cmd> --help", async () => {
+  // PR #23 review #2: `git help log`-style invocation should reach the per-
+  // command help.
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  const ioHelpRepo = bufferIO();
+  const helpRepoResult = await dispatch(["help", "repo"], built.deps, ioHelpRepo);
+  expect(helpRepoResult.exitCode).toBe(0);
+  expect(ioHelpRepo.err()).toBe("");
+
+  const ioRepoHelp = bufferIO();
+  await dispatch(["repo", "--help"], built.deps, ioRepoHelp);
+  expect(ioHelpRepo.out()).toBe(ioRepoHelp.out());
+
+  // Nested: `quay help repo add` should match `quay repo add --help`.
+  const ioHelpRepoAdd = bufferIO();
+  await dispatch(["help", "repo", "add"], built.deps, ioHelpRepoAdd);
+  const ioRepoAddHelp = bufferIO();
+  await dispatch(["repo", "add", "--help"], built.deps, ioRepoAddHelp);
+  expect(ioHelpRepoAdd.out()).toBe(ioRepoAddHelp.out());
+
+  // Unknown `help <bogus>` falls back to top-level help instead of erroring.
+  const ioBogus = bufferIO();
+  const bogusResult = await dispatch(["help", "bogus"], built.deps, ioBogus);
+  expect(bogusResult.exitCode).toBe(0);
+  expect(ioBogus.out()).toContain("Usage:");
+  expect(ioBogus.out()).toContain("quay <command>");
+});
+
+test("unknown subcommand surfaces the parent's usage block", async () => {
+  // PR #23 review #5: a typo'd subcommand benefits from the usage block as
+  // much as a missing one.
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  const ioTask = bufferIO();
+  const taskResult = await dispatch(["task", "bogus"], built.deps, ioTask);
+  expect(taskResult.exitCode).not.toBe(0);
+  expect(ioTask.out()).toBe("");
+  const taskFirstLine = ioTask.err().split("\n").find((l) => l.length > 0);
+  const taskParsed = JSON.parse(taskFirstLine as string);
+  expect(taskParsed.error).toBe("usage_error");
+  expect(taskParsed.message).toContain("unknown task subcommand: bogus");
+  expect(ioTask.err()).toContain("Usage:");
+  expect(ioTask.err()).toContain("quay task");
+
+  const ioRepo = bufferIO();
+  const repoResult = await dispatch(["repo", "bogus"], built.deps, ioRepo);
+  expect(repoResult.exitCode).not.toBe(0);
+  const repoFirstLine = ioRepo.err().split("\n").find((l) => l.length > 0);
+  const repoParsed = JSON.parse(repoFirstLine as string);
+  expect(repoParsed.error).toBe("usage_error");
+  expect(repoParsed.message).toContain("unknown repo subcommand: bogus");
+  expect(ioRepo.err()).toContain("quay repo");
+});
+
 test("artifact and task explicit help reach stdout", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
