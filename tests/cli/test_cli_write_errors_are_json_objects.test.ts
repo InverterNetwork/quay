@@ -59,7 +59,12 @@ test("test_cli_write_errors_unknown_command_is_json_object", async () => {
   const result = await dispatch(["bogus-command"], built.deps, io);
 
   expect(result.exitCode).not.toBe(0);
-  const parsed = JSON.parse(io.err().trim());
+  // AST-83: stderr is now JSON envelope + a one-line human hint. The
+  // structured envelope must still be a parseable JSON object on its own
+  // line so existing log/aggregator tooling keeps working.
+  const lines = io.err().split("\n").filter((l) => l.length > 0);
+  const parsed = JSON.parse(lines[0] as string);
   expect(parsed.error).toBe("usage_error");
   expect(typeof parsed.message).toBe("string");
+  expect(lines.slice(1).join("\n")).toContain("quay --help");
 });

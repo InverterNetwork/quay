@@ -44,6 +44,13 @@ import { tick_once, type TickDeps, type TickOptions } from "../core/tick.ts";
 import type { SupervisorLock } from "../core/supervisor_lock.ts";
 import { toCliError, serviceErrorToCli } from "./errors.ts";
 import { getTask, listTasks } from "./format.ts";
+import {
+  HELP_HINT,
+  commandHelp,
+  isHelpToken,
+  topLevelHelp,
+  wantsHelp,
+} from "./help.ts";
 import type { CliIO } from "./io.ts";
 
 export interface CliPaths {
@@ -88,12 +95,45 @@ export async function dispatch(
   deps: CliDeps,
   io: CliIO,
 ): Promise<DispatchResult> {
+  // Bare `quay` with no args: surface help on stderr (operator-friendly) and
+  // exit non-zero so wrapping scripts still fail closed. We deliberately drop
+  // the previous `usage_error: no command provided` JSON envelope here — there
+  // was no command to envelope in the first place, and showing the command
+  // list is more useful than a one-liner error for an interactive user.
   if (argv.length === 0) {
-    return writeError(io, "usage_error", "no command provided", { argv });
+    io.stderr(topLevelHelp());
+    return { exitCode: 1 };
   }
 
   const [head, ...rest] = argv;
+  // Explicit top-level help.
+  //
+  //   quay --help / -h / help              → top-level overview, stdout.
+  //   quay help <cmd> [<sub>] [...]        → per-command help for that path,
+  //                                          mirroring `git help log`.
+  //
+  // Per-command `<cmd> --help` invocations fall through to the relevant
+  // handler so each one can short-circuit to its own usage block.
+  if (isHelpToken(head as string)) {
+    if (rest.length === 0) {
+      io.stdout(topLevelHelp());
+      return { exitCode: 0 };
+    }
+    if (head === "help") {
+      // Fall back to top-level help if the path isn't registered, rather
+      // than emit a confusing `usage_error: no help for: ...`.
+      const block = commandHelp(rest);
+      if (block !== null) {
+        io.stdout(block);
+        return { exitCode: 0 };
+      }
+      io.stdout(topLevelHelp());
+      return { exitCode: 0 };
+    }
+  }
   try {
+    // Per-command --help: route to the relevant handler so each one can
+    // short-circuit to its own usage block on stdout.
     switch (head) {
       case "task":
         return await handleTask(rest, deps, io);
@@ -112,9 +152,14 @@ export async function dispatch(
       case "artifact":
         return handleArtifact(rest, deps, io);
       default:
-        return writeError(io, "usage_error", `unknown command: ${head}`, {
-          command: head,
-        });
+        // Preserve the structured-error envelope so machine consumers
+        // (hermes-agent etc.) keep parsing as before; tack on a one-line
+        // human hint on the next line.
+        io.stderr(
+          `${JSON.stringify({ error: "usage_error", message: `unknown command: ${head}`, command: head })}\n`,
+        );
+        io.stderr(HELP_HINT);
+        return { exitCode: 1 };
     }
   } catch (err) {
     const payload = toCliError(err);
@@ -133,29 +178,79 @@ function writeError(
   return { exitCode: 1 };
 }
 
+// Like `writeError`, but additionally renders the per-command usage block on
+// stderr after the JSON envelope. The structured envelope still parses as
+// JSON (it's the first line); the human-readable block follows.
+function writeErrorWithUsage(
+  io: CliIO,
+  helpPath: string[],
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): DispatchResult {
+  io.stderr(`${JSON.stringify({ error: code, message, ...details })}\n`);
+  const block = commandHelp(helpPath);
+  if (block !== null) io.stderr(`\n${block}`);
+  return { exitCode: 1 };
+}
+
 async function handleTask(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
 ): Promise<DispatchResult> {
   if (argv.length === 0) {
-    return writeError(io, "usage_error", "task subcommand required");
+    // Bare `quay task`: keep the structured envelope (machine consumers may
+    // still rely on it) but show the noun's usage block on the next line.
+    return writeErrorWithUsage(
+      io,
+      ["task"],
+      "usage_error",
+      "task subcommand required",
+    );
   }
   const [sub, ...rest] = argv;
+  // `quay task --help` (or `-h` / `help`) prints the noun's usage on stdout.
+  if (isHelpToken(sub as string)) return printHelp(io, ["task"]);
+  // Per-subcommand --help is recognised by the leaf handlers via wantsHelp().
   switch (sub) {
     case "list":
+      if (wantsHelp(rest)) return printHelp(io, ["task", "list"]);
       return handleTaskList(rest, deps, io);
     case "get":
+      if (wantsHelp(rest)) return printHelp(io, ["task", "get"]);
       return handleTaskGet(rest, deps, io);
     case "events":
+      if (wantsHelp(rest)) return printHelp(io, ["task", "events"]);
       return handleTaskEvents(rest, deps, io);
     case "claim":
+      if (wantsHelp(rest)) return printHelp(io, ["task", "claim"]);
       return handleClaim(rest, deps, io);
     case "release-claim":
+      if (wantsHelp(rest)) return printHelp(io, ["task", "release-claim"]);
       return handleReleaseClaim(rest, deps, io);
     default:
-      return writeError(io, "usage_error", `unknown task subcommand: ${sub}`);
+      // A typo'd subcommand benefits from the noun's usage block as much as
+      // a missing one — surface it on stderr alongside the structured envelope.
+      return writeErrorWithUsage(
+        io,
+        ["task"],
+        "usage_error",
+        `unknown task subcommand: ${sub}`,
+      );
   }
+}
+
+// Common "explicit --help" path for any command/subcommand: prints to stdout,
+// exits 0. Returns a no-op `{exitCode: 1}` if the path isn't registered, but
+// this should never fire in practice (the path is always one we control).
+function printHelp(io: CliIO, path: string[]): DispatchResult {
+  const block = commandHelp(path);
+  if (block === null) {
+    return writeError(io, "usage_error", `no help for: ${path.join(" ")}`);
+  }
+  io.stdout(block);
+  return { exitCode: 0 };
 }
 
 function handleTaskList(
@@ -231,10 +326,11 @@ function handleTaskEvents(
 }
 
 function handleTick(
-  _argv: string[],
+  argv: string[],
   deps: CliDeps,
   io: CliIO,
 ): DispatchResult {
+  if (wantsHelp(argv)) return printHelp(io, ["tick"]);
   const tickDeps: TickDeps = pickTickDeps(deps);
   const results = tick_once(tickDeps, deps.tickOptions ?? {});
   for (const r of results) {
@@ -248,6 +344,7 @@ function handleEnqueue(
   deps: CliDeps,
   io: CliIO,
 ): DispatchResult {
+  if (wantsHelp(argv)) return printHelp(io, ["enqueue"]);
   // --linear-issue routes to the adapter-driven flow (spec §8). Mutually
   // exclusive flags are rejected before any adapter / DB call so a bad
   // invocation (e.g. caller passes both forms) costs nothing.
@@ -370,16 +467,25 @@ function handleRepo(
   io: CliIO,
 ): DispatchResult {
   if (argv.length === 0) {
-    return writeError(io, "usage_error", "repo subcommand required");
+    return writeErrorWithUsage(
+      io,
+      ["repo"],
+      "usage_error",
+      "repo subcommand required",
+    );
   }
   const [sub, ...rest] = argv;
+  if (isHelpToken(sub as string)) return printHelp(io, ["repo"]);
   const service = createRepoService({ db: deps.db, clock: deps.clock });
   switch (sub) {
     case "add":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "add"]);
       return handleRepoAdd(rest, service, io);
     case "update":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "update"]);
       return handleRepoUpdate(rest, service, io);
     case "remove": {
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "remove"]);
       const repoId = positional(rest);
       if (!repoId) {
         return writeError(io, "usage_error", "repo remove requires <repo_id>");
@@ -389,13 +495,23 @@ function handleRepo(
       return { exitCode: 0 };
     }
     case "list":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "list"]);
       return handleRepoList(service, io);
     case "export":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "export"]);
       return handleRepoExport(rest, service, io);
     case "import":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "import"]);
       return handleRepoImport(rest, service, io);
     default:
-      return writeError(io, "usage_error", `unknown repo subcommand: ${sub}`);
+      // Mirror bare `quay repo`: structured envelope plus the noun's usage
+      // block so a typo gets the same recovery hint as the missing-sub case.
+      return writeErrorWithUsage(
+        io,
+        ["repo"],
+        "usage_error",
+        `unknown repo subcommand: ${sub}`,
+      );
   }
 }
 
@@ -533,6 +649,7 @@ function handleCancel(
   deps: CliDeps,
   io: CliIO,
 ): DispatchResult {
+  if (wantsHelp(argv)) return printHelp(io, ["cancel"]);
   const taskId = positional(argv);
   if (!taskId) {
     return writeError(io, "usage_error", "cancel requires <task_id>");
@@ -623,6 +740,7 @@ function handleSubmitBrief(
   deps: CliDeps,
   io: CliIO,
 ): DispatchResult {
+  if (wantsHelp(argv)) return printHelp(io, ["submit-brief"]);
   const json = tryParseJsonFlag(argv);
   if (!json.ok) return writeError(io, "usage_error", json.message);
   let input: { taskId: string; claimId: string; brief: string; reason: string };
@@ -672,6 +790,7 @@ function handleEscalateHuman(
   deps: CliDeps,
   io: CliIO,
 ): DispatchResult {
+  if (wantsHelp(argv)) return printHelp(io, ["escalate-human"]);
   const json = tryParseJsonFlag(argv);
   if (!json.ok) return writeError(io, "usage_error", json.message);
   let input: {
@@ -726,10 +845,25 @@ function handleArtifact(
   deps: CliDeps,
   io: CliIO,
 ): DispatchResult {
-  if (argv.length === 0 || argv[0] !== "get") {
-    return writeError(io, "usage_error", "artifact subcommand required (get)");
+  if (argv.length === 0) {
+    return writeErrorWithUsage(
+      io,
+      ["artifact"],
+      "usage_error",
+      "artifact subcommand required (get)",
+    );
+  }
+  if (isHelpToken(argv[0] as string)) return printHelp(io, ["artifact"]);
+  if (argv[0] !== "get") {
+    return writeErrorWithUsage(
+      io,
+      ["artifact"],
+      "usage_error",
+      `unknown artifact subcommand: ${argv[0]}`,
+    );
   }
   const rest = argv.slice(1);
+  if (wantsHelp(rest)) return printHelp(io, ["artifact", "get"]);
   const taskId = positional(rest);
   const kind = positionalAt(rest, 1);
   if (!taskId || !kind) {
