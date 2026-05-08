@@ -8,7 +8,7 @@ import { SlackAdapter } from "../../src/adapters/slack.ts";
 const integration = process.env.QUAY_INTEGRATION_TESTS === "1";
 
 describe.skipIf(!integration)("SlackAdapter contract (integration)", async () => {
-  test("instantiates without error", async () => {
+  test("instantiates without error", () => {
     expect(new SlackAdapter()).toBeDefined();
   });
 
@@ -28,7 +28,7 @@ describe.skipIf(!integration)("SlackAdapter contract (integration)", async () =>
   });
 });
 
-test("test_slack_adapter_fetch_thread_context_contract_tests_skipped_without_integration_flag", async () => {
+test("test_slack_adapter_fetch_thread_context_contract_tests_skipped_without_integration_flag", () => {
   // Pin the gate itself: this asserts the integration block does not run
   // by default. Mirrors the linear adapter's `_skipped_without_integration_flag`
   // test. Live calls against `https://slack.com/api/conversations.replies`
@@ -37,7 +37,7 @@ test("test_slack_adapter_fetch_thread_context_contract_tests_skipped_without_int
   expect(integration).toBe(false);
 });
 
-test("slack adapter contract block is skipped by default", async () => {
+test("slack adapter contract block is skipped by default", () => {
   // Existing pre-slice-18 gate test, kept for the original assertion.
   expect(integration).toBe(false);
 });
