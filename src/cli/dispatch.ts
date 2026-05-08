@@ -140,7 +140,7 @@ export async function dispatch(
       case "tick":
         return handleTick(rest, deps, io);
       case "enqueue":
-        return handleEnqueue(rest, deps, io);
+        return await handleEnqueue(rest, deps, io);
       case "repo":
         return handleRepo(rest, deps, io);
       case "cancel":
@@ -339,11 +339,11 @@ function handleTick(
   return { exitCode: 0 };
 }
 
-function handleEnqueue(
+async function handleEnqueue(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
-): DispatchResult {
+): Promise<DispatchResult> {
   if (wantsHelp(argv)) return printHelp(io, ["enqueue"]);
   // --linear-issue routes to the adapter-driven flow (spec §8). Mutually
   // exclusive flags are rejected before any adapter / DB call so a bad
@@ -399,12 +399,12 @@ function handleEnqueue(
   return { exitCode: 0 };
 }
 
-function handleEnqueueLinearIssueFlow(
+async function handleEnqueueLinearIssueFlow(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
   identifier: string,
-): DispatchResult {
+): Promise<DispatchResult> {
   // Spec §8 / §17: --linear-issue is mutually exclusive with --brief-file,
   // --external-ref, --slack-thread-ref. The adapter derives those latter two
   // from the Linear ticket, and accepting overrides on this path would

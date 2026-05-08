@@ -94,7 +94,7 @@ afterEach(() => {
   }
 });
 
-test("test_linear_adapter_get_issue_returns_structured_payload", () => {
+test("test_linear_adapter_get_issue_returns_structured_payload", async () => {
   const handle = recorder(() =>
     jsonResponse(
       issuePayload({
@@ -121,7 +121,7 @@ test("test_linear_adapter_get_issue_returns_structured_payload", () => {
     token: "test-token",
     transport: handle.transport,
   });
-  const issue = adapter.getIssue("ENG-1234");
+  const issue = await adapter.getIssue("ENG-1234");
   expect(issue).not.toBeNull();
   expect(issue!.identifier).toBe("ENG-1234");
   expect(issue!.url).toBe("https://linear.app/inverter/issue/ENG-1234");
@@ -137,7 +137,7 @@ test("test_linear_adapter_get_issue_returns_structured_payload", () => {
   expect(handle.requests[0]!.headers.Authorization).toBe("test-token");
 });
 
-test("test_linear_adapter_get_issue_returns_null_on_404", () => {
+test("test_linear_adapter_get_issue_returns_null_on_404", async () => {
   // Linear's `issue(id: ...)` returns `data.issue: null` when the
   // identifier doesn't resolve. The adapter must surface that as `null`,
   // not a thrown error (per LinearPort contract — null is a 404, throws
@@ -149,10 +149,10 @@ test("test_linear_adapter_get_issue_returns_null_on_404", () => {
     token: "test-token",
     transport: handle.transport,
   });
-  expect(adapter.getIssue("ENG-9999")).toBeNull();
+  expect(await adapter.getIssue("ENG-9999")).toBeNull();
 });
 
-test("test_linear_adapter_throws_on_5xx_with_useful_message", () => {
+test("test_linear_adapter_throws_on_5xx_with_useful_message", async () => {
   const responseBody =
     "<html><body>Internal Server Error: backend pool exhausted</body></html>";
   const handle = recorder(() => ({
@@ -166,7 +166,7 @@ test("test_linear_adapter_throws_on_5xx_with_useful_message", () => {
   });
   let caught: unknown;
   try {
-    adapter.getIssue("ENG-1234");
+    await adapter.getIssue("ENG-1234");
   } catch (e) {
     caught = e;
   }
@@ -181,7 +181,7 @@ test("test_linear_adapter_throws_on_5xx_with_useful_message", () => {
   expect(err.message).toContain("backend pool exhausted");
 });
 
-test("test_linear_adapter_throws_on_429_with_retry_after", () => {
+test("test_linear_adapter_throws_on_429_with_retry_after", async () => {
   const handle = recorder(() => ({
     status: 429,
     headers: { "Retry-After": "30" },
@@ -193,7 +193,7 @@ test("test_linear_adapter_throws_on_429_with_retry_after", () => {
   });
   let caught: unknown;
   try {
-    adapter.getIssue("ENG-1234");
+    await adapter.getIssue("ENG-1234");
   } catch (e) {
     caught = e;
   }
@@ -205,7 +205,7 @@ test("test_linear_adapter_throws_on_429_with_retry_after", () => {
   expect(err.details?.retry_after).toBe(30);
 });
 
-test("test_linear_adapter_paginates_comments_to_completion", () => {
+test("test_linear_adapter_paginates_comments_to_completion", async () => {
   // Mock issue with 4 comments split across 2 pages. The adapter must
   // walk to the second page and assemble the full chronological list.
   const pageOneNodes = [
@@ -268,7 +268,7 @@ test("test_linear_adapter_paginates_comments_to_completion", () => {
     token: "test-token",
     transport: handle.transport,
   });
-  const issue = adapter.getIssue("ENG-1234");
+  const issue = await adapter.getIssue("ENG-1234");
   expect(issue).not.toBeNull();
   expect(issue!.comments.map((c) => c.id)).toEqual(["c1", "c2", "c3", "c4"]);
   // Chronological order check — sorted by createdAt regardless of arrival.
@@ -278,7 +278,7 @@ test("test_linear_adapter_paginates_comments_to_completion", () => {
   expect(handle.requests.length).toBe(2);
 });
 
-test("test_linear_adapter_marks_bot_authored_comments", () => {
+test("test_linear_adapter_marks_bot_authored_comments", async () => {
   // Linear flags integration-authored comments via `botActor`. The adapter
   // must surface that as `authorIsBot: true` (and propagate the bot's
   // display name as authorName) regardless of whether `user` is also set.
@@ -312,7 +312,7 @@ test("test_linear_adapter_marks_bot_authored_comments", () => {
     token: "test-token",
     transport: handle.transport,
   });
-  const issue = adapter.getIssue("ENG-1234");
+  const issue = await adapter.getIssue("ENG-1234");
   expect(issue).not.toBeNull();
   expect(issue!.comments).toHaveLength(2);
   expect(issue!.comments[0]!.authorIsBot).toBe(false);
@@ -321,7 +321,7 @@ test("test_linear_adapter_marks_bot_authored_comments", () => {
   expect(issue!.comments[1]!.authorName).toBe("Linear (GitHub)");
 });
 
-test("test_linear_adapter_rejects_draft_issues", () => {
+test("test_linear_adapter_rejects_draft_issues", async () => {
   // Defensive draft check (adapters spec §17): if the issue payload carries
   // a `draft: true` flag, throw `ticket_not_actionable` rather than feed an
   // uncommitted ticket into the enqueue pipeline.
@@ -336,7 +336,7 @@ test("test_linear_adapter_rejects_draft_issues", () => {
   });
   let caught: unknown;
   try {
-    adapter.getIssue("ENG-1234");
+    await adapter.getIssue("ENG-1234");
   } catch (e) {
     caught = e;
   }
@@ -345,7 +345,7 @@ test("test_linear_adapter_rejects_draft_issues", () => {
   expect(err.code).toBe("ticket_not_actionable");
 });
 
-test("test_linear_adapter_does_not_fetch_labels_field", () => {
+test("test_linear_adapter_does_not_fetch_labels_field", async () => {
   // The LinearIssue v1 type deliberately omits `labels` (adapters spec §7
   // exclusion list). The query must too — even a stray `labels` selection
   // would over-fetch from Linear, leak organizational vocabulary into
@@ -355,30 +355,30 @@ test("test_linear_adapter_does_not_fetch_labels_field", () => {
     token: "test-token",
     transport: handle.transport,
   });
-  adapter.getIssue("ENG-1234");
+  await adapter.getIssue("ENG-1234");
   expect(handle.requests.length).toBe(1);
   const query = handle.requests[0]!.parsedBody.query;
   expect(query).not.toMatch(/\blabels\b/);
 });
 
-test("test_linear_adapter_resolves_token_from_env", () => {
+test("test_linear_adapter_resolves_token_from_env", async () => {
   // No explicit token: the adapter should read `LINEAR_API_KEY` lazily on
   // the first call and bail with a clear error if it is missing.
   delete process.env.LINEAR_API_KEY;
   const handle = recorder(() => jsonResponse(issuePayload({})));
   const noKeyAdapter = new LinearAdapter({ transport: handle.transport });
-  expect(() => noKeyAdapter.getIssue("ENG-1234")).toThrow(/LINEAR_API_KEY/);
+  await expect(noKeyAdapter.getIssue("ENG-1234")).rejects.toThrow(/LINEAR_API_KEY/);
 
   process.env.LINEAR_API_KEY = "env-resolved-token";
   const adapter = new LinearAdapter({ transport: handle.transport });
-  adapter.getIssue("ENG-1234");
+  await adapter.getIssue("ENG-1234");
   expect(handle.requests.length).toBe(1);
   expect(handle.requests[0]!.headers.Authorization).toBe(
     "env-resolved-token",
   );
 });
 
-test("test_linear_adapter_missing_token_throws_adapter_not_configured", () => {
+test("test_linear_adapter_missing_token_throws_adapter_not_configured", async () => {
   // Spec §12: missing `LINEAR_API_KEY` is a deployment misconfiguration
   // (`adapter_not_configured`), not an upstream `adapter_error`.
   delete process.env.LINEAR_API_KEY;
@@ -386,7 +386,7 @@ test("test_linear_adapter_missing_token_throws_adapter_not_configured", () => {
   const adapter = new LinearAdapter({ transport: handle.transport });
   let caught: unknown = null;
   try {
-    adapter.getIssue("ENG-1234");
+    await adapter.getIssue("ENG-1234");
   } catch (e) {
     caught = e;
   }
@@ -399,7 +399,7 @@ test("test_linear_adapter_missing_token_throws_adapter_not_configured", () => {
   expect(handle.requests.length).toBe(0);
 });
 
-test("test_linear_adapter_honors_token_env_var_override", () => {
+test("test_linear_adapter_honors_token_env_var_override", async () => {
   // Operators can re-point the env-var via [adapters.linear].api_key_env;
   // the adapter must read the named variable, not LINEAR_API_KEY.
   delete process.env.LINEAR_API_KEY;
@@ -410,14 +410,14 @@ test("test_linear_adapter_honors_token_env_var_override", () => {
       transport: handle.transport,
       tokenEnvVar: "MY_CUSTOM_LINEAR_KEY",
     });
-    adapter.getIssue("ENG-1234");
+    await adapter.getIssue("ENG-1234");
     expect(handle.requests[0]!.headers.Authorization).toBe("custom-token");
   } finally {
     delete process.env.MY_CUSTOM_LINEAR_KEY;
   }
 });
 
-test("test_linear_adapter_throws_on_graphql_errors_even_if_issue_present", () => {
+test("test_linear_adapter_throws_on_graphql_errors_even_if_issue_present", async () => {
   // Spec §12: any non-empty errors[] is a hard adapter failure. Even when
   // data.issue is populated (e.g. a deprecated-field warning), the adapter
   // must throw adapter_error rather than silently return the issue.
@@ -434,7 +434,7 @@ test("test_linear_adapter_throws_on_graphql_errors_even_if_issue_present", () =>
   });
   let caught: unknown;
   try {
-    adapter.getIssue("ENG-1234");
+    await adapter.getIssue("ENG-1234");
   } catch (e) {
     caught = e;
   }
@@ -445,7 +445,7 @@ test("test_linear_adapter_throws_on_graphql_errors_even_if_issue_present", () =>
   expect(err.message).toContain("deprecated field used");
 });
 
-test("test_linear_adapter_throws_when_pagination_returns_404_mid_fetch", () => {
+test("test_linear_adapter_throws_when_pagination_returns_404_mid_fetch", async () => {
   // If a ticket disappears between page 1 and page 2, the adapter must throw
   // adapter_error{retryable:true} rather than returning a partial result.
   // The next poll cycle will receive a clean 404 the caller can handle.
@@ -479,7 +479,7 @@ test("test_linear_adapter_throws_when_pagination_returns_404_mid_fetch", () => {
   });
   let caught: unknown;
   try {
-    adapter.getIssue("ENG-1234");
+    await adapter.getIssue("ENG-1234");
   } catch (e) {
     caught = e;
   }
@@ -490,11 +490,10 @@ test("test_linear_adapter_throws_when_pagination_returns_404_mid_fetch", () => {
   expect(handle.requests.length).toBe(2);
 });
 
-test("test_linear_adapter_throws_on_malformed_envelope_shapes", () => {
+test("test_linear_adapter_throws_on_malformed_envelope_shapes", async () => {
   // Malformed envelopes (missing data key, data:null, or data without issue
   // field) must throw adapter_error{retryable:false}. Only {data:{issue:null}}
   // is the documented Linear 404 shape and must return null cleanly.
-  const adapter = new LinearAdapter({ token: "test-token", transport: recorder(() => ({ status: 200, headers: {}, body: "" })).transport });
 
   const cases: Array<[string, Record<string, unknown>]> = [
     ["empty object", {}],
@@ -507,7 +506,7 @@ test("test_linear_adapter_throws_on_malformed_envelope_shapes", () => {
     const a = new LinearAdapter({ token: "test-token", transport: handle.transport });
     let caught: unknown;
     try {
-      a.getIssue("ENG-1234");
+      await a.getIssue("ENG-1234");
     } catch (e) {
       caught = e;
     }
@@ -520,10 +519,10 @@ test("test_linear_adapter_throws_on_malformed_envelope_shapes", () => {
   // Real 404: {data:{issue:null}} must return null, not throw.
   const handle404 = recorder(() => jsonResponse({ data: { issue: null } }));
   const a404 = new LinearAdapter({ token: "test-token", transport: handle404.transport });
-  expect(a404.getIssue("ENG-9999")).toBeNull();
+  expect(await a404.getIssue("ENG-9999")).toBeNull();
 });
 
-test("test_linear_adapter_throws_when_has_next_page_with_null_cursor", () => {
+test("test_linear_adapter_throws_when_has_next_page_with_null_cursor", async () => {
   // If Linear returns hasNextPage:true but endCursor:null, continuing
   // pagination would silently truncate comments. Treat it as a hard failure.
   const handle = recorder(() =>
@@ -551,7 +550,7 @@ test("test_linear_adapter_throws_when_has_next_page_with_null_cursor", () => {
   });
   let caught: unknown;
   try {
-    adapter.getIssue("ENG-1234");
+    await adapter.getIssue("ENG-1234");
   } catch (e) {
     caught = e;
   }
