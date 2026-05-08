@@ -97,11 +97,11 @@ export interface TicketContextDeps {
   config: { linearEnabled: boolean; slackEnabled: boolean };
 }
 
-export function fetchTicketContext(
+export async function fetchTicketContext(
   deps: TicketContextDeps,
   identifier: string,
-): TicketContext {
-  return fetchTicketContextWithIssue(deps, identifier).ctx;
+): Promise<TicketContext> {
+  return (await fetchTicketContextWithIssue(deps, identifier)).ctx;
 }
 
 export interface TicketContextWithIssue {
@@ -113,10 +113,10 @@ export interface TicketContextWithIssue {
 // for the slice-16 enqueue-linear-issue path, which builds a validator
 // payload that needs `body` from the raw issue (block intact, not the
 // stripped brief). Splitting this avoids a second round-trip to Linear.
-export function fetchTicketContextWithIssue(
+export async function fetchTicketContextWithIssue(
   deps: TicketContextDeps,
   identifier: string,
-): TicketContextWithIssue {
+): Promise<TicketContextWithIssue> {
   if (!deps.config.linearEnabled) {
     throw new QuayError(
       "adapter_not_enabled",
@@ -127,7 +127,7 @@ export function fetchTicketContextWithIssue(
 
   let issue: LinearIssue | null;
   try {
-    issue = deps.linear.getIssue(identifier);
+    issue = await deps.linear.getIssue(identifier);
   } catch (e) {
     if (e instanceof QuayError) throw e;
     throw new QuayError(

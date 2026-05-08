@@ -34,11 +34,11 @@ export interface EnqueueLinearIssueDeps {
   adaptersConfig: { linearEnabled: boolean; slackEnabled: boolean };
 }
 
-export function handleEnqueueLinearIssue(
+export async function handleEnqueueLinearIssue(
   args: EnqueueLinearIssueArgs,
   deps: EnqueueLinearIssueDeps,
   io: CliIO,
-): DispatchResult {
+): Promise<DispatchResult> {
   // Pre-fetch idempotency: when an explicit --repo was given we look up
   // (repo, external_ref) directly. When --repo is absent we'd normally have to
   // fetch the ticket first to learn the repo — but Linear identifiers
@@ -81,7 +81,7 @@ export function handleEnqueueLinearIssue(
   let ctx: TicketContext;
   let issue: LinearIssue;
   try {
-    const fetched = fetchTicketContextWithIssue(
+    const fetched = await fetchTicketContextWithIssue(
       {
         linear: deps.linear,
         slack: deps.slack,

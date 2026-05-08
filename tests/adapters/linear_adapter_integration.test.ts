@@ -15,14 +15,14 @@ describe.skipIf(!integration)("LinearAdapter contract (integration)", () => {
     expect(new LinearAdapter()).toBeDefined();
   });
 
-  test("getIssue against a known sandbox identifier returns a structured payload", () => {
+  test("getIssue against a known sandbox identifier returns a structured payload", async () => {
     // Operators wire a sandbox issue identifier via QUAY_LINEAR_SANDBOX_ID
     // when running this opt-in suite. Without it, this is a no-op so the
     // gate stays useful even on partial integration setups.
     const id = process.env.QUAY_LINEAR_SANDBOX_ID;
     if (id === undefined || id === "") return;
     const adapter = new LinearAdapter();
-    const issue = adapter.getIssue(id);
+    const issue = await adapter.getIssue(id);
     expect(issue).not.toBeNull();
     expect(issue!.identifier).toBeDefined();
     expect(issue!.url).toMatch(/^https:\/\/linear\.app\//);

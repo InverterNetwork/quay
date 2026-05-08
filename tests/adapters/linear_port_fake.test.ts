@@ -36,11 +36,11 @@ function sampleIssue(identifier = "ENG-1234"): LinearIssue {
   };
 }
 
-test("test_linear_port_fake_get_issue_returns_structured_payload", () => {
+test("test_linear_port_fake_get_issue_returns_structured_payload", async () => {
   const fake = new FakeLinearAdapter();
   fake.setIssue(sampleIssue());
 
-  const issue = fake.getIssue("ENG-1234");
+  const issue = await fake.getIssue("ENG-1234");
   expect(issue).not.toBeNull();
   expect(issue!.identifier).toBe("ENG-1234");
   expect(issue!.url).toBe("https://linear.app/inverter/issue/ENG-1234");
@@ -53,22 +53,22 @@ test("test_linear_port_fake_get_issue_returns_structured_payload", () => {
   expect(fake.getIssueCalls).toEqual(["ENG-1234"]);
 });
 
-test("test_linear_port_fake_get_issue_returns_null_on_404", () => {
+test("test_linear_port_fake_get_issue_returns_null_on_404", async () => {
   const fake = new FakeLinearAdapter();
   // No state configured for ENG-9999 → fake returns null (404 semantics),
   // not an exception.
 
-  expect(fake.getIssue("ENG-9999")).toBeNull();
+  expect(await fake.getIssue("ENG-9999")).toBeNull();
   expect(fake.getIssueCalls).toEqual(["ENG-9999"]);
 });
 
-test("test_linear_port_fake_throws_on_draft_issue", () => {
+test("test_linear_port_fake_throws_on_draft_issue", async () => {
   const fake = new FakeLinearAdapter();
   fake.setDraft("ENG-1234");
 
   let caught: unknown;
   try {
-    fake.getIssue("ENG-1234");
+    await fake.getIssue("ENG-1234");
   } catch (e) {
     caught = e;
   }
@@ -77,13 +77,13 @@ test("test_linear_port_fake_throws_on_draft_issue", () => {
   expect(err.code).toBe("ticket_not_actionable");
 });
 
-test("test_linear_port_fake_throws_on_5xx_with_retryable_false", () => {
+test("test_linear_port_fake_throws_on_5xx_with_retryable_false", async () => {
   const fake = new FakeLinearAdapter();
   fake.set5xx("ENG-1234", "internal server error");
 
   let caught: unknown;
   try {
-    fake.getIssue("ENG-1234");
+    await fake.getIssue("ENG-1234");
   } catch (e) {
     caught = e;
   }
@@ -94,13 +94,13 @@ test("test_linear_port_fake_throws_on_5xx_with_retryable_false", () => {
   expect(err.details?.retryable).toBe(false);
 });
 
-test("test_linear_port_fake_throws_on_429_with_retryable_true_and_retry_after", () => {
+test("test_linear_port_fake_throws_on_429_with_retryable_true_and_retry_after", async () => {
   const fake = new FakeLinearAdapter();
   fake.set429("ENG-1234", 42);
 
   let caught: unknown;
   try {
-    fake.getIssue("ENG-1234");
+    await fake.getIssue("ENG-1234");
   } catch (e) {
     caught = e;
   }

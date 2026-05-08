@@ -129,10 +129,12 @@ function configureSampleSlackThread(slack: FakeSlack): {
   return { parent, replies };
 }
 
-function expectQuayError(fn: () => unknown): QuayError {
+async function expectQuayError(
+  fn: () => Promise<unknown>,
+): Promise<QuayError> {
   let caught: unknown;
   try {
-    fn();
+    await fn();
   } catch (e) {
     caught = e;
   }
@@ -142,7 +144,7 @@ function expectQuayError(fn: () => unknown): QuayError {
 
 // ---------------------------------------------------------------------------
 
-test("test_fetch_ticket_context_assembles_full_brief_when_both_adapters_enabled", () => {
+test("test_fetch_ticket_context_assembles_full_brief_when_both_adapters_enabled", async () => {
   const { linear, slack, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -162,7 +164,7 @@ test("test_fetch_ticket_context_assembles_full_brief_when_both_adapters_enabled"
   );
   configureSampleSlackThread(slack);
 
-  const ctx = fetchTicketContext(deps, "ENG-1276");
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
 
   expect(ctx.external_ref).toBe("ENG-1276");
   expect(ctx.slack_thread_ref).toBe(SLACK_THREAD_REF);
@@ -197,7 +199,7 @@ test("test_fetch_ticket_context_assembles_full_brief_when_both_adapters_enabled"
   expect(slack.fetchThreadContextCalls).toEqual([SLACK_THREAD_REF]);
 });
 
-test("test_fetch_ticket_context_omits_slack_section_when_no_thread_ref_parsed", () => {
+test("test_fetch_ticket_context_omits_slack_section_when_no_thread_ref_parsed", async () => {
   const { linear, slack, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -205,14 +207,14 @@ test("test_fetch_ticket_context_omits_slack_section_when_no_thread_ref_parsed", 
     }),
   );
 
-  const ctx = fetchTicketContext(deps, "ENG-1276");
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
 
   expect(ctx.slack_thread_ref).toBeNull();
   expect(ctx.brief).not.toContain("## Slack Context");
   expect(slack.fetchThreadContextCalls).toEqual([]);
 });
 
-test("test_fetch_ticket_context_degrades_when_slack_disabled_but_link_parsed", () => {
+test("test_fetch_ticket_context_degrades_when_slack_disabled_but_link_parsed", async () => {
   const { linear, slack, deps } = setupFakes({ slackEnabled: false });
   linear.setIssue(
     makeIssue({
@@ -225,30 +227,30 @@ test("test_fetch_ticket_context_degrades_when_slack_disabled_but_link_parsed", (
   );
 
   // Should not raise even though Slack would have fetched the thread.
-  const ctx = fetchTicketContext(deps, "ENG-1276");
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
 
   expect(ctx.slack_thread_ref).toBeNull();
   expect(ctx.brief).not.toContain("## Slack Context");
   expect(slack.fetchThreadContextCalls).toEqual([]);
 });
 
-test("test_fetch_ticket_context_fails_closed_when_linear_disabled", () => {
+test("test_fetch_ticket_context_fails_closed_when_linear_disabled", async () => {
   const { deps } = setupFakes({ linearEnabled: false });
 
-  const err = expectQuayError(() => fetchTicketContext(deps, "ENG-1276"));
+  const err = await expectQuayError(() => fetchTicketContext(deps, "ENG-1276"));
   expect(err.code).toBe("adapter_not_enabled");
 });
 
-test("test_fetch_ticket_context_fails_closed_on_linear_api_error", () => {
+test("test_fetch_ticket_context_fails_closed_on_linear_api_error", async () => {
   const { linear, deps } = setupFakes();
   linear.set5xx("ENG-1276", "internal server error");
 
-  const err = expectQuayError(() => fetchTicketContext(deps, "ENG-1276"));
+  const err = await expectQuayError(() => fetchTicketContext(deps, "ENG-1276"));
   expect(err.code).toBe("adapter_error");
   expect(err.details?.adapter).toBe("linear");
 });
 
-test("test_fetch_ticket_context_fails_closed_on_slack_fetch_error_when_enabled", () => {
+test("test_fetch_ticket_context_fails_closed_on_slack_fetch_error_when_enabled", async () => {
   const { linear, slack, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -262,12 +264,12 @@ test("test_fetch_ticket_context_fails_closed_on_slack_fetch_error_when_enabled",
   // No `configureThreadContext` call → fake throws on fetch.
   void slack;
 
-  const err = expectQuayError(() => fetchTicketContext(deps, "ENG-1276"));
+  const err = await expectQuayError(() => fetchTicketContext(deps, "ENG-1276"));
   expect(err.code).toBe("adapter_error");
   expect(err.details?.adapter).toBe("slack");
 });
 
-test("test_fetch_ticket_context_returns_tags_in_block_order", () => {
+test("test_fetch_ticket_context_returns_tags_in_block_order", async () => {
   const { linear, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -278,11 +280,11 @@ test("test_fetch_ticket_context_returns_tags_in_block_order", () => {
     }),
   );
 
-  const ctx = fetchTicketContext(deps, "ENG-1276");
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
   expect(ctx.tags).toEqual(["zeta", "alpha", "mid", "beta"]);
 });
 
-test("test_fetch_ticket_context_returns_authors_in_block_order", () => {
+test("test_fetch_ticket_context_returns_authors_in_block_order", async () => {
   const { linear, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -297,7 +299,7 @@ test("test_fetch_ticket_context_returns_authors_in_block_order", () => {
     }),
   );
 
-  const ctx = fetchTicketContext(deps, "ENG-1276");
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
   expect(ctx.authors).toEqual([
     { name: "Primary", slack_id: "U001" },
     { name: "Second", slack_id: "U002" },
@@ -305,7 +307,7 @@ test("test_fetch_ticket_context_returns_authors_in_block_order", () => {
   ]);
 });
 
-test("test_fetch_ticket_context_includes_user_comments_in_brief", () => {
+test("test_fetch_ticket_context_includes_user_comments_in_brief", async () => {
   const { linear, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -324,7 +326,7 @@ test("test_fetch_ticket_context_includes_user_comments_in_brief", () => {
     }),
   );
 
-  const ctx = fetchTicketContext(deps, "ENG-1276");
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
 
   expect(ctx.brief).toContain("## Ticket Comments");
   expect(ctx.brief).toContain("**Marvin Gross** — 2026-04-25T14:02:00Z:");
@@ -340,7 +342,7 @@ test("test_fetch_ticket_context_includes_user_comments_in_brief", () => {
   expect(idxFabian).toBeGreaterThan(idxMarvin);
 });
 
-test("test_fetch_ticket_context_omits_comments_section_when_no_user_comments", () => {
+test("test_fetch_ticket_context_omits_comments_section_when_no_user_comments", async () => {
   const { linear, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -350,11 +352,11 @@ test("test_fetch_ticket_context_omits_comments_section_when_no_user_comments", (
     }),
   );
 
-  const ctx = fetchTicketContext(deps, "ENG-1276");
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
   expect(ctx.brief).not.toContain("## Ticket Comments");
 });
 
-test("test_fetch_ticket_context_filters_bot_comments_from_brief", () => {
+test("test_fetch_ticket_context_filters_bot_comments_from_brief", async () => {
   const { linear, deps } = setupFakes();
   const issue = makeIssue({
     comments: [
@@ -368,7 +370,7 @@ test("test_fetch_ticket_context_filters_bot_comments_from_brief", () => {
   });
   linear.setIssue(issue);
 
-  const ctx = fetchTicketContext(deps, "ENG-1276");
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
 
   // Brief: bot comment filtered out, user comment retained.
   expect(ctx.brief).toContain("## Ticket Comments");
@@ -380,7 +382,7 @@ test("test_fetch_ticket_context_filters_bot_comments_from_brief", () => {
   expect(ctx.ticket_snapshot).toContain("Following up on the PR linkage.");
 });
 
-test("test_fetch_ticket_context_brief_section_order_is_canonical", () => {
+test("test_fetch_ticket_context_brief_section_order_is_canonical", async () => {
   const { linear, slack, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -396,7 +398,7 @@ test("test_fetch_ticket_context_brief_section_order_is_canonical", () => {
   );
   configureSampleSlackThread(slack);
 
-  const ctx = fetchTicketContext(deps, "ENG-1276");
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
 
   const sections = [
     "## Contributors",
@@ -424,14 +426,14 @@ test("test_fetch_ticket_context_brief_section_order_is_canonical", () => {
     }),
   );
   configureSampleSlackThread(linearOnly.slack);
-  const ctx2 = fetchTicketContext(linearOnly.deps, "ENG-1276");
+  const ctx2 = await fetchTicketContext(linearOnly.deps, "ENG-1276");
   expect(ctx2.brief).not.toContain("## Ticket Comments");
   expect(ctx2.brief.indexOf("## Slack Context")).toBeGreaterThan(
     ctx2.brief.indexOf("## Ticket Context"),
   );
 });
 
-test("test_fetch_ticket_context_strips_quay_config_block_from_brief", () => {
+test("test_fetch_ticket_context_strips_quay_config_block_from_brief", async () => {
   const { linear, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -442,7 +444,7 @@ test("test_fetch_ticket_context_strips_quay_config_block_from_brief", () => {
     }),
   );
 
-  const ctx = fetchTicketContext(deps, "ENG-1276");
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
 
   expect(ctx.brief).not.toContain("```quay-config");
   expect(ctx.brief).not.toContain("slack_id");
@@ -452,15 +454,15 @@ test("test_fetch_ticket_context_strips_quay_config_block_from_brief", () => {
   expect(ctx.ticket_snapshot).toContain("slack_id");
 });
 
-test("test_fetch_ticket_context_404_surfaces_as_ticket_not_found", () => {
+test("test_fetch_ticket_context_404_surfaces_as_ticket_not_found", async () => {
   const { deps } = setupFakes();
   // No state configured for ENG-9999 → fake returns null (404).
 
-  const err = expectQuayError(() => fetchTicketContext(deps, "ENG-9999"));
+  const err = await expectQuayError(() => fetchTicketContext(deps, "ENG-9999"));
   expect(err.code).toBe("ticket_not_found");
 });
 
-test("test_fetch_ticket_context_block_invalid_propagates", () => {
+test("test_fetch_ticket_context_block_invalid_propagates", async () => {
   const { linear, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -469,12 +471,12 @@ test("test_fetch_ticket_context_block_invalid_propagates", () => {
     }),
   );
 
-  const err = expectQuayError(() => fetchTicketContext(deps, "ENG-1276"));
+  const err = await expectQuayError(() => fetchTicketContext(deps, "ENG-1276"));
   expect(err.code).toBe("ticket_block_invalid");
   expect(err.details?.detail).toBeDefined();
 });
 
-test("test_fetch_ticket_context_block_missing_returns_error", () => {
+test("test_fetch_ticket_context_block_missing_returns_error", async () => {
   const { linear, deps } = setupFakes();
   linear.setIssue(
     makeIssue({
@@ -482,7 +484,7 @@ test("test_fetch_ticket_context_block_missing_returns_error", () => {
     }),
   );
 
-  const err = expectQuayError(() => fetchTicketContext(deps, "ENG-1276"));
+  const err = await expectQuayError(() => fetchTicketContext(deps, "ENG-1276"));
   expect(err.code).toBe("ticket_block_invalid");
   expect(err.details?.detail).toBe(
     "no quay-config block found in ticket body",

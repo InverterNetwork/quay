@@ -45,7 +45,7 @@ export class FakeLinearAdapter implements LinearPort {
 
   // Port impl -----------------------------------------------------------
 
-  getIssue(identifier: string): LinearIssue | null {
+  async getIssue(identifier: string): Promise<LinearIssue | null> {
     this.getIssueCalls.push(identifier);
     const state = this.states.get(identifier);
     if (!state) return null;

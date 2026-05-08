@@ -1,14 +1,12 @@
 // Real Linear adapter. Reads issues + comments via Linear's GraphQL API.
 // Bot token is sourced from `LINEAR_API_KEY` (adapters spec §4 / §7).
 //
-// LinearPort is synchronous (the dispatcher in `quay enqueue --linear-issue`
-// is a blocking pipeline: fetch → validate → enqueue, with no benefit from
-// async hand-offs). Bun's `fetch` is async-only, so the adapter runs the
-// HTTP call in a child Bun process and `spawnSync`-waits on it — same
-// pattern as `SlackAdapter` (`src/adapters/slack.ts`). Tests inject a
-// synchronous in-process `transport` instead, which is why the network
-// path is gated behind `QUAY_INTEGRATION_TESTS` and the unit suite never
-// needs the env var or the network.
+// The adapter calls `fetch` in-process. An out-of-process spawn would not
+// survive `bun build --compile`: `process.execPath` is the compiled quay
+// binary, not bun, so spawning `process.execPath -e <script>` re-enters
+// quay's CLI dispatcher with `-e` and fails. Tests inject an in-process
+// `transport`; the network path is gated behind `QUAY_INTEGRATION_TESTS`
+// so the unit suite never needs the env var or the network.
 //
 // Failure-mode mapping (adapters spec §12):
 //   - HTTP 200, `data.issue === null`         → return null
@@ -29,7 +27,6 @@ import type {
 
 const DEFAULT_LINEAR_ENDPOINT = "https://api.linear.app/graphql";
 const DEFAULT_LINEAR_TIMEOUT_MS = 30_000;
-const PARENT_TIMEOUT_GRACE_MS = 5_000;
 // First page of comments fetched alongside the issue, and subsequent pages.
 // Linear's GraphQL caps `first` at 250; 100 keeps us well under.
 const COMMENTS_PAGE_SIZE = 100;
@@ -51,7 +48,7 @@ export interface LinearTransportResponse {
 
 export type LinearTransport = (
   req: LinearTransportRequest,
-) => LinearTransportResponse;
+) => Promise<LinearTransportResponse> | LinearTransportResponse;
 
 interface RawLinearComment {
   id: string;
@@ -106,11 +103,11 @@ export class LinearAdapter implements LinearPort {
       opts?.timeoutMs !== undefined && opts.timeoutMs > 0
         ? opts.timeoutMs
         : resolveTimeoutFromEnv();
-    this.transport = opts?.transport ?? this.spawnFetchTransport();
+    this.transport = opts?.transport ?? buildDefaultTransport(this.timeoutMs);
   }
 
-  getIssue(identifier: string): LinearIssue | null {
-    const first = this.queryIssuePage(identifier, null);
+  async getIssue(identifier: string): Promise<LinearIssue | null> {
+    const first = await this.queryIssuePage(identifier, null);
     if (first === null) return null;
     if (isDraftIssue(first)) {
       throw new QuayError(
@@ -130,7 +127,7 @@ export class LinearAdapter implements LinearPort {
           { adapter: "linear", retryable: false },
         );
       }
-      const next = this.queryIssuePage(identifier, cursor);
+      const next = await this.queryIssuePage(identifier, cursor);
       if (next === null) {
         throw new QuayError(
           "adapter_error",
@@ -170,10 +167,10 @@ export class LinearAdapter implements LinearPort {
     return fromEnv;
   }
 
-  private queryIssuePage(
+  private async queryIssuePage(
     identifier: string,
     commentsAfter: string | null,
-  ): RawLinearIssue | null {
+  ): Promise<RawLinearIssue | null> {
     const token = this.resolveToken();
     const body = JSON.stringify({
       query: GET_ISSUE_QUERY,
@@ -183,7 +180,7 @@ export class LinearAdapter implements LinearPort {
         commentsAfter,
       },
     });
-    const response = this.transport({
+    const response = await this.transport({
       url: this.endpoint,
       method: "POST",
       headers: {
@@ -262,44 +259,37 @@ export class LinearAdapter implements LinearPort {
     if (parsed.data.issue === null) return null;
     return parsed.data.issue;
   }
+}
 
-  // Default transport: spawns a child Bun process that runs `fetch` and
-  // writes a JSON-encoded {status, headers, body} envelope to stdout.
-  // Token + URL + body live in env (not argv) for the same reasons as
-  // SlackAdapter — argv is exposed via `/proc/<pid>/cmdline` on Linux.
-  private spawnFetchTransport(): LinearTransport {
-    const timeoutMs = this.timeoutMs;
-    return (req) => {
-      const result = Bun.spawnSync({
-        cmd: [process.execPath, "-e", linearFetchScript()],
-        env: {
-          ...process.env,
-          QUAY_LINEAR_URL: req.url,
-          QUAY_LINEAR_METHOD: req.method,
-          QUAY_LINEAR_BODY: req.body,
-          QUAY_LINEAR_HEADERS: JSON.stringify(req.headers),
-          QUAY_LINEAR_TIMEOUT_MS: String(timeoutMs),
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-        timeout: timeoutMs + PARENT_TIMEOUT_GRACE_MS,
-      });
-      if (result.exitCode !== 0) {
-        throw new Error(
-          `Linear request child process failed (exit ${result.exitCode}): ${decode(result.stderr).trim()}`,
-        );
+// `AbortController` bounds each request to `timeoutMs` so a stalled
+// connection cannot wedge the supervisor's bounded budget.
+function buildDefaultTransport(timeoutMs: number): LinearTransport {
+  return async (req) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const init: RequestInit = {
+        method: req.method,
+        headers: req.headers,
+        signal: controller.signal,
+      };
+      if (req.method !== "GET" && req.body !== "") init.body = req.body;
+      const response = await fetch(req.url, init);
+      const body = await response.text();
+      const headers = Object.fromEntries(response.headers.entries());
+      return { status: response.status, headers, body };
+    } catch (err) {
+      const e = err as Error & { name?: string };
+      const name = e?.name ?? "";
+      const msg = e?.message ?? String(err);
+      if (name === "AbortError" || name === "TimeoutError" || /aborted|abort/i.test(msg)) {
+        throw new Error(`Linear request timed out after ${timeoutMs}ms`);
       }
-      let envelope: { status: number; headers: Record<string, string>; body: string };
-      try {
-        envelope = JSON.parse(decode(result.stdout));
-      } catch (err) {
-        throw new Error(
-          `Linear request returned unparseable envelope: ${(err as Error).message}`,
-        );
-      }
-      return envelope;
-    };
-  }
+      throw new Error(`Linear request failed: ${msg}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
 
 // GraphQL query — single source of truth, used both for the initial fetch
@@ -381,61 +371,10 @@ function truncate(s: string): string {
   return `${s.slice(0, 500)}... (truncated, ${s.length} bytes total)`;
 }
 
-function decode(buf: Buffer | Uint8Array | undefined): string {
-  if (!buf) return "";
-  return new TextDecoder().decode(buf);
-}
-
 function resolveTimeoutFromEnv(): number {
   const raw = process.env.QUAY_LINEAR_TIMEOUT_MS;
   if (raw === undefined || raw === "") return DEFAULT_LINEAR_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_LINEAR_TIMEOUT_MS;
   return Math.floor(parsed);
-}
-
-// Child-process script: argv is empty (everything sensitive is in env),
-// stdout receives a JSON envelope `{status, headers, body}` so the parent
-// can map HTTP status / Retry-After header to the right QuayError.
-function linearFetchScript(): string {
-  return `
-const url = process.env.QUAY_LINEAR_URL || "";
-const method = process.env.QUAY_LINEAR_METHOD || "POST";
-const body = process.env.QUAY_LINEAR_BODY || "";
-const headersJson = process.env.QUAY_LINEAR_HEADERS || "{}";
-if (!url) {
-  process.stderr.write("QUAY_LINEAR_URL not set in child env");
-  process.exit(1);
-}
-let headers;
-try { headers = JSON.parse(headersJson); }
-catch (e) {
-  process.stderr.write("QUAY_LINEAR_HEADERS unparseable: " + (e && e.message ? e.message : e));
-  process.exit(1);
-}
-const timeoutMs = Number(process.env.QUAY_LINEAR_TIMEOUT_MS || "30000");
-const controller = new AbortController();
-const timer = setTimeout(() => controller.abort(), timeoutMs);
-const init = { method, headers, signal: controller.signal };
-if (method !== "GET" && body) init.body = body;
-fetch(url, init)
-  .then(async (r) => {
-    const text = await r.text();
-    const respHeaders = {};
-    r.headers.forEach((v, k) => { respHeaders[k] = v; });
-    process.stdout.write(JSON.stringify({ status: r.status, headers: respHeaders, body: text }));
-  })
-  .catch((err) => {
-    const isAbort =
-      (err && (err.name === "AbortError" || err.name === "TimeoutError")) ||
-      /aborted|abort/i.test(String(err && err.message ? err.message : err));
-    if (isAbort) {
-      process.stderr.write("Linear request timed out after " + timeoutMs + "ms");
-    } else {
-      process.stderr.write(String(err && err.message ? err.message : err));
-    }
-    process.exit(1);
-  })
-  .finally(() => clearTimeout(timer));
-`;
 }
