@@ -27,5 +27,5 @@ export interface LinearPort {
   // Throws `ticket_not_actionable` on draft issues, `adapter_error` with
   // `retryable:false` on 5xx, `adapter_error` with `retryable:true` and
   // `retry_after` on 429, and on network/auth errors.
-  getIssue(identifier: string): LinearIssue | null;
+  getIssue(identifier: string): Promise<LinearIssue | null>;
 }
