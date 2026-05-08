@@ -2,12 +2,12 @@
 // §14 invariants on durable intent + crash recovery).
 //
 // Two entry points:
-//   - cancel_task(...): synchronous CLI path. Acquires the supervisor lock,
+//   - cancel_task(...): CLI path. Acquires the supervisor lock,
 //     writes durable task-level cancel intent (`tasks.cancel_requested_at` +
 //     flags + per-attempt `kill_intent = 'cancel'` when running), kills the
 //     running tmux session if applicable, and runs the finalizer to terminal.
 //   - runCancelFinalizer(...): the canonical finalizer used by both the CLI
-//     path (after the synchronous intent commit) and tick recovery (top-of-
+//     path (after the intent commit) and tick recovery (top-of-
 //     loop check on `cancel_requested_at IS NOT NULL`). The caller owns the
 //     supervisor lock — we do NOT take it here, otherwise tick recovery would
 //     re-enter the in-process lock guard.
@@ -130,10 +130,10 @@ function loadRunningAttempt(db: DB, taskId: string): AttemptRow | null {
   );
 }
 
-export function cancel_task(
+export async function cancel_task(
   deps: CancelDeps,
   input: CancelTaskInput,
-): CancelResult {
+): Promise<CancelResult> {
   return deps.supervisorLock.run(() => cancelUnderLock(deps, input));
 }
 
@@ -171,8 +171,8 @@ function cancelUnderLock(deps: CancelDeps, input: CancelTaskInput): CancelResult
   }
 
   // If cancel intent already landed (recovery path), skip the intent commit
-  // and the synchronous tmux kill (those were either already done or will be
-  // re-done idempotently inside the finalizer's step 1).
+  // and the tmux kill (those were either already done or will be re-done
+  // idempotently inside the finalizer's step 1).
   const alreadyHadIntent = initial.cancel_requested_at !== null;
   if (!alreadyHadIntent) {
     commitCancelIntent(deps, input, initial);

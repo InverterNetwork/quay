@@ -138,13 +138,13 @@ export async function dispatch(
       case "task":
         return await handleTask(rest, deps, io);
       case "tick":
-        return handleTick(rest, deps, io);
+        return await handleTick(rest, deps, io);
       case "enqueue":
         return await handleEnqueue(rest, deps, io);
       case "repo":
         return handleRepo(rest, deps, io);
       case "cancel":
-        return handleCancel(rest, deps, io);
+        return await handleCancel(rest, deps, io);
       case "submit-brief":
         return handleSubmitBrief(rest, deps, io);
       case "escalate-human":
@@ -325,14 +325,14 @@ function handleTaskEvents(
   return { exitCode: 0 };
 }
 
-function handleTick(
+async function handleTick(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
-): DispatchResult {
+): Promise<DispatchResult> {
   if (wantsHelp(argv)) return printHelp(io, ["tick"]);
   const tickDeps: TickDeps = pickTickDeps(deps);
-  const results = tick_once(tickDeps, deps.tickOptions ?? {});
+  const results = await tick_once(tickDeps, deps.tickOptions ?? {});
   for (const r of results) {
     io.stdout(`${JSON.stringify(r)}\n`);
   }
@@ -659,11 +659,11 @@ function handleRepoImport(
   return { exitCode: 0 };
 }
 
-function handleCancel(
+async function handleCancel(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
-): DispatchResult {
+): Promise<DispatchResult> {
   if (wantsHelp(argv)) return printHelp(io, ["cancel"]);
   const taskId = positional(argv);
   if (!taskId) {
@@ -694,7 +694,7 @@ function handleCancel(
     artifactStore: deps.artifactStore,
     supervisorLock: deps.supervisorLock,
   };
-  const result: CancelResult = cancel_task(cancelDeps, {
+  const result: CancelResult = await cancel_task(cancelDeps, {
     taskId,
     closePr,
     keepWorktree,

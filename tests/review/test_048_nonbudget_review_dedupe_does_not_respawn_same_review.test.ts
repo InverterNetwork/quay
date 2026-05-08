@@ -13,7 +13,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_048_nonbudget_review_dedupe_does_not_respawn_same_review", () => {
+test("test_048_nonbudget_review_dedupe_does_not_respawn_same_review", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T15:00:00.000Z");
 
@@ -60,7 +60,7 @@ test("test_048_nonbudget_review_dedupe_does_not_respawn_same_review", () => {
     },
   });
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   // No respawn scheduled; tick is silent on this task.
   expect(results).toEqual([]);
 

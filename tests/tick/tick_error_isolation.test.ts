@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_tick_error_isolated_to_task_and_tick_continues", () => {
+test("test_tick_error_isolated_to_task_and_tick_continues", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T12:00:00.000Z");
 
@@ -54,7 +54,7 @@ test("test_tick_error_isolated_to_task_and_tick_continues", () => {
   built.git.fail.fetchBranchIfExists = (_repoId, branch) =>
     branch === `quay/${failingTask}`;
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
 
   expect(results.map((r) => r.action)).toEqual(["tick_error", "spawned"]);
   expect(results[0]!.task_id).toBe(failingTask);
@@ -94,7 +94,7 @@ test("test_tick_error_isolated_to_task_and_tick_continues", () => {
 
   delete built.git.fail.fetchBranchIfExists;
 
-  const retry = tick_once(built.deps);
+  const retry = await tick_once(built.deps);
 
   expect(retry).toEqual([{ task_id: failingTask, action: "spawned" }]);
 

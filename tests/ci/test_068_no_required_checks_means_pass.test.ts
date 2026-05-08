@@ -13,7 +13,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_068_no_required_checks_means_pass", () => {
+test("test_068_no_required_checks_means_pass", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
 
@@ -43,7 +43,7 @@ test("test_068_no_required_checks_means_pass", () => {
     },
   });
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: taskId, action: "ci_passed" }]);
 
   const state = h.db

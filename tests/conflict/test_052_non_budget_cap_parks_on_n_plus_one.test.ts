@@ -14,7 +14,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_052_non_budget_cap_parks_on_n_plus_one", () => {
+test("test_052_non_budget_cap_parks_on_n_plus_one", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T17:00:00.000Z");
 
@@ -62,7 +62,7 @@ test("test_052_non_budget_cap_parks_on_n_plus_one", () => {
       },
     });
 
-    const results = tick_once(built.deps, { maxNonBudgetRespawns: 3 });
+    const results = await tick_once(built.deps, { maxNonBudgetRespawns: 3 });
 
     if (i < 3) {
       // Scheduled. Task moved to `queued`. Reset to pr-open + clear pending

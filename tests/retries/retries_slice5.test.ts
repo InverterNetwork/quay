@@ -19,7 +19,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_005_ci_fail_schedules_budget_consuming_retry", () => {
+test("test_005_ci_fail_schedules_budget_consuming_retry", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-ci");
@@ -46,7 +46,7 @@ test("test_005_ci_fail_schedules_budget_consuming_retry", () => {
     excerpt: "unit test failed in widget.spec.ts",
   });
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: taskId, action: "ci_failed" }]);
 
   const pending = h.db
@@ -82,7 +82,7 @@ test("test_005_ci_fail_schedules_budget_consuming_retry", () => {
   expect(retryBrief).toContain("latest implementation brief");
 });
 
-test("test_013_final_attempt_blocker_sets_budget_exhausted", () => {
+test("test_013_final_attempt_blocker_sets_budget_exhausted", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T11:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-final-blocker");
@@ -107,7 +107,7 @@ test("test_013_final_attempt_blocker_sets_budget_exhausted", () => {
   const built = buildTickDeps(h);
   built.tmux.markDead(t.sessionName!);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: t.taskId, action: "blocker_ingested" }]);
 
   const task = h.db
@@ -120,7 +120,7 @@ test("test_013_final_attempt_blocker_sets_budget_exhausted", () => {
   expect(artifactCount(t.taskId, "last_failure")).toBe(1);
 });
 
-test("test_021_retry_budget_exhaustion_creates_last_failure", () => {
+test("test_021_retry_budget_exhaustion_creates_last_failure", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T12:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-budget-cap");
@@ -144,7 +144,7 @@ test("test_021_retry_budget_exhaustion_creates_last_failure", () => {
   built.git.setRemoteHeadSha(repoId, t.branchName, null);
   built.github.setPrExists(repoId, t.branchName, false);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: t.taskId, action: "crashed" }]);
   const task = h.db
     .query<{ state: string; budget_exhausted: number }, [string]>(
@@ -156,7 +156,7 @@ test("test_021_retry_budget_exhaustion_creates_last_failure", () => {
   expect(artifactCount(t.taskId, "last_failure")).toBe(1);
 });
 
-test("test_023_retry_brief_uses_most_recent_brief", () => {
+test("test_023_retry_brief_uses_most_recent_brief", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-latest-brief");
   const taskId = insertTask(h.db, {
@@ -197,7 +197,7 @@ test("test_023_retry_brief_uses_most_recent_brief", () => {
     excerpt: "lint failed",
   });
 
-  tick_once(built.deps);
+  await tick_once(built.deps);
   const pending = h.db
     .query<{ attempt_id: number }, [string]>(
       `SELECT attempt_id FROM attempts WHERE task_id = ? AND spawned_at IS NULL`,

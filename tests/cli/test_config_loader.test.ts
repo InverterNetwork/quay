@@ -1,6 +1,6 @@
 // Spec §13 deployment config: `quay tick` and the production CLI must read
 // `~/.quay/config.toml` (or the operator's override) and forward the knobs
-// to `tick_once()` + the supervisor lock. Without this wiring, every
+// to `await tick_once()` + the supervisor lock. Without this wiring, every
 // production deployment runs with the hard-coded defaults regardless of
 // what the operator sets.
 //

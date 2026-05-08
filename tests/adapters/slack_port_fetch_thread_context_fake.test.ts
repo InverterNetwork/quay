@@ -38,12 +38,12 @@ function manyReplies(count: number): SlackThreadMessage[] {
   return out;
 }
 
-test("test_slack_port_fake_fetch_thread_context_returns_parent_and_replies", () => {
+test("test_slack_port_fake_fetch_thread_context_returns_parent_and_replies", async () => {
   const fake = new FakeSlack();
   const replies = [reply(1), reply(2), reply(3, { bot: true })];
   fake.configureThreadContext(THREAD_REF, parent(), replies);
 
-  const ctx = fake.fetchThreadContext(THREAD_REF);
+  const ctx = await fake.fetchThreadContext(THREAD_REF);
   expect(ctx.parent.ts).toBe("1700.001");
   expect(ctx.parent.text).toBe("Original ask in the thread.");
   expect(ctx.replies.map((r) => r.ts)).toEqual([
@@ -55,12 +55,12 @@ test("test_slack_port_fake_fetch_thread_context_returns_parent_and_replies", () 
   expect(fake.fetchThreadContextCalls).toEqual([THREAD_REF]);
 });
 
-test("test_slack_port_fake_fetch_thread_context_truncates_above_cap", () => {
+test("test_slack_port_fake_fetch_thread_context_truncates_above_cap", async () => {
   const fake = new FakeSlack();
   // Default cap is 200 — so 500 replies should truncate to 100 + marker + 100.
   fake.configureThreadContext(THREAD_REF, parent(), manyReplies(500));
 
-  const ctx = fake.fetchThreadContext(THREAD_REF);
+  const ctx = await fake.fetchThreadContext(THREAD_REF);
   expect(ctx.replies).toHaveLength(201);
   // First 100 are the head of the original list.
   expect(ctx.replies.slice(0, 100).map((r) => r.text)).toEqual(
@@ -79,13 +79,13 @@ test("test_slack_port_fake_fetch_thread_context_truncates_above_cap", () => {
   );
 });
 
-test("test_slack_port_fake_fetch_thread_context_respects_config_override", () => {
+test("test_slack_port_fake_fetch_thread_context_respects_config_override", async () => {
   const fake = new FakeSlack();
   fake.setMaxThreadMessages(50);
   // 60-message thread → above the override cap → first 25 + marker + last 25.
   fake.configureThreadContext(THREAD_REF, parent(), manyReplies(60));
 
-  const ctx = fake.fetchThreadContext(THREAD_REF);
+  const ctx = await fake.fetchThreadContext(THREAD_REF);
   expect(ctx.replies).toHaveLength(51);
   expect(ctx.replies.slice(0, 25).map((r) => r.text)).toEqual(
     manyReplies(60).slice(0, 25).map((r) => r.text),
@@ -101,13 +101,13 @@ test("test_slack_port_fake_fetch_thread_context_respects_config_override", () =>
   );
 });
 
-test("test_slack_port_fake_fetch_thread_context_returns_full_thread_under_cap", () => {
+test("test_slack_port_fake_fetch_thread_context_returns_full_thread_under_cap", async () => {
   const fake = new FakeSlack();
   // 50 replies vs default cap of 200 → no truncation.
   const replies = manyReplies(50);
   fake.configureThreadContext(THREAD_REF, parent(), replies);
 
-  const ctx = fake.fetchThreadContext(THREAD_REF);
+  const ctx = await fake.fetchThreadContext(THREAD_REF);
   expect(ctx.replies).toHaveLength(50);
   expect(ctx.replies.map((r) => r.text)).toEqual(replies.map((r) => r.text));
   // No marker anywhere.
@@ -116,14 +116,14 @@ test("test_slack_port_fake_fetch_thread_context_returns_full_thread_under_cap", 
   }
 });
 
-test("test_slack_port_fake_fetch_thread_context_throws_on_thread_not_found", () => {
+test("test_slack_port_fake_fetch_thread_context_throws_on_thread_not_found", async () => {
   const fake = new FakeSlack();
   // No configureThreadContext call → fake should throw, not return empty.
   // The caller (`ticketContext.fetch`) wraps as `adapter_error{adapter:"slack"}`.
 
   let caught: unknown;
   try {
-    fake.fetchThreadContext(THREAD_REF);
+    await fake.fetchThreadContext(THREAD_REF);
   } catch (e) {
     caught = e;
   }
@@ -131,7 +131,7 @@ test("test_slack_port_fake_fetch_thread_context_throws_on_thread_not_found", () 
   expect((caught as Error).message).toMatch(/thread not found/i);
 });
 
-test("test_slack_port_fake_fetch_thread_context_page_cap_marker_reflects_lower_bound", () => {
+test("test_slack_port_fake_fetch_thread_context_page_cap_marker_reflects_lower_bound", async () => {
   // Simulate a thread so large that the real adapter would have hit the 50-page
   // cap before exhausting all replies. The fake is configured with pageCapped=true
   // to mirror that state. The truncation marker must advertise that the omitted
@@ -144,7 +144,7 @@ test("test_slack_port_fake_fetch_thread_context_page_cap_marker_reflects_lower_b
     pageCapped: true,
   });
 
-  const ctx = fake.fetchThreadContext(THREAD_REF);
+  const ctx = await fake.fetchThreadContext(THREAD_REF);
   // Default cap is 200 → half = 100 → 201 entries (head + marker + tail).
   expect(ctx.replies).toHaveLength(201);
 
@@ -169,7 +169,7 @@ test("test_slack_port_fake_fetch_thread_context_page_cap_marker_reflects_lower_b
   );
 });
 
-test("test_slack_port_existing_methods_unchanged", () => {
+test("test_slack_port_existing_methods_unchanged", async () => {
   // Smoke-test the four pre-slice-14 methods on the fake to confirm the
   // interface extension didn't disturb their behavior. The slice-6/8 test
   // suites cover deeper semantics; this test pins the surface area.
@@ -177,7 +177,7 @@ test("test_slack_port_existing_methods_unchanged", () => {
   const ref = "C99:0.001";
 
   // post — appends a bot message and returns its ts.
-  const posted = fake.post({ threadRef: ref, body: "hello with nonce ABC123" });
+  const posted = await fake.post({ threadRef: ref, body: "hello with nonce ABC123" });
   expect(typeof posted.ts).toBe("string");
   expect(posted.ts.length).toBeGreaterThan(0);
   expect(fake.postCalls).toEqual([
@@ -185,20 +185,20 @@ test("test_slack_port_existing_methods_unchanged", () => {
   ]);
 
   // fenceTs — returns latest ts in the thread.
-  const fence = fake.fenceTs(ref);
+  const fence = await fake.fenceTs(ref);
   expect(fence).toBe(posted.ts);
   expect(fake.fenceCalls).toEqual([ref]);
 
   // searchByNonce — finds bot messages whose body contains the nonce.
-  const found = fake.searchByNonce(ref, "ABC123");
+  const found = await fake.searchByNonce(ref, "ABC123");
   expect(found).not.toBeNull();
   expect(found!.ts).toBe(posted.ts);
   expect(found!.authorBot).toBe(true);
-  expect(fake.searchByNonce(ref, "missing")).toBeNull();
+  expect(await fake.searchByNonce(ref, "missing")).toBeNull();
 
   // listReplies — returns messages strictly above the lower bound.
   fake.appendHumanReply(ref, "human answer");
-  const after = fake.listReplies(ref, posted.ts);
+  const after = await fake.listReplies(ref, posted.ts);
   expect(after.map((r) => r.text)).toEqual(["human answer"]);
   expect(fake.listCalls.at(-1)).toEqual({
     threadRef: ref,

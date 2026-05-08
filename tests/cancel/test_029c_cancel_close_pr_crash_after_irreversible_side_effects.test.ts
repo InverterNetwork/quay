@@ -71,7 +71,7 @@ function insertDoneTask(
   return attemptId;
 }
 
-test("test_029c_cancel_close_pr_crash_after_irreversible_side_effects", () => {
+test("test_029c_cancel_close_pr_crash_after_irreversible_side_effects", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-029c");
@@ -96,9 +96,9 @@ test("test_029c_cancel_close_pr_crash_after_irreversible_side_effects", () => {
     throw new Error("simulated crash after irreversible cleanup");
   });
 
-  expect(() =>
+  await expect(
     cancel_task(built.deps, { taskId, closePr: true }),
-  ).toThrow(/simulated crash/);
+  ).rejects.toThrow(/simulated crash/);
 
   // Irreversible side effects landed: gh pr close called; PR no longer open.
   expect(built.github.closePrCalls).toEqual([
@@ -136,7 +136,7 @@ test("test_029c_cancel_close_pr_crash_after_irreversible_side_effects", () => {
 
   // Recovery: clear failpoint and run a tick.
   clearAllFailpoints();
-  const tickResults = tick_once(built.deps);
+  const tickResults = await tick_once(built.deps);
   expect(tickResults).toEqual([{ task_id: taskId, action: "cancel_finalized" }]);
 
   // Terminal convergence to `cancelled` (NOT `closed_unmerged`).

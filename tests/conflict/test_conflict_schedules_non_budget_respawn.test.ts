@@ -14,7 +14,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_conflict_schedules_non_budget_respawn", () => {
+test("test_conflict_schedules_non_budget_respawn", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T16:00:00.000Z");
 
@@ -58,7 +58,7 @@ test("test_conflict_schedules_non_budget_respawn", () => {
     },
   });
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([
     { task_id: taskId, action: "conflict_respawn_scheduled" },
   ]);

@@ -22,7 +22,7 @@ afterEach(() => {
   h = null;
 });
 
-test("first_tick_spawns_when_remote_branch_does_not_yet_exist", () => {
+test("first_tick_spawns_when_remote_branch_does_not_yet_exist", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T11:00:00.000Z");
 
@@ -42,7 +42,7 @@ test("first_tick_spawns_when_remote_branch_does_not_yet_exist", () => {
   // `remoteHeadSha` returns null in that case.
   built.github.setPrExists(repoId, `quay/${taskId}`, false);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
 
   // The tick spawns; it does not fail with tick_error.
   expect(results).toEqual([{ task_id: taskId, action: "spawned" }]);

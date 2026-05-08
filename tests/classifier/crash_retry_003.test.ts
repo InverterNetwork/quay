@@ -11,7 +11,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_003_dead_worker_without_pr_or_signal_schedules_crash_retry", () => {
+test("test_003_dead_worker_without_pr_or_signal_schedules_crash_retry", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T14:00:00.000Z");
 
@@ -31,7 +31,7 @@ test("test_003_dead_worker_without_pr_or_signal_schedules_crash_retry", () => {
   built.git.setRemoteHeadSha(repoId, t.branchName, null);
   built.github.setPrExists(repoId, t.branchName, false);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: t.taskId, action: "crashed" }]);
 
   // Task back to queued; attempts_consumed not yet incremented for the retry

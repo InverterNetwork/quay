@@ -158,7 +158,7 @@ export async function fetchTicketContextWithIssue(
   if (block.slack_thread_ref !== null && deps.config.slackEnabled) {
     slackThreadRef = block.slack_thread_ref;
     try {
-      slackThread = deps.slack.fetchThreadContext(slackThreadRef);
+      slackThread = await deps.slack.fetchThreadContext(slackThreadRef);
     } catch (e) {
       if (e instanceof QuayError) throw e;
       throw new QuayError(

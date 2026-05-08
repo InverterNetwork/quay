@@ -16,7 +16,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_spawn_window_null_session_uses_same_classifier", () => {
+test("test_spawn_window_null_session_uses_same_classifier", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T20:00:00.000Z");
 
@@ -39,7 +39,7 @@ test("test_spawn_window_null_session_uses_same_classifier", () => {
   // Simulate an orphan canonical-name session that survived the spawn crash.
   built.tmux.liveSessions.add(canonicalSession);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([
     { task_id: t.taskId, action: "spawn_window_recovered" },
   ]);

@@ -10,7 +10,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_promotion_rowcount_zero_on_cancel_intent_skips_spawn", () => {
+test("test_promotion_rowcount_zero_on_cancel_intent_skips_spawn", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-cancel");
   const taskId = insertTask(h.db, { taskId: "task-cancel-mid", repoId });
@@ -38,7 +38,7 @@ test("test_promotion_rowcount_zero_on_cancel_intent_skips_spawn", () => {
   // promotion predicate remains as a backstop, and the observable result is
   // unchanged: no tmux spawn, no budget consumed, no spawned event, no
   // per-attempt promotion commits.
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
   expect(results).toEqual([{ task_id: taskId, action: "cancel_finalized" }]);
 
   // No tmux spawn at all (not even attempted).

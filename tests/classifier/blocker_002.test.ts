@@ -16,7 +16,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_002_worker_blocker_transitions_to_awaiting_next_brief", () => {
+test("test_002_worker_blocker_transitions_to_awaiting_next_brief", async () => {
   h = createHarness();
   h.clock.set("2026-04-26T13:00:00.000Z");
 
@@ -35,7 +35,7 @@ test("test_002_worker_blocker_transitions_to_awaiting_next_brief", () => {
   // Worker is dead — no live session.
   built.tmux.markDead(t.sessionName!);
 
-  const results = tick_once(built.deps);
+  const results = await tick_once(built.deps);
 
   expect(results).toEqual([{ task_id: t.taskId, action: "blocker_ingested" }]);
 

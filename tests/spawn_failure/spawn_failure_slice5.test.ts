@@ -17,7 +17,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_045_spawn_failure_no_evidence_rolls_back_budget_and_requeues", () => {
+test("test_045_spawn_failure_no_evidence_rolls_back_budget_and_requeues", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T13:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-spawn-fail");
@@ -34,7 +34,7 @@ test("test_045_spawn_failure_no_evidence_rolls_back_budget_and_requeues", () => 
   built.git.setRemoteHeadSha(repoId, t.branchName, null);
   built.github.setPrExists(repoId, t.branchName, false);
 
-  expect(tick_once(built.deps)).toEqual([
+  expect(await tick_once(built.deps)).toEqual([
     { task_id: t.taskId, action: "spawn_failed" },
   ]);
   const task = h.db
@@ -54,7 +54,7 @@ test("test_045_spawn_failure_no_evidence_rolls_back_budget_and_requeues", () => 
   expect(pendingReason(t.taskId)).toBe("initial");
 });
 
-test("test_046b_spawn_window_push_without_pr_takes_spawn_failed_default", () => {
+test("test_046b_spawn_window_push_without_pr_takes_spawn_failed_default", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-pushed-no-pr");
   const t = insertRunningTask(h.db, {
@@ -70,7 +70,7 @@ test("test_046b_spawn_window_push_without_pr_takes_spawn_failed_default", () => 
   built.git.setRemoteHeadSha(repoId, t.branchName, "new");
   built.github.setPrExists(repoId, t.branchName, false);
 
-  tick_once(built.deps);
+  await tick_once(built.deps);
   const attempt = h.db
     .query<{ exit_kind: string | null }, [number]>(
       `SELECT exit_kind FROM attempts WHERE attempt_id = ?`,
@@ -80,7 +80,7 @@ test("test_046b_spawn_window_push_without_pr_takes_spawn_failed_default", () => 
   expect(pendingReason(t.taskId)).toBe("initial");
 });
 
-test("test_062_max_spawn_failures_parks_worktree_error", () => {
+test("test_062_max_spawn_failures_parks_worktree_error", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-spawn-cap");
   const t = insertRunningTask(h.db, {
@@ -98,7 +98,7 @@ test("test_062_max_spawn_failures_parks_worktree_error", () => {
   built.git.setRemoteHeadSha(repoId, t.branchName, null);
   built.github.setPrExists(repoId, t.branchName, false);
 
-  tick_once(built.deps);
+  await tick_once(built.deps);
   const task = h.db
     .query<{ state: string; spawn_failures_consecutive: number }, [string]>(
       `SELECT state, spawn_failures_consecutive FROM tasks WHERE task_id = ?`,
@@ -110,7 +110,7 @@ test("test_062_max_spawn_failures_parks_worktree_error", () => {
   });
 });
 
-test("test_062_consecutive_substrate_failures_accumulate_across_ticks", () => {
+test("test_062_consecutive_substrate_failures_accumulate_across_ticks", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-spawn-loop");
   const taskId = insertTask(h.db, { taskId: "task-spawn-loop", repoId });
@@ -128,7 +128,7 @@ test("test_062_consecutive_substrate_failures_accumulate_across_ticks", () => {
 
   for (let i = 0; i < 6; i++) {
     built.tmux.failSpawnNext();
-    tick_once(built.deps);
+    await tick_once(built.deps);
   }
   const task = h.db
     .query<{ state: string; spawn_failures_consecutive: number }, [string]>(
@@ -141,7 +141,7 @@ test("test_062_consecutive_substrate_failures_accumulate_across_ticks", () => {
   });
 });
 
-test("test_063_evidence_found_recovery_resets_spawn_failures", () => {
+test("test_063_evidence_found_recovery_resets_spawn_failures", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-evidence-reset");
   const t = insertRunningTask(h.db, {
@@ -161,7 +161,7 @@ test("test_063_evidence_found_recovery_resets_spawn_failures", () => {
   built.git.setRemoteHeadSha(repoId, t.branchName, "sha");
   built.github.setPrExists(repoId, t.branchName, true);
 
-  tick_once(built.deps);
+  await tick_once(built.deps);
   const task = h.db
     .query<{ state: string; spawn_failures_consecutive: number }, [string]>(
       `SELECT state, spawn_failures_consecutive FROM tasks WHERE task_id = ?`,

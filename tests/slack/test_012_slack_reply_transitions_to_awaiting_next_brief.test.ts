@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_012_slack_reply_transitions_to_awaiting_next_brief", () => {
+test("test_012_slack_reply_transitions_to_awaiting_next_brief", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-012");
@@ -54,7 +54,7 @@ test("test_012_slack_reply_transitions_to_awaiting_next_brief", () => {
   if (!esc.ok) throw new Error("expected escalate");
 
   // Tick #1: post.
-  tick_once(built.deps);
+  await tick_once(built.deps);
   expect(built.slack.postCalls).toHaveLength(1);
 
   // Human reply lands after the bot post.
@@ -74,7 +74,7 @@ test("test_012_slack_reply_transitions_to_awaiting_next_brief", () => {
   );
 
   // Tick #2: ingest reply.
-  const r2 = tick_once(built.deps);
+  const r2 = await tick_once(built.deps);
   const actions = r2.filter((r) => r.task_id === taskId).map((r) => r.action);
   expect(actions).toContain("slack_reply_ingested");
 

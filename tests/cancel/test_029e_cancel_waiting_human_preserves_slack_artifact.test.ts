@@ -19,7 +19,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_029e_cancel_waiting_human_preserves_slack_artifact", () => {
+test("test_029e_cancel_waiting_human_preserves_slack_artifact", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-029e");
@@ -92,7 +92,7 @@ test("test_029e_cancel_waiting_human_preserves_slack_artifact", () => {
   // Cancel from waiting_human. No Slack API call — Slack writer is tick-only,
   // and cancel doesn't unpost.
   const slack = new FakeSlack();
-  const result = cancel_task(built.deps, { taskId });
+  const result = await cancel_task(built.deps, { taskId });
   expect(result.ok).toBe(true);
   if (!result.ok) throw new Error("expected ok");
   expect(result.value.outcome).toBe("cancelled");
