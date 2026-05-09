@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test, expect, afterEach } from "bun:test";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
+import { insertRepo } from "../support/fixtures.ts";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 
@@ -23,17 +24,6 @@ function tempDir(): string {
   return d;
 }
 
-async function addRepo(built: ReturnType<typeof buildCliDeps>, id: string): Promise<void> {
-  const io = bufferIO();
-  const result = await dispatch(
-    ["repo", "add", "--id", id, "--url", `git@example.com:owner/${id}.git`,
-     "--base-branch", "main", "--package-manager", "bun", "--install-cmd", "bun install"],
-    built.deps,
-    io,
-  );
-  expect(result.exitCode).toBe(0);
-}
-
 function writeJson(dir: string, filename: string, data: unknown): string {
   const path = join(dir, filename);
   writeFileSync(path, JSON.stringify(data));
@@ -43,7 +33,7 @@ function writeJson(dir: string, filename: string, data: unknown): string {
 test("apply-tags declaratively sets namespaces and values", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
   const dir = tempDir();
 
   const path = writeJson(dir, "tags.json", {
@@ -72,7 +62,7 @@ test("apply-tags declaratively sets namespaces and values", async () => {
 test("apply-tags removes existing values not in input", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
   const dir = tempDir();
 
   // First apply: set area and risk.
@@ -105,7 +95,7 @@ test("apply-tags removes existing values not in input", async () => {
 test("apply-tags with empty namespaces clears everything", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
   const dir = tempDir();
 
   const seed = writeJson(dir, "seed.json", {
@@ -128,7 +118,7 @@ test("apply-tags with empty namespaces clears everything", async () => {
 test("apply-tags required flag toggling", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
   const dir = tempDir();
 
   const required = writeJson(dir, "required.json", {
@@ -153,7 +143,7 @@ test("apply-tags required flag toggling", async () => {
 test("apply-tags post-apply state matches exactly what was requested", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
   const dir = tempDir();
 
   // Pre-populate with extra data.
@@ -200,7 +190,7 @@ test("apply-tags for non-existent repo returns unknown_repo", async () => {
 test("apply-tags with invalid namespace charset returns validation_error", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
   const dir = tempDir();
 
   const path = writeJson(dir, "bad.json", {
@@ -220,7 +210,7 @@ test("apply-tags with invalid namespace charset returns validation_error", async
 test("apply-tags with invalid value charset returns validation_error", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
   const dir = tempDir();
 
   const path = writeJson(dir, "bad-val.json", {
@@ -240,7 +230,7 @@ test("apply-tags with invalid value charset returns validation_error", async () 
 test("apply-tags requires --from flag", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
 
   const io = bufferIO();
   const result = await dispatch(["repo", "apply-tags", "repo-a"], built.deps, io);
@@ -260,11 +250,28 @@ test("apply-tags requires <repo_id>", async () => {
   expect(err.error).toBe("usage_error");
 });
 
+test("apply-tags reads from stdin when --from is '-'", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  insertRepo(h.db, "repo-a");
+
+  const io = bufferIO();
+  io.setStdin(JSON.stringify({ namespaces: { area: { values: ["bonding-curve"] } } }));
+  const result = await dispatch(
+    ["repo", "apply-tags", "repo-a", "--from", "-"],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  expect(out.namespaces.area.values).toEqual(["bonding-curve"]);
+});
+
 test("per-repo isolation: apply-tags on repo-a does not affect repo-b", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
-  await addRepo(built, "repo-b");
+  insertRepo(h.db, "repo-a");
+  insertRepo(h.db, "repo-b");
   const dir = tempDir();
 
   await dispatch(

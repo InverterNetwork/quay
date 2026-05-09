@@ -1,6 +1,7 @@
 import { test, expect, afterEach } from "bun:test";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
+import { insertRepo } from "../support/fixtures.ts";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 
@@ -10,21 +11,10 @@ afterEach(() => {
   h = null;
 });
 
-async function addRepo(built: ReturnType<typeof buildCliDeps>, id: string): Promise<void> {
-  const io = bufferIO();
-  const result = await dispatch(
-    ["repo", "add", "--id", id, "--url", `git@example.com:owner/${id}.git`,
-     "--base-branch", "main", "--package-manager", "bun", "--install-cmd", "bun install"],
-    built.deps,
-    io,
-  );
-  expect(result.exitCode).toBe(0);
-}
-
 test("set-tags then get-tags returns the value", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
 
   const setIo = bufferIO();
   const setResult = await dispatch(
@@ -48,7 +38,7 @@ test("set-tags then get-tags returns the value", async () => {
 test("set-tags on existing pair is no-op (idempotent)", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
 
   for (let i = 0; i < 2; i++) {
     const io = bufferIO();
@@ -72,7 +62,7 @@ test("set-tags on existing pair is no-op (idempotent)", async () => {
 test("unset-tags --value removes only that value", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
 
   await dispatch(
     ["repo", "set-tags", "repo-a", "--namespace", "area", "--value", "bonding-curve"],
@@ -104,7 +94,7 @@ test("unset-tags --value removes only that value", async () => {
 test("unset-tags without value removes whole namespace", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
 
   await dispatch(
     ["repo", "set-tags", "repo-a", "--namespace", "area", "--value", "bonding-curve"],
@@ -136,7 +126,7 @@ test("unset-tags without value removes whole namespace", async () => {
 test("get-tags returns sorted namespaces and values", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
 
   for (const [ns, v] of [["risk", "reentrancy"], ["area", "vesting"], ["area", "bonding-curve"]]) {
     await dispatch(
@@ -156,8 +146,8 @@ test("get-tags returns sorted namespaces and values", async () => {
 test("per-repo isolation: tags on repo-a not visible in repo-b", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
-  await addRepo(built, "repo-b");
+  insertRepo(h.db, "repo-a");
+  insertRepo(h.db, "repo-b");
 
   await dispatch(
     ["repo", "set-tags", "repo-a", "--namespace", "area", "--value", "bonding-curve"],
@@ -189,7 +179,7 @@ test("set-tags for non-existent repo returns unknown_repo", async () => {
 test("set-tags with invalid namespace returns validation_error", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
 
   const io = bufferIO();
   const result = await dispatch(
@@ -205,7 +195,7 @@ test("set-tags with invalid namespace returns validation_error", async () => {
 test("set-tags requires --namespace flag", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
 
   const io = bufferIO();
   const result = await dispatch(
@@ -221,7 +211,7 @@ test("set-tags requires --namespace flag", async () => {
 test("set-tags requires --value flag", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
-  await addRepo(built, "repo-a");
+  insertRepo(h.db, "repo-a");
 
   const io = bufferIO();
   const result = await dispatch(

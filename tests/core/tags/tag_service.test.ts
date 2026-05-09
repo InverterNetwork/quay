@@ -1,5 +1,7 @@
 import { test, expect, afterEach } from "bun:test";
 import { createHarness, type Harness } from "../../support/harness.ts";
+import { insertRepo } from "../../support/fixtures.ts";
+import { createRepoService } from "../../../src/core/repos/service.ts";
 import { createTagService } from "../../../src/core/tags/service.ts";
 import { QuayError } from "../../../src/core/errors.ts";
 
@@ -9,32 +11,21 @@ afterEach(() => {
   h = null;
 });
 
-const REQUIRED_REPO = {
-  repo_id: "repo-a",
-  repo_url: "git@example.com:owner/repo-a.git",
-  base_branch: "main",
-  package_manager: "bun",
-  install_cmd: "bun install",
-};
-
-function addRepo(harness: Harness, repoId: string): void {
-  harness.db.query(
-    `INSERT INTO repos (repo_id, repo_url, base_branch, package_manager, install_cmd, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(repoId, `git@example.com:owner/${repoId}.git`, "main", "bun", "bun install", "2024-01-01T00:00:00.000Z");
+function makeService(harness: Harness) {
+  const repoService = createRepoService({ db: harness.db, clock: harness.clock });
+  return createTagService({ db: harness.db, clock: harness.clock, repoService });
 }
 
 test("setValue and getValues round-trip", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "area", "bonding-curve");
   svc.setValue("repo", "repo-a", "area", "vesting");
   svc.setValue("repo", "repo-a", "risk", "reentrancy");
 
-  const values = svc.getValues("repo", "repo-a");
-  expect(values).toEqual({
+  expect(svc.getValues("repo", "repo-a")).toEqual({
     area: ["bonding-curve", "vesting"],
     risk: ["reentrancy"],
   });
@@ -42,39 +33,34 @@ test("setValue and getValues round-trip", () => {
 
 test("setValue is idempotent", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "area", "bonding-curve");
   svc.setValue("repo", "repo-a", "area", "bonding-curve");
 
-  const values = svc.getValues("repo", "repo-a");
-  expect(values["area"]).toEqual(["bonding-curve"]);
+  expect(svc.getValues("repo", "repo-a")["area"]).toEqual(["bonding-curve"]);
   expect(
-    h.db
-      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM tag_namespaces")
-      .get()!.c,
+    h.db.query<{ c: number }, []>("SELECT COUNT(*) AS c FROM tag_namespaces").get()!.c,
   ).toBe(1);
 });
 
 test("unsetValue with specific value removes only that value", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "area", "bonding-curve");
   svc.setValue("repo", "repo-a", "area", "vesting");
-
   svc.unsetValue("repo", "repo-a", "area", "bonding-curve");
 
-  const values = svc.getValues("repo", "repo-a");
-  expect(values["area"]).toEqual(["vesting"]);
+  expect(svc.getValues("repo", "repo-a")["area"]).toEqual(["vesting"]);
 });
 
 test("unsetValue without value removes whole namespace and meta", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "area", "bonding-curve");
   svc.setValue("repo", "repo-a", "area", "vesting");
@@ -82,20 +68,17 @@ test("unsetValue without value removes whole namespace and meta", () => {
 
   svc.unsetValue("repo", "repo-a", "area");
 
-  const values = svc.getValues("repo", "repo-a");
-  expect(values["area"]).toBeUndefined();
-  const required = svc.getRequired("repo", "repo-a");
-  expect(required["area"]).toBeUndefined();
+  expect(svc.getValues("repo", "repo-a")["area"]).toBeUndefined();
+  expect(svc.getRequired("repo", "repo-a")["area"]).toBeUndefined();
 });
 
 test("setRequired upserts the meta row", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "area", "bonding-curve");
   svc.setRequired("repo", "repo-a", "area", true);
-
   expect(svc.getRequired("repo", "repo-a")).toEqual({ area: true });
 
   svc.setRequired("repo", "repo-a", "area", false);
@@ -104,56 +87,64 @@ test("setRequired upserts the meta row", () => {
 
 test("getRequired returns only explicitly set namespaces", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "area", "bonding-curve");
 
-  const required = svc.getRequired("repo", "repo-a");
-  expect(Object.keys(required)).toHaveLength(0);
+  expect(Object.keys(svc.getRequired("repo", "repo-a"))).toHaveLength(0);
 });
 
-test("apply is transactional and declaratively replaces state", () => {
+test("apply declaratively replaces state and returns the canonical result", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "old-ns", "old-val");
 
-  svc.apply("repo", "repo-a", {
+  const result = svc.apply("repo", "repo-a", {
     area: { values: ["bonding-curve", "vesting"], required: true },
     risk: { values: ["reentrancy"] },
   });
 
-  const values = svc.getValues("repo", "repo-a");
-  expect(values).toEqual({
-    area: ["bonding-curve", "vesting"],
-    risk: ["reentrancy"],
+  expect(result).toEqual({
+    area: { values: ["bonding-curve", "vesting"], required: true },
+    risk: { values: ["reentrancy"], required: false },
   });
-  expect(values["old-ns"]).toBeUndefined();
-
-  const required = svc.getRequired("repo", "repo-a");
-  expect(required).toEqual({ area: true });
+  expect(svc.getValues("repo", "repo-a")["old-ns"]).toBeUndefined();
+  expect(svc.getRequired("repo", "repo-a")).toEqual({ area: true });
 });
 
 test("apply with empty namespaces clears everything", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "area", "bonding-curve");
   svc.setRequired("repo", "repo-a", "area", true);
 
-  svc.apply("repo", "repo-a", {});
-
+  expect(svc.apply("repo", "repo-a", {})).toEqual({});
   expect(svc.getValues("repo", "repo-a")).toEqual({});
   expect(svc.getRequired("repo", "repo-a")).toEqual({});
 });
 
-test("apply is transactional: invalid value in second namespace leaves nothing written", () => {
+test("apply rejects an empty namespace string before touching the DB", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
+
+  svc.setValue("repo", "repo-a", "area", "existing");
+
+  expect(() =>
+    svc.apply("repo", "repo-a", { "": { values: ["x"] } }),
+  ).toThrow(QuayError);
+  expect(svc.getValues("repo", "repo-a")).toEqual({ area: ["existing"] });
+});
+
+test("apply rolls back when a value in a later namespace is invalid", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "area", "existing");
 
@@ -161,33 +152,30 @@ test("apply is transactional: invalid value in second namespace leaves nothing w
   try {
     svc.apply("repo", "repo-a", {
       "good-ns": { values: ["good-val"] },
-      "bad ns": { values: ["val"] }, // invalid namespace charset
+      "bad ns": { values: ["val"] },
     });
   } catch (err) {
     caught = err;
   }
   expect(caught).toBeInstanceOf(QuayError);
   expect((caught as QuayError).code).toBe("validation_error");
-
-  // The "existing" value from before should still be there; nothing was written.
-  const values = svc.getValues("repo", "repo-a");
-  expect(values).toEqual({ area: ["existing"] });
+  expect(svc.getValues("repo", "repo-a")).toEqual({ area: ["existing"] });
 });
 
 test("per-repo isolation: vocab on repo-a does not appear in repo-b", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  addRepo(h, "repo-b");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  insertRepo(h.db, "repo-b");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "area", "bonding-curve");
 
   expect(svc.getValues("repo", "repo-b")).toEqual({});
 });
 
-test("unknown_repo error when repo does not exist", () => {
+test("setValue throws unknown_repo when the repo does not exist", () => {
   h = createHarness();
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  const svc = makeService(h);
 
   let caught: unknown;
   try {
@@ -199,9 +187,9 @@ test("unknown_repo error when repo does not exist", () => {
   expect((caught as QuayError).code).toBe("unknown_repo");
 });
 
-test("apply throws unknown_repo for non-existent repo", () => {
+test("apply throws unknown_repo when the repo does not exist", () => {
   h = createHarness();
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  const svc = makeService(h);
 
   let caught: unknown;
   try {
@@ -215,11 +203,10 @@ test("apply throws unknown_repo for non-existent repo", () => {
 
 test("validation_error for namespace not matching [a-z0-9-]+", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
-  const invalid = ["Area", "a_b", "a b", "", "a/b"];
-  for (const ns of invalid) {
+  for (const ns of ["Area", "a_b", "a b", "", "a/b"]) {
     let caught: unknown;
     try {
       svc.setValue("repo", "repo-a", ns, "val");
@@ -233,11 +220,10 @@ test("validation_error for namespace not matching [a-z0-9-]+", () => {
 
 test("validation_error for value not matching [a-z0-9-]+", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
-  const invalid = ["Val", "a_b", "a b", "", "a/b"];
-  for (const v of invalid) {
+  for (const v of ["Val", "a_b", "a b", "", "a/b"]) {
     let caught: unknown;
     try {
       svc.setValue("repo", "repo-a", "area", v);
@@ -249,9 +235,9 @@ test("validation_error for value not matching [a-z0-9-]+", () => {
   }
 });
 
-test("PK and CHECK constraint: deployment scope with non-null repo_id is rejected", () => {
+test("CHECK constraint: deployment scope with non-null repo_id is rejected", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
+  insertRepo(h.db, "repo-a");
 
   let caught: unknown;
   try {
@@ -270,8 +256,8 @@ test("PK and CHECK constraint: deployment scope with non-null repo_id is rejecte
 
 test("created_at is stored as unix ms integer", () => {
   h = createHarness();
-  addRepo(h, "repo-a");
-  const svc = createTagService({ db: h.db, clock: h.clock });
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
 
   svc.setValue("repo", "repo-a", "area", "val");
 
@@ -282,4 +268,20 @@ test("created_at is stored as unix ms integer", () => {
     .get()!;
   expect(typeof row.created_at).toBe("number");
   expect(row.created_at).toBeGreaterThan(0);
+});
+
+test("getVocab merges values and required into a single sorted shape", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
+
+  svc.setValue("repo", "repo-a", "risk", "reentrancy");
+  svc.setValue("repo", "repo-a", "area", "vesting");
+  svc.setValue("repo", "repo-a", "area", "bonding-curve");
+  svc.setRequired("repo", "repo-a", "area", true);
+
+  expect(svc.getVocab("repo", "repo-a")).toEqual({
+    area: { values: ["bonding-curve", "vesting"], required: true },
+    risk: { values: ["reentrancy"], required: false },
+  });
 });

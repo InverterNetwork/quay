@@ -24,8 +24,8 @@ import type { TmuxPort } from "../ports/tmux.ts";
 import { enqueue, type EnqueueDeps } from "../core/enqueue.ts";
 import type { ValidatorRunner } from "../core/validator_runner.ts";
 import { handleEnqueueLinearIssue } from "./enqueue_linear_issue.ts";
-import { createRepoService } from "../core/repos/service.ts";
-import type { TagService } from "../core/tags/service.ts";
+import type { RepoService } from "../core/repos/service.ts";
+import type { TagService, TagVocab } from "../core/tags/service.ts";
 import {
   cancel_task,
   type CancelDeps,
@@ -85,6 +85,7 @@ export interface CliDeps {
   linear?: LinearPort;
   validatorRunner?: ValidatorRunner;
   adaptersConfig?: { linearEnabled: boolean; slackEnabled: boolean };
+  repoService: RepoService;
   tagService: TagService;
 }
 
@@ -478,7 +479,7 @@ function handleRepo(
   }
   const [sub, ...rest] = argv;
   if (isHelpToken(sub as string)) return printHelp(io, ["repo"]);
-  const service = createRepoService({ db: deps.db, clock: deps.clock });
+  const service = deps.repoService;
   switch (sub) {
     case "add":
       if (wantsHelp(rest)) return printHelp(io, ["repo", "add"]);
@@ -542,7 +543,7 @@ const REPO_FLAGS: Array<{ flag: string; key: string }> = [
 
 function handleRepoAdd(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const json = tryParseJsonFlag(argv);
@@ -555,7 +556,7 @@ function handleRepoAdd(
 
 function handleRepoUpdate(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const repoId = readFlag(argv, "--id") ?? positional(argv);
@@ -578,7 +579,7 @@ function handleRepoUpdate(
 
 function handleRepoList(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const validation = validateFlags(argv, { boolean: ["--active"] });
@@ -592,7 +593,7 @@ function handleRepoList(
 
 function handleRepoExport(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const validation = validateFlags(argv, {
@@ -628,7 +629,7 @@ function handleRepoExport(
 
 function handleRepoImport(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const inputPath = readFlag(argv, "--in");
@@ -732,21 +733,7 @@ function handleRepoGetTags(
   if (!repoId) {
     return writeError(io, "usage_error", "repo get-tags requires <repo_id>");
   }
-  const values = tagService.getValues("repo", repoId);
-  const required = tagService.getRequired("repo", repoId);
-  const allNamespaces = Array.from(
-    new Set([...Object.keys(values), ...Object.keys(required)]),
-  ).sort();
-  const namespaces: Record<
-    string,
-    { values: string[]; required: boolean }
-  > = {};
-  for (const ns of allNamespaces) {
-    namespaces[ns] = {
-      values: (values[ns] ?? []).sort(),
-      required: required[ns] ?? false,
-    };
-  }
+  const namespaces = tagService.getVocab("repo", repoId);
   io.stdout(`${JSON.stringify({ repo_id: repoId, namespaces })}\n`);
   return { exitCode: 0 };
 }
@@ -764,25 +751,12 @@ function handleRepoApplyTags(
   if (!fromPath) {
     return writeError(io, "usage_error", "repo apply-tags requires --from <path>");
   }
-  let raw: string;
-  if (fromPath === "-") {
-    try {
-      raw = readFileSync("/dev/stdin", "utf8");
-    } catch (err) {
-      return writeError(
-        io,
-        "usage_error",
-        `failed to read stdin: ${(err as Error).message}`,
-      );
-    }
-  } else {
-    const fileRead = tryReadFile(fromPath);
-    if (!fileRead.ok) return writeError(io, "usage_error", fileRead.message);
-    raw = fileRead.value;
-  }
+  const inputRead = readApplyTagsInput(fromPath, io);
+  if (!inputRead.ok) return writeError(io, "usage_error", inputRead.message);
+
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(inputRead.value);
   } catch (err) {
     return writeError(
       io,
@@ -804,21 +778,20 @@ function handleRepoApplyTags(
     );
   }
   const desired = (parsed as { namespaces: Record<string, { values: string[]; required?: boolean }> }).namespaces;
-  tagService.apply("repo", repoId, desired);
-  const values = tagService.getValues("repo", repoId);
-  const requiredMap = tagService.getRequired("repo", repoId);
-  const allNamespaces = Array.from(
-    new Set([...Object.keys(values), ...Object.keys(requiredMap)]),
-  ).sort();
-  const namespaces: Record<string, { values: string[]; required: boolean }> = {};
-  for (const ns of allNamespaces) {
-    namespaces[ns] = {
-      values: (values[ns] ?? []).sort(),
-      required: requiredMap[ns] ?? false,
-    };
-  }
+  const namespaces: TagVocab = tagService.apply("repo", repoId, desired);
   io.stdout(`${JSON.stringify({ ok: true, repo_id: repoId, namespaces })}\n`);
   return { exitCode: 0 };
+}
+
+function readApplyTagsInput(
+  fromPath: string,
+  io: CliIO,
+): { ok: true; value: string } | { ok: false; message: string } {
+  if (fromPath === "-") {
+    if (!io.stdin) return { ok: false, message: "no stdin source configured" };
+    return { ok: true, value: io.stdin() };
+  }
+  return tryReadFile(fromPath);
 }
 
 async function handleCancel(

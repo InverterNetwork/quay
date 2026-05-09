@@ -38,6 +38,7 @@ import {
 import { resolveDataDir } from "./data_dir.ts";
 import { dispatch, type CliDeps } from "./dispatch.ts";
 import { handleValidateTicket } from "./validate_ticket.ts";
+import { createRepoService } from "../core/repos/service.ts";
 import { createTagService } from "../core/tags/service.ts";
 
 async function main(): Promise<number> {
@@ -134,6 +135,7 @@ async function main(): Promise<number> {
     artifactRoot: artifactsRoot,
     clock,
   });
+  const repoService = createRepoService({ db, clock });
 
   const deps: CliDeps = {
     db,
@@ -173,7 +175,8 @@ async function main(): Promise<number> {
     // unused adapter object.
     validatorRunner: new SpawnedValidatorRunner(),
     adaptersConfig,
-    tagService: createTagService({ db, clock }),
+    repoService,
+    tagService: createTagService({ db, clock, repoService }),
   };
 
   const io = {
