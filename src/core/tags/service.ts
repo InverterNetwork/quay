@@ -46,7 +46,7 @@ export interface TagService {
   apply(
     scope: TagScope,
     repoId: string | null,
-    desired: Record<string, { values: string[]; required?: boolean }>,
+    desired: unknown,
   ): TagVocab;
 }
 
@@ -54,6 +54,15 @@ const labelSchema = z
   .string()
   .min(1)
   .regex(/^[a-z0-9-]+$/, "must match [a-z0-9-]+");
+
+const applySpecSchema = z
+  .object({
+    values: z.array(z.string()),
+    required: z.boolean().optional(),
+  })
+  .strict();
+
+const applyInputSchema = z.record(z.string(), applySpecSchema);
 
 function validateInputs(
   scope: TagScope,
@@ -87,10 +96,20 @@ export function createTagService({
     }
   }
 
+  function ensureRepoForScope(
+    scope: TagScope,
+    repoId: string | null | undefined,
+  ): void {
+    if (scope === "repo" && repoId !== null && repoId !== undefined) {
+      assertRepoExists(repoId);
+    }
+  }
+
   function getValues(
     scope: TagScope,
     repoId?: string,
   ): Record<string, string[]> {
+    ensureRepoForScope(scope, repoId);
     const effectiveRepoId = scope === "repo" ? (repoId ?? null) : null;
     const rows = db
       .query<{ namespace: string; value: string }, [string, string | null]>(
@@ -111,6 +130,7 @@ export function createTagService({
     scope: TagScope,
     repoId?: string,
   ): Record<string, boolean> {
+    ensureRepoForScope(scope, repoId);
     const effectiveRepoId = scope === "repo" ? (repoId ?? null) : null;
     const rows = db
       .query<
@@ -151,7 +171,7 @@ export function createTagService({
     value: string,
   ): void {
     validateInputs(scope, repoId, namespace, value);
-    if (scope === "repo" && repoId !== null) assertRepoExists(repoId);
+    ensureRepoForScope(scope, repoId);
     db.query(
       `INSERT OR IGNORE INTO tag_namespaces (scope, repo_id, namespace, value, created_at)
        VALUES (?, ?, ?, ?, ?)`,
@@ -165,6 +185,7 @@ export function createTagService({
     value?: string,
   ): void {
     validateInputs(scope, repoId, namespace, value);
+    ensureRepoForScope(scope, repoId);
     if (value !== undefined) {
       db.query(
         `DELETE FROM tag_namespaces
@@ -189,22 +210,22 @@ export function createTagService({
     required: boolean,
   ): void {
     validateInputs(scope, repoId, namespace);
+    ensureRepoForScope(scope, repoId);
     db.query(
       `INSERT INTO tag_namespace_meta (scope, repo_id, namespace, required, created_at)
        VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (scope, repo_id, namespace) DO UPDATE SET required = excluded.required`,
+       ON CONFLICT (scope, IFNULL(repo_id, ''), namespace)
+         DO UPDATE SET required = excluded.required`,
     ).run(scope, repoId, namespace, required ? 1 : 0, nowMs());
   }
 
   function apply(
     scope: TagScope,
     repoId: string | null,
-    desired: Record<string, { values: string[]; required?: boolean }>,
+    desiredRaw: unknown,
   ): TagVocab {
-    if (scope === "repo" && repoId !== null) assertRepoExists(repoId);
-    // Validate everything before any writes so a bad input late in the
-    // dictionary leaves the prior state intact (the transaction below
-    // would still roll back, but failing fast is friendlier).
+    ensureRepoForScope(scope, repoId);
+    const desired = parseOrThrow(applyInputSchema, desiredRaw, "apply");
     for (const [ns, spec] of Object.entries(desired)) {
       validateInputs(scope, repoId, ns);
       for (const v of spec.values) {
@@ -213,7 +234,7 @@ export function createTagService({
     }
 
     const insertValue = db.query(
-      `INSERT INTO tag_namespaces (scope, repo_id, namespace, value, created_at)
+      `INSERT OR IGNORE INTO tag_namespaces (scope, repo_id, namespace, value, created_at)
        VALUES (?, ?, ?, ?, ?)`,
     );
     const insertMeta = db.query(
@@ -241,7 +262,7 @@ export function createTagService({
       }
     })();
 
-    return canonicalizeDesired(desired);
+    return getVocab(scope, repoId === null ? undefined : repoId);
   }
 
   return {
@@ -253,18 +274,4 @@ export function createTagService({
     setRequired,
     apply,
   };
-}
-
-function canonicalizeDesired(
-  desired: Record<string, { values: string[]; required?: boolean }>,
-): TagVocab {
-  const result: TagVocab = {};
-  for (const ns of Object.keys(desired).sort()) {
-    const spec = desired[ns]!;
-    result[ns] = {
-      values: [...new Set(spec.values)].sort(),
-      required: spec.required ?? false,
-    };
-  }
-  return result;
 }

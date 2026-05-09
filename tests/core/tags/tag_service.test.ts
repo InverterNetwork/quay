@@ -270,6 +270,54 @@ test("created_at is stored as unix ms integer", () => {
   expect(row.created_at).toBeGreaterThan(0);
 });
 
+test("deployment-scope rows are unique despite NULL repo_id", () => {
+  h = createHarness();
+  const harness = h;
+
+  const insert = () =>
+    harness.db
+      .query(
+        `INSERT INTO tag_namespaces (scope, repo_id, namespace, value, created_at)
+         VALUES ('deployment', NULL, 'task-type', 'bug', 1)`,
+      )
+      .run();
+
+  insert();
+  let caught: unknown;
+  try {
+    insert();
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeTruthy();
+  expect(String(caught)).toMatch(/UNIQUE|constraint/i);
+
+  expect(
+    harness.db
+      .query<{ c: number }, []>(`SELECT COUNT(*) AS c FROM tag_namespaces`)
+      .get()!.c,
+  ).toBe(1);
+});
+
+test("getValues, getRequired, unsetValue, setRequired all reject unknown repo", () => {
+  h = createHarness();
+  const svc = makeService(h);
+  const expectUnknown = (fn: () => void) => {
+    let caught: unknown;
+    try {
+      fn();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(QuayError);
+    expect((caught as QuayError).code).toBe("unknown_repo");
+  };
+  expectUnknown(() => svc.getValues("repo", "no-such-repo"));
+  expectUnknown(() => svc.getRequired("repo", "no-such-repo"));
+  expectUnknown(() => svc.unsetValue("repo", "no-such-repo", "area"));
+  expectUnknown(() => svc.setRequired("repo", "no-such-repo", "area", true));
+});
+
 test("getVocab merges values and required into a single sorted shape", () => {
   h = createHarness();
   insertRepo(h.db, "repo-a");

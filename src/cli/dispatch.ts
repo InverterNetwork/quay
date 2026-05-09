@@ -777,7 +777,7 @@ function handleRepoApplyTags(
       'repo apply-tags: input must be { "namespaces": { ... } }',
     );
   }
-  const desired = (parsed as { namespaces: Record<string, { values: string[]; required?: boolean }> }).namespaces;
+  const desired = (parsed as { namespaces: unknown }).namespaces;
   const namespaces: TagVocab = tagService.apply("repo", repoId, desired);
   io.stdout(`${JSON.stringify({ ok: true, repo_id: repoId, namespaces })}\n`);
   return { exitCode: 0 };

@@ -60,6 +60,11 @@ quay repo remove <repo_id>
 quay repo list [--active]
 quay repo export [--out <path>] [--active]
 quay repo import --in <path>
+
+quay repo set-tags <repo_id> --namespace <name> --value <v>
+quay repo unset-tags <repo_id> --namespace <name> [--value <v>]
+quay repo get-tags <repo_id>
+quay repo apply-tags <repo_id> --from <path>
 ```
 
 `repo add` and `repo update` also accept `--input <json>` for structured

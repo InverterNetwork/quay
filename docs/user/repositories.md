@@ -88,6 +88,68 @@ to either command to limit the output to repos with `archived_at IS NULL` —
 the typical "which repos are in service?" question. `repo import` upserts
 rows and is intended for restore workflows.
 
+## Tag Vocabulary
+
+Each repo can carry a tag vocabulary that the validator uses to constrain
+ticket tags. Tags have the shape `<namespace>-<value>`; the vocabulary defines
+which `(namespace, value)` pairs are legal for tickets targeting this repo,
+and (per namespace) whether at least one tag from that namespace is required.
+
+A repo with no per-repo vocabulary configured is **not enforced** by the
+validator — its tickets continue to use the legacy charset-only checks. The
+moment any per-repo vocabulary is configured, full enforcement kicks in for
+that repo.
+
+```bash
+quay repo set-tags myrepo --namespace area --value bonding-curve
+quay repo set-tags myrepo --namespace area --value vesting-contract
+quay repo set-tags myrepo --namespace risk --value reentrancy
+
+quay repo get-tags myrepo
+# {"repo_id":"myrepo","namespaces":{
+#   "area":{"values":["bonding-curve","vesting-contract"],"required":false},
+#   "risk":{"values":["reentrancy"],"required":false}
+# }}
+
+quay repo unset-tags myrepo --namespace area --value vesting-contract
+quay repo unset-tags myrepo --namespace risk
+```
+
+`set-tags` is idempotent (re-adding an existing pair is a no-op).
+`unset-tags` without `--value` removes the entire namespace, including its
+required flag.
+
+### Declarative reconciliation
+
+`apply-tags` replaces the repo's vocabulary with the contents of a JSON file
+in one transactional pass — values not in the input are removed, values in
+the input are added, and the per-namespace `required` flag is set from the
+input. This is the shape config-as-code installers use to drive the
+vocabulary from a checked-in file.
+
+```json
+{
+  "namespaces": {
+    "area": {
+      "values": ["bonding-curve", "vesting-contract"],
+      "required": true
+    },
+    "risk": {
+      "values": ["reentrancy"]
+    }
+  }
+}
+```
+
+```bash
+quay repo apply-tags myrepo --from ./tags.json
+quay repo apply-tags myrepo --from -    # read from stdin
+```
+
+`namespace` and `value` must each match `[a-z0-9-]+`. Passing
+`{"namespaces": {}}` clears the repo's vocabulary entirely, returning the
+repo to the unenforced state.
+
 ## Remove A Repo
 
 ```bash

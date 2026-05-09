@@ -161,6 +161,32 @@ test("per-repo isolation: tags on repo-a not visible in repo-b", async () => {
   expect(out.namespaces).toEqual({});
 });
 
+test("get-tags for non-existent repo returns unknown_repo", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  const io = bufferIO();
+  const result = await dispatch(["repo", "get-tags", "no-such-repo"], built.deps, io);
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err());
+  expect(err.error).toBe("unknown_repo");
+});
+
+test("unset-tags for non-existent repo returns unknown_repo", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["repo", "unset-tags", "no-such-repo", "--namespace", "area"],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err());
+  expect(err.error).toBe("unknown_repo");
+});
+
 test("set-tags for non-existent repo returns unknown_repo", async () => {
   h = createHarness();
   const built = buildCliDeps(h);

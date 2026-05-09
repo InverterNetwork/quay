@@ -65,7 +65,6 @@ test("apply-tags removes existing values not in input", async () => {
   insertRepo(h.db, "repo-a");
   const dir = tempDir();
 
-  // First apply: set area and risk.
   const first = writeJson(dir, "first.json", {
     namespaces: {
       area: { values: ["bonding-curve"] },
@@ -74,7 +73,6 @@ test("apply-tags removes existing values not in input", async () => {
   });
   await dispatch(["repo", "apply-tags", "repo-a", "--from", first], built.deps, bufferIO());
 
-  // Second apply: only area; risk should be gone.
   const second = writeJson(dir, "second.json", {
     namespaces: {
       area: { values: ["vesting"] },
@@ -146,7 +144,6 @@ test("apply-tags post-apply state matches exactly what was requested", async () 
   insertRepo(h.db, "repo-a");
   const dir = tempDir();
 
-  // Pre-populate with extra data.
   await dispatch(
     ["repo", "set-tags", "repo-a", "--namespace", "extra", "--value", "noise"],
     built.deps,
@@ -248,6 +245,59 @@ test("apply-tags requires <repo_id>", async () => {
   expect(result.exitCode).toBe(1);
   const err = JSON.parse(io.err());
   expect(err.error).toBe("usage_error");
+});
+
+test("apply-tags rejects malformed values shape with validation_error", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  insertRepo(h.db, "repo-a");
+  const dir = tempDir();
+
+  const cases: Array<[string, unknown]> = [
+    ["values is a string", { area: { values: "abc" } }],
+    ["values is a number", { area: { values: 42 } }],
+    ["values missing", { area: { required: true } }],
+    ["spec is a number", { area: 42 }],
+    ["values has non-string element", { area: { values: ["ok", 7] } }],
+    ["unknown extra key", { area: { values: ["ok"], wat: true } }],
+  ];
+
+  for (const [label, namespaces] of cases) {
+    const path = writeJson(dir, `${label}.json`, { namespaces });
+    const io = bufferIO();
+    const result = await dispatch(
+      ["repo", "apply-tags", "repo-a", "--from", path],
+      built.deps,
+      io,
+    );
+    expect(result.exitCode).toBe(1);
+    const err = JSON.parse(io.err());
+    expect(err.error).toBe("validation_error");
+  }
+
+  expect(
+    h.db.query<{ c: number }, []>("SELECT COUNT(*) AS c FROM tag_namespaces").get()!.c,
+  ).toBe(0);
+});
+
+test("apply-tags accepts duplicate values in input without error", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  insertRepo(h.db, "repo-a");
+  const dir = tempDir();
+
+  const path = writeJson(dir, "dupes.json", {
+    namespaces: { area: { values: ["x", "x", "y"] } },
+  });
+  const io = bufferIO();
+  const result = await dispatch(
+    ["repo", "apply-tags", "repo-a", "--from", path],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  expect(out.namespaces.area.values).toEqual(["x", "y"]);
 });
 
 test("apply-tags reads from stdin when --from is '-'", async () => {
