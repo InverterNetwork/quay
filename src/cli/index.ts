@@ -37,6 +37,7 @@ import {
 } from "./config.ts";
 import { resolveDataDir } from "./data_dir.ts";
 import { dispatch, type CliDeps } from "./dispatch.ts";
+import { createLazyRepoVocabLookup } from "./repo_vocab_lookup.ts";
 import { handleValidateTicket } from "./validate_ticket.ts";
 import { createRepoService } from "../core/repos/service.ts";
 import { createTagService } from "../core/tags/service.ts";
@@ -66,7 +67,13 @@ async function main(): Promise<number> {
         stdin: () => readFileSync(0, "utf8"),
       },
       process.env,
-      { embeddedSchema: EMBEDDED_TICKET_SCHEMA },
+      {
+        embeddedSchema: EMBEDDED_TICKET_SCHEMA,
+        lookupRepoVocab: createLazyRepoVocabLookup(
+          process.env,
+          EMBEDDED_MIGRATIONS,
+        ),
+      },
     );
     return result.exitCode;
   }

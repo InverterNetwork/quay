@@ -65,7 +65,10 @@ export type ValidationCode =
   | "MIN_COUNT"
   | "MAX_COUNT"
   | "DUPLICATE"
-  | "ENUM";
+  | "ENUM"
+  | "TAG_UNKNOWN_NAMESPACE"
+  | "TAG_UNKNOWN_VALUE"
+  | "TAG_REQUIRED_MISSING";
 
 export interface ValidationError {
   field: string;

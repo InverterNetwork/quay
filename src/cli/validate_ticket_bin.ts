@@ -1,16 +1,21 @@
 #!/usr/bin/env bun
 // Standalone child-process entry for `quay validate-ticket`. Adapters spec
 // §11 requires `enqueue --linear-issue` to invoke the validator as a
-// subprocess; the public `quay validate-ticket` CLI is also routed through
-// dispatch (see src/cli/index.ts), but that path opens the Quay DB and runs
-// migrations — wasted work for a stateless, JSON-in/JSON-out validator. This
-// thin entry skips the substrate setup so the spawn is fast.
-//
-// argv / stdin / exit-code contract is identical to the dispatched form:
-// see src/cli/validate_ticket.ts for the full semantics.
+// subprocess; this thin entry skips the dispatcher's adapter wiring (slack,
+// linear, github, tmux, …) so the spawn stays cheap. The DB is opened
+// lazily inside the vocab lookup, only when a payload references a repo
+// that has opted in. argv / stdin / exit-code contract is identical to the
+// dispatched form (see src/cli/validate_ticket.ts).
 
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { loadMigrationsFromDir } from "../db/migrate.ts";
+import { createLazyRepoVocabLookup } from "./repo_vocab_lookup.ts";
 import { handleValidateTicket } from "./validate_ticket.ts";
+
+const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const MIGRATIONS_DIR = join(REPO_ROOT, "migrations");
 
 const result = handleValidateTicket(
   process.argv.slice(2),
@@ -24,5 +29,11 @@ const result = handleValidateTicket(
     stdin: () => readFileSync(0, "utf8"),
   },
   process.env,
+  {
+    lookupRepoVocab: createLazyRepoVocabLookup(
+      process.env,
+      loadMigrationsFromDir(MIGRATIONS_DIR),
+    ),
+  },
 );
 process.exit(result.exitCode);
