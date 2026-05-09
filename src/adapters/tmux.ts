@@ -30,6 +30,13 @@ import type { TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 
 const PROMPT_FILE = ".quay-prompt.md";
 const SESSION_LOG_FILE = ".quay-session.log";
+// Worker exit-code marker. The agent invocation is wrapped so the inner
+// shell writes `$?` here after the agent exits and before the wrapper
+// itself exits (which is what tears the pane down). Absence of this file
+// after the session has died means the wrapper never reached the post-
+// agent step — typically because the whole pane was killed by signal —
+// which itself is signal worth surfacing.
+const EXIT_CODE_FILE = ".quay-exit-code";
 // Marker for direct children of the worktree root that belong to a previous
 // Quay attempt. Anything matching this prefix is sweep-eligible at spawn
 // time — see the spawn preflight for why.
@@ -59,15 +66,33 @@ export class TmuxAdapter implements TmuxPort {
       "{prompt_file}",
       shellQuote(promptFile),
     );
-    // `exec sh -c "..."` so the inner agent replaces the shell. When the
-    // agent exits, the pane has nothing left to run and tmux drops the
-    // session — making `tmux has-session` a reliable liveness probe.
-    const tmuxCommand = `exec sh -c ${shellQuote(expanded)}`;
+    // Wrap so the inner shell records the agent's exit status to
+    // `<worktree>/.quay-exit-code` after the agent exits and before the
+    // wrapper itself returns. The pane still dies once the wrapper
+    // returns (`tmux has-session` liveness probe is preserved); the
+    // small post-agent step adds milliseconds and converts an opaque
+    // silent exit into a single-byte ground-truth artifact. POSIX `$?`
+    // is the agent's literal exit status (0–255 for normal exit; 128+N
+    // for signals) — adapter-side readers translate the 128+N range to
+    // a signal name.
+    //
+    // `exec sh -c '...'` ensures only one wrapper shell is alive in the
+    // pane at any time (tmux's outer sh exec's into our inner sh, which
+    // runs the wrapped command and exits).
+    const exitCodeFile = join(input.worktreePath, EXIT_CODE_FILE);
+    const wrapped = `${expanded} ; printf %s "$?" > ${shellQuote(exitCodeFile)}`;
+    const tmuxCommand = `exec sh -c ${shellQuote(wrapped)}`;
 
     // Step 1: create session with a placeholder command that keeps the
     // session alive while we wire pipe-pane. `cat` reads stdin (nobody is
     // typing in a detached session) and produces no output, so it stays
     // quiet until we respawn the pane in step 3.
+    //
+    // `env: process.env` is forwarded explicitly because Bun snapshots
+    // env at startup. tmux populates the new session's environment from
+    // its connecting client, so anything quay tick mints or refreshes at
+    // runtime (GH_TOKEN, GITHUB_TOKEN, credential-helper sockets, etc.)
+    // would otherwise be invisible to the agent — silent-exit territory.
     const result = Bun.spawnSync({
       cmd: [
         "tmux",
@@ -79,6 +104,7 @@ export class TmuxAdapter implements TmuxPort {
         input.worktreePath,
         "cat",
       ],
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -110,6 +136,7 @@ export class TmuxAdapter implements TmuxPort {
         `${input.sessionName}:0.0`,
         pipeCommand,
       ],
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -122,6 +149,7 @@ export class TmuxAdapter implements TmuxPort {
       try {
         Bun.spawnSync({
           cmd: ["tmux", "kill-session", "-t", `=${input.sessionName}`],
+          env: process.env,
           stdout: "ignore",
           stderr: "ignore",
         });
@@ -147,6 +175,7 @@ export class TmuxAdapter implements TmuxPort {
         `${input.sessionName}:0.0`,
         tmuxCommand,
       ],
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -155,6 +184,7 @@ export class TmuxAdapter implements TmuxPort {
       try {
         Bun.spawnSync({
           cmd: ["tmux", "kill-session", "-t", `=${input.sessionName}`],
+          env: process.env,
           stdout: "ignore",
           stderr: "ignore",
         });
@@ -168,6 +198,7 @@ export class TmuxAdapter implements TmuxPort {
   isAlive(sessionName: string): boolean {
     const result = Bun.spawnSync({
       cmd: ["tmux", "has-session", "-t", `=${sessionName}`],
+      env: process.env,
       stdout: "ignore",
       stderr: "ignore",
     });
@@ -180,6 +211,7 @@ export class TmuxAdapter implements TmuxPort {
     // way.
     Bun.spawnSync({
       cmd: ["tmux", "kill-session", "-t", `=${sessionName}`],
+      env: process.env,
       stdout: "ignore",
       stderr: "ignore",
     });
@@ -258,6 +290,93 @@ export class TmuxAdapter implements TmuxPort {
     if (stat.size === 0) return spawnedAt;
     return new Date(stat.mtimeMs).toISOString();
   }
+
+  collectExitStatus(
+    _sessionName: string,
+    worktreePath: string,
+  ): ExitStatus | null {
+    // The spawn wrapper writes `$?` (the agent's exit status as the
+    // shell saw it) to <worktreePath>/.quay-exit-code right before the
+    // wrapper itself exits. Three cases at read time:
+    //
+    //   1. File present, parseable as 0–127 → clean exit with that code.
+    //   2. File present, parseable as 128+N → the agent was killed by
+    //      signal N. POSIX `$?` reports `128 + signum` for signaled
+    //      children; we translate to a SIG<name> string.
+    //   3. File absent or unparseable → return null. Absence typically
+    //      means the *whole* pane was killed (cgroup reap, tmux kill,
+    //      OOM) before the wrapper's post-agent step could run; the
+    //      classifier surfaces that as no exit_status artifact, which
+    //      itself discriminates "wrapper-observed exit" from "external
+    //      kill" in triage.
+    const path = join(worktreePath, EXIT_CODE_FILE);
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf8").trim();
+    } catch {
+      return null;
+    }
+    if (raw.length === 0) return null;
+    const rawStatus = Number.parseInt(raw, 10);
+    if (!Number.isFinite(rawStatus) || rawStatus < 0 || rawStatus > 255) {
+      return null;
+    }
+    if (rawStatus >= 128 && rawStatus <= 128 + 64) {
+      const signum = rawStatus - 128;
+      return {
+        rawStatus,
+        exitCode: null,
+        signalName: signalName(signum),
+      };
+    }
+    return { rawStatus, exitCode: rawStatus, signalName: null };
+  }
+}
+
+export interface ExitStatus {
+  // Raw POSIX `$?` value (0–255). 0–127 is a normal exit code; 128+N
+  // means "killed by signal N".
+  rawStatus: number;
+  // The agent's exit code, or null if the agent was killed by a signal.
+  exitCode: number | null;
+  // SIG<name> if killed by signal, else null. May be `SIG${signum}` if
+  // the number is outside the lookup table (rare, but kept verbatim
+  // rather than dropped so triage still has the raw integer).
+  signalName: string | null;
+}
+
+// POSIX/Linux signal names. macOS overlaps for the common signals
+// (SIGHUP/SIGINT/SIGQUIT/SIGILL/SIGTRAP/SIGABRT/SIGKILL/SIGSEGV/SIGPIPE/
+// SIGALRM/SIGTERM); the few that diverge (SIGUSR1/2, SIGCHLD, SIGCONT,
+// SIGSTOP, SIGTSTP) decode to their Linux meaning here, which matches
+// the deployment target. For unknown numbers we return `SIG<n>` so the
+// raw integer survives in triage.
+const SIGNAL_NAMES: Record<number, string> = {
+  1: "SIGHUP",
+  2: "SIGINT",
+  3: "SIGQUIT",
+  4: "SIGILL",
+  5: "SIGTRAP",
+  6: "SIGABRT",
+  7: "SIGBUS",
+  8: "SIGFPE",
+  9: "SIGKILL",
+  10: "SIGUSR1",
+  11: "SIGSEGV",
+  12: "SIGUSR2",
+  13: "SIGPIPE",
+  14: "SIGALRM",
+  15: "SIGTERM",
+  17: "SIGCHLD",
+  18: "SIGCONT",
+  19: "SIGSTOP",
+  20: "SIGTSTP",
+  24: "SIGXCPU",
+  25: "SIGXFSZ",
+};
+
+function signalName(signum: number): string {
+  return SIGNAL_NAMES[signum] ?? `SIG${signum}`;
 }
 
 // POSIX-shell single-quote escaping. Any single-quote in the input is closed,
