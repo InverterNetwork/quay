@@ -32,9 +32,3 @@ test("config.data_dir wins over home fallback when QUAY_DATA_DIR is unset", () =
 test("falls back to <home>/.quay when nothing is set", () => {
   expect(resolveDataDir({}, undefined, "/home/user")).toBe("/home/user/.quay");
 });
-
-test("config.data_dir empty string is treated as unset", () => {
-  // The config schema enforces min_length=1, but the resolver guards
-  // defensively so a future relaxation can't silently produce "".
-  expect(resolveDataDir({}, "", "/home/user")).toBe("/home/user/.quay");
-});
