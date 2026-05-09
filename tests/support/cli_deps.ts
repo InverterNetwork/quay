@@ -5,6 +5,7 @@ import { createArtifactStore } from "../../src/artifacts/store.ts";
 import type { CliDeps } from "../../src/cli/dispatch.ts";
 import { InProcessSupervisorLock } from "../../src/core/supervisor_lock.ts";
 import type { ValidatorRunner } from "../../src/core/validator_runner.ts";
+import { createTagService } from "../../src/core/tags/service.ts";
 import type { Harness } from "./harness.ts";
 import { FakeCommandRunner } from "./fakes/command_runner.ts";
 import { FakeGit } from "./fakes/git.ts";
@@ -76,6 +77,7 @@ export function buildCliDeps(
         linearEnabled: options.linearEnabled ?? true,
         slackEnabled: options.slackEnabled ?? true,
       },
+      tagService: createTagService({ db: h.db, clock: h.clock }),
     },
     git,
     github,

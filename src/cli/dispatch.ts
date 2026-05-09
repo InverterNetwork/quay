@@ -25,6 +25,7 @@ import { enqueue, type EnqueueDeps } from "../core/enqueue.ts";
 import type { ValidatorRunner } from "../core/validator_runner.ts";
 import { handleEnqueueLinearIssue } from "./enqueue_linear_issue.ts";
 import { createRepoService } from "../core/repos/service.ts";
+import type { TagService } from "../core/tags/service.ts";
 import {
   cancel_task,
   type CancelDeps,
@@ -84,6 +85,7 @@ export interface CliDeps {
   linear?: LinearPort;
   validatorRunner?: ValidatorRunner;
   adaptersConfig?: { linearEnabled: boolean; slackEnabled: boolean };
+  tagService: TagService;
 }
 
 export interface DispatchResult {
@@ -503,6 +505,18 @@ function handleRepo(
     case "import":
       if (wantsHelp(rest)) return printHelp(io, ["repo", "import"]);
       return handleRepoImport(rest, service, io);
+    case "set-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "set-tags"]);
+      return handleRepoSetTags(rest, deps.tagService, io);
+    case "unset-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "unset-tags"]);
+      return handleRepoUnsetTags(rest, deps.tagService, io);
+    case "get-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "get-tags"]);
+      return handleRepoGetTags(rest, deps.tagService, io);
+    case "apply-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "apply-tags"]);
+      return handleRepoApplyTags(rest, deps.tagService, io);
     default:
       // Mirror bare `quay repo`: structured envelope plus the noun's usage
       // block so a typo gets the same recovery hint as the missing-sub case.
@@ -656,6 +670,154 @@ function handleRepoImport(
   io.stdout(
     `${JSON.stringify({ imported: ids.length, repo_ids: ids })}\n`,
   );
+  return { exitCode: 0 };
+}
+
+function handleRepoSetTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo set-tags requires <repo_id>");
+  }
+  const ns = readFlag(argv, "--namespace");
+  const value = readFlag(argv, "--value");
+  if (!ns || !value) {
+    return writeError(
+      io,
+      "usage_error",
+      "repo set-tags requires --namespace <name> --value <v>",
+    );
+  }
+  tagService.setValue("repo", repoId, ns, value);
+  io.stdout(
+    `${JSON.stringify({ ok: true, repo_id: repoId, namespace: ns, value })}\n`,
+  );
+  return { exitCode: 0 };
+}
+
+function handleRepoUnsetTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo unset-tags requires <repo_id>");
+  }
+  const ns = readFlag(argv, "--namespace");
+  if (!ns) {
+    return writeError(
+      io,
+      "usage_error",
+      "repo unset-tags requires --namespace <name>",
+    );
+  }
+  const value = readFlag(argv, "--value") ?? undefined;
+  tagService.unsetValue("repo", repoId, ns, value);
+  io.stdout(
+    `${JSON.stringify({ ok: true, repo_id: repoId, namespace: ns, value: value ?? null })}\n`,
+  );
+  return { exitCode: 0 };
+}
+
+function handleRepoGetTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo get-tags requires <repo_id>");
+  }
+  const values = tagService.getValues("repo", repoId);
+  const required = tagService.getRequired("repo", repoId);
+  const allNamespaces = Array.from(
+    new Set([...Object.keys(values), ...Object.keys(required)]),
+  ).sort();
+  const namespaces: Record<
+    string,
+    { values: string[]; required: boolean }
+  > = {};
+  for (const ns of allNamespaces) {
+    namespaces[ns] = {
+      values: (values[ns] ?? []).sort(),
+      required: required[ns] ?? false,
+    };
+  }
+  io.stdout(`${JSON.stringify({ repo_id: repoId, namespaces })}\n`);
+  return { exitCode: 0 };
+}
+
+function handleRepoApplyTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo apply-tags requires <repo_id>");
+  }
+  const fromPath = readFlag(argv, "--from");
+  if (!fromPath) {
+    return writeError(io, "usage_error", "repo apply-tags requires --from <path>");
+  }
+  let raw: string;
+  if (fromPath === "-") {
+    try {
+      raw = readFileSync("/dev/stdin", "utf8");
+    } catch (err) {
+      return writeError(
+        io,
+        "usage_error",
+        `failed to read stdin: ${(err as Error).message}`,
+      );
+    }
+  } else {
+    const fileRead = tryReadFile(fromPath);
+    if (!fileRead.ok) return writeError(io, "usage_error", fileRead.message);
+    raw = fileRead.value;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return writeError(
+      io,
+      "usage_error",
+      `repo apply-tags: not valid JSON: ${(err as Error).message}`,
+    );
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("namespaces" in parsed) ||
+    typeof (parsed as { namespaces: unknown }).namespaces !== "object" ||
+    (parsed as { namespaces: unknown }).namespaces === null
+  ) {
+    return writeError(
+      io,
+      "usage_error",
+      'repo apply-tags: input must be { "namespaces": { ... } }',
+    );
+  }
+  const desired = (parsed as { namespaces: Record<string, { values: string[]; required?: boolean }> }).namespaces;
+  tagService.apply("repo", repoId, desired);
+  const values = tagService.getValues("repo", repoId);
+  const requiredMap = tagService.getRequired("repo", repoId);
+  const allNamespaces = Array.from(
+    new Set([...Object.keys(values), ...Object.keys(requiredMap)]),
+  ).sort();
+  const namespaces: Record<string, { values: string[]; required: boolean }> = {};
+  for (const ns of allNamespaces) {
+    namespaces[ns] = {
+      values: (values[ns] ?? []).sort(),
+      required: requiredMap[ns] ?? false,
+    };
+  }
+  io.stdout(`${JSON.stringify({ ok: true, repo_id: repoId, namespaces })}\n`);
   return { exitCode: 0 };
 }
 

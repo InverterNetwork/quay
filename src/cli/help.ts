@@ -119,6 +119,10 @@ const COMMANDS: Record<string, CommandSpec> = {
       "repo list",
       "repo export",
       "repo import",
+      "repo set-tags",
+      "repo unset-tags",
+      "repo get-tags",
+      "repo apply-tags",
     ],
   },
   "repo add": {
@@ -182,6 +186,45 @@ const COMMANDS: Record<string, CommandSpec> = {
     synopsis: "quay repo import --in <path>",
     summary: "Upsert each repo row from a JSON array file (idempotent).",
     flags: [{ flag: "--in <path>", desc: "Path to a JSON array file (required)." }],
+  },
+  "repo set-tags": {
+    path: "repo set-tags",
+    synopsis: "quay repo set-tags <repo_id> --namespace <name> --value <v>",
+    summary: "Add a value to a tag namespace for a repo (idempotent).",
+    details:
+      "Namespaces and values must match [a-z0-9-]+. Running the same command twice is safe — duplicate pairs are silently ignored.",
+    flags: [
+      { flag: "--namespace <name>", desc: "Namespace identifier (required). Must match [a-z0-9-]+." },
+      { flag: "--value <v>", desc: "Value to add to the namespace (required). Must match [a-z0-9-]+." },
+    ],
+  },
+  "repo unset-tags": {
+    path: "repo unset-tags",
+    synopsis: "quay repo unset-tags <repo_id> --namespace <name> [--value <v>]",
+    summary: "Remove a value (or a whole namespace) from a repo's tag vocab.",
+    details:
+      "When --value is supplied, only that one value is removed. When omitted, the entire namespace and its required/optional metadata are deleted.",
+    flags: [
+      { flag: "--namespace <name>", desc: "Namespace to target (required)." },
+      { flag: "--value <v>", desc: "Specific value to remove. Omit to remove the whole namespace." },
+    ],
+  },
+  "repo get-tags": {
+    path: "repo get-tags",
+    synopsis: "quay repo get-tags <repo_id>",
+    summary: "Print the tag vocabulary for a repo as JSON.",
+    details:
+      'Output shape: { "repo_id": "...", "namespaces": { "<ns>": { "values": [...], "required": bool }, ... } }. Namespaces and values are sorted alphabetically for stable output.',
+  },
+  "repo apply-tags": {
+    path: "repo apply-tags",
+    synopsis: "quay repo apply-tags <repo_id> --from <path>",
+    summary: "Declaratively replace a repo's entire tag vocabulary from a JSON file.",
+    details:
+      'Reads a { "namespaces": { "<ns>": { "values": [...], "required": bool }, ... } } document. Any existing namespaces not present in the input are removed. An empty namespaces object clears everything. Pass - as path to read from stdin. The operation is transactional: on validation failure nothing is written.',
+    flags: [
+      { flag: "--from <path>", desc: "Path to a JSON file (required). Use - for stdin." },
+    ],
   },
   cancel: {
     path: "cancel",
