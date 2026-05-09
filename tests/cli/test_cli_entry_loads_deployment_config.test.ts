@@ -11,7 +11,7 @@
 // touches the operator's real `~/.quay`.
 
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,7 +33,11 @@ function tempDir(prefix = "quay-cli-cfg-"): string {
   return d;
 }
 
-function runCli(args: string[], extraEnv: Record<string, string>): {
+function runCli(
+  args: string[],
+  extraEnv: Record<string, string>,
+  opts: { cwd?: string } = {},
+): {
   exitCode: number;
   stdout: string;
   stderr: string;
@@ -41,6 +45,7 @@ function runCli(args: string[], extraEnv: Record<string, string>): {
   const result = Bun.spawnSync({
     cmd: [process.execPath, ENTRY, ...args],
     env: { ...process.env, ...extraEnv },
+    ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -129,6 +134,41 @@ test("CLI fails loudly when configured repos_root does not exist (consumer model
   });
   expect(exitCode).not.toBe(0);
   expect(stderr).toMatch(/repos_root.*does not exist/);
+});
+
+test("relative file paths in CLI args resolve against the operator's invocation cwd, not /", () => {
+  // The startup `chdir("/")` (defence against an unreadable inherited
+  // cwd) must NOT bleed into dispatch: documented invocations like
+  // `repo import --in repos.json` and `enqueue --brief ./brief.md` are
+  // relative-path-shaped and resolve against the cwd the operator
+  // invoked from. The CLI captures the invocation cwd up front and
+  // restores it before dispatch.
+  const dataDir = tempDir();
+  const callerCwd = tempDir();
+  writeFileSync(join(callerCwd, "repos.json"), "[]");
+  const { exitCode, stderr } = runCli(
+    ["repo", "import", "--in", "repos.json"],
+    { QUAY_DATA_DIR: dataDir },
+    { cwd: callerCwd },
+  );
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+});
+
+test("QUAY_DATA_DIR pins the data dir over config.data_dir; no fallback materialised", () => {
+  const envDataDir = tempDir();
+  const configDataDir = tempDir();
+  const configPath = join(tempDir(), "config.toml");
+  writeFileSync(configPath, `data_dir = "${configDataDir}"\n`);
+  const { exitCode, stdout, stderr } = runCli(["repo", "list"], {
+    QUAY_DATA_DIR: envDataDir,
+    QUAY_CONFIG_FILE: configPath,
+  });
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+  expect(stdout.trim()).toBe("[]");
+  expect(existsSync(join(envDataDir, "quay.db"))).toBe(true);
+  expect(existsSync(join(configDataDir, "quay.db"))).toBe(false);
 });
 
 test("CLI fails loudly when the config file is invalid (does not silently use defaults)", () => {

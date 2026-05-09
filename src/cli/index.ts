@@ -35,6 +35,7 @@ import {
   slackAdapterOptionsFromConfig,
   tickOptionsFromConfig,
 } from "./config.ts";
+import { resolveDataDir } from "./data_dir.ts";
 import { dispatch, type CliDeps } from "./dispatch.ts";
 import { handleValidateTicket } from "./validate_ticket.ts";
 
@@ -67,15 +68,30 @@ async function main(): Promise<number> {
     );
     return result.exitCode;
   }
+  // An inherited cwd the process can't read (e.g. `sudo -u <unprivileged>`
+  // from a root shell at `/root`) has historically degraded config + DB
+  // init into a silent `~/.quay/` fallback. Pin cwd to `/` for init, then
+  // restore before `dispatch` so user-supplied relative paths (`--brief
+  // ./brief.md`, `--in repos.json`) still resolve under the invocation
+  // cwd. Adapter spawn sites all pass an explicit `cwd`, so the process-
+  // wide chdir doesn't bleed into subprocesses.
+  let invocationCwd: string | undefined;
+  try {
+    invocationCwd = process.cwd();
+  } catch {}
+  try {
+    process.chdir("/");
+  } catch (err) {
+    // Surfacing rather than swallowing: a silent failure here would
+    // re-enter the hostile-cwd state this branch exists to neutralise.
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `${JSON.stringify({ error: "internal_error", message: `chdir to / failed: ${message}` })}\n`,
+    );
+  }
   const { config } = loadConfig();
   const adaptersConfig = adaptersConfigFromConfig(config);
-  // Spec §13: `data_dir` defaults to `~/.quay`. The QUAY_DATA_DIR env var
-  // is the operator's runtime override (handy in tests / containers); the
-  // config file's `data_dir` is the deployment-level default. Env wins.
-  const dataDir =
-    process.env.QUAY_DATA_DIR ??
-    config.data_dir ??
-    join(homedir(), ".quay");
+  const dataDir = resolveDataDir(process.env, config.data_dir, homedir());
   // Spec §13: `repos_root` defaults to `${data_dir}/repos`. The config
   // override is honored verbatim (operator-controlled absolute path), with
   // the same precedence as `worktree_root` — config wins over the derived
@@ -170,6 +186,11 @@ async function main(): Promise<number> {
     // else to do until the input is consumed.
     stdin: () => readFileSync(0, "utf8"),
   };
+  if (invocationCwd !== undefined && invocationCwd !== "/") {
+    try {
+      process.chdir(invocationCwd);
+    } catch {}
+  }
   const result = await dispatch(argv, deps, io);
   return result.exitCode;
 }
