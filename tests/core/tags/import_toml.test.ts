@@ -98,6 +98,25 @@ extra = true
   expect((caught as QuayError).code).toBe("validation_error");
 });
 
+test("syntactically invalid TOML throws validation_error", () => {
+  let caught: unknown;
+  try {
+    parseImportToml("[tags.namespaces.area\nvalues = [\n");
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(QuayError);
+  expect((caught as QuayError).code).toBe("validation_error");
+});
+
+test("duplicate values in TOML are deduped on parse", () => {
+  const result = parseImportToml(`
+[tags.namespaces.area]
+values = ["x", "x", "y"]
+`);
+  expect(result["area"]?.values).toEqual(["x", "y"]);
+});
+
 test("[tags] as a non-table throws validation_error", () => {
   const toml = `tags = "oops"\n`;
   let caught: unknown;

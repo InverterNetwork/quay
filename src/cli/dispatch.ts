@@ -872,6 +872,10 @@ function handleTagsSetDeployment(
   tagService: TagService,
   io: CliIO,
 ): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--namespace", "--value"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
   const ns = readFlag(argv, "--namespace");
   const value = readFlag(argv, "--value");
   if (!ns || !value) {
@@ -893,6 +897,10 @@ function handleTagsUnsetDeployment(
   tagService: TagService,
   io: CliIO,
 ): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--namespace", "--value"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
   const ns = readFlag(argv, "--namespace");
   if (!ns) {
     return writeError(
@@ -914,6 +922,10 @@ function handleTagsGetDeployment(
   tagService: TagService,
   io: CliIO,
 ): DispatchResult {
+  const validation = validateFlags(argv, {});
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
   const namespaces = tagService.getVocab("deployment");
   io.stdout(`${JSON.stringify({ scope: "deployment", namespaces })}\n`);
   return { exitCode: 0 };
@@ -924,6 +936,10 @@ function handleTagsApplyDeployment(
   tagService: TagService,
   io: CliIO,
 ): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--from"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
   const env = readNamespacesEnvelope(argv, "tags apply-deployment", io);
   if (!env.ok) return env.result;
   const namespaces: TagVocab = tagService.apply("deployment", null, env.namespaces);
@@ -961,6 +977,20 @@ function handleTagsImport(
     );
     return { exitCode: 0 };
   }
+  // Refuse to wipe a non-empty deployment vocab when the TOML carries no
+  // namespaces — almost always a user typo (e.g. `[namespaces]` instead of
+  // `[tags.namespaces]`). Explicit clearing goes through `apply-deployment`.
+  if (Object.keys(desired).length === 0 && Object.keys(current).length > 0) {
+    io.stderr(
+      `${JSON.stringify({
+        error: "empty_import",
+        message:
+          "TOML has no [tags.namespaces] entries; refusing to clear non-empty deployment vocab. Use `quay tags apply-deployment --from -` with `{\"namespaces\":{}}` to clear explicitly.",
+        current,
+      })}\n`,
+    );
+    return { exitCode: 1 };
+  }
   if (plan.needsForce && !forceFlag) {
     io.stderr(
       `${JSON.stringify({
@@ -983,6 +1013,10 @@ function handleTagsList(
   deps: CliDeps,
   io: CliIO,
 ): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--repo"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
   const repoId = readFlag(argv, "--repo");
   if (!repoId) {
     return writeError(io, "usage_error", "tags list requires --repo <repo_id>");

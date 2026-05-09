@@ -123,6 +123,55 @@ test("malformed TOML → exit 1, validation_error", async () => {
   const io = bufferIO();
   const result = await dispatch(["tags", "import", "--from", path], built.deps, io);
   expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err());
+  expect(err.error).toBe("validation_error");
+});
+
+test("re-importing TOML with duplicate values is a no-op", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const dir = tempDir();
+  const path = writeToml(
+    dir,
+    "dupes.toml",
+    `
+[tags.namespaces.area]
+values = ["bonding-curve", "bonding-curve", "vesting"]
+`,
+  );
+
+  await dispatch(["tags", "import", "--from", path], built.deps, bufferIO());
+
+  const io = bufferIO();
+  const result = await dispatch(["tags", "import", "--from", path], built.deps, io);
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  expect(out.noop).toBe(true);
+  expect(out.namespaces.area.values).toEqual(["bonding-curve", "vesting"]);
+});
+
+test("--force on TOML missing [tags.namespaces] refuses to wipe a non-empty vocab", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const dir = tempDir();
+  const seedPath = writeToml(dir, "seed.toml", SIMPLE_TOML);
+  await dispatch(["tags", "import", "--from", seedPath], built.deps, bufferIO());
+
+  const emptyPath = writeToml(dir, "empty.toml", `[other]\nkey = "value"\n`);
+  const io = bufferIO();
+  const result = await dispatch(
+    ["tags", "import", "--from", emptyPath, "--force"],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err());
+  expect(err.error).toBe("empty_import");
+  // Vocab must be untouched.
+  const getIo = bufferIO();
+  await dispatch(["tags", "get-deployment"], built.deps, getIo);
+  const got = JSON.parse(getIo.out());
+  expect(Object.keys(got.namespaces)).toEqual(["area", "risk"]);
 });
 
 test("TOML with invalid namespace spec (missing values) → exit 1, validation_error", async () => {

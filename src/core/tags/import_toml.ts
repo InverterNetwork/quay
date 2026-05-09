@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { TagVocab } from "./service.ts";
+import { QuayError } from "../errors.ts";
 import { parseOrThrow } from "../zod_helpers.ts";
 
 export interface ImportPlan {
@@ -34,9 +35,27 @@ const importTomlSchema = z
 export function parseImportToml(
   raw: string,
 ): Record<string, { values: string[]; required?: boolean | undefined }> {
-  const doc = Bun.TOML.parse(raw);
+  // Bun.TOML.parse throws AggregateError on syntax errors. Wrap it so
+  // user-supplied broken input surfaces as validation_error rather than
+  // bubbling up to dispatch as internal_error.
+  let doc: unknown;
+  try {
+    doc = Bun.TOML.parse(raw);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new QuayError("validation_error", `tags import TOML is not valid TOML: ${message}`);
+  }
   const parsed = parseOrThrow(importTomlSchema, doc, "tags import TOML");
-  return parsed.tags?.namespaces ?? {};
+  const namespaces = parsed.tags?.namespaces ?? {};
+  // Dedupe values in each namespace so a TOML with `values = ["x", "x"]`
+  // round-trips through the deduped DB storage as a no-op on re-import.
+  const result: Record<string, { values: string[]; required?: boolean | undefined }> = {};
+  for (const [ns, spec] of Object.entries(namespaces)) {
+    result[ns] = spec.required !== undefined
+      ? { values: Array.from(new Set(spec.values)), required: spec.required }
+      : { values: Array.from(new Set(spec.values)) };
+  }
+  return result;
 }
 
 export function planImport(

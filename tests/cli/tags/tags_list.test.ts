@@ -114,3 +114,19 @@ test("missing --repo flag → usage_error", async () => {
   const err = JSON.parse(io.err());
   expect(err.error).toBe("usage_error");
 });
+
+test("unknown flag on tags list is rejected", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  insertRepo(h.db, "repo-a");
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["tags", "list", "--repo", "repo-a", "--frce"],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err());
+  expect(err.error).toBe("usage_error");
+});

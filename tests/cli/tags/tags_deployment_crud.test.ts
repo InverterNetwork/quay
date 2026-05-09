@@ -309,3 +309,22 @@ test("apply-deployment requires --from flag", async () => {
   const err = JSON.parse(io.err());
   expect(err.error).toBe("usage_error");
 });
+
+test("unknown flag is rejected on every tags subcommand", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  const cases: Array<string[]> = [
+    ["tags", "set-deployment", "--namespace", "area", "--value", "v", "--frce"],
+    ["tags", "unset-deployment", "--namespace", "area", "--frce"],
+    ["tags", "get-deployment", "--frce"],
+    ["tags", "apply-deployment", "--from", "/tmp/x", "--frce"],
+  ];
+  for (const argv of cases) {
+    const io = bufferIO();
+    const result = await dispatch(argv, built.deps, io);
+    expect(result.exitCode).toBe(1);
+    const err = JSON.parse(io.err());
+    expect(err.error).toBe("usage_error");
+  }
+});
