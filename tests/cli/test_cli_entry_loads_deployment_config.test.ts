@@ -11,7 +11,7 @@
 // touches the operator's real `~/.quay`.
 
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -129,6 +129,30 @@ test("CLI fails loudly when configured repos_root does not exist (consumer model
   });
   expect(exitCode).not.toBe(0);
   expect(stderr).toMatch(/repos_root.*does not exist/);
+});
+
+test("QUAY_DATA_DIR pins the data dir over config.data_dir; no fallback materialised (AST-89)", () => {
+  // AST-89: an explicit QUAY_DATA_DIR is a hard contract. When set, we
+  // never silently write to `config.data_dir` (or `~/.quay/`) — that
+  // silent fallback under `sudo -u hermes` was leaving stale-state
+  // pollution at `~/.quay/` even after the operator-side reconciler had
+  // just deleted it. This test pins the env-wins behaviour: the env-named
+  // dir gets the DB; the config-named one stays untouched.
+  const envDataDir = tempDir();
+  const configDataDir = tempDir();
+  const configPath = join(tempDir(), "config.toml");
+  writeFileSync(configPath, `data_dir = "${configDataDir}"\n`);
+  const { exitCode, stdout, stderr } = runCli(["repo", "list"], {
+    QUAY_DATA_DIR: envDataDir,
+    QUAY_CONFIG_FILE: configPath,
+  });
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+  expect(stdout.trim()).toBe("[]");
+  // The env-named dir was used (DB materialised).
+  expect(existsSync(join(envDataDir, "quay.db"))).toBe(true);
+  // The config-named dir was NOT used — no parallel DB was created.
+  expect(existsSync(join(configDataDir, "quay.db"))).toBe(false);
 });
 
 test("CLI fails loudly when the config file is invalid (does not silently use defaults)", () => {

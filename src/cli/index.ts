@@ -35,10 +35,23 @@ import {
   slackAdapterOptionsFromConfig,
   tickOptionsFromConfig,
 } from "./config.ts";
+import { resolveDataDir } from "./data_dir.ts";
 import { dispatch, type CliDeps } from "./dispatch.ts";
 import { handleValidateTicket } from "./validate_ticket.ts";
 
 async function main(): Promise<number> {
+  // Some sudo / Bun combinations leave the process at a cwd it can't read
+  // (e.g., `sudo -u hermes <bin>` from a root shell whose cwd is `/root`).
+  // In that state, internal cwd-sensitive operations during runtime
+  // initialisation have historically degraded into a silent `~/.quay/`
+  // fallback even when QUAY_DATA_DIR was set (AST-89). Pin cwd to `/`
+  // before we touch anything else. chdir to an absolute path doesn't
+  // require read/exec permission on the source cwd, and `/` is universally
+  // present on supported platforms; the try/catch is defence-in-depth.
+  try {
+    process.chdir("/");
+  } catch {}
+
   const argv = process.argv.slice(2);
   // `quay --version` and `-v` MUST short-circuit before any DB / config /
   // migration work: the version stamp is meaningful even on a host where
@@ -69,13 +82,7 @@ async function main(): Promise<number> {
   }
   const { config } = loadConfig();
   const adaptersConfig = adaptersConfigFromConfig(config);
-  // Spec §13: `data_dir` defaults to `~/.quay`. The QUAY_DATA_DIR env var
-  // is the operator's runtime override (handy in tests / containers); the
-  // config file's `data_dir` is the deployment-level default. Env wins.
-  const dataDir =
-    process.env.QUAY_DATA_DIR ??
-    config.data_dir ??
-    join(homedir(), ".quay");
+  const dataDir = resolveDataDir(process.env, config.data_dir, homedir());
   // Spec §13: `repos_root` defaults to `${data_dir}/repos`. The config
   // override is honored verbatim (operator-controlled absolute path), with
   // the same precedence as `worktree_root` — config wins over the derived
