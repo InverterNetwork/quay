@@ -90,10 +90,21 @@ rows and is intended for restore workflows.
 
 ## Tag Vocabulary
 
-Each repo can carry a tag vocabulary that the validator uses to constrain
-ticket tags. Tags have the shape `<namespace>-<value>`; the vocabulary defines
-which `(namespace, value)` pairs are legal for tickets targeting this repo,
-and (per namespace) whether at least one tag from that namespace is required.
+The tag vocabulary is layered: a deployment-wide vocab (managed with `quay tags ...`)
+is merged with each repo's per-repo vocab at validation time. See `quay tags --help`
+for the deployment-side CLI surface. The `quay tags list --repo <id>` command is the
+consumer-facing surface (Hermes ticket-creation, future workers) that returns the
+merged shape.
+
+The `enforced` flag returned by `tags list` controls whether ticket-tag enforcement
+is active for a repo. It is `true` when the repo has any per-repo vocabulary
+configured. Deployment vocab alone (with no per-repo vocab) leaves `enforced: false`
+— per-repo presence is the explicit opt-in signal.
+
+Each repo can carry a per-repo tag vocabulary that, merged with the deployment vocab,
+the validator uses to constrain ticket tags. Tags have the shape `<namespace>-<value>`;
+the vocabulary defines which `(namespace, value)` pairs are legal for tickets targeting
+this repo, and (per namespace) whether at least one tag from that namespace is required.
 
 A repo with no per-repo vocabulary configured is **not enforced** by the
 validator — its tickets continue to use the legacy charset-only checks. The
