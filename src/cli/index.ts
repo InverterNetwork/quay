@@ -40,18 +40,6 @@ import { dispatch, type CliDeps } from "./dispatch.ts";
 import { handleValidateTicket } from "./validate_ticket.ts";
 
 async function main(): Promise<number> {
-  // Some sudo / Bun combinations leave the process at a cwd it can't read
-  // (e.g., `sudo -u hermes <bin>` from a root shell whose cwd is `/root`).
-  // In that state, internal cwd-sensitive operations during runtime
-  // initialisation have historically degraded into a silent `~/.quay/`
-  // fallback even when QUAY_DATA_DIR was set (AST-89). Pin cwd to `/`
-  // before we touch anything else. chdir to an absolute path doesn't
-  // require read/exec permission on the source cwd, and `/` is universally
-  // present on supported platforms; the try/catch is defence-in-depth.
-  try {
-    process.chdir("/");
-  } catch {}
-
   const argv = process.argv.slice(2);
   // `quay --version` and `-v` MUST short-circuit before any DB / config /
   // migration work: the version stamp is meaningful even on a host where
@@ -80,6 +68,14 @@ async function main(): Promise<number> {
     );
     return result.exitCode;
   }
+  // Under `sudo -u hermes` from a cwd unreadable to hermes (e.g. `/root`),
+  // cwd-sensitive runtime ops below have historically degraded into a
+  // silent `~/.quay/` fallback. Pin cwd to `/` so config + DB init can't
+  // observe a hostile cwd. Runs after the cwd-independent short-circuits
+  // above so `--version` and `validate-ticket` remain syscall-free.
+  try {
+    process.chdir("/");
+  } catch {}
   const { config } = loadConfig();
   const adaptersConfig = adaptersConfigFromConfig(config);
   const dataDir = resolveDataDir(process.env, config.data_dir, homedir());

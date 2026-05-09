@@ -1,15 +1,5 @@
-// AST-89: QUAY_DATA_DIR is a hard pin. When the operator names a data dir
-// explicitly via the env var, quay must use it and only it — no silent
-// fallback to `~/.quay/` on top of an explicit signal. The bug that
-// motivated this contract was a silent re-creation of the legacy
-// `~/.quay/` data dir under `sudo -u hermes ...` (cwd `/root` unreadable
-// to hermes), which defeated the operator-side reconciler that had just
-// deleted that directory.
-//
-// Empty string is treated as unset, matching the config-loader's
-// QUAY_DATA_DIR handling (`src/cli/config.ts`). This prevents a stray
-// `QUAY_DATA_DIR=` line in a systemd unit from collapsing the dir to `""`
-// and writing `quay.db` cwd-relative.
+// QUAY_DATA_DIR is a hard pin; empty string is treated as unset.
+// See `src/cli/data_dir.ts` for the WHY.
 
 import { expect, test } from "bun:test";
 import { resolveDataDir } from "../../src/cli/data_dir.ts";

@@ -1,10 +1,7 @@
-// Spec §13: `data_dir` is operator-pinned via QUAY_DATA_DIR. When that env
-// var is set to a non-empty value it MUST be the data dir — we never
-// silently fall back to `~/.quay/` after the operator has named one
-// explicitly (AST-89). Empty string is treated as unset, matching the
-// config-loader's QUAY_DATA_DIR handling, so a `QUAY_DATA_DIR=` line in
-// a systemd unit doesn't accidentally collapse the dir to the cwd-relative
-// `quay.db`.
+// Spec §13: QUAY_DATA_DIR is a hard pin — when set non-empty it MUST be
+// the data dir, never a silent `~/.quay/` fallback. Empty string is
+// treated as unset (matches config.ts) so `QUAY_DATA_DIR=` in a systemd
+// unit can't collapse the dir to "" and write `quay.db` cwd-relative.
 
 import { join } from "node:path";
 
