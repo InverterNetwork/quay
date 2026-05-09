@@ -12,8 +12,6 @@ export function resolveDataDir(
 ): string {
   const fromEnv = env.QUAY_DATA_DIR;
   if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
-  if (configDataDir !== undefined && configDataDir !== "") {
-    return configDataDir;
-  }
+  if (configDataDir !== undefined) return configDataDir;
   return join(home, ".quay");
 }

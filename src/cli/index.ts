@@ -68,14 +68,32 @@ async function main(): Promise<number> {
     );
     return result.exitCode;
   }
-  // Under `sudo -u hermes` from a cwd unreadable to hermes (e.g. `/root`),
-  // cwd-sensitive runtime ops below have historically degraded into a
-  // silent `~/.quay/` fallback. Pin cwd to `/` so config + DB init can't
-  // observe a hostile cwd. Runs after the cwd-independent short-circuits
-  // above so `--version` and `validate-ticket` remain syscall-free.
+  // When the process inherits a cwd it can't read (e.g. `sudo -u <unprivileged>`
+  // from a root shell at `/root`), cwd-sensitive runtime ops below have
+  // historically degraded into a silent `~/.quay/` fallback. Pin cwd to
+  // `/` so config + DB init can't observe a hostile cwd; restore the
+  // operator's invocation cwd before `dispatch` so user-supplied relative
+  // paths (`--brief ./brief.md`, `--in repos.json`) still resolve under
+  // it. Audited spawn sites (LocalGitAdapter, GitHubCliAdapter,
+  // TmuxAdapter, ShellCommandRunner) all pass an explicit `cwd`, so
+  // changing the process cwd doesn't bleed into subprocesses. Runs after
+  // the cwd-independent short-circuits above so `--version` and
+  // `validate-ticket` remain syscall-free.
+  let invocationCwd: string | undefined;
+  try {
+    invocationCwd = process.cwd();
+  } catch {}
   try {
     process.chdir("/");
-  } catch {}
+  } catch (err) {
+    // chdir to absolute "/" should never fail on supported platforms. If
+    // it does, surface it — silently failing here would re-enter the very
+    // hostile-cwd state this branch exists to neutralise.
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `${JSON.stringify({ error: "internal_error", message: `chdir to / failed: ${message}` })}\n`,
+    );
+  }
   const { config } = loadConfig();
   const adaptersConfig = adaptersConfigFromConfig(config);
   const dataDir = resolveDataDir(process.env, config.data_dir, homedir());
@@ -173,6 +191,11 @@ async function main(): Promise<number> {
     // else to do until the input is consumed.
     stdin: () => readFileSync(0, "utf8"),
   };
+  if (invocationCwd !== undefined && invocationCwd !== "/") {
+    try {
+      process.chdir(invocationCwd);
+    } catch {}
+  }
   const result = await dispatch(argv, deps, io);
   return result.exitCode;
 }
