@@ -149,6 +149,7 @@ export function handleValidateTicket(
   const baseResult = validateTicket(parsed as TicketDraft, schema);
   const vocabErrors = enforceRepoVocab(
     parsed as Record<string, unknown>,
+    baseResult.errors,
     deps.lookupRepoVocab,
   );
   const errors: ValidationError[] = [...baseResult.errors, ...vocabErrors];
@@ -165,22 +166,23 @@ export function handleValidateTicket(
 
 function enforceRepoVocab(
   payload: Record<string, unknown>,
+  _baseErrors: ValidationError[],
   lookup: RepoVocabLookup | undefined,
 ): ValidationError[] {
   if (lookup === undefined) return [];
   const repoId = payload["repo"];
   if (typeof repoId !== "string" || repoId === "") return [];
-  const context = lookup(repoId);
-  // Opt-in gate: no per-repo vocab → no enforcement, even if the deployment
-  // has required namespaces. Deployment-level requireds only bind repos that
-  // have opted in.
-  if (context === null || Object.keys(context.perRepo).length === 0) return [];
+  // Skip when `tags` is structurally wrong: the schema validator already
+  // flagged it, and our index-keyed errors would overlay arbitrary fields.
+  // Per-item type errors are tolerated below (validateTagVocab passes
+  // non-strings through without emitting a vocab error so the original
+  // indices stay aligned with the base validator's tags[i] paths).
   const tagsRaw = payload["tags"];
-  const tags = Array.isArray(tagsRaw)
-    ? tagsRaw.filter((t): t is string => typeof t === "string")
-    : [];
+  if (!Array.isArray(tagsRaw)) return [];
+  const context = lookup(repoId);
+  if (context === null) return [];
   const merged = mergeVocab(context.deployment, context.perRepo);
-  return validateTagVocab(tags, merged);
+  return validateTagVocab(tagsRaw, merged);
 }
 
 interface ParsedFlags {

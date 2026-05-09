@@ -71,7 +71,7 @@ async function main(): Promise<number> {
         embeddedSchema: EMBEDDED_TICKET_SCHEMA,
         lookupRepoVocab: createLazyRepoVocabLookup(
           process.env,
-          EMBEDDED_MIGRATIONS,
+          () => EMBEDDED_MIGRATIONS,
         ),
       },
     );

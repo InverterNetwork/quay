@@ -270,6 +270,31 @@ test("no lookup wired → existing v0 behavior preserved", () => {
   expect(JSON.parse(io.out().trim())).toEqual({ valid: true });
 });
 
+test("non-string tags don't shift vocab error indices", () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  insertRepo(h.db, "repo-a");
+  built.deps.tagService.apply("repo", "repo-a", {
+    area: { values: ["bonding-curve"] },
+  });
+
+  // tags[0] is a number → base validator emits TYPE at tags[0].
+  // tags[1] is "risk-reentrancy" — unknown namespace under repo-a's vocab.
+  // The vocab error must point at tags[1], not tags[0].
+  const { io, result } = runValidate({
+    payload: { ...BASE_PAYLOAD, tags: [123, "risk-reentrancy"] as unknown[] },
+    tagService: built.deps.tagService,
+  });
+  expect(result.exitCode).toBe(1);
+  const out = JSON.parse(io.out().trim());
+  const typeErr = out.errors.find((e: { code: string }) => e.code === "TYPE");
+  expect(typeErr.field).toBe("tags[0]");
+  const vocabErr = out.errors.find(
+    (e: { code: string }) => e.code === "TAG_UNKNOWN_NAMESPACE",
+  );
+  expect(vocabErr.field).toBe("tags[1]");
+});
+
 test("vocab errors coexist with v0 schema errors", () => {
   h = createHarness();
   const built = buildCliDeps(h);

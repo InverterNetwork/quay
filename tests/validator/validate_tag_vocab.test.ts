@@ -114,14 +114,15 @@ test("validateTagVocab: empty tag list and required namespace → TAG_REQUIRED_M
   expect(errors[0]?.code).toBe("TAG_REQUIRED_MISSING");
 });
 
-test("validateTagVocab: multi-dash value preserves the rest verbatim", () => {
+test("validateTagVocab: value may contain dashes; only namespace is the prefix before the first dash", () => {
+  // Namespaces are forbidden from containing dashes (enforced by tag-service
+  // labelSchema), so the value side is the only multi-segment piece. Tag
+  // `risk-money-handling` parses as namespace=risk, value=money-handling.
   const errors = validateTagVocab(
-    ["task-type-bug-fix"],
-    vocab({ "task-type": { values: ["bug-fix"] } }),
+    ["risk-money-handling"],
+    vocab({ risk: { values: ["money-handling"] } }),
   );
-  // Splits on FIRST dash → namespace="task", value="type-bug-fix".
-  // "task" is unknown → TAG_UNKNOWN_NAMESPACE.
-  expect(errors[0]?.code).toBe("TAG_UNKNOWN_NAMESPACE");
+  expect(errors).toEqual([]);
 });
 
 test("validateTagVocab: collects errors per tag, keeps required check at the end", () => {

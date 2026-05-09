@@ -18,14 +18,17 @@ export function parseTagToken(tag: string): ParsedTag | null {
 }
 
 export function validateTagVocab(
-  tags: string[],
+  tags: readonly unknown[],
   merged: MergedVocab,
 ): ValidationError[] {
   const errors: ValidationError[] = [];
   const matchedNamespaces = new Set<string>();
 
   for (let i = 0; i < tags.length; i += 1) {
-    const tag = tags[i]!;
+    const tag = tags[i];
+    // Non-string entries already get a TYPE error from the schema validator;
+    // skip silently here so error indices keep matching the original array.
+    if (typeof tag !== "string") continue;
     const path = `tags[${i}]`;
     const parsed = parseTagToken(tag);
     if (parsed === null) {

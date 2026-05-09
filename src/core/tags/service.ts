@@ -50,7 +50,14 @@ export interface TagService {
   ): TagVocab;
 }
 
-const labelSchema = z
+// Values may contain `-`, but namespaces may not — the validator parses tag
+// tokens as `<namespace>-<value>` by splitting on the first `-`, so a dashed
+// namespace would be unaddressable in any ticket tag.
+const namespaceSchema = z
+  .string()
+  .min(1)
+  .regex(/^[a-z0-9]+$/, "must match [a-z0-9]+ (no dashes)");
+const valueSchema = z
   .string()
   .min(1)
   .regex(/^[a-z0-9-]+$/, "must match [a-z0-9-]+");
@@ -73,9 +80,9 @@ function validateInputs(
   if (scope === "repo") {
     parseOrThrow(repoIdSchema, repoId, "repo_id");
   }
-  parseOrThrow(labelSchema, namespace, "namespace");
+  parseOrThrow(namespaceSchema, namespace, "namespace");
   if (value !== undefined) {
-    parseOrThrow(labelSchema, value, "value");
+    parseOrThrow(valueSchema, value, "value");
   }
 }
 
@@ -229,7 +236,7 @@ export function createTagService({
     for (const [ns, spec] of Object.entries(desired)) {
       validateInputs(scope, repoId, ns);
       for (const v of spec.values) {
-        parseOrThrow(labelSchema, v, `value in namespace "${ns}"`);
+        parseOrThrow(valueSchema, v, `value in namespace "${ns}"`);
       }
     }
 

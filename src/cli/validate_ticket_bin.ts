@@ -32,7 +32,7 @@ const result = handleValidateTicket(
   {
     lookupRepoVocab: createLazyRepoVocabLookup(
       process.env,
-      loadMigrationsFromDir(MIGRATIONS_DIR),
+      () => loadMigrationsFromDir(MIGRATIONS_DIR),
     ),
   },
 );
