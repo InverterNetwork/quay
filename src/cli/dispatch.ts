@@ -24,7 +24,8 @@ import type { TmuxPort } from "../ports/tmux.ts";
 import { enqueue, type EnqueueDeps } from "../core/enqueue.ts";
 import type { ValidatorRunner } from "../core/validator_runner.ts";
 import { handleEnqueueLinearIssue } from "./enqueue_linear_issue.ts";
-import { createRepoService } from "../core/repos/service.ts";
+import type { RepoService } from "../core/repos/service.ts";
+import type { TagService, TagVocab } from "../core/tags/service.ts";
 import {
   cancel_task,
   type CancelDeps,
@@ -84,6 +85,8 @@ export interface CliDeps {
   linear?: LinearPort;
   validatorRunner?: ValidatorRunner;
   adaptersConfig?: { linearEnabled: boolean; slackEnabled: boolean };
+  repoService: RepoService;
+  tagService: TagService;
 }
 
 export interface DispatchResult {
@@ -476,7 +479,7 @@ function handleRepo(
   }
   const [sub, ...rest] = argv;
   if (isHelpToken(sub as string)) return printHelp(io, ["repo"]);
-  const service = createRepoService({ db: deps.db, clock: deps.clock });
+  const service = deps.repoService;
   switch (sub) {
     case "add":
       if (wantsHelp(rest)) return printHelp(io, ["repo", "add"]);
@@ -503,6 +506,18 @@ function handleRepo(
     case "import":
       if (wantsHelp(rest)) return printHelp(io, ["repo", "import"]);
       return handleRepoImport(rest, service, io);
+    case "set-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "set-tags"]);
+      return handleRepoSetTags(rest, deps.tagService, io);
+    case "unset-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "unset-tags"]);
+      return handleRepoUnsetTags(rest, deps.tagService, io);
+    case "get-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "get-tags"]);
+      return handleRepoGetTags(rest, deps.tagService, io);
+    case "apply-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "apply-tags"]);
+      return handleRepoApplyTags(rest, deps.tagService, io);
     default:
       // Mirror bare `quay repo`: structured envelope plus the noun's usage
       // block so a typo gets the same recovery hint as the missing-sub case.
@@ -528,7 +543,7 @@ const REPO_FLAGS: Array<{ flag: string; key: string }> = [
 
 function handleRepoAdd(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const json = tryParseJsonFlag(argv);
@@ -541,7 +556,7 @@ function handleRepoAdd(
 
 function handleRepoUpdate(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const repoId = readFlag(argv, "--id") ?? positional(argv);
@@ -564,7 +579,7 @@ function handleRepoUpdate(
 
 function handleRepoList(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const validation = validateFlags(argv, { boolean: ["--active"] });
@@ -578,7 +593,7 @@ function handleRepoList(
 
 function handleRepoExport(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const validation = validateFlags(argv, {
@@ -614,7 +629,7 @@ function handleRepoExport(
 
 function handleRepoImport(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const inputPath = readFlag(argv, "--in");
@@ -657,6 +672,126 @@ function handleRepoImport(
     `${JSON.stringify({ imported: ids.length, repo_ids: ids })}\n`,
   );
   return { exitCode: 0 };
+}
+
+function handleRepoSetTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo set-tags requires <repo_id>");
+  }
+  const ns = readFlag(argv, "--namespace");
+  const value = readFlag(argv, "--value");
+  if (!ns || !value) {
+    return writeError(
+      io,
+      "usage_error",
+      "repo set-tags requires --namespace <name> --value <v>",
+    );
+  }
+  tagService.setValue("repo", repoId, ns, value);
+  io.stdout(
+    `${JSON.stringify({ ok: true, repo_id: repoId, namespace: ns, value })}\n`,
+  );
+  return { exitCode: 0 };
+}
+
+function handleRepoUnsetTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo unset-tags requires <repo_id>");
+  }
+  const ns = readFlag(argv, "--namespace");
+  if (!ns) {
+    return writeError(
+      io,
+      "usage_error",
+      "repo unset-tags requires --namespace <name>",
+    );
+  }
+  const value = readFlag(argv, "--value") ?? undefined;
+  tagService.unsetValue("repo", repoId, ns, value);
+  io.stdout(
+    `${JSON.stringify({ ok: true, repo_id: repoId, namespace: ns, value: value ?? null })}\n`,
+  );
+  return { exitCode: 0 };
+}
+
+function handleRepoGetTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo get-tags requires <repo_id>");
+  }
+  const namespaces = tagService.getVocab("repo", repoId);
+  io.stdout(`${JSON.stringify({ repo_id: repoId, namespaces })}\n`);
+  return { exitCode: 0 };
+}
+
+function handleRepoApplyTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo apply-tags requires <repo_id>");
+  }
+  const fromPath = readFlag(argv, "--from");
+  if (!fromPath) {
+    return writeError(io, "usage_error", "repo apply-tags requires --from <path>");
+  }
+  const inputRead = readApplyTagsInput(fromPath, io);
+  if (!inputRead.ok) return writeError(io, "usage_error", inputRead.message);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inputRead.value);
+  } catch (err) {
+    return writeError(
+      io,
+      "usage_error",
+      `repo apply-tags: not valid JSON: ${(err as Error).message}`,
+    );
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("namespaces" in parsed) ||
+    typeof (parsed as { namespaces: unknown }).namespaces !== "object" ||
+    (parsed as { namespaces: unknown }).namespaces === null
+  ) {
+    return writeError(
+      io,
+      "usage_error",
+      'repo apply-tags: input must be { "namespaces": { ... } }',
+    );
+  }
+  const desired = (parsed as { namespaces: unknown }).namespaces;
+  const namespaces: TagVocab = tagService.apply("repo", repoId, desired);
+  io.stdout(`${JSON.stringify({ ok: true, repo_id: repoId, namespaces })}\n`);
+  return { exitCode: 0 };
+}
+
+function readApplyTagsInput(
+  fromPath: string,
+  io: CliIO,
+): { ok: true; value: string } | { ok: false; message: string } {
+  if (fromPath === "-") {
+    if (!io.stdin) return { ok: false, message: "no stdin source configured" };
+    return { ok: true, value: io.stdin() };
+  }
+  return tryReadFile(fromPath);
 }
 
 async function handleCancel(
