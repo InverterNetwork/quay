@@ -31,10 +31,9 @@ const DEFAULT_VALIDATOR_BIN = fileURLToPath(
 // True when running inside a `bun build --compile` binary. In that context,
 // `DEFAULT_VALIDATOR_BIN` resolves to a virtual /$bunfs/... path that no
 // spawned process can read, so we must recurse through the running binary
-// instead. Detect by inspecting the resolved path directly: `Bun.embeddedFiles`
-// looked tempting but is empty in release-built binaries (AST-88), so the
-// gate never fired and the spawn fell through to `bun run` against an
-// unreachable virtual path.
+// instead. We detect via the resolved path because `Bun.embeddedFiles` is
+// empty in release-built binaries — relying on it would silently fall
+// through to `bun run` against an unreachable virtual path.
 function isCompiledBinary(): boolean {
   return DEFAULT_VALIDATOR_BIN.startsWith("/$bunfs/");
 }
