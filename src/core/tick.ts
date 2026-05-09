@@ -7,6 +7,7 @@ import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PrSnapshot } from "../ports/github.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
+import { probeAgentIdentity } from "./agent_identity.ts";
 import { runCancelFinalizer } from "./cancel.ts";
 import {
   classifyAndApply,
@@ -1622,9 +1623,18 @@ function promoteAndSpawn(
   // spawn_failures_consecutive here (and not inside the promotion txn) is
   // load-bearing: a substrate failure between promotion and this point must
   // leave the consecutive counter intact so it can accumulate across ticks.
+  //
+  // agent_identity is captured here (alongside tmux_session) so a successful
+  // spawn always lands a non-NULL identity. The probe is in-process and
+  // self-bounded — it never throws, so a flaky binary cannot block tick.
+  const agentIdentity = probeAgentIdentity(agentInvocation);
   deps.db
-    .query(`UPDATE attempts SET tmux_session = ? WHERE attempt_id = ?`)
-    .run(sessionName, pending.attempt_id);
+    .query(
+      `UPDATE attempts
+          SET tmux_session = ?, agent_identity = ?
+        WHERE attempt_id = ?`,
+    )
+    .run(sessionName, agentIdentity, pending.attempt_id);
   deps.db
     .query(`UPDATE tasks SET spawn_failures_consecutive = 0 WHERE task_id = ?`)
     .run(task.task_id);

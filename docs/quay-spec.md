@@ -844,7 +844,8 @@ CREATE TABLE attempts (
   pr_existed_at_spawn INTEGER NOT NULL DEFAULT 0,  -- 0/1; whether a PR (open or closed/merged) existed for this branch at promotion time. Used together with the post-exit PR check to detect "PR was created during this attempt" without further remote-SHA churn.
   ended_at TEXT,
   exit_kind TEXT,                     -- pr_opened / blocker_written / killed_stale / killed_wall_clock / killed_cancel / crashed / clean_no_pr / spawn_failed / no_progress
-  kill_intent TEXT                    -- NULL while the worker is supposed to keep running. Set inside the SQL chokepoint *before* the tmux kill for any ordered-kill path: 'stale' / 'wall_clock' / 'cancel'. Read by the next tick: if the worker is dead and kill_intent is set, complete the originally-scheduled transition (deterministic retry for stale/wall_clock; cancellation cleanup for cancel) instead of running the dead-worker classifier. Cleared on the resulting transition.
+  kill_intent TEXT,                   -- NULL while the worker is supposed to keep running. Set inside the SQL chokepoint *before* the tmux kill for any ordered-kill path: 'stale' / 'wall_clock' / 'cancel'. Read by the next tick: if the worker is dead and kill_intent is set, complete the originally-scheduled transition (deterministic retry for stale/wall_clock; cancellation cleanup for cancel) instead of running the dead-worker classifier. Cleared on the resulting transition.
+  agent_identity TEXT                 -- "<runtime>/<runtime_version>/<model_id>", e.g. "claude/2.1.132/unknown". Captured at spawn time by probing the agent binary's `--version`. NULL on rows that pre-date the slice; populated for every successful spawn thereafter. Lets retro analysis slice attempts by which agent runtime executed them (preamble v2 vs v1 on the same model, opus vs sonnet cost/quality tradeoff, etc.).
 );
 
 -- Append-only artifact store pointer
