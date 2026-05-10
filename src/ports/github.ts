@@ -80,6 +80,16 @@ export interface PrSnapshot {
   state: PrTerminalState;
   headSha: string;
   baseSha: string | null;
+  // GitHub's numeric PR id and the human-readable PR URL. Optional because
+  // many test fixtures predate PR-metadata writeback and a few `gh` failure
+  // modes (rate-limit on the metadata fields, gh older than 2.20) can leave
+  // them missing — tick treats absent values as "don't update".
+  prNumber?: number | null;
+  prUrl?: string | null;
+  // The base branch name (`gh pr view --json baseRefName`). Captured so
+  // callers that need the base ref for diffing can compute against it
+  // without re-scraping. Optional for the same reason as prNumber/prUrl.
+  baseRef?: string | null;
   mergeable: PrMergeableState;
   latestReview: PrLatestReview;
   checks: PrChecksReport;

@@ -31,6 +31,12 @@ class StubbedGitHubAdapter extends GitHubCliAdapter {
     }
     return typeof next === "function" ? next(cmd) : next;
   }
+
+  // Bypass the git merge-base shell-out so the response queue stays focused
+  // on the bracketing-reads contract this test pins.
+  protected override computeMergeBaseSha(): string | null {
+    return null;
+  }
 }
 
 function ok(stdout: string): RunResult {
