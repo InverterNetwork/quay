@@ -6,8 +6,12 @@ import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PrSnapshot } from "../ports/github.ts";
 import type { SlackPort } from "../ports/slack.ts";
-import type { TmuxPort } from "../ports/tmux.ts";
+import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
+import { probeAgentIdentity } from "./agent_identity.ts";
 import { runCancelFinalizer } from "./cancel.ts";
+import { EXIT_INFO_NONE } from "./exit_status.ts";
+import { collectToolTraceArtifact } from "./tool_trace.ts";
+import { collectUsageArtifact } from "./usage.ts";
 import {
   classifyAndApply,
   type ClassifyContextAttempt,
@@ -31,8 +35,25 @@ export const DEFAULT_MAX_SPAWN_FAILURES = 3;
 export const DEFAULT_CLAIM_TIMEOUT_SECONDS = 1800;
 export const DEFAULT_MAX_CLAIM_EXPIRATIONS = 3;
 export const DEFAULT_MAX_NON_BUDGET_RESPAWNS = 20;
+// `--output-format json` makes claude print one final JSON envelope
+// (tokens, cost, model id, full response) to stdout instead of the
+// streaming human-readable text. We redirect that stdout to
+// `.quay-usage.json` in the worktree so the dead-worker classifier
+// can ingest it as a `usage` artifact.
+//
+// `--debug --debug-file .quay-tool-trace.log` captures claude's
+// tool-dispatch / API events into a worktree-local file, ingested
+// as a `tool_trace` artifact. This is the highest-signal data for
+// prompt iteration ("preamble v2 made claude read 3 files, v1 made
+// it read 12"); without it, only the final stdout reaches the
+// session log and intermediate tool calls vanish.
+//
+// Operators with non-claude agent runtimes (Codex, Cursor, ...)
+// override this template and write the same filenames for capture
+// to land — quay reads `.quay-usage.json` and `.quay-tool-trace.log`
+// by name, not by runtime.
 export const DEFAULT_AGENT_INVOCATION =
-  "claude --permission-mode bypassPermissions < {prompt_file}";
+  "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json";
 
 export interface TickDeps {
   db: DB;
@@ -423,17 +444,17 @@ function processRunningTask(
   if (attempt.tmux_session === null) {
     // Spawn-window recovery: kill any orphan tmux session matching the
     // canonical name (idempotent — missing session is OK), then run the
-    // same evidence classifier.
+    // same evidence classifier. No worker process ever started in this
+    // window, so there's no OS-level exit to capture — pass NONE.
     const canonical = `quay-task-${task.tmux_id}-${attempt.attempt_number}`;
     try {
       deps.tmux.kill(canonical);
     } catch {}
-    const res = classifyAndApply(
-      deps,
-      ctxTask,
-      ctxAttempt,
-      { sessionName: canonical, spawnWindow: true },
-    );
+    const res = classifyAndApply(deps, ctxTask, ctxAttempt, {
+      sessionName: canonical,
+      spawnWindow: true,
+      exitInfo: EXIT_INFO_NONE,
+    });
     if (res.outcome === "spawn_window_no_evidence") {
       return handleSpawnFailure(deps, task, attempt, options);
     }
@@ -447,7 +468,7 @@ function processRunningTask(
     }
     const intent = detectKillIntent(deps, task, attempt, options);
     if (intent !== null) {
-      setKillIntent(deps, task.task_id, attempt.attempt_id, intent);
+      setKillIntent(deps, task, attempt, intent);
       fireFailpoint("after_kill_intent_commit");
       deps.tmux.kill(attempt.tmux_session);
       return { task_id: task.task_id, action: "kill_intent_set" };
@@ -455,9 +476,15 @@ function processRunningTask(
     return null;
   }
 
+  // Worker pane is dead. Capture the OS-level exit observation once, here,
+  // before classifier cleanup deletes the marker file the wrapper wrote
+  // into the worktree. The captured pair is stamped onto the attempts
+  // row by whichever terminal path runs next.
+  const exitInfo = readExitInfo(deps, attempt.tmux_session, task.worktree_path);
+
   if (attempt.kill_intent === "wall_clock" || attempt.kill_intent === "stale") {
     const retryReason: BudgetRetryReason = attempt.kill_intent;
-    finalizeKillIntent(deps, task, attempt, retryReason);
+    finalizeKillIntent(deps, task, attempt, retryReason, exitInfo);
     return {
       task_id: task.task_id,
       action: retryReason === "wall_clock" ? "wall_clock_killed" : "stale_killed",
@@ -468,9 +495,25 @@ function processRunningTask(
     { ...deps, artifactStore: deps.artifactStore },
     ctxTask,
     ctxAttempt,
-    { sessionName: attempt.tmux_session, spawnWindow: false },
+    { sessionName: attempt.tmux_session, spawnWindow: false, exitInfo },
   );
   return outcomeToResult(task.task_id, res.outcome, false);
+}
+
+// Worker exit info is best-effort: a missing marker file (worker exec'd
+// itself, was killed before the wrapper's printf ran) should never block
+// the dead-worker path. EXIT_INFO_NONE leaves both columns NULL, which
+// is indistinguishable from a pre-migration row for downstream consumers.
+function readExitInfo(
+  deps: TickDeps,
+  sessionName: string,
+  worktreePath: string,
+): PaneExitInfo {
+  try {
+    return deps.tmux.getExitInfo(sessionName, worktreePath);
+  } catch {
+    return EXIT_INFO_NONE;
+  }
 }
 
 function outcomeToResult(
@@ -1344,28 +1387,49 @@ function detectKillIntent(
 
 function setKillIntent(
   deps: TickDeps,
-  taskId: string,
-  attemptId: number,
+  task: RunningTaskRow,
+  attempt: CurrentAttemptRow,
   intent: "wall_clock" | "stale",
 ): void {
   const now = deps.clock.nowISO();
+  // Spawned-at is non-null on every running attempt (promotion sets it
+  // before tmux_session); fall back to `now` defensively to keep the
+  // event_data fields populated even if invariants slip in the future.
+  const spawnedAt = attempt.spawned_at ?? now;
+  const spawnedSecondsAgo = Math.max(
+    0,
+    Math.floor((Date.parse(now) - Date.parse(spawnedAt)) / 1000),
+  );
+  // For stale, the operator's diagnostic question is "what was the most
+  // recent log byte mtime when we decided?" — captured here so the event
+  // row is self-sufficient without a separate journal lookup.
+  const lastLogAt =
+    intent === "stale" && attempt.tmux_session !== null
+      ? safeLogFreshness(deps, attempt.tmux_session, task.worktree_path, spawnedAt)
+      : null;
+  const eventData = JSON.stringify({
+    intent,
+    spawned_seconds_ago: spawnedSecondsAgo,
+    ...(lastLogAt !== null ? { last_log_at: lastLogAt } : {}),
+  });
   deps.db.exec("BEGIN");
   try {
     deps.db
       .query(
         `UPDATE attempts SET kill_intent = ? WHERE attempt_id = ? AND kill_intent IS NULL`,
       )
-      .run(intent, attemptId);
+      .run(intent, attempt.attempt_id);
     deps.db
       .query(
-        `INSERT INTO events (task_id, attempt_id, event_type, occurred_at)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT INTO events (task_id, attempt_id, event_type, occurred_at, event_data)
+         VALUES (?, ?, ?, ?, ?)`,
       )
       .run(
-        taskId,
-        attemptId,
+        task.task_id,
+        attempt.attempt_id,
         intent === "wall_clock" ? "wall_clock_exceeded" : "stale_detected",
         now,
+        eventData,
       );
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -1376,11 +1440,25 @@ function setKillIntent(
   }
 }
 
+function safeLogFreshness(
+  deps: TickDeps,
+  sessionName: string,
+  worktreePath: string,
+  spawnedAt: string,
+): string | null {
+  try {
+    return deps.tmux.logFreshness(sessionName, worktreePath, spawnedAt);
+  } catch {
+    return null;
+  }
+}
+
 function finalizeKillIntent(
   deps: TickDeps,
   task: RunningTaskRow,
   attempt: CurrentAttemptRow,
   reason: "wall_clock" | "stale",
+  exitInfo: PaneExitInfo,
 ): void {
   if (attempt.tmux_session) {
     try {
@@ -1399,6 +1477,14 @@ function finalizeKillIntent(
       }
     } catch {}
   }
+  // Best-effort usage + tool-trace capture. A wall-clock kill mid-run
+  // typically truncates `--output-format json` output (malformed
+  // envelope, dropped), but the streaming `--debug-file` log already
+  // has whatever events landed before the kill — so even killed
+  // attempts usually produce a useful tool_trace. Clean exits racing
+  // with a kill window produce a complete envelope and trace.
+  collectUsageArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
+  collectToolTraceArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
 
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");
@@ -1408,12 +1494,16 @@ function finalizeKillIntent(
         `UPDATE attempts
             SET exit_kind = ?,
                 ended_at = ?,
-                kill_intent = NULL
+                kill_intent = NULL,
+                exit_code = ?,
+                exit_signal = ?
           WHERE attempt_id = ? AND ended_at IS NULL`,
       )
       .run(
         reason === "wall_clock" ? "killed_wall_clock" : "killed_stale",
         now,
+        exitInfo.exitCode,
+        exitInfo.exitSignal,
         attempt.attempt_id,
       );
     scheduleDeterministicRetry(deps, {
@@ -1622,9 +1712,18 @@ function promoteAndSpawn(
   // spawn_failures_consecutive here (and not inside the promotion txn) is
   // load-bearing: a substrate failure between promotion and this point must
   // leave the consecutive counter intact so it can accumulate across ticks.
+  //
+  // agent_identity is captured here (alongside tmux_session) so a successful
+  // spawn always lands a non-NULL identity. The probe is in-process and
+  // self-bounded — it never throws, so a flaky binary cannot block tick.
+  const agentIdentity = probeAgentIdentity(agentInvocation);
   deps.db
-    .query(`UPDATE attempts SET tmux_session = ? WHERE attempt_id = ?`)
-    .run(sessionName, pending.attempt_id);
+    .query(
+      `UPDATE attempts
+          SET tmux_session = ?, agent_identity = ?
+        WHERE attempt_id = ?`,
+    )
+    .run(sessionName, agentIdentity, pending.attempt_id);
   deps.db
     .query(`UPDATE tasks SET spawn_failures_consecutive = 0 WHERE task_id = ?`)
     .run(task.task_id);

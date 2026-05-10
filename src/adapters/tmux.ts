@@ -26,20 +26,20 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import type {
-  ExitStatus,
-  TmuxPort,
-  TmuxSpawnInput,
-} from "../ports/tmux.ts";
+import { decodePaneStatus, EXIT_INFO_NONE } from "../core/exit_status.ts";
+import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 
 const PROMPT_FILE = ".quay-prompt.md";
 const SESSION_LOG_FILE = ".quay-session.log";
-// Worker exit-code marker. The agent invocation is wrapped so the inner
-// shell writes `$?` here after the agent exits and before the wrapper
-// itself exits (which is what tears the pane down). Absence of this file
-// after the session has died means the wrapper never reached the post-
-// agent step — typically because the whole pane was killed by signal —
-// which itself is signal worth surfacing.
+// Tool-call trace produced by the agent's debug stream when the operator
+// uses `--debug-file`. With the default agent invocation routing stdout
+// to `.quay-usage.json` and debug output to this file, the pane log can
+// stay empty for an entire run — so freshness must consider this file
+// too or stale-kill fires on healthy long-running attempts.
+const TOOL_TRACE_FILE = ".quay-tool-trace.log";
+// Per-attempt exit-status marker written by the spawn wrapper. Holds the
+// worker shell's `$?` as plain decimal text. Treated identically to
+// other `.quay-*` files by the spawn preflight sweep.
 const EXIT_CODE_FILE = ".quay-exit-code";
 // Marker for direct children of the worktree root that belong to a previous
 // Quay attempt. Anything matching this prefix is sweep-eligible at spawn
@@ -70,21 +70,19 @@ export class TmuxAdapter implements TmuxPort {
       "{prompt_file}",
       shellQuote(promptFile),
     );
-    // Wrap so the inner shell records the agent's exit status to
-    // `<worktree>/.quay-exit-code` after the agent exits and before the
-    // wrapper itself returns. The pane still dies once the wrapper
-    // returns (`tmux has-session` liveness probe is preserved); the
-    // small post-agent step adds milliseconds and converts an opaque
-    // silent exit into a single-byte ground-truth artifact. POSIX `$?`
-    // is the agent's literal exit status (0–255 for normal exit; 128+N
-    // for signals) — adapter-side readers translate the 128+N range to
-    // a signal name.
-    //
-    // `exec sh -c '...'` ensures only one wrapper shell is alive in the
-    // pane at any time (tmux's outer sh exec's into our inner sh, which
-    // runs the wrapped command and exits).
+    // Wrap the worker so the shell writes its terminal `$?` to
+    // `<worktree>/.quay-exit-code` before the pane goes away. POSIX `$?`
+    // for a child terminated by signal N is 128+N, so the single integer
+    // captures both normal exits (0–127) and signaled exits (≥128); the
+    // classifier decodes it. Two corner cases produce no marker file
+    // (and thus a NULL/NULL row downstream): the agent_invocation uses
+    // `exec` to replace the wrapper shell, or the wrapper itself is
+    // killed before the trailing `printf` runs. We outer-`exec` into the
+    // wrapper so the pane has a single shell process rather than two
+    // nested ones — matching the prior session-exit semantics that
+    // `has-session` liveness depends on.
     const exitCodeFile = join(input.worktreePath, EXIT_CODE_FILE);
-    const wrapped = `${expanded} ; printf %s "$?" > ${shellQuote(exitCodeFile)}`;
+    const wrapped = `${expanded}\nstatus=$?\nprintf '%d' "$status" > ${shellQuote(exitCodeFile)}\nexit "$status"`;
     const tmuxCommand = `exec sh -c ${shellQuote(wrapped)}`;
 
     // Step 1: create session with a placeholder command that keeps the
@@ -221,6 +219,25 @@ export class TmuxAdapter implements TmuxPort {
     });
   }
 
+  getExitInfo(_sessionName: string, worktreePath: string): PaneExitInfo {
+    // The spawn wrapper writes the worker shell's `$?` to
+    // `<worktreePath>/.quay-exit-code` before the pane terminates. We
+    // chose this over reading tmux's `#{pane_dead_status}` /
+    // `#{pane_dead_signo}` formatters because tmux 3.6a on macOS
+    // (and other versions) returns empty strings for signaled exits —
+    // making native capture unreliable for the "killed by SIGKILL"
+    // hypothesis the column exists to discriminate.
+    const path = join(worktreePath, EXIT_CODE_FILE);
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch {
+      return EXIT_INFO_NONE;
+    }
+    const status = parseIntOrNull(raw);
+    return decodePaneStatus(status, null);
+  }
+
   collectLog(_sessionName: string, worktreePath: string): string | null {
     // The pipe-pane configured at spawn writes every byte the agent prints
     // to <worktreePath>/.quay-session.log. Survives the session's death
@@ -277,107 +294,50 @@ export class TmuxAdapter implements TmuxPort {
     worktreePath: string,
     spawnedAt: string,
   ): string {
-    // The log mtime is the freshness signal: stale-kill fires when the
-    // most recent output is older than `staleness_threshold_seconds`. For
-    // a freshly spawned worker that hasn't written anything yet, no log
-    // file exists; fall back to spawned_at so the freshness window starts
-    // from spawn (not from epoch).
-    const logPath = join(worktreePath, SESSION_LOG_FILE);
-    let stat;
-    try {
-      stat = statSync(logPath);
-    } catch {
-      return spawnedAt;
+    // The freshness signal is the maximum mtime across every observability
+    // file the worker may be writing: the pane log captured by pipe-pane
+    // and (since the default invocation pipes stdout/debug elsewhere) the
+    // tool-trace file written by `--debug-file`. Without including the
+    // trace, an attempt that produces only debug output stale-kills past
+    // `staleness_threshold_seconds` even when actively making tool calls.
+    // Empty / missing files contribute nothing; if no file has any bytes
+    // yet, we fall back to spawned_at so the staleness window starts from
+    // spawn rather than epoch.
+    let freshestMs: number | null = null;
+    for (const name of [SESSION_LOG_FILE, TOOL_TRACE_FILE]) {
+      let stat;
+      try {
+        stat = statSync(join(worktreePath, name));
+      } catch {
+        continue;
+      }
+      if (stat.size === 0) continue;
+      if (freshestMs === null || stat.mtimeMs > freshestMs) {
+        freshestMs = stat.mtimeMs;
+      }
     }
-    // Empty log file (pipe-pane created it but nothing has been printed
-    // yet): same case as "no log yet" — use spawned_at as the floor.
-    if (stat.size === 0) return spawnedAt;
-    return new Date(stat.mtimeMs).toISOString();
+    if (freshestMs === null) return spawnedAt;
+    return new Date(freshestMs).toISOString();
   }
 
-  collectExitStatus(
-    _sessionName: string,
-    worktreePath: string,
-  ): ExitStatus | null {
-    // The spawn wrapper writes `$?` (the agent's exit status as the
-    // shell saw it) to <worktreePath>/.quay-exit-code right before the
-    // wrapper itself exits. Three cases at read time:
-    //
-    //   1. File present, parseable as 0–127 → clean exit with that code.
-    //   2. File present, parseable as 128+N → the agent was killed by
-    //      signal N. POSIX `$?` reports `128 + signum` for signaled
-    //      children; we translate to a SIG<name> string.
-    //   3. File absent or unparseable → return null. Absence typically
-    //      means the *whole* pane was killed (cgroup reap, tmux kill,
-    //      OOM) before the wrapper's post-agent step could run; the
-    //      classifier surfaces that as no exit_status artifact, which
-    //      itself discriminates "wrapper-observed exit" from "external
-    //      kill" in triage.
-    const path = join(worktreePath, EXIT_CODE_FILE);
-    let raw: string;
-    try {
-      raw = readFileSync(path, "utf8").trim();
-    } catch {
-      return null;
-    }
-    // Strict digit-only match. `Number.parseInt` would silently accept
-    // trailing junk ("42garbage" → 42); the wrapper writes a clean
-    // `printf %s "$?"` today, but the parser shouldn't disagree with
-    // itself by rejecting unparseable content while accepting
-    // partially-parseable content.
-    if (!/^\d+$/.test(raw)) return null;
-    const rawStatus = Number(raw);
-    if (rawStatus > 255) return null;
-    if (rawStatus >= 128 && rawStatus <= 128 + 64) {
-      const signum = rawStatus - 128;
-      return {
-        rawStatus,
-        exitCode: null,
-        signalName: signalName(signum),
-      };
-    }
-    return { rawStatus, exitCode: rawStatus, signalName: null };
-  }
-}
-
-// POSIX/Linux signal names. macOS overlaps for the common signals
-// (SIGHUP/SIGINT/SIGQUIT/SIGILL/SIGTRAP/SIGABRT/SIGKILL/SIGSEGV/SIGPIPE/
-// SIGALRM/SIGTERM); the few that diverge (SIGUSR1/2, SIGCHLD, SIGCONT,
-// SIGSTOP, SIGTSTP) decode to their Linux meaning here, which matches
-// the deployment target. For unknown numbers we return `SIG<n>` so the
-// raw integer survives in triage.
-const SIGNAL_NAMES: Record<number, string> = {
-  1: "SIGHUP",
-  2: "SIGINT",
-  3: "SIGQUIT",
-  4: "SIGILL",
-  5: "SIGTRAP",
-  6: "SIGABRT",
-  7: "SIGBUS",
-  8: "SIGFPE",
-  9: "SIGKILL",
-  10: "SIGUSR1",
-  11: "SIGSEGV",
-  12: "SIGUSR2",
-  13: "SIGPIPE",
-  14: "SIGALRM",
-  15: "SIGTERM",
-  17: "SIGCHLD",
-  18: "SIGCONT",
-  19: "SIGSTOP",
-  20: "SIGTSTP",
-  24: "SIGXCPU",
-  25: "SIGXFSZ",
-};
-
-function signalName(signum: number): string {
-  return SIGNAL_NAMES[signum] ?? `SIG${signum}`;
 }
 
 // POSIX-shell single-quote escaping. Any single-quote in the input is closed,
 // escaped with `'\''`, and reopened.
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+// Parses a tmux format substitution into a number. Returns null for the
+// empty string (older tmux that doesn't recognise the format key
+// substitutes empty, not the literal `#{...}`) and for any non-numeric
+// payload, so the decoder can treat "no observation" uniformly.
+function parseIntOrNull(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  if (!/^-?\d+$/.test(trimmed)) return null;
+  return Number.parseInt(trimmed, 10);
 }
 
 // Files whose stale presence directly drives the bug the sweep exists to
@@ -387,8 +347,8 @@ function shellQuote(s: string): string {
 // would be misread as the current attempt's exit status — and in the
 // exact silent-exit case the wrapper is built to diagnose, the wrapper
 // never overwrites the file, so the previous attempt's `$?` would be
-// persisted as this attempt's `exit_status` artifact and actively
-// poison triage. Failing to remove any of these is treated as a hard
+// stamped onto this attempt's `attempts.exit_code`/`exit_signal` columns
+// and actively poison triage. Failing to remove any of these is treated as a hard
 // spawn failure so the spawn-substrate-failed path takes over (same
 // semantics as a `pipe-pane` failure) — silently proceeding would
 // reintroduce the exact bugs this sweep prevents.

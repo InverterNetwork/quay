@@ -23,8 +23,11 @@ import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort } from "../ports/github.ts";
-import type { TmuxPort } from "../ports/tmux.ts";
+import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
+import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import { collectToolTraceArtifact } from "./tool_trace.ts";
+import { collectUsageArtifact } from "./usage.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
 
 export type CancelErrorCode = "unknown_task" | "wrong_state";
@@ -261,24 +264,37 @@ export function runCancelFinalizer(deps: CancelDeps, taskId: string): void {
   // Step 1: ensure no live worker. For `running` attempts kill the canonical
   // session (or the recorded tmux_session when set). For non-running states
   // there's no live attempt — this is a no-op.
+  //
+  // Capture the OS-level exit observation around the kill: if the worker
+  // was already dead by the time cancel arrived, the pane's recorded exit
+  // info is informative; once we issue our own kill, tmux destroys the
+  // session and the info is unreadable. Best-effort either way — failure
+  // leaves the pair NULL/NULL on the killed_cancel row.
   const latest = loadLatestAttempt(deps.db, taskId);
+  let exitInfo: PaneExitInfo = EXIT_INFO_NONE;
   if (latest !== null && row.state === "running") {
     const session =
       latest.tmux_session ??
       `quay-task-${row.tmux_id}-${latest.attempt_number}`;
     try {
-      if (deps.tmux.isAlive(session)) {
-        deps.tmux.kill(session);
-      } else {
-        // Defensive idempotent kill — fake's `kill` is a no-op for missing
-        // sessions, so this is safe.
-        deps.tmux.kill(session);
+      if (!deps.tmux.isAlive(session)) {
+        try {
+          exitInfo = deps.tmux.getExitInfo(session, row.worktree_path);
+        } catch {}
       }
+    } catch {}
+    try {
+      deps.tmux.kill(session);
     } catch {}
   }
 
-  // Step 2: best-effort session-log capture. Done inside try/catch — failures
-  // do not block terminal convergence.
+  // Step 2: best-effort session-log + usage capture. Done inside
+  // try/catch — failures do not block terminal convergence. The usage
+  // envelope is rarely complete when cancel arrives (claude
+  // `--output-format json` only writes at clean exit, and cancel
+  // typically kills mid-run), but capturing when present means a
+  // late-arriving cancel against an already-finished worker still
+  // links the row to its usage artifact.
   if (latest !== null) {
     try {
       const sessionName =
@@ -300,6 +316,8 @@ export function runCancelFinalizer(deps: CancelDeps, taskId: string): void {
         }
       }
     } catch {}
+    collectUsageArtifact(deps, taskId, latest.attempt_id, row.worktree_path);
+    collectToolTraceArtifact(deps, taskId, latest.attempt_id, row.worktree_path);
   }
 
   // Step 3: cleanup matrix per §5. Substrate failures are logged-and-continue;
@@ -307,7 +325,7 @@ export function runCancelFinalizer(deps: CancelDeps, taskId: string): void {
   applyCleanupMatrix(deps, row);
 
   // Step 4: atomic terminal transition.
-  commitTerminal(deps, row, latest);
+  commitTerminal(deps, row, latest, exitInfo);
 }
 
 function applyCleanupMatrix(deps: CancelDeps, row: TaskRow): void {
@@ -368,6 +386,7 @@ function commitTerminal(
   deps: CancelDeps,
   row: TaskRow,
   latest: AttemptRow | null,
+  exitInfo: PaneExitInfo,
 ): void {
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN IMMEDIATE");
@@ -402,10 +421,17 @@ function commitTerminal(
           `UPDATE attempts
               SET exit_kind = 'killed_cancel',
                   ended_at = ?,
-                  kill_intent = NULL
+                  kill_intent = NULL,
+                  exit_code = ?,
+                  exit_signal = ?
             WHERE attempt_id = ? AND ended_at IS NULL`,
         )
-        .run(now, latest.attempt_id);
+        .run(
+          now,
+          exitInfo.exitCode,
+          exitInfo.exitSignal,
+          latest.attempt_id,
+        );
       // Always clear kill_intent on the latest attempt — even a terminated
       // one — so a stale `kill_intent = 'cancel'` doesn't linger.
       deps.db

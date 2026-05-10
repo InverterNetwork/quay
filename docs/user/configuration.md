@@ -22,7 +22,7 @@ repos_root = "/var/lib/quay/repos"
 worktree_root = "/var/lib/quay/worktrees"
 max_concurrent = 2
 retry_budget = 5
-agent_invocation = "claude --permission-mode bypassPermissions < {prompt_file}"
+agent_invocation = "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json"
 max_attempt_duration_seconds = 3600
 staleness_threshold_seconds = 600
 max_spawn_failures = 3
@@ -51,7 +51,7 @@ max_thread_messages = 200
 | `worktree_root` | `${data_dir}/worktrees` | Quay creates the derived default. |
 | `max_concurrent` | `2` | Maximum running tasks promoted by tick. |
 | `retry_budget` | `5` | Copied onto new tasks at enqueue time. |
-| `agent_invocation` | `claude --permission-mode bypassPermissions < {prompt_file}` | Shell command used inside tmux. |
+| `agent_invocation` | `claude … --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json` (see `Agent Invocation` below) | Shell command used inside tmux. The default writes a `usage` envelope to `.quay-usage.json` and a `tool_trace` debug log to `.quay-tool-trace.log`; both are captured as per-attempt artifacts. |
 | `max_attempt_duration_seconds` | `3600` | Live worker wall-clock kill threshold. |
 | `staleness_threshold_seconds` | `600` | Live worker no-fresh-log kill threshold. |
 | `max_spawn_failures` | `3` | Repeated spawn failures before `worktree_error`. |
@@ -70,11 +70,23 @@ shell-quoted prompt path.
 Examples:
 
 ```toml
-agent_invocation = "claude --permission-mode bypassPermissions < {prompt_file}"
+agent_invocation = "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json"
 agent_invocation = "my-agent run --prompt {prompt_file}"
 ```
 
 The command runs inside the task worktree.
+
+The default invocation writes two worktree-local files which Quay captures as
+per-attempt artifacts:
+
+- `.quay-usage.json` — the JSON envelope claude prints under `--output-format
+  json`. Captured as the `usage` artifact (`quay artifact get <task_id> usage`).
+- `.quay-tool-trace.log` — the debug stream from `--debug --debug-file`.
+  Captured as the `tool_trace` artifact (`quay artifact get <task_id> tool_trace`).
+
+If you replace the default with a different agent runtime, write the same two
+filenames (or omit the redirects to skip those captures). Quay reads the files
+by name, not by runtime.
 
 ## Repos Root Behavior
 

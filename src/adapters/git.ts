@@ -4,13 +4,21 @@
 // names cannot smuggle metacharacters into the command line.
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { GitPort } from "../ports/git.ts";
+import type { DiffSummary, DiffSummaryFile, GitPort } from "../ports/git.ts";
 
 interface RunResult {
   exitCode: number;
   stdout: string;
   stderr: string;
 }
+
+// Per-file array cap on diff_summary capture. A monorepo PR touching
+// thousands of files would otherwise persist a multi-megabyte JSON blob
+// inline on the attempts row. 200 keeps the column compact for the
+// common case while still showing the head of the path list for
+// inspection. Aggregates (files_changed, insertions, deletions) are
+// computed before truncation and reflect the full diff.
+const MAX_DIFF_FILES = 200;
 
 export class LocalGitAdapter implements GitPort {
   constructor(private readonly reposRoot: string) {}
@@ -362,6 +370,97 @@ export class LocalGitAdapter implements GitPort {
       "--delete",
       branch,
     ]);
+  }
+
+  diffSummary(
+    repoId: string,
+    baseSha: string,
+    headSha: string,
+  ): DiffSummary | null {
+    // --no-renames so numstat and name-status agree on paths: a renamed
+    // file shows as a delete + add in both, instead of name-status
+    // emitting "Rxx old new" while numstat collapses it onto one line
+    // with a "{old => new}" path. v1 doesn't try to reunify renames; the
+    // delete+add split is good enough for the lines-changed query usecase.
+    //
+    // -c core.quotePath=false keeps non-ASCII filenames literal — without
+    // it git emits octal-escaped quoted strings like "caf\303\251.txt"
+    // and downstream consumers can't index by the actual on-disk path.
+    const range = `${baseSha}..${headSha}`;
+    const numstatRes = runIn(this.bareDir(repoId), [
+      "git",
+      "-c",
+      "core.quotePath=false",
+      "diff",
+      "--no-renames",
+      "--numstat",
+      range,
+    ]);
+    if (numstatRes.exitCode !== 0) return null;
+    const nameStatusRes = runIn(this.bareDir(repoId), [
+      "git",
+      "-c",
+      "core.quotePath=false",
+      "diff",
+      "--no-renames",
+      "--name-status",
+      range,
+    ]);
+    if (nameStatusRes.exitCode !== 0) return null;
+
+    const statusByPath = new Map<string, string>();
+    for (const line of nameStatusRes.stdout.split("\n")) {
+      if (line === "") continue;
+      const cols = line.split("\t");
+      if (cols.length < 2) continue;
+      const status = cols[0]!.charAt(0);
+      const path = cols[cols.length - 1]!;
+      statusByPath.set(path, status);
+    }
+
+    const files: DiffSummaryFile[] = [];
+    let insertions = 0;
+    let deletions = 0;
+    for (const line of numstatRes.stdout.split("\n")) {
+      if (line === "") continue;
+      const cols = line.split("\t");
+      if (cols.length < 3) continue;
+      const insCol = cols[0]!;
+      const delCol = cols[1]!;
+      const path = cols.slice(2).join("\t");
+      const ins = insCol === "-" ? null : parseInt(insCol, 10);
+      const del = delCol === "-" ? null : parseInt(delCol, 10);
+      if (ins !== null && Number.isFinite(ins)) insertions += ins;
+      if (del !== null && Number.isFinite(del)) deletions += del;
+      files.push({
+        path,
+        status: statusByPath.get(path) ?? "M",
+        ins: ins !== null && Number.isFinite(ins) ? ins : null,
+        del: del !== null && Number.isFinite(del) ? del : null,
+      });
+    }
+
+    // Truncate the per-file array on monorepo-scale diffs to keep the
+    // attempts row compact (TEXT column read on every list query).
+    // Aggregates are computed BEFORE truncation so they remain accurate;
+    // the truncation marker tells consumers the array is partial. The
+    // first MAX_DIFF_FILES entries are kept — the order matches git's
+    // output, which is alphabetical-ish; for a monorepo touch the head
+    // is as useful as any other slice and avoids needing to score files.
+    const totalFilesChanged = files.length;
+    let truncated = false;
+    let kept = files;
+    if (files.length > MAX_DIFF_FILES) {
+      kept = files.slice(0, MAX_DIFF_FILES);
+      truncated = true;
+    }
+    return {
+      files_changed: totalFilesChanged,
+      insertions,
+      deletions,
+      files: kept,
+      ...(truncated ? { truncated: true } : {}),
+    };
   }
 
   private bareDir(repoId: string): string {
