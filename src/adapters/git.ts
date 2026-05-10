@@ -4,7 +4,7 @@
 // names cannot smuggle metacharacters into the command line.
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { GitPort } from "../ports/git.ts";
+import type { DiffSummary, DiffSummaryFile, GitPort } from "../ports/git.ts";
 
 interface RunResult {
   exitCode: number;
@@ -362,6 +362,73 @@ export class LocalGitAdapter implements GitPort {
       "--delete",
       branch,
     ]);
+  }
+
+  diffSummary(
+    repoId: string,
+    baseSha: string,
+    headSha: string,
+  ): DiffSummary | null {
+    // --no-renames so numstat and name-status agree on paths: a renamed
+    // file shows as a delete + add in both, instead of name-status
+    // emitting "Rxx old new" while numstat collapses it onto one line
+    // with a "{old => new}" path. v1 doesn't try to reunify renames; the
+    // delete+add split is good enough for the lines-changed query usecase.
+    const range = `${baseSha}..${headSha}`;
+    const numstatRes = runIn(this.bareDir(repoId), [
+      "git",
+      "diff",
+      "--no-renames",
+      "--numstat",
+      range,
+    ]);
+    if (numstatRes.exitCode !== 0) return null;
+    const nameStatusRes = runIn(this.bareDir(repoId), [
+      "git",
+      "diff",
+      "--no-renames",
+      "--name-status",
+      range,
+    ]);
+    if (nameStatusRes.exitCode !== 0) return null;
+
+    const statusByPath = new Map<string, string>();
+    for (const line of nameStatusRes.stdout.split("\n")) {
+      if (line === "") continue;
+      const cols = line.split("\t");
+      if (cols.length < 2) continue;
+      const status = cols[0]!.charAt(0);
+      const path = cols[cols.length - 1]!;
+      statusByPath.set(path, status);
+    }
+
+    const files: DiffSummaryFile[] = [];
+    let insertions = 0;
+    let deletions = 0;
+    for (const line of numstatRes.stdout.split("\n")) {
+      if (line === "") continue;
+      const cols = line.split("\t");
+      if (cols.length < 3) continue;
+      const insCol = cols[0]!;
+      const delCol = cols[1]!;
+      const path = cols.slice(2).join("\t");
+      const ins = insCol === "-" ? null : parseInt(insCol, 10);
+      const del = delCol === "-" ? null : parseInt(delCol, 10);
+      if (ins !== null && Number.isFinite(ins)) insertions += ins;
+      if (del !== null && Number.isFinite(del)) deletions += del;
+      files.push({
+        path,
+        status: statusByPath.get(path) ?? "M",
+        ins: ins !== null && Number.isFinite(ins) ? ins : null,
+        del: del !== null && Number.isFinite(del) ? del : null,
+      });
+    }
+    return {
+      files_changed: files.length,
+      insertions,
+      deletions,
+      files,
+    };
   }
 
   private bareDir(repoId: string): string {

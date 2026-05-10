@@ -497,13 +497,65 @@ function transitionPrOpened(
       )
       .run(task.task_id, attempt.attempt_id, now);
     deps.db.exec("COMMIT");
-    return { outcome: "pr_opened" };
   } catch (err) {
     try {
       deps.db.exec("ROLLBACK");
     } catch {}
     throw err;
   }
+
+  captureDiffSummary(deps, task, attempt, remoteShaAtExit);
+  return { outcome: "pr_opened" };
+}
+
+// Best-effort lines-changed capture between `remote_sha_at_spawn` and
+// `remote_sha_at_exit`. Runs after the transition has committed so a slow
+// or failing git invocation never blocks the state machine. Failure leaves
+// `attempts.diff_summary` NULL and emits a `tick_error` event so retro
+// analysis can tell "no diff captured (capture failed)" apart from "no
+// diff produced (column populated with zero-files JSON)".
+function captureDiffSummary(
+  deps: ClassifierDeps,
+  task: ClassifyContextTask,
+  attempt: ClassifyContextAttempt,
+  remoteShaAtExit: string | null,
+): void {
+  const baseSha = attempt.remote_sha_at_spawn;
+  if (
+    baseSha === null ||
+    remoteShaAtExit === null ||
+    baseSha === remoteShaAtExit
+  ) {
+    return;
+  }
+  let summary;
+  try {
+    summary = deps.git.diffSummary(task.repo_id, baseSha, remoteShaAtExit);
+  } catch {
+    summary = null;
+  }
+  if (summary !== null) {
+    try {
+      deps.db
+        .query(`UPDATE attempts SET diff_summary = ? WHERE attempt_id = ?`)
+        .run(JSON.stringify(summary), attempt.attempt_id);
+    } catch {}
+    return;
+  }
+  try {
+    const eventData = JSON.stringify({
+      capture: "diff_summary",
+      base_sha: baseSha,
+      head_sha: remoteShaAtExit,
+    });
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, occurred_at, event_data
+         ) VALUES (?, ?, 'tick_error', ?, ?)`,
+      )
+      .run(task.task_id, attempt.attempt_id, deps.clock.nowISO(), eventData);
+  } catch {}
 }
 
 function scheduleCrashRetry(
