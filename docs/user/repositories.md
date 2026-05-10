@@ -159,9 +159,11 @@ quay repo apply-tags myrepo --from ./tags.json
 quay repo apply-tags myrepo --from -    # read from stdin
 ```
 
-`namespace` and `value` must each match `[a-z0-9-]+`. Passing
-`{"namespaces": {}}` clears the repo's vocabulary entirely, returning the
-repo to the unenforced state.
+`namespace` must match `[a-z0-9]+` (no dashes — the validator splits ticket
+tags on the first dash, so a dashed namespace would be unaddressable).
+`value` may use the full `[a-z0-9-]+` charset. Passing `{"namespaces": {}}`
+clears the repo's vocabulary entirely, returning the repo to the
+unenforced state.
 
 ## Remove A Repo
 

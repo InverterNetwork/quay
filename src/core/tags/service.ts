@@ -200,14 +200,20 @@ export function createTagService({
       ).run(scope, repoId, namespace, value);
       return;
     }
-    db.query(
+    // Wrap the two DELETEs so a mid-flight failure can't leave the meta row
+    // orphaned without its values (the apply path uses the same pattern).
+    const deleteValues = db.query(
       `DELETE FROM tag_namespaces
         WHERE scope = ? AND repo_id IS ? AND namespace = ?`,
-    ).run(scope, repoId, namespace);
-    db.query(
+    );
+    const deleteMeta = db.query(
       `DELETE FROM tag_namespace_meta
         WHERE scope = ? AND repo_id IS ? AND namespace = ?`,
-    ).run(scope, repoId, namespace);
+    );
+    db.transaction(() => {
+      deleteValues.run(scope, repoId, namespace);
+      deleteMeta.run(scope, repoId, namespace);
+    })();
   }
 
   function setRequired(

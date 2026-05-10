@@ -192,9 +192,9 @@ const COMMANDS: Record<string, CommandSpec> = {
     synopsis: "quay repo set-tags <repo_id> --namespace <name> --value <v>",
     summary: "Add a value to a tag namespace for a repo (idempotent).",
     details:
-      "Namespaces and values must match [a-z0-9-]+. Running the same command twice is safe — duplicate pairs are silently ignored.",
+      "Namespaces must match [a-z0-9]+ (no dashes — the validator splits ticket tags on the first dash). Values may use [a-z0-9-]+. Running the same command twice is safe — duplicate pairs are silently ignored.",
     flags: [
-      { flag: "--namespace <name>", desc: "Namespace identifier (required). Must match [a-z0-9-]+." },
+      { flag: "--namespace <name>", desc: "Namespace identifier (required). Must match [a-z0-9]+." },
       { flag: "--value <v>", desc: "Value to add to the namespace (required). Must match [a-z0-9-]+." },
     ],
   },
@@ -244,9 +244,9 @@ const COMMANDS: Record<string, CommandSpec> = {
     synopsis: "quay tags set-deployment --namespace <name> --value <v>",
     summary: "Add a value to a deployment-scoped tag namespace (idempotent).",
     details:
-      "Namespaces and values must match [a-z0-9-]+. Running the same command twice is safe — duplicate pairs are silently ignored.",
+      "Namespaces must match [a-z0-9]+ (no dashes — the validator splits ticket tags on the first dash). Values may use [a-z0-9-]+. Running the same command twice is safe — duplicate pairs are silently ignored.",
     flags: [
-      { flag: "--namespace <name>", desc: "Namespace identifier (required). Must match [a-z0-9-]+." },
+      { flag: "--namespace <name>", desc: "Namespace identifier (required). Must match [a-z0-9]+." },
       { flag: "--value <v>", desc: "Value to add to the namespace (required). Must match [a-z0-9-]+." },
     ],
   },

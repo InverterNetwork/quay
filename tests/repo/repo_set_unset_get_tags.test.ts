@@ -272,3 +272,59 @@ test("help flag works for set-tags, unset-tags, get-tags", async () => {
     expect(io.out()).toContain("Usage:");
   }
 });
+
+test("unknown flag is rejected on every repo tag subcommand", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  insertRepo(h.db, "repo-a");
+
+  const cases: Array<string[]> = [
+    ["repo", "set-tags", "repo-a", "--namespace", "area", "--value", "v", "--frce"],
+    ["repo", "unset-tags", "repo-a", "--namespace", "area", "--value", "v", "--frce"],
+    ["repo", "get-tags", "repo-a", "--frce"],
+    ["repo", "apply-tags", "repo-a", "--from", "/tmp/x", "--frce"],
+  ];
+  for (const argv of cases) {
+    const io = bufferIO();
+    const result = await dispatch(argv, built.deps, io);
+    expect(result.exitCode).toBe(1);
+    const err = JSON.parse(io.err());
+    expect(err.error).toBe("usage_error");
+  }
+});
+
+test("unset-tags refuses to whole-namespace-delete on a --value typo", async () => {
+  // The original blocking concern: `--vale bonding-curve` (typo) without flag
+  // validation would silently fall through to the namespace-delete path,
+  // wiping every value in the namespace.
+  h = createHarness();
+  const built = buildCliDeps(h);
+  insertRepo(h.db, "repo-a");
+
+  await dispatch(
+    ["repo", "set-tags", "repo-a", "--namespace", "area", "--value", "bonding-curve"],
+    built.deps,
+    bufferIO(),
+  );
+  await dispatch(
+    ["repo", "set-tags", "repo-a", "--namespace", "area", "--value", "vesting"],
+    built.deps,
+    bufferIO(),
+  );
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["repo", "unset-tags", "repo-a", "--namespace", "area", "--vale", "bonding-curve"],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err());
+  expect(err.error).toBe("usage_error");
+
+  // Both values must still be present.
+  const getIo = bufferIO();
+  await dispatch(["repo", "get-tags", "repo-a"], built.deps, getIo);
+  const got = JSON.parse(getIo.out());
+  expect(got.namespaces.area.values).toEqual(["bonding-curve", "vesting"]);
+});

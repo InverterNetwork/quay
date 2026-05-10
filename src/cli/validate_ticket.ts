@@ -170,17 +170,18 @@ function enforceRepoVocab(
   if (lookup === undefined) return [];
   const repoId = payload["repo"];
   if (typeof repoId !== "string" || repoId === "") return [];
-  // Skip when `tags` is structurally wrong: the schema validator already
-  // flagged it, and our index-keyed errors would overlay arbitrary fields.
-  // Per-item type errors are tolerated below (validateTagVocab passes
-  // non-strings through without emitting a vocab error so the original
-  // indices stay aligned with the base validator's tags[i] paths).
-  const tagsRaw = payload["tags"];
-  if (!Array.isArray(tagsRaw)) return [];
   const context = lookup(repoId);
   if (context === null) return [];
   const merged = mergeVocab(context.deployment, context.perRepo);
-  return validateTagVocab(tagsRaw, merged);
+  // Treat structurally-wrong `tags` (missing or non-array) as empty: the
+  // schema validator handles the TYPE/MISSING report, and required-namespace
+  // checks still fire (bare `tags` field, no index-shift concern) so the
+  // user sees both classes of error in one round-trip. Non-string array
+  // entries are tolerated inside validateTagVocab so per-tag indices stay
+  // aligned with the base validator's tags[i] paths.
+  const tagsRaw = payload["tags"];
+  const tags = Array.isArray(tagsRaw) ? tagsRaw : [];
+  return validateTagVocab(tags, merged);
 }
 
 interface ParsedFlags {

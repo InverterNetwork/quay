@@ -683,6 +683,10 @@ function handleRepoSetTags(
   tagService: TagService,
   io: CliIO,
 ): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--namespace", "--value"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
   const repoId = positional(argv);
   if (!repoId) {
     return writeError(io, "usage_error", "repo set-tags requires <repo_id>");
@@ -708,6 +712,13 @@ function handleRepoUnsetTags(
   tagService: TagService,
   io: CliIO,
 ): DispatchResult {
+  // A typo on `--value` (e.g. `--vale`) without flag validation falls through
+  // to the whole-namespace deletion path, silently destroying the entire
+  // namespace + its required-flag.
+  const validation = validateFlags(argv, { valued: ["--namespace", "--value"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
   const repoId = positional(argv);
   if (!repoId) {
     return writeError(io, "usage_error", "repo unset-tags requires <repo_id>");
@@ -733,6 +744,10 @@ function handleRepoGetTags(
   tagService: TagService,
   io: CliIO,
 ): DispatchResult {
+  const validation = validateFlags(argv, {});
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
   const repoId = positional(argv);
   if (!repoId) {
     return writeError(io, "usage_error", "repo get-tags requires <repo_id>");
@@ -747,6 +762,10 @@ function handleRepoApplyTags(
   tagService: TagService,
   io: CliIO,
 ): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--from"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
   const repoId = positional(argv);
   if (!repoId) {
     return writeError(io, "usage_error", "repo apply-tags requires <repo_id>");

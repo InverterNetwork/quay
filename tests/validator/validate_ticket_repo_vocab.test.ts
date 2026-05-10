@@ -270,6 +270,48 @@ test("no lookup wired → existing v0 behavior preserved", () => {
   expect(JSON.parse(io.out().trim())).toEqual({ valid: true });
 });
 
+test("required-missing fires even when tags is the wrong type", () => {
+  // Without this, the user sees the TYPE error for `tags`, fixes it, then
+  // discovers required-namespace errors on the second submission. Bare
+  // `tags` field has no index-shift concern, so we can emit both at once.
+  h = createHarness();
+  const built = buildCliDeps(h);
+  insertRepo(h.db, "repo-a");
+  built.deps.tagService.apply("repo", "repo-a", {
+    area: { values: ["bonding-curve"], required: true },
+  });
+
+  const { io, result } = runValidate({
+    payload: { ...BASE_PAYLOAD, tags: "oops" as unknown as string[] },
+    tagService: built.deps.tagService,
+  });
+  expect(result.exitCode).toBe(1);
+  const out = JSON.parse(io.out().trim());
+  const codes = out.errors.map((e: { code: string }) => e.code);
+  expect(codes).toContain("TYPE");
+  expect(codes).toContain("TAG_REQUIRED_MISSING");
+});
+
+test("required-missing fires even when tags is missing entirely", () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  insertRepo(h.db, "repo-a");
+  built.deps.tagService.apply("repo", "repo-a", {
+    area: { values: ["bonding-curve"], required: true },
+  });
+
+  const { tags: _omitted, ...withoutTags } = BASE_PAYLOAD;
+  const { io, result } = runValidate({
+    payload: withoutTags,
+    tagService: built.deps.tagService,
+  });
+  expect(result.exitCode).toBe(1);
+  const out = JSON.parse(io.out().trim());
+  const codes = out.errors.map((e: { code: string }) => e.code);
+  expect(codes).toContain("MISSING");
+  expect(codes).toContain("TAG_REQUIRED_MISSING");
+});
+
 test("non-string tags don't shift vocab error indices", () => {
   h = createHarness();
   const built = buildCliDeps(h);
