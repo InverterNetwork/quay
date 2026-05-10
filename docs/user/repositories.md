@@ -130,7 +130,12 @@ quay repo unset-tags myrepo --namespace risk
 
 `set-tags` is idempotent (re-adding an existing pair is a no-op).
 `unset-tags` without `--value` removes the entire namespace, including its
-required flag.
+required flag. `unset-tags` with `--value` that drains the last value of a
+required namespace also clears the required flag — the alternative would
+brick the repo with a permanently unsatisfiable `TAG_REQUIRED_MISSING`.
+
+A required namespace must always have at least one value. `apply-tags` and
+`tags import` both reject `{values: [], required: true}` at write time.
 
 ### Declarative reconciliation
 

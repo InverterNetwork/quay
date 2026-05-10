@@ -10,12 +10,19 @@ export interface ImportPlan {
   needsForce: boolean;
 }
 
+// Mirror the unsatisfiable-state guard from TagService.apply: a required
+// namespace with zero values would brick validation for every consumer of
+// the imported vocab.
 const nsSpecSchema = z
   .object({
     values: z.array(z.string()),
     required: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (s) => !(s.required === true && s.values.length === 0),
+    { message: "namespace marked required must have at least one value" },
+  );
 
 // Top-level passthrough so unrelated TOML sections (e.g. `[adapters]`) survive
 // without complaint. `tags` and `tags.namespaces` are typed strictly so a

@@ -346,6 +346,66 @@ test("getValues, getRequired, unsetValue, setRequired all reject unknown repo", 
   expectUnknown(() => svc.setRequired("repo", "no-such-repo", "area", true));
 });
 
+test("apply rejects required namespace with empty values (unsatisfiable)", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
+
+  let caught: unknown;
+  try {
+    svc.apply("repo", "repo-a", { area: { values: [], required: true } });
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(QuayError);
+  expect((caught as QuayError).code).toBe("validation_error");
+  // Nothing was committed.
+  expect(svc.getVocab("repo", "repo-a")).toEqual({});
+});
+
+test("apply allows non-required namespace with empty values (a no-op clear)", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
+
+  // No `required` field set: empty values is just an empty namespace, fine.
+  svc.apply("repo", "repo-a", { area: { values: [] } });
+  expect(svc.getVocab("repo", "repo-a")).toEqual({});
+});
+
+test("draining the last value of a required namespace also clears the meta row", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
+
+  svc.setValue("repo", "repo-a", "area", "bonding-curve");
+  svc.setRequired("repo", "repo-a", "area", true);
+  expect(svc.getVocab("repo", "repo-a")).toEqual({
+    area: { values: ["bonding-curve"], required: true },
+  });
+
+  // Drain via single-value unset: the namespace must converge to "removed",
+  // not the bricked "required=true with zero values" state.
+  svc.unsetValue("repo", "repo-a", "area", "bonding-curve");
+  expect(svc.getVocab("repo", "repo-a")).toEqual({});
+  expect(svc.getRequired("repo", "repo-a")).toEqual({});
+});
+
+test("draining a non-last value leaves required flag intact", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
+
+  svc.setValue("repo", "repo-a", "area", "bonding-curve");
+  svc.setValue("repo", "repo-a", "area", "vesting");
+  svc.setRequired("repo", "repo-a", "area", true);
+
+  svc.unsetValue("repo", "repo-a", "area", "vesting");
+  expect(svc.getVocab("repo", "repo-a")).toEqual({
+    area: { values: ["bonding-curve"], required: true },
+  });
+});
+
 test("getVocab merges values and required into a single sorted shape", () => {
   h = createHarness();
   insertRepo(h.db, "repo-a");

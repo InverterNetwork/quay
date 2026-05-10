@@ -330,6 +330,14 @@ Codes use the standard `{field, code, message}` envelope. Per-tag codes use
 `tags[i]` paths; `TAG_REQUIRED_MISSING` uses the bare `tags` path (matching
 `MISSING`).
 
+**Vocab invariant: required namespaces are never empty.** `quay repo
+apply-tags`, `quay tags apply-deployment`, and `quay tags import` reject
+any namespace with `required = true` and `values = []` at write time
+(would otherwise emit `TAG_REQUIRED_MISSING` on every validation with no
+satisfying tag possible). `quay repo unset-tags --value <last>` cascades
+to clearing the required flag in the same transaction so the namespace
+converges to "removed" rather than "bricked".
+
 ### Default schema (shipped)
 
 Quay ships a default schema reflecting the load-bearing fields from `docs/orchestrator-design-notes.md` §2:

@@ -144,6 +144,32 @@ namespaces = "oops"
   expect((caught as QuayError).code).toBe("validation_error");
 });
 
+test("required namespace with empty values throws validation_error", () => {
+  // The unsatisfiable shape: a TOML import that flags a namespace required
+  // but provides no values would brick validation for every consumer.
+  const toml = `
+[tags.namespaces.area]
+values = []
+required = true
+`;
+  let caught: unknown;
+  try {
+    parseImportToml(toml);
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(QuayError);
+  expect((caught as QuayError).code).toBe("validation_error");
+});
+
+test("non-required namespace with empty values is accepted (a no-op clear)", () => {
+  const toml = `
+[tags.namespaces.area]
+values = []
+`;
+  expect(parseImportToml(toml)).toEqual({ area: { values: [] } });
+});
+
 test("planImport: same desired vs current is a noop", () => {
   const desired = { area: { values: ["bonding-curve", "vesting"], required: true } };
   const current = { area: { values: ["bonding-curve", "vesting"], required: true } };

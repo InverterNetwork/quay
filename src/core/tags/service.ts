@@ -62,12 +62,20 @@ const valueSchema = z
   .min(1)
   .regex(/^[a-z0-9-]+$/, "must match [a-z0-9-]+");
 
+// A required namespace with zero values is an unsatisfiable state: every
+// validate-ticket call would emit TAG_REQUIRED_MISSING with no possible tag
+// able to clear it, bricking the repo until someone hand-edits the DB.
+// Reject the shape at write time on every apply path.
 const applySpecSchema = z
   .object({
     values: z.array(z.string()),
     required: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (s) => !(s.required === true && s.values.length === 0),
+    { message: "namespace marked required must have at least one value" },
+  );
 
 const applyInputSchema = z.record(z.string(), applySpecSchema);
 
@@ -194,10 +202,27 @@ export function createTagService({
     validateInputs(scope, repoId, namespace, value);
     ensureRepoForScope(scope, repoId);
     if (value !== undefined) {
-      db.query(
+      // Draining the last value of a required namespace would leave the meta
+      // row stranded with `required=1` and no satisfying tag — a permanent
+      // TAG_REQUIRED_MISSING. Cascade-clear the meta in the same transaction
+      // so the namespace converges to "removed" rather than "bricked".
+      const deleteValue = db.query(
         `DELETE FROM tag_namespaces
           WHERE scope = ? AND repo_id IS ? AND namespace = ? AND value = ?`,
-      ).run(scope, repoId, namespace, value);
+      );
+      const countRemaining = db.query<{ c: number }, [string, string | null, string]>(
+        `SELECT COUNT(*) AS c FROM tag_namespaces
+          WHERE scope = ? AND repo_id IS ? AND namespace = ?`,
+      );
+      const deleteMeta = db.query(
+        `DELETE FROM tag_namespace_meta
+          WHERE scope = ? AND repo_id IS ? AND namespace = ?`,
+      );
+      db.transaction(() => {
+        deleteValue.run(scope, repoId, namespace, value);
+        const remaining = countRemaining.get(scope, repoId, namespace)!.c;
+        if (remaining === 0) deleteMeta.run(scope, repoId, namespace);
+      })();
       return;
     }
     // Wrap the two DELETEs so a mid-flight failure can't leave the meta row
