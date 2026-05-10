@@ -468,7 +468,7 @@ function processRunningTask(
     }
     const intent = detectKillIntent(deps, task, attempt, options);
     if (intent !== null) {
-      setKillIntent(deps, task.task_id, attempt.attempt_id, intent);
+      setKillIntent(deps, task, attempt, intent);
       fireFailpoint("after_kill_intent_commit");
       deps.tmux.kill(attempt.tmux_session);
       return { task_id: task.task_id, action: "kill_intent_set" };
@@ -1387,28 +1387,49 @@ function detectKillIntent(
 
 function setKillIntent(
   deps: TickDeps,
-  taskId: string,
-  attemptId: number,
+  task: RunningTaskRow,
+  attempt: CurrentAttemptRow,
   intent: "wall_clock" | "stale",
 ): void {
   const now = deps.clock.nowISO();
+  // Spawned-at is non-null on every running attempt (promotion sets it
+  // before tmux_session); fall back to `now` defensively to keep the
+  // event_data fields populated even if invariants slip in the future.
+  const spawnedAt = attempt.spawned_at ?? now;
+  const spawnedSecondsAgo = Math.max(
+    0,
+    Math.floor((Date.parse(now) - Date.parse(spawnedAt)) / 1000),
+  );
+  // For stale, the operator's diagnostic question is "what was the most
+  // recent log byte mtime when we decided?" — captured here so the event
+  // row is self-sufficient without a separate journal lookup.
+  const lastLogAt =
+    intent === "stale" && attempt.tmux_session !== null
+      ? safeLogFreshness(deps, attempt.tmux_session, task.worktree_path, spawnedAt)
+      : null;
+  const eventData = JSON.stringify({
+    intent,
+    spawned_seconds_ago: spawnedSecondsAgo,
+    ...(lastLogAt !== null ? { last_log_at: lastLogAt } : {}),
+  });
   deps.db.exec("BEGIN");
   try {
     deps.db
       .query(
         `UPDATE attempts SET kill_intent = ? WHERE attempt_id = ? AND kill_intent IS NULL`,
       )
-      .run(intent, attemptId);
+      .run(intent, attempt.attempt_id);
     deps.db
       .query(
-        `INSERT INTO events (task_id, attempt_id, event_type, occurred_at)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT INTO events (task_id, attempt_id, event_type, occurred_at, event_data)
+         VALUES (?, ?, ?, ?, ?)`,
       )
       .run(
-        taskId,
-        attemptId,
+        task.task_id,
+        attempt.attempt_id,
         intent === "wall_clock" ? "wall_clock_exceeded" : "stale_detected",
         now,
+        eventData,
       );
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -1416,6 +1437,19 @@ function setKillIntent(
       deps.db.exec("ROLLBACK");
     } catch {}
     throw err;
+  }
+}
+
+function safeLogFreshness(
+  deps: TickDeps,
+  sessionName: string,
+  worktreePath: string,
+  spawnedAt: string,
+): string | null {
+  try {
+    return deps.tmux.logFreshness(sessionName, worktreePath, spawnedAt);
+  } catch {
+    return null;
   }
 }
 

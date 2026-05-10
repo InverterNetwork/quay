@@ -877,9 +877,47 @@ CREATE TABLE events (
   from_state TEXT,
   to_state TEXT,
   payload_artifact_id INTEGER REFERENCES artifacts(artifact_id),
-  occurred_at TEXT NOT NULL
+  occurred_at TEXT NOT NULL,
+  event_data TEXT                     -- nullable JSON; per-event-type "why" payload (no schema enforced). NULL on rows pre-dating the slice and on event types this slice doesn't populate. See "Event data convention" below for examples.
 );
 ```
+
+#### Event data convention
+
+`events.event_data` is a per-event-type JSON document carrying the
+context the `(event_type, from_state, to_state)` triple can't express.
+Schema is convention-only in v1. Examples for the event types
+populated today:
+
+```jsonc
+// crashed / no_progress (classifier dead-worker path)
+{
+  "exit_code": 137,                  // null when signaled
+  "exit_signal": "SIGKILL",          // null when normal exit
+  "remote_unchanged": true,          // remote_sha_at_exit matched spawn-time SHA (or both NULL)
+  "pr_existed_at_spawn": false,
+  "pr_exists_at_exit": false
+}
+
+// blocker_ingested (classifier valid-blocker path)
+{
+  "exit_code": 0,
+  "exit_signal": null,
+  "blocker_bytes": 423,              // size of the ingested .quay-blocked.md
+  "blocker_content_hash": "abc..."   // sha256 of the blocker bytes
+}
+
+// wall_clock_exceeded / stale_detected (kill-intent commit)
+{
+  "intent": "wall_clock",            // or "stale"
+  "spawned_seconds_ago": 3601,
+  "last_log_at": "2026-05-10T14:00:00.000Z"   // stale_detected only
+}
+```
+
+Adding new keys to an existing event type is backwards-compatible
+(consumers parse-or-default). Rename or remove a key only behind a
+deliberate migration of consumers.
 
 ### Schema constraints and transaction predicates
 
