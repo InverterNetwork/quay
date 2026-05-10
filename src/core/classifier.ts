@@ -18,6 +18,7 @@ import type { GitHubPort } from "../ports/github.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
 import {
   scheduleDeterministicRetry,
@@ -105,6 +106,11 @@ export function classifyAndApply(
   // for Codex / Cursor). Idempotent via the same content_hash unique
   // index that protects session_log.
   collectUsageArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
+
+  // Step 1c: best-effort tool-trace capture (claude
+  // `--debug --debug-file .quay-tool-trace.log`, equivalent for other
+  // runtimes). Tail-read past 4 MiB. Idempotent via content_hash.
+  collectToolTraceArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
 
   // Step 2: blocker file (valid → ingest; malformed → persist + retry).
   const blockerPath = join(task.worktree_path, BLOCKER_FILENAME);

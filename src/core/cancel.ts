@@ -26,6 +26,7 @@ import type { GitHubPort } from "../ports/github.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
 
@@ -316,6 +317,7 @@ export function runCancelFinalizer(deps: CancelDeps, taskId: string): void {
       }
     } catch {}
     collectUsageArtifact(deps, taskId, latest.attempt_id, row.worktree_path);
+    collectToolTraceArtifact(deps, taskId, latest.attempt_id, row.worktree_path);
   }
 
   // Step 3: cleanup matrix per §5. Substrate failures are logged-and-continue;
