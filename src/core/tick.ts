@@ -10,6 +10,7 @@ import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { probeAgentIdentity } from "./agent_identity.ts";
 import { runCancelFinalizer } from "./cancel.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
+import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
 import {
   classifyAndApply,
@@ -38,12 +39,21 @@ export const DEFAULT_MAX_NON_BUDGET_RESPAWNS = 20;
 // (tokens, cost, model id, full response) to stdout instead of the
 // streaming human-readable text. We redirect that stdout to
 // `.quay-usage.json` in the worktree so the dead-worker classifier
-// can ingest it as a `usage` artifact. Operators with non-claude
-// agent runtimes (Codex, Cursor, ...) need to override this template
-// and write the same `.quay-usage.json` filename for usage capture
-// to land — quay reads the file by name, not by runtime.
+// can ingest it as a `usage` artifact.
+//
+// `--debug --debug-file .quay-tool-trace.log` captures claude's
+// tool-dispatch / API events into a worktree-local file, ingested
+// as a `tool_trace` artifact. This is the highest-signal data for
+// prompt iteration ("preamble v2 made claude read 3 files, v1 made
+// it read 12"); without it, only the final stdout reaches the
+// session log and intermediate tool calls vanish.
+//
+// Operators with non-claude agent runtimes (Codex, Cursor, ...)
+// override this template and write the same filenames for capture
+// to land — quay reads `.quay-usage.json` and `.quay-tool-trace.log`
+// by name, not by runtime.
 export const DEFAULT_AGENT_INVOCATION =
-  "claude --permission-mode bypassPermissions --output-format json < {prompt_file} > .quay-usage.json";
+  "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json";
 
 export interface TickDeps {
   db: DB;
@@ -1433,12 +1443,14 @@ function finalizeKillIntent(
       }
     } catch {}
   }
-  // Best-effort usage envelope capture. A wall-clock kill mid-run
-  // typically truncates `--output-format json` output, in which case
-  // the envelope is malformed and the helper drops it; clean exits
-  // racing with a kill window do produce a complete envelope, and
-  // those rows should still link to a usage artifact.
+  // Best-effort usage + tool-trace capture. A wall-clock kill mid-run
+  // typically truncates `--output-format json` output (malformed
+  // envelope, dropped), but the streaming `--debug-file` log already
+  // has whatever events landed before the kill — so even killed
+  // attempts usually produce a useful tool_trace. Clean exits racing
+  // with a kill window produce a complete envelope and trace.
   collectUsageArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
+  collectToolTraceArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
 
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");
