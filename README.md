@@ -179,8 +179,13 @@ quay submit-brief | escalate-human | cancel
 quay artifact get <task_id> <kind>         # raw bytes to stdout
 ```
 
-`quay validate-ticket` runs stateless — it does not open the DB or apply
-migrations, so a malformed `~/.quay/config.toml` cannot break validation.
+`quay validate-ticket` skips the dispatcher's adapter wiring for fast
+spawns. It opens the Quay DB lazily — and only when a ticket payload's
+`repo` is registered with per-repo tag vocab — to enforce the layered
+(deployment + per-repo) tag namespaces. A missing data dir, an
+unconfigured repo, or a repo with no per-repo vocab degrades cleanly to
+"no enforcement" so validation keeps working before Quay has been
+initialized.
 
 ## Configuration
 

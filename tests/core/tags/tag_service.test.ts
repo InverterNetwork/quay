@@ -100,7 +100,7 @@ test("apply declaratively replaces state and returns the canonical result", () =
   insertRepo(h.db, "repo-a");
   const svc = makeService(h);
 
-  svc.setValue("repo", "repo-a", "old-ns", "old-val");
+  svc.setValue("repo", "repo-a", "oldns", "old-val");
 
   const result = svc.apply("repo", "repo-a", {
     area: { values: ["bonding-curve", "vesting"], required: true },
@@ -111,7 +111,7 @@ test("apply declaratively replaces state and returns the canonical result", () =
     area: { values: ["bonding-curve", "vesting"], required: true },
     risk: { values: ["reentrancy"], required: false },
   });
-  expect(svc.getValues("repo", "repo-a")["old-ns"]).toBeUndefined();
+  expect(svc.getValues("repo", "repo-a")["oldns"]).toBeUndefined();
   expect(svc.getRequired("repo", "repo-a")).toEqual({ area: true });
 });
 
@@ -297,6 +297,34 @@ test("deployment-scope rows are unique despite NULL repo_id", () => {
       .query<{ c: number }, []>(`SELECT COUNT(*) AS c FROM tag_namespaces`)
       .get()!.c,
   ).toBe(1);
+});
+
+test("namespace labels with dashes are rejected; values may contain dashes", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  const svc = makeService(h);
+
+  let caught: unknown;
+  try {
+    svc.setValue("repo", "repo-a", "task-type", "bug");
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(QuayError);
+  expect((caught as QuayError).code).toBe("validation_error");
+
+  // Dashed values still work — only namespaces are constrained.
+  svc.setValue("repo", "repo-a", "area", "bonding-curve");
+  expect(svc.getValues("repo", "repo-a")["area"]).toEqual(["bonding-curve"]);
+
+  // apply() rejects dashed namespaces too.
+  let applyCaught: unknown;
+  try {
+    svc.apply("repo", "repo-a", { "task-type": { values: ["bug"] } });
+  } catch (err) {
+    applyCaught = err;
+  }
+  expect(applyCaught).toBeInstanceOf(QuayError);
 });
 
 test("getValues, getRequired, unsetValue, setRequired all reject unknown repo", () => {

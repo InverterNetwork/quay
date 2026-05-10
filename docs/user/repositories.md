@@ -102,9 +102,11 @@ configured. Deployment vocab alone (with no per-repo vocab) leaves `enforced: fa
 — per-repo presence is the explicit opt-in signal.
 
 Each repo can carry a per-repo tag vocabulary that, merged with the deployment vocab,
-the validator uses to constrain ticket tags. Tags have the shape `<namespace>-<value>`;
-the vocabulary defines which `(namespace, value)` pairs are legal for tickets targeting
-this repo, and (per namespace) whether at least one tag from that namespace is required.
+the validator uses to constrain ticket tags. Tags have the shape `<namespace>-<value>`,
+parsed by splitting on the first `-`. Namespaces are constrained to `[a-z0-9]+`
+(no dashes); values may use the full `[a-z0-9-]+` charset. The vocabulary defines
+which `(namespace, value)` pairs are legal for tickets targeting this repo, and
+(per namespace) whether at least one tag from that namespace is required.
 
 A repo with no per-repo vocabulary configured is **not enforced** by the
 validator — its tickets continue to use the legacy charset-only checks. The

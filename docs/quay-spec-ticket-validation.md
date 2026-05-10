@@ -261,6 +261,10 @@ charset = "lowercase_alphanum_dash"         # applies to each item if item_type 
 
 Error codes: `MISSING`, `TYPE`, `MIN_COUNT`, `MAX_COUNT`, `DUPLICATE`, plus per-item errors with field paths like `tags[0]` and `tags[2]`.
 
+The `tags` field also has an additional opt-in **per-repo vocab enforcement
+layer** — see §6.1 below for the codes (`TAG_UNKNOWN_NAMESPACE`,
+`TAG_UNKNOWN_VALUE`, `TAG_REQUIRED_MISSING`) and the gate semantics.
+
 #### `object`
 
 ```toml
@@ -296,6 +300,35 @@ Error code: `ENUM` for invalid values.
 - `"ascii_printable"` — `[\x20-\x7E]+`.
 
 Custom charsets are not v1; use `pattern` for anything more specific.
+
+### 6.1 Per-repo tag-vocab enforcement (opt-in)
+
+When the ticket payload's `repo` is registered with Quay AND has at least one
+per-repo tag namespace configured (`quay repo set-tags` / `apply-tags`), the
+validator runs an additional layer over the schema's `tags` field:
+
+- Each tag is parsed as `<namespace>-<value>` by splitting on the first `-`.
+  Namespace labels are constrained to `[a-z0-9]+` (no dashes); values may use
+  the full `[a-z0-9-]+` charset.
+- Each `(namespace, value)` pair must appear in the merged vocab
+  (deployment ∪ per-repo). Required namespaces (from either layer; deployment
+  wins on conflict) must have at least one matching tag in the list.
+
+**Opt-in gate:** repos with no per-repo vocab keep the v0 behavior
+(charset/min/unique only). Deployment-level `required` namespaces only bind
+repos that have opted in by configuring at least one per-repo namespace.
+
+**New error codes:**
+
+- `TAG_UNKNOWN_NAMESPACE` — tag is unparseable (no dash, leading/trailing
+  dash, empty), or its namespace prefix isn't in the merged vocab.
+- `TAG_UNKNOWN_VALUE` — namespace is known but the value isn't in its
+  permitted set.
+- `TAG_REQUIRED_MISSING` — a required namespace has no representative tag.
+
+Codes use the standard `{field, code, message}` envelope. Per-tag codes use
+`tags[i]` paths; `TAG_REQUIRED_MISSING` uses the bare `tags` path (matching
+`MISSING`).
 
 ### Default schema (shipped)
 
