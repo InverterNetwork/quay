@@ -18,6 +18,16 @@ export interface TmuxSpawnInput {
   agentInvocation: string;
 }
 
+export interface ExitStatus {
+  // Raw POSIX `$?` value (0–255). 0–127 is a normal exit code; 128+N
+  // means "killed by signal N".
+  rawStatus: number;
+  // The agent's exit code, or null if the agent was killed by a signal.
+  exitCode: number | null;
+  // SIG<name> if killed by signal, else null.
+  signalName: string | null;
+}
+
 export interface TmuxPort {
   spawn(input: TmuxSpawnInput): void;
   isAlive(sessionName: string): boolean;
@@ -35,4 +45,14 @@ export interface TmuxPort {
     worktreePath: string,
     spawnedAt: string,
   ): string;
+  // Best-effort: returns the agent's exit status as captured by the
+  // spawn wrapper into `<worktreePath>/.quay-exit-code`. Null when the
+  // file is absent or unparseable — typically because the wrapper itself
+  // was killed (whole pane reaped, tmux kill, OOM) before reaching the
+  // post-agent step. Absence vs. presence is the discriminator the
+  // silent-exit triage path needs.
+  collectExitStatus(
+    sessionName: string,
+    worktreePath: string,
+  ): ExitStatus | null;
 }
