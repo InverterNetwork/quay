@@ -6,9 +6,10 @@ import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PrSnapshot } from "../ports/github.ts";
 import type { SlackPort } from "../ports/slack.ts";
-import type { TmuxPort } from "../ports/tmux.ts";
+import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { probeAgentIdentity } from "./agent_identity.ts";
 import { runCancelFinalizer } from "./cancel.ts";
+import { EXIT_INFO_NONE } from "./exit_status.ts";
 import {
   classifyAndApply,
   type ClassifyContextAttempt,
@@ -424,17 +425,17 @@ function processRunningTask(
   if (attempt.tmux_session === null) {
     // Spawn-window recovery: kill any orphan tmux session matching the
     // canonical name (idempotent — missing session is OK), then run the
-    // same evidence classifier.
+    // same evidence classifier. No worker process ever started in this
+    // window, so there's no OS-level exit to capture — pass NONE.
     const canonical = `quay-task-${task.tmux_id}-${attempt.attempt_number}`;
     try {
       deps.tmux.kill(canonical);
     } catch {}
-    const res = classifyAndApply(
-      deps,
-      ctxTask,
-      ctxAttempt,
-      { sessionName: canonical, spawnWindow: true },
-    );
+    const res = classifyAndApply(deps, ctxTask, ctxAttempt, {
+      sessionName: canonical,
+      spawnWindow: true,
+      exitInfo: EXIT_INFO_NONE,
+    });
     if (res.outcome === "spawn_window_no_evidence") {
       return handleSpawnFailure(deps, task, attempt, options);
     }
@@ -456,9 +457,15 @@ function processRunningTask(
     return null;
   }
 
+  // Worker pane is dead. Capture the OS-level exit observation once, here,
+  // before classifier cleanup deletes the marker file the wrapper wrote
+  // into the worktree. The captured pair is stamped onto the attempts
+  // row by whichever terminal path runs next.
+  const exitInfo = readExitInfo(deps, attempt.tmux_session, task.worktree_path);
+
   if (attempt.kill_intent === "wall_clock" || attempt.kill_intent === "stale") {
     const retryReason: BudgetRetryReason = attempt.kill_intent;
-    finalizeKillIntent(deps, task, attempt, retryReason);
+    finalizeKillIntent(deps, task, attempt, retryReason, exitInfo);
     return {
       task_id: task.task_id,
       action: retryReason === "wall_clock" ? "wall_clock_killed" : "stale_killed",
@@ -469,9 +476,25 @@ function processRunningTask(
     { ...deps, artifactStore: deps.artifactStore },
     ctxTask,
     ctxAttempt,
-    { sessionName: attempt.tmux_session, spawnWindow: false },
+    { sessionName: attempt.tmux_session, spawnWindow: false, exitInfo },
   );
   return outcomeToResult(task.task_id, res.outcome, false);
+}
+
+// Worker exit info is best-effort: a missing marker file (worker exec'd
+// itself, was killed before the wrapper's printf ran) should never block
+// the dead-worker path. EXIT_INFO_NONE leaves both columns NULL, which
+// is indistinguishable from a pre-migration row for downstream consumers.
+function readExitInfo(
+  deps: TickDeps,
+  sessionName: string,
+  worktreePath: string,
+): PaneExitInfo {
+  try {
+    return deps.tmux.getExitInfo(sessionName, worktreePath);
+  } catch {
+    return EXIT_INFO_NONE;
+  }
 }
 
 function outcomeToResult(
@@ -1382,6 +1405,7 @@ function finalizeKillIntent(
   task: RunningTaskRow,
   attempt: CurrentAttemptRow,
   reason: "wall_clock" | "stale",
+  exitInfo: PaneExitInfo,
 ): void {
   if (attempt.tmux_session) {
     try {
@@ -1409,12 +1433,16 @@ function finalizeKillIntent(
         `UPDATE attempts
             SET exit_kind = ?,
                 ended_at = ?,
-                kill_intent = NULL
+                kill_intent = NULL,
+                exit_code = ?,
+                exit_signal = ?
           WHERE attempt_id = ? AND ended_at IS NULL`,
       )
       .run(
         reason === "wall_clock" ? "killed_wall_clock" : "killed_stale",
         now,
+        exitInfo.exitCode,
+        exitInfo.exitSignal,
         attempt.attempt_id,
       );
     scheduleDeterministicRetry(deps, {
