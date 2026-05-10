@@ -1,6 +1,7 @@
 import type { DB } from "../../db/connection.ts";
 import type { Clock } from "../../ports/clock.ts";
 import { QuayError } from "../errors.ts";
+import { parseOrThrow } from "../zod_helpers.ts";
 import {
   repoAddInputSchema,
   repoImportInputSchema,
@@ -254,19 +255,4 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
   }
 
   return { add, update, remove, get, list, upsert };
-}
-
-function parseOrThrow<T>(
-  schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false; error: { issues: { path: (string | number)[]; message: string }[] } } },
-  raw: unknown,
-  label: string,
-): T {
-  const result = schema.safeParse(raw);
-  if (result.success) return result.data;
-  const summary = result.error.issues
-    .map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`)
-    .join("; ");
-  throw new QuayError("validation_error", `${label} input invalid: ${summary}`, {
-    issues: result.error.issues,
-  });
 }

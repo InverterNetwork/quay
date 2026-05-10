@@ -89,6 +89,12 @@ export class TmuxAdapter implements TmuxPort {
     // session alive while we wire pipe-pane. `cat` reads stdin (nobody is
     // typing in a detached session) and produces no output, so it stays
     // quiet until we respawn the pane in step 3.
+    //
+    // `env: process.env` is forwarded explicitly because Bun snapshots
+    // env at startup. tmux populates the new session's environment from
+    // its connecting client, so anything quay tick mints or refreshes at
+    // runtime (GH_TOKEN, GITHUB_TOKEN, credential-helper sockets, etc.)
+    // would otherwise be invisible to the agent — silent-exit territory.
     const result = Bun.spawnSync({
       cmd: [
         "tmux",
@@ -100,6 +106,7 @@ export class TmuxAdapter implements TmuxPort {
         input.worktreePath,
         "cat",
       ],
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -131,6 +138,7 @@ export class TmuxAdapter implements TmuxPort {
         `${input.sessionName}:0.0`,
         pipeCommand,
       ],
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -143,6 +151,7 @@ export class TmuxAdapter implements TmuxPort {
       try {
         Bun.spawnSync({
           cmd: ["tmux", "kill-session", "-t", `=${input.sessionName}`],
+          env: process.env,
           stdout: "ignore",
           stderr: "ignore",
         });
@@ -168,6 +177,7 @@ export class TmuxAdapter implements TmuxPort {
         `${input.sessionName}:0.0`,
         tmuxCommand,
       ],
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -176,6 +186,7 @@ export class TmuxAdapter implements TmuxPort {
       try {
         Bun.spawnSync({
           cmd: ["tmux", "kill-session", "-t", `=${input.sessionName}`],
+          env: process.env,
           stdout: "ignore",
           stderr: "ignore",
         });
@@ -189,6 +200,7 @@ export class TmuxAdapter implements TmuxPort {
   isAlive(sessionName: string): boolean {
     const result = Bun.spawnSync({
       cmd: ["tmux", "has-session", "-t", `=${sessionName}`],
+      env: process.env,
       stdout: "ignore",
       stderr: "ignore",
     });
@@ -201,6 +213,7 @@ export class TmuxAdapter implements TmuxPort {
     // way.
     Bun.spawnSync({
       cmd: ["tmux", "kill-session", "-t", `=${sessionName}`],
+      env: process.env,
       stdout: "ignore",
       stderr: "ignore",
     });
@@ -306,6 +319,7 @@ export class TmuxAdapter implements TmuxPort {
     if (freshestMs === null) return spawnedAt;
     return new Date(freshestMs).toISOString();
   }
+
 }
 
 // POSIX-shell single-quote escaping. Any single-quote in the input is closed,
@@ -329,11 +343,20 @@ function parseIntOrNull(value: string | undefined): number | null {
 // Files whose stale presence directly drives the bug the sweep exists to
 // fix: `.quay-blocked.md` would be ingested as the new attempt's blocker;
 // `.quay-session.log` would mix old bytes into the new attempt's log and
-// skew the mtime-based freshness signal. Failing to remove either of
-// these is treated as a hard spawn failure so the spawn-substrate-failed
-// path takes over (same semantics as a `pipe-pane` failure) — silently
-// proceeding would reintroduce the exact bug this sweep prevents.
-const SWEEP_FAIL_CLOSED = new Set([".quay-blocked.md", ".quay-session.log"]);
+// skew the mtime-based freshness signal. A leftover `.quay-exit-code`
+// would be misread as the current attempt's exit status — and in the
+// exact silent-exit case the wrapper is built to diagnose, the wrapper
+// never overwrites the file, so the previous attempt's `$?` would be
+// stamped onto this attempt's `attempts.exit_code`/`exit_signal` columns
+// and actively poison triage. Failing to remove any of these is treated as a hard
+// spawn failure so the spawn-substrate-failed path takes over (same
+// semantics as a `pipe-pane` failure) — silently proceeding would
+// reintroduce the exact bugs this sweep prevents.
+const SWEEP_FAIL_CLOSED = new Set([
+  ".quay-blocked.md",
+  ".quay-session.log",
+  ".quay-exit-code",
+]);
 
 // Remove every direct child of `worktreePath` whose name starts with the
 // `.quay-` prefix. The two files in `SWEEP_FAIL_CLOSED` are required

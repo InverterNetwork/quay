@@ -64,7 +64,7 @@ An **artifact** is data that one actor hands to another, or observes from anothe
 | External → Orchestrator (per task) | Yes — e.g. ticket snapshot, ingested Slack reply |
 | Orchestrator → Quay | Yes — caller brief |
 | Quay → Worker | Yes — protocol preamble, final prompt |
-| Worker → Quay | Yes — signal file (`.quay-blocked.md`), session log, observed PR/CI state |
+| Worker → Quay | Yes — signal file (`.quay-blocked.md`), session log, exit-code marker (`.quay-exit-code`), observed PR/CI state |
 | Worker → External | Captured via Quay's observation (PR pointer + observed slices) |
 | Quay → External (per task) | Yes — Slack escalation message |
 | Orchestrator → Orchestrator (internal reasoning, tool calls) | No |
@@ -1227,13 +1227,13 @@ After rollback, enqueue exits with a structured error describing which step fail
 1. Quay writes `<worktree>/.quay-prompt.md` containing `preamble + "\n\n" + brief`.
 2. Quay creates the tmux session: `tmux new-session -d -s <session_name> -c <worktree>`.
 3. Quay configures pane piping to the session log: `tmux pipe-pane -t <session_name> -o "cat >> <worktree>/.quay-session.log"`.
-4. Quay sends the agent invocation as keys to the pane, **wrapped in `exec sh -c '<...>'`** so the pane exits when the agent process exits. **The prompt is delivered as a file path, never inline-quoted.** Shell-quoting prompts of arbitrary content via `tmux send-keys` is fragile (newlines, quotes, backticks all break in subtle ways). Canonical pattern (after substituting `{prompt_file}` into `agent_invocation`):
+4. Quay sends the agent invocation as keys to the pane, **wrapped in `exec sh -c '<...>'`** so the pane exits when the agent process exits. **The prompt is delivered as a file path, never inline-quoted.** Shell-quoting prompts of arbitrary content via `tmux send-keys` is fragile (newlines, quotes, backticks all break in subtle ways). The wrapper also captures the agent's exit status (`$?`) to `<worktree>/.quay-exit-code` after the agent exits and before the wrapper itself returns; the dead-worker classifier reads this on transition and persists it as an `exit_status` artifact (absence vs. presence is what discriminates "wrapper observed the agent exit" from "wrapper itself was reaped"). Canonical pattern (after substituting `{prompt_file}` into `agent_invocation`):
 
     ```
-    tmux send-keys -t <session_name> "exec sh -c '<agent_invocation_with_prompt_file>'" C-m
+    tmux send-keys -t <session_name> "exec sh -c '<agent_invocation_with_prompt_file> ; printf %s \"\$?\" > <worktree>/.quay-exit-code'" C-m
     ```
 
-    The `exec` is load-bearing: without it, the configured agent runs as a child of the session's interactive shell, and when the agent exits the shell remains, so `tmux has-session` would report the session as alive *forever* — turning every successful completion into a staleness or wall-clock kill on the next tick. With `exec sh -c`, the `sh` process replaces the login shell; when the agent inside it exits, `sh` exits, and tmux destroys the pane (and session, since the pane is the only one). `is_alive(handle)` flipping to false is then the canonical "worker has finished" signal that drives the dead-worker branch in §5.
+    The `exec` is load-bearing: without it, the configured agent runs as a child of the session's interactive shell, and when the agent exits the shell remains, so `tmux has-session` would report the session as alive *forever* — turning every successful completion into a staleness or wall-clock kill on the next tick. With `exec sh -c`, the `sh` process replaces the login shell; when the agent inside it exits, the wrapper writes the exit-code file and `sh` exits, and tmux destroys the pane (and session, since the pane is the only one). `is_alive(handle)` flipping to false is then the canonical "worker has finished" signal that drives the dead-worker branch in §5. The post-agent step adds milliseconds and is a no-op for the liveness contract; if the whole pane is killed (cgroup reap, OOM, `tmux kill`) the wrapper never reaches the post-agent step and `.quay-exit-code` stays absent.
 
     Quoting: Quay constructs the keystroke string by substituting `{prompt_file}` (a Quay-controlled path with no shell metacharacters by construction — see §13 worktree paths) into the operator-configured `agent_invocation`, then wrapping the result in `sh -c '...'`. The single-quoted `sh` command runs `agent_invocation` through `/bin/sh` (matching Quay's documented command-execution model in §13). If the operator's `agent_invocation` already contains a literal single quote, the operator escapes it per standard `sh -c` rules; Quay does not transform `agent_invocation` beyond the `{prompt_file}` substitution.
 

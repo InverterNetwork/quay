@@ -97,3 +97,30 @@ Optional:
 
 Override the schema with `--schema-file` or by placing `ticket_schema.toml` in
 `QUAY_CONFIG_DIR` or `$HOME/.quay`.
+
+## Per-Repo Tag Vocabulary (Opt-In)
+
+When a ticket's target repo has any per-repo tag vocabulary configured (via
+`quay repo set-tags` or `quay repo apply-tags` — see
+[Repositories](repositories.md#tag-vocabulary)), the validator enforces an
+extra layer on top of the schema's `tags` field:
+
+- Each tag is parsed as `<namespace>-<value>`, splitting on the first `-`.
+  Namespaces match `[a-z0-9]+` (no dashes); values may use `[a-z0-9-]+`.
+- Each `(namespace, value)` pair must appear in the merged (deployment ∪
+  per-repo) vocab.
+- A namespace marked `required` (in either layer; deployment-required wins)
+  must have at least one matching tag in the list.
+
+Repos with no per-repo vocab keep the legacy charset/min/unique-only
+behavior; deployment-level required namespaces only bind opted-in repos.
+Use `quay tags list --repo <id>` to inspect the merged vocab and the
+`enforced` flag for a given repo.
+
+Additional error codes the validator may return when enforcement is on:
+
+| Code | Meaning |
+| --- | --- |
+| `TAG_UNKNOWN_NAMESPACE` | Tag is unparseable, or its namespace prefix isn't in the merged vocab. |
+| `TAG_UNKNOWN_VALUE` | Namespace is known but the value isn't in its permitted set. |
+| `TAG_REQUIRED_MISSING` | A required namespace has no representative tag in the list. |

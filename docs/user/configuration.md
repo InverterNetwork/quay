@@ -117,5 +117,9 @@ path fails with `repos_root_missing`. This catches typos before enqueueing work.
 3. `$HOME/.quay/ticket_schema.toml`
 4. The shipped default schema.
 
-`validate-ticket` is stateless: it does not open the deployment config, DB, or
-migrations.
+`validate-ticket` skips the dispatcher's adapter wiring for fast spawns. It
+opens the Quay DB lazily — only when the ticket payload's `repo` is
+registered and has per-repo tag vocab configured — to enforce the layered
+deployment + per-repo namespaces. The deployment config IS read in that
+case so `data_dir` from `~/.quay/config.toml` is honored. A missing data
+dir or unconfigured repo degrades cleanly to "no enforcement".

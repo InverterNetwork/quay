@@ -8,7 +8,7 @@ const nonEmptyString = z.string().min(1);
 // id like `../escape` would let the bare clone (and downstream cleanup) write
 // outside `data_dir`. We constrain to a conservative identifier charset; that
 // is also what the docs imply by calling `repo_id` an "id".
-const repoIdSchema = z
+export const repoIdSchema = z
   .string()
   .min(1)
   .max(128)
