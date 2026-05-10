@@ -140,11 +140,24 @@ export function classifyAndApply(
   const prCreatedDuringAttempt = prExistsAtExit && !prExistedAtSpawn;
   const noProgress = remoteUnchanged && !prCreatedDuringAttempt;
 
+  const predicate: PredicateState = {
+    remoteUnchanged,
+    prExistedAtSpawn,
+    prExistsAtExit,
+  };
+
   if (prExistsAtExit && !noProgress) {
     return transitionPrOpened(deps, task, attempt, remoteShaAtExit, exitInfo);
   }
   if (prExistsAtExit && noProgress) {
-    return scheduleNoProgressRetry(deps, task, attempt, remoteShaAtExit, exitInfo);
+    return scheduleNoProgressRetry(
+      deps,
+      task,
+      attempt,
+      remoteShaAtExit,
+      exitInfo,
+      predicate,
+    );
   }
   if (options.spawnWindow) {
     // No evidence on the spawn-window path: the genuine spawn-failed default
@@ -152,7 +165,20 @@ export function classifyAndApply(
     // slice. Leave the row untouched so that recovery converges later.
     return { outcome: "spawn_window_no_evidence" };
   }
-  return scheduleCrashRetry(deps, task, attempt, remoteShaAtExit, exitInfo);
+  return scheduleCrashRetry(
+    deps,
+    task,
+    attempt,
+    remoteShaAtExit,
+    exitInfo,
+    predicate,
+  );
+}
+
+interface PredicateState {
+  remoteUnchanged: boolean;
+  prExistedAtSpawn: boolean;
+  prExistsAtExit: boolean;
 }
 
 interface BlockerValid {
@@ -297,14 +323,20 @@ function ingestBlocker(
           attempt,
           blockerContent: content,
         });
+        const eventData = JSON.stringify({
+          exit_code: exitInfo.exitCode,
+          exit_signal: exitInfo.exitSignal,
+          blocker_bytes: new TextEncoder().encode(content).byteLength,
+          blocker_content_hash: contentHash,
+        });
         deps.db
           .query(
             `INSERT INTO events (
                task_id, attempt_id, event_type,
-               from_state, to_state, payload_artifact_id, occurred_at
-             ) VALUES (?, ?, 'blocker_ingested', 'running', 'awaiting-next-brief', ?, ?)`,
+               from_state, to_state, payload_artifact_id, occurred_at, event_data
+             ) VALUES (?, ?, 'blocker_ingested', 'running', 'awaiting-next-brief', ?, ?, ?)`,
           )
-          .run(task.task_id, attempt.attempt_id, artifactId, now);
+          .run(task.task_id, attempt.attempt_id, artifactId, now, eventData);
         deps.db.exec("COMMIT");
       }
     } catch (err) {
@@ -480,6 +512,7 @@ function scheduleCrashRetry(
   attempt: ClassifyContextAttempt,
   remoteShaAtExit: string | null,
   exitInfo: PaneExitInfo,
+  predicate: PredicateState,
 ): ClassifyResult {
   return scheduleRetry(
     deps,
@@ -487,6 +520,7 @@ function scheduleCrashRetry(
     attempt,
     remoteShaAtExit,
     exitInfo,
+    predicate,
     "crashed",
     "crash",
   );
@@ -498,6 +532,7 @@ function scheduleNoProgressRetry(
   attempt: ClassifyContextAttempt,
   remoteShaAtExit: string | null,
   exitInfo: PaneExitInfo,
+  predicate: PredicateState,
 ): ClassifyResult {
   return scheduleRetry(
     deps,
@@ -505,6 +540,7 @@ function scheduleNoProgressRetry(
     attempt,
     remoteShaAtExit,
     exitInfo,
+    predicate,
     "no_progress",
     "crash",
   );
@@ -518,6 +554,7 @@ function scheduleRetry(
   attempt: ClassifyContextAttempt,
   remoteShaAtExit: string | null,
   exitInfo: PaneExitInfo,
+  predicate: PredicateState,
   exitKind: DeadExitKind,
   retryReason: "crash" | "malformed_signal",
 ): ClassifyResult {
@@ -568,14 +605,28 @@ function scheduleRetry(
       fromState: "running",
     });
     const eventType = exitKind === "no_progress" ? "no_progress" : "crashed";
+    const eventData = JSON.stringify({
+      exit_code: exitInfo.exitCode,
+      exit_signal: exitInfo.exitSignal,
+      remote_unchanged: predicate.remoteUnchanged,
+      pr_existed_at_spawn: predicate.prExistedAtSpawn,
+      pr_exists_at_exit: predicate.prExistsAtExit,
+    });
     deps.db
       .query(
         `INSERT INTO events (
            task_id, attempt_id, event_type,
-           from_state, to_state, occurred_at
-         ) VALUES (?, ?, ?, 'running', (SELECT state FROM tasks WHERE task_id = ?), ?)`,
+           from_state, to_state, occurred_at, event_data
+         ) VALUES (?, ?, ?, 'running', (SELECT state FROM tasks WHERE task_id = ?), ?, ?)`,
       )
-      .run(task.task_id, attempt.attempt_id, eventType, task.task_id, now);
+      .run(
+        task.task_id,
+        attempt.attempt_id,
+        eventType,
+        task.task_id,
+        now,
+        eventData,
+      );
     deps.db.exec("COMMIT");
     return { outcome: exitKind === "no_progress" ? "no_progress" : "crashed" };
   } catch (err) {
