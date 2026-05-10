@@ -174,6 +174,18 @@ quay enqueue --linear-issue <ENG-1234>     # Linear-adapter enqueue (target repo
                                            # `--repo <id>` is an optional override)
 quay validate-ticket [--ticket-json <p|->] [--schema-file <p>] [--quiet]
                                            # standalone validator: JSON in, JSON out
+
+quay repo set-tags <repo_id> --namespace <n> --value <v>   # per-repo tag vocab CRUD
+quay repo unset-tags <repo_id> --namespace <n> [--value <v>]
+quay repo get-tags <repo_id>
+quay repo apply-tags <repo_id> --from <path|->             # declarative replace
+quay tags set-deployment --namespace <n> --value <v>       # deployment-wide vocab
+quay tags unset-deployment --namespace <n> [--value <v>]
+quay tags get-deployment
+quay tags apply-deployment --from <path|->
+quay tags import --from <path> [--force]                   # bootstrap from TOML
+quay tags list --repo <repo_id>                            # merged vocab + enforced flag
+
 quay task get <task_id> | task list        # read commands (deterministic JSON)
 quay submit-brief | escalate-human | cancel
 quay artifact get <task_id> <kind>         # raw bytes to stdout
