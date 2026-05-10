@@ -1,0 +1,13 @@
+-- Per-attempt diff capture: lines-changed metadata between
+-- `remote_sha_at_spawn` and `remote_sha_at_exit`, computed once on the
+-- `pr_opened` transition. Reconstructable from `git log` between the two
+-- SHAs, but lifting it into a queryable column drops the join with the
+-- bare clone for retro analysis ("avg lines per attempt across preamble
+-- versions", "attempts that touched config-only").
+--
+-- v1 is a TEXT column holding JSON by convention (files_changed,
+-- insertions, deletions, files[]); not schema-enforced. NULL on rows
+-- pre-dating this slice, on attempts that never reached pr_opened, and
+-- on best-effort capture failures (missing SHA locally, git error) —
+-- those also surface as a `tick_error` event.
+ALTER TABLE attempts ADD COLUMN diff_summary TEXT;
