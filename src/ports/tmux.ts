@@ -35,4 +35,17 @@ export interface TmuxPort {
     worktreePath: string,
     spawnedAt: string,
   ): string;
+  // Returns the OS-level exit observation for a worker whose pane has
+  // died. The real adapter wraps the agent invocation so the worker's
+  // shell writes its `$?` to `<worktreePath>/.quay-exit-code` before the
+  // pane terminates; the value (a wait-style status that encodes
+  // signaled exits as 128+signum) is read here. Both fields are null
+  // when the file is absent, malformed, or never written (e.g. the
+  // agent invocation `exec`'d itself, replacing the wrapper).
+  getExitInfo(sessionName: string, worktreePath: string): PaneExitInfo;
+}
+
+export interface PaneExitInfo {
+  exitCode: number | null;
+  exitSignal: string | null;
 }

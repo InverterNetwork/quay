@@ -26,10 +26,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
+import { decodePaneStatus, EXIT_INFO_NONE } from "../core/exit_status.ts";
+import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 
 const PROMPT_FILE = ".quay-prompt.md";
 const SESSION_LOG_FILE = ".quay-session.log";
+// Per-attempt exit-status marker written by the spawn wrapper. Holds the
+// worker shell's `$?` as plain decimal text. Treated identically to
+// other `.quay-*` files by the spawn preflight sweep.
+const EXIT_CODE_FILE = ".quay-exit-code";
 // Marker for direct children of the worktree root that belong to a previous
 // Quay attempt. Anything matching this prefix is sweep-eligible at spawn
 // time — see the spawn preflight for why.
@@ -59,10 +64,20 @@ export class TmuxAdapter implements TmuxPort {
       "{prompt_file}",
       shellQuote(promptFile),
     );
-    // `exec sh -c "..."` so the inner agent replaces the shell. When the
-    // agent exits, the pane has nothing left to run and tmux drops the
-    // session — making `tmux has-session` a reliable liveness probe.
-    const tmuxCommand = `exec sh -c ${shellQuote(expanded)}`;
+    // Wrap the worker so the shell writes its terminal `$?` to
+    // `<worktree>/.quay-exit-code` before the pane goes away. POSIX `$?`
+    // for a child terminated by signal N is 128+N, so the single integer
+    // captures both normal exits (0–127) and signaled exits (≥128); the
+    // classifier decodes it. Two corner cases produce no marker file
+    // (and thus a NULL/NULL row downstream): the agent_invocation uses
+    // `exec` to replace the wrapper shell, or the wrapper itself is
+    // killed before the trailing `printf` runs. We outer-`exec` into the
+    // wrapper so the pane has a single shell process rather than two
+    // nested ones — matching the prior session-exit semantics that
+    // `has-session` liveness depends on.
+    const exitCodeFile = join(input.worktreePath, EXIT_CODE_FILE);
+    const wrapped = `${expanded}\nstatus=$?\nprintf '%d' "$status" > ${shellQuote(exitCodeFile)}\nexit "$status"`;
+    const tmuxCommand = `exec sh -c ${shellQuote(wrapped)}`;
 
     // Step 1: create session with a placeholder command that keeps the
     // session alive while we wire pipe-pane. `cat` reads stdin (nobody is
@@ -185,6 +200,25 @@ export class TmuxAdapter implements TmuxPort {
     });
   }
 
+  getExitInfo(_sessionName: string, worktreePath: string): PaneExitInfo {
+    // The spawn wrapper writes the worker shell's `$?` to
+    // `<worktreePath>/.quay-exit-code` before the pane terminates. We
+    // chose this over reading tmux's `#{pane_dead_status}` /
+    // `#{pane_dead_signo}` formatters because tmux 3.6a on macOS
+    // (and other versions) returns empty strings for signaled exits —
+    // making native capture unreliable for the "killed by SIGKILL"
+    // hypothesis the column exists to discriminate.
+    const path = join(worktreePath, EXIT_CODE_FILE);
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch {
+      return EXIT_INFO_NONE;
+    }
+    const status = parseIntOrNull(raw);
+    return decodePaneStatus(status, null);
+  }
+
   collectLog(_sessionName: string, worktreePath: string): string | null {
     // The pipe-pane configured at spawn writes every byte the agent prints
     // to <worktreePath>/.quay-session.log. Survives the session's death
@@ -264,6 +298,18 @@ export class TmuxAdapter implements TmuxPort {
 // escaped with `'\''`, and reopened.
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+// Parses a tmux format substitution into a number. Returns null for the
+// empty string (older tmux that doesn't recognise the format key
+// substitutes empty, not the literal `#{...}`) and for any non-numeric
+// payload, so the decoder can treat "no observation" uniformly.
+function parseIntOrNull(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  if (!/^-?\d+$/.test(trimmed)) return null;
+  return Number.parseInt(trimmed, 10);
 }
 
 // Files whose stale presence directly drives the bug the sweep exists to
