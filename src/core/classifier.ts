@@ -15,8 +15,11 @@ import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort } from "../ports/github.ts";
-import type { TmuxPort } from "../ports/tmux.ts";
+import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
+import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import { collectToolTraceArtifact } from "./tool_trace.ts";
+import { collectUsageArtifact } from "./usage.ts";
 import {
   scheduleDeterministicRetry,
   writeBlockerBudgetExhausted,
@@ -71,6 +74,14 @@ export interface ClassifyOptions {
   // schedules a `crash` retry; spawn-window defers spawn_failed rollback to
   // a later slice and returns `spawn_window_no_evidence`.
   spawnWindow: boolean;
+  // OS-level exit observation captured by the caller before the classifier
+  // runs (read from the worker shell's `.quay-exit-code` marker file).
+  // Stamped alongside `exit_kind` on every terminal SQL update so retro
+  // analysis can correlate the classification with the raw substrate
+  // signal. EXIT_INFO_NONE on the spawn-window path (no real process
+  // ran) and on any path where the marker file was missing or
+  // unreadable.
+  exitInfo?: PaneExitInfo;
 }
 
 export interface ClassifyResult {
@@ -83,18 +94,32 @@ export function classifyAndApply(
   attempt: ClassifyContextAttempt,
   options: ClassifyOptions,
 ): ClassifyResult {
+  const exitInfo = options.exitInfo ?? EXIT_INFO_NONE;
+
   // Step 1: best-effort session log capture. Idempotent across re-entry via
   // the recovery-path content_hash unique index.
   collectSessionLog(deps, task, attempt, options.sessionName);
+
+  // Step 1b: best-effort usage envelope capture. The spawn wrapper
+  // writes `<worktree>/.quay-usage.json` for any agent invocation that
+  // emits a structured stdout (claude `--output-format json`, similar
+  // for Codex / Cursor). Idempotent via the same content_hash unique
+  // index that protects session_log.
+  collectUsageArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
+
+  // Step 1c: best-effort tool-trace capture (claude
+  // `--debug --debug-file .quay-tool-trace.log`, equivalent for other
+  // runtimes). Tail-read past 4 MiB. Idempotent via content_hash.
+  collectToolTraceArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
 
   // Step 2: blocker file (valid → ingest; malformed → persist + retry).
   const blockerPath = join(task.worktree_path, BLOCKER_FILENAME);
   const probe = probeBlockerFile(blockerPath);
   if (probe.kind === "valid") {
-    return ingestBlocker(deps, task, attempt, blockerPath, probe.content);
+    return ingestBlocker(deps, task, attempt, blockerPath, probe.content, exitInfo);
   }
   if (probe.kind === "malformed") {
-    return ingestMalformed(deps, task, attempt, blockerPath, probe.bytes);
+    return ingestMalformed(deps, task, attempt, blockerPath, probe.bytes, exitInfo);
   }
 
   // Step 3: fresh remote/PR snapshot for the progress predicate. Use the
@@ -115,11 +140,24 @@ export function classifyAndApply(
   const prCreatedDuringAttempt = prExistsAtExit && !prExistedAtSpawn;
   const noProgress = remoteUnchanged && !prCreatedDuringAttempt;
 
+  const predicate: PredicateState = {
+    remoteUnchanged,
+    prExistedAtSpawn,
+    prExistsAtExit,
+  };
+
   if (prExistsAtExit && !noProgress) {
-    return transitionPrOpened(deps, task, attempt, remoteShaAtExit);
+    return transitionPrOpened(deps, task, attempt, remoteShaAtExit, exitInfo);
   }
   if (prExistsAtExit && noProgress) {
-    return scheduleNoProgressRetry(deps, task, attempt, remoteShaAtExit);
+    return scheduleNoProgressRetry(
+      deps,
+      task,
+      attempt,
+      remoteShaAtExit,
+      exitInfo,
+      predicate,
+    );
   }
   if (options.spawnWindow) {
     // No evidence on the spawn-window path: the genuine spawn-failed default
@@ -127,7 +165,20 @@ export function classifyAndApply(
     // slice. Leave the row untouched so that recovery converges later.
     return { outcome: "spawn_window_no_evidence" };
   }
-  return scheduleCrashRetry(deps, task, attempt, remoteShaAtExit);
+  return scheduleCrashRetry(
+    deps,
+    task,
+    attempt,
+    remoteShaAtExit,
+    exitInfo,
+    predicate,
+  );
+}
+
+interface PredicateState {
+  remoteUnchanged: boolean;
+  prExistedAtSpawn: boolean;
+  prExistsAtExit: boolean;
 }
 
 interface BlockerValid {
@@ -211,6 +262,7 @@ function ingestBlocker(
   attempt: ClassifyContextAttempt,
   blockerPath: string,
   content: string,
+  exitInfo: PaneExitInfo,
 ): ClassifyResult {
   const contentHash = sha256(content);
   const artifactId = upsertRecoveryArtifact(deps, {
@@ -255,23 +307,36 @@ function ingestBlocker(
           .query(
             `UPDATE attempts
                 SET exit_kind = 'blocker_written',
-                    ended_at = ?
+                    ended_at = ?,
+                    exit_code = ?,
+                    exit_signal = ?
               WHERE attempt_id = ? AND ended_at IS NULL`,
           )
-          .run(now, attempt.attempt_id);
+          .run(
+            now,
+            exitInfo.exitCode,
+            exitInfo.exitSignal,
+            attempt.attempt_id,
+          );
         writeBlockerBudgetExhausted(deps, {
           taskId: task.task_id,
           attempt,
           blockerContent: content,
         });
+        const eventData = JSON.stringify({
+          exit_code: exitInfo.exitCode,
+          exit_signal: exitInfo.exitSignal,
+          blocker_bytes: new TextEncoder().encode(content).byteLength,
+          blocker_content_hash: contentHash,
+        });
         deps.db
           .query(
             `INSERT INTO events (
                task_id, attempt_id, event_type,
-               from_state, to_state, payload_artifact_id, occurred_at
-             ) VALUES (?, ?, 'blocker_ingested', 'running', 'awaiting-next-brief', ?, ?)`,
+               from_state, to_state, payload_artifact_id, occurred_at, event_data
+             ) VALUES (?, ?, 'blocker_ingested', 'running', 'awaiting-next-brief', ?, ?, ?)`,
           )
-          .run(task.task_id, attempt.attempt_id, artifactId, now);
+          .run(task.task_id, attempt.attempt_id, artifactId, now, eventData);
         deps.db.exec("COMMIT");
       }
     } catch (err) {
@@ -296,6 +361,7 @@ function ingestMalformed(
   attempt: ClassifyContextAttempt,
   blockerPath: string,
   bytes: Uint8Array,
+  exitInfo: PaneExitInfo,
 ): ClassifyResult {
   const contentHash = sha256Bytes(bytes);
   const artifactId = upsertRecoveryArtifact(deps, {
@@ -337,10 +403,17 @@ function ingestMalformed(
           .query(
             `UPDATE attempts
                 SET exit_kind = 'crashed',
-                    ended_at = ?
+                    ended_at = ?,
+                    exit_code = ?,
+                    exit_signal = ?
               WHERE attempt_id = ? AND ended_at IS NULL`,
           )
-          .run(now, attempt.attempt_id);
+          .run(
+            now,
+            exitInfo.exitCode,
+            exitInfo.exitSignal,
+            attempt.attempt_id,
+          );
         scheduleDeterministicRetry(deps, {
           taskId: task.task_id,
           prevAttempt: attempt,
@@ -377,6 +450,7 @@ function transitionPrOpened(
   task: ClassifyContextTask,
   attempt: ClassifyContextAttempt,
   remoteShaAtExit: string | null,
+  exitInfo: PaneExitInfo,
 ): ClassifyResult {
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");
@@ -402,10 +476,18 @@ function transitionPrOpened(
         `UPDATE attempts
             SET exit_kind = 'pr_opened',
                 ended_at = ?,
-                remote_sha_at_exit = ?
+                remote_sha_at_exit = ?,
+                exit_code = ?,
+                exit_signal = ?
           WHERE attempt_id = ?`,
       )
-      .run(now, remoteShaAtExit, attempt.attempt_id);
+      .run(
+        now,
+        remoteShaAtExit,
+        exitInfo.exitCode,
+        exitInfo.exitSignal,
+        attempt.attempt_id,
+      );
     deps.db
       .query(
         `INSERT INTO events (
@@ -415,13 +497,65 @@ function transitionPrOpened(
       )
       .run(task.task_id, attempt.attempt_id, now);
     deps.db.exec("COMMIT");
-    return { outcome: "pr_opened" };
   } catch (err) {
     try {
       deps.db.exec("ROLLBACK");
     } catch {}
     throw err;
   }
+
+  captureDiffSummary(deps, task, attempt, remoteShaAtExit);
+  return { outcome: "pr_opened" };
+}
+
+// Best-effort lines-changed capture between `remote_sha_at_spawn` and
+// `remote_sha_at_exit`. Runs after the transition has committed so a slow
+// or failing git invocation never blocks the state machine. Failure leaves
+// `attempts.diff_summary` NULL and emits a `tick_error` event so retro
+// analysis can tell "no diff captured (capture failed)" apart from "no
+// diff produced (column populated with zero-files JSON)".
+function captureDiffSummary(
+  deps: ClassifierDeps,
+  task: ClassifyContextTask,
+  attempt: ClassifyContextAttempt,
+  remoteShaAtExit: string | null,
+): void {
+  const baseSha = attempt.remote_sha_at_spawn;
+  if (
+    baseSha === null ||
+    remoteShaAtExit === null ||
+    baseSha === remoteShaAtExit
+  ) {
+    return;
+  }
+  let summary;
+  try {
+    summary = deps.git.diffSummary(task.repo_id, baseSha, remoteShaAtExit);
+  } catch {
+    summary = null;
+  }
+  if (summary !== null) {
+    try {
+      deps.db
+        .query(`UPDATE attempts SET diff_summary = ? WHERE attempt_id = ?`)
+        .run(JSON.stringify(summary), attempt.attempt_id);
+    } catch {}
+    return;
+  }
+  try {
+    const eventData = JSON.stringify({
+      capture: "diff_summary",
+      base_sha: baseSha,
+      head_sha: remoteShaAtExit,
+    });
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, occurred_at, event_data
+         ) VALUES (?, ?, 'tick_error', ?, ?)`,
+      )
+      .run(task.task_id, attempt.attempt_id, deps.clock.nowISO(), eventData);
+  } catch {}
 }
 
 function scheduleCrashRetry(
@@ -429,8 +563,19 @@ function scheduleCrashRetry(
   task: ClassifyContextTask,
   attempt: ClassifyContextAttempt,
   remoteShaAtExit: string | null,
+  exitInfo: PaneExitInfo,
+  predicate: PredicateState,
 ): ClassifyResult {
-  return scheduleRetry(deps, task, attempt, remoteShaAtExit, "crashed", "crash");
+  return scheduleRetry(
+    deps,
+    task,
+    attempt,
+    remoteShaAtExit,
+    exitInfo,
+    predicate,
+    "crashed",
+    "crash",
+  );
 }
 
 function scheduleNoProgressRetry(
@@ -438,12 +583,16 @@ function scheduleNoProgressRetry(
   task: ClassifyContextTask,
   attempt: ClassifyContextAttempt,
   remoteShaAtExit: string | null,
+  exitInfo: PaneExitInfo,
+  predicate: PredicateState,
 ): ClassifyResult {
   return scheduleRetry(
     deps,
     task,
     attempt,
     remoteShaAtExit,
+    exitInfo,
+    predicate,
     "no_progress",
     "crash",
   );
@@ -456,6 +605,8 @@ function scheduleRetry(
   task: ClassifyContextTask,
   attempt: ClassifyContextAttempt,
   remoteShaAtExit: string | null,
+  exitInfo: PaneExitInfo,
+  predicate: PredicateState,
   exitKind: DeadExitKind,
   retryReason: "crash" | "malformed_signal",
 ): ClassifyResult {
@@ -482,10 +633,19 @@ function scheduleRetry(
         `UPDATE attempts
             SET exit_kind = ?,
                 ended_at = ?,
-                remote_sha_at_exit = ?
+                remote_sha_at_exit = ?,
+                exit_code = ?,
+                exit_signal = ?
           WHERE attempt_id = ?`,
       )
-      .run(exitKind, now, remoteShaAtExit, attempt.attempt_id);
+      .run(
+        exitKind,
+        now,
+        remoteShaAtExit,
+        exitInfo.exitCode,
+        exitInfo.exitSignal,
+        attempt.attempt_id,
+      );
     scheduleDeterministicRetry(deps, {
       taskId: task.task_id,
       prevAttempt: attempt,
@@ -497,14 +657,28 @@ function scheduleRetry(
       fromState: "running",
     });
     const eventType = exitKind === "no_progress" ? "no_progress" : "crashed";
+    const eventData = JSON.stringify({
+      exit_code: exitInfo.exitCode,
+      exit_signal: exitInfo.exitSignal,
+      remote_unchanged: predicate.remoteUnchanged,
+      pr_existed_at_spawn: predicate.prExistedAtSpawn,
+      pr_exists_at_exit: predicate.prExistsAtExit,
+    });
     deps.db
       .query(
         `INSERT INTO events (
            task_id, attempt_id, event_type,
-           from_state, to_state, occurred_at
-         ) VALUES (?, ?, ?, 'running', (SELECT state FROM tasks WHERE task_id = ?), ?)`,
+           from_state, to_state, occurred_at, event_data
+         ) VALUES (?, ?, ?, 'running', (SELECT state FROM tasks WHERE task_id = ?), ?, ?)`,
       )
-      .run(task.task_id, attempt.attempt_id, eventType, task.task_id, now);
+      .run(
+        task.task_id,
+        attempt.attempt_id,
+        eventType,
+        task.task_id,
+        now,
+        eventData,
+      );
     deps.db.exec("COMMIT");
     return { outcome: exitKind === "no_progress" ? "no_progress" : "crashed" };
   } catch (err) {

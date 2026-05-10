@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isValidGitRef } from "../../../src/core/branch_slug.ts";
-import type { GitPort } from "../../../src/ports/git.ts";
+import type { DiffSummary, GitPort } from "../../../src/ports/git.ts";
 
 export interface FakeGitCall {
   op: string;
@@ -24,6 +24,7 @@ export class FakeGit implements GitPort {
   readonly remoteBranches = new Map<string, Set<string>>();
   readonly openPrBranches = new Map<string, Set<string>>();
   readonly remoteHeads = new Map<string, string>(); // key = `${repoId}\0${branch}`
+  readonly diffSummaries = new Map<string, DiffSummary>(); // key = `${repoId}\0${base}\0${head}`
   readonly worktrees = new Set<string>();
   readonly worktreeBranches = new Map<string, { repoId: string; branch: string }>();
   readonly reposRoot: string;
@@ -144,6 +145,29 @@ export class FakeGit implements GitPort {
   remoteHeadSha(repoId: string, branch: string): string | null {
     this.record("remoteHeadSha", { repoId, branch });
     return this.remoteHeads.get(`${repoId}\0${branch}`) ?? null;
+  }
+
+  diffSummary(
+    repoId: string,
+    baseSha: string,
+    headSha: string,
+  ): DiffSummary | null {
+    this.record("diffSummary", { repoId, baseSha, headSha });
+    return this.diffSummaries.get(`${repoId}\0${baseSha}\0${headSha}`) ?? null;
+  }
+
+  setDiffSummary(
+    repoId: string,
+    baseSha: string,
+    headSha: string,
+    summary: DiffSummary | null,
+  ): void {
+    const key = `${repoId}\0${baseSha}\0${headSha}`;
+    if (summary === null) {
+      this.diffSummaries.delete(key);
+    } else {
+      this.diffSummaries.set(key, summary);
+    }
   }
 
   setRemoteHeadSha(repoId: string, branch: string, sha: string | null): void {

@@ -247,6 +247,36 @@ test("spawn aborts when a stale .quay-blocked.md cannot be swept", () => {
   ).toThrow(/quay-blocked\.md/);
 });
 
+// In the silent-exit case the wrapper never reaches its post-agent
+// step, so a stale `.quay-exit-code` from a previous attempt is NOT
+// overwritten and would be misread as the current attempt's exit
+// status — actively poisoning triage. Fail closed at sweep time, same
+// as `.quay-session.log` and `.quay-blocked.md`.
+test("spawn aborts when a stale .quay-exit-code cannot be swept", () => {
+  if (typeof process.geteuid === "function" && process.geteuid() === 0) {
+    return;
+  }
+  const adapter = new TmuxAdapter();
+  const worktreePath = tempWorktree();
+  const stalePath = join(worktreePath, ".quay-exit-code");
+  writeFileSync(stalePath, "0");
+  chmodSync(worktreePath, 0o555);
+  cleanups.unshift(() => {
+    try {
+      chmodSync(worktreePath, 0o755);
+    } catch {}
+  });
+
+  expect(() =>
+    adapter.spawn({
+      sessionName: `quay-test-sweep-fail-exit-${Math.random().toString(36).slice(2, 10)}`,
+      worktreePath,
+      promptContent: "ignored",
+      agentInvocation: "true",
+    }),
+  ).toThrow(/quay-exit-code/);
+});
+
 t("spawn does not touch unrelated files in the worktree root", () => {
   const adapter = new TmuxAdapter();
   const worktreePath = tempWorktree();

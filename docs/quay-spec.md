@@ -64,7 +64,7 @@ An **artifact** is data that one actor hands to another, or observes from anothe
 | External → Orchestrator (per task) | Yes — e.g. ticket snapshot, ingested Slack reply |
 | Orchestrator → Quay | Yes — caller brief |
 | Quay → Worker | Yes — protocol preamble, final prompt |
-| Worker → Quay | Yes — signal file (`.quay-blocked.md`), session log, observed PR/CI state |
+| Worker → Quay | Yes — signal file (`.quay-blocked.md`), session log, exit-code marker (`.quay-exit-code`), observed PR/CI state |
 | Worker → External | Captured via Quay's observation (PR pointer + observed slices) |
 | Quay → External (per task) | Yes — Slack escalation message |
 | Orchestrator → Orchestrator (internal reasoning, tool calls) | No |
@@ -737,6 +737,8 @@ Snapshot anything that crosses a task boundary. Internal-to-one-actor work is no
 | `slack_reply` | Tick ingests a non-bot reply during `waiting_human` | Slack reply body + author + ts | File |
 | `last_failure` | Retry budget exhausted | Captured at any transition into `awaiting-next-brief` where `attempts_consumed >= retry_budget`. Contents depend on path: for deterministic-retry exhaustion (CI fail / crash / stale / wall-clock / malformed-signal) → the retry brief Quay would have spawned with (template + diagnostics + most-recent brief). For worker-blocker exhaustion (final-attempt blocker) → the blocker prose + a note that no respawn was attempted + a reference to the most-recent brief. Either way, gives the orchestrator everything it needs to decide between `escalate-human` and `cancel`. | File |
 | `malformed_signal` | Tick observes `.quay-blocked.md` that fails validation (empty / unreadable / unparseable) | Raw bytes of the rejected file, captured for forensics before deletion. | File |
+| `usage` | Worker exits (clean or killed) and `<worktree>/.quay-usage.json` exists | Spawn wrapper redirects the agent's `--output-format json` (claude — equivalent flags for Codex / Cursor / etc.) to `.quay-usage.json`. Captured verbatim as the JSON envelope; downstream consumers parse `input_tokens`, `output_tokens`, `total_cost_usd`, `duration_ms`, model id, etc. NULL-output rows (worker killed before write, malformed JSON, agent that doesn't emit a structured envelope) simply have no `usage` artifact — the row's absence is the signal. | File |
+| `tool_trace` | Worker exits (clean or killed) and `<worktree>/.quay-tool-trace.log` exists | Spawn wrapper passes `--debug --debug-file .quay-tool-trace.log` (claude — equivalent debug-output flags for other runtimes). The file streams tool-dispatch events (`tool_dispatch_start tool=Bash`, `tool_dispatch_end tool=Write outcome=ok`, `[API:request] ...`) as the worker runs, so even a killed-mid-run attempt typically produces a useful trace. Captured verbatim; v1 is bytes (parsing is claude-internal and may shift). Tail-read past 4 MiB so a runaway worker can't bloat the artifact store. | File |
 
 ### What is NOT an artifact
 
@@ -844,7 +846,11 @@ CREATE TABLE attempts (
   pr_existed_at_spawn INTEGER NOT NULL DEFAULT 0,  -- 0/1; whether a PR (open or closed/merged) existed for this branch at promotion time. Used together with the post-exit PR check to detect "PR was created during this attempt" without further remote-SHA churn.
   ended_at TEXT,
   exit_kind TEXT,                     -- pr_opened / blocker_written / killed_stale / killed_wall_clock / killed_cancel / crashed / clean_no_pr / spawn_failed / no_progress
-  kill_intent TEXT                    -- NULL while the worker is supposed to keep running. Set inside the SQL chokepoint *before* the tmux kill for any ordered-kill path: 'stale' / 'wall_clock' / 'cancel'. Read by the next tick: if the worker is dead and kill_intent is set, complete the originally-scheduled transition (deterministic retry for stale/wall_clock; cancellation cleanup for cancel) instead of running the dead-worker classifier. Cleared on the resulting transition.
+  kill_intent TEXT,                   -- NULL while the worker is supposed to keep running. Set inside the SQL chokepoint *before* the tmux kill for any ordered-kill path: 'stale' / 'wall_clock' / 'cancel'. Read by the next tick: if the worker is dead and kill_intent is set, complete the originally-scheduled transition (deterministic retry for stale/wall_clock; cancellation cleanup for cancel) instead of running the dead-worker classifier. Cleared on the resulting transition.
+  agent_identity TEXT,                -- "<runtime>/<runtime_version>/<model_id>", e.g. "claude/2.1.132/unknown". Captured at spawn time by probing the agent binary's `--version`. NULL on rows that pre-date the slice; populated for every successful spawn thereafter. Lets retro analysis slice attempts by which agent runtime executed them (preamble v2 vs v1 on the same model, opus vs sonnet cost/quality tradeoff, etc.).
+  exit_code INTEGER,                  -- OS-level exit code (0–255) when the worker pane exited without a signal. NULL when the process was signaled, when the row pre-dates this slice, when no real process ever ran (spawn_failed), or when the worker shell was itself killed before its post-block could record `$?` (e.g. tick's wall_clock kill, cancel finalizer kill). Quay's `exit_kind` is the classification; this is the raw substrate observation.
+  exit_signal TEXT,                   -- Canonical signal name (e.g. "SIGINT", "SIGKILL", "SIGPIPE") when the worker pane was terminated by signal; NULL otherwise. Same NULL semantics as `exit_code`. Captured by wrapping the agent invocation in `<agent>; printf '%d' "$?" > .quay-exit-code` and decoding the 128+N shell convention — works on every tmux version (tmux's `#{pane_dead_status}` / `#{pane_dead_signo}` formatters are unreliable for signaled exits on tmux 3.6a / macOS).
+  diff_summary TEXT                   -- JSON: lines-changed metadata between `remote_sha_at_spawn` and `remote_sha_at_exit` (`{files_changed, insertions, deletions, files: [{path, status, ins, del}]}`). Computed once on the `pr_opened` transition via `git diff --no-renames --numstat` + `--name-status` against the bare clone. NULL on rows pre-dating this slice, on attempts that never reached `pr_opened`, on attempts whose remote SHA didn't change (no diff to capture), and on best-effort capture failures (also recorded as a `tick_error` event with `event_data.capture = 'diff_summary'`).
 );
 
 -- Append-only artifact store pointer
@@ -852,7 +858,7 @@ CREATE TABLE artifacts (
   artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id TEXT NOT NULL REFERENCES tasks(task_id),
   attempt_id INTEGER REFERENCES attempts(attempt_id),
-  kind TEXT NOT NULL,                 -- ticket_snapshot / brief / final_prompt / blocker / session_log / ci_failure_excerpt / review_comments / conflict_slice / slack_escalation_post / slack_reply / last_failure / malformed_signal
+  kind TEXT NOT NULL,                 -- ticket_snapshot / brief / final_prompt / blocker / session_log / ci_failure_excerpt / review_comments / conflict_slice / slack_escalation_post / slack_reply / last_failure / malformed_signal / usage / tool_trace
   file_path TEXT NOT NULL,
   content_hash TEXT,                  -- used for crash-safe ingestion idempotency (set on blocker / slack_reply / malformed_signal / slack_escalation_post). For slack_escalation_post the hash covers (question_body || escalation_seq || escalation_nonce) so a fresh escalation cannot dedupe against a prior one.
   escalation_seq INTEGER,             -- only set on slack_escalation_post artifacts; copied from tasks.next_escalation_seq at step 1 of the Slack post sequence.
@@ -872,9 +878,47 @@ CREATE TABLE events (
   from_state TEXT,
   to_state TEXT,
   payload_artifact_id INTEGER REFERENCES artifacts(artifact_id),
-  occurred_at TEXT NOT NULL
+  occurred_at TEXT NOT NULL,
+  event_data TEXT                     -- nullable JSON; per-event-type "why" payload (no schema enforced). NULL on rows pre-dating the slice and on event types this slice doesn't populate. See "Event data convention" below for examples.
 );
 ```
+
+#### Event data convention
+
+`events.event_data` is a per-event-type JSON document carrying the
+context the `(event_type, from_state, to_state)` triple can't express.
+Schema is convention-only in v1. Examples for the event types
+populated today:
+
+```jsonc
+// crashed / no_progress (classifier dead-worker path)
+{
+  "exit_code": 137,                  // null when signaled
+  "exit_signal": "SIGKILL",          // null when normal exit
+  "remote_unchanged": true,          // remote_sha_at_exit matched spawn-time SHA (or both NULL)
+  "pr_existed_at_spawn": false,
+  "pr_exists_at_exit": false
+}
+
+// blocker_ingested (classifier valid-blocker path)
+{
+  "exit_code": 0,
+  "exit_signal": null,
+  "blocker_bytes": 423,              // size of the ingested .quay-blocked.md
+  "blocker_content_hash": "abc..."   // sha256 of the blocker bytes
+}
+
+// wall_clock_exceeded / stale_detected (kill-intent commit)
+{
+  "intent": "wall_clock",            // or "stale"
+  "spawned_seconds_ago": 3601,
+  "last_log_at": "2026-05-10T14:00:00.000Z"   // stale_detected only
+}
+```
+
+Adding new keys to an existing event type is backwards-compatible
+(consumers parse-or-default). Rename or remove a key only behind a
+deliberate migration of consumers.
 
 ### Schema constraints and transaction predicates
 
@@ -1183,13 +1227,13 @@ After rollback, enqueue exits with a structured error describing which step fail
 1. Quay writes `<worktree>/.quay-prompt.md` containing `preamble + "\n\n" + brief`.
 2. Quay creates the tmux session: `tmux new-session -d -s <session_name> -c <worktree>`.
 3. Quay configures pane piping to the session log: `tmux pipe-pane -t <session_name> -o "cat >> <worktree>/.quay-session.log"`.
-4. Quay sends the agent invocation as keys to the pane, **wrapped in `exec sh -c '<...>'`** so the pane exits when the agent process exits. **The prompt is delivered as a file path, never inline-quoted.** Shell-quoting prompts of arbitrary content via `tmux send-keys` is fragile (newlines, quotes, backticks all break in subtle ways). Canonical pattern (after substituting `{prompt_file}` into `agent_invocation`):
+4. Quay sends the agent invocation as keys to the pane, **wrapped in `exec sh -c '<...>'`** so the pane exits when the agent process exits. **The prompt is delivered as a file path, never inline-quoted.** Shell-quoting prompts of arbitrary content via `tmux send-keys` is fragile (newlines, quotes, backticks all break in subtle ways). The wrapper also captures the agent's exit status (`$?`) to `<worktree>/.quay-exit-code` after the agent exits and before the wrapper itself returns; the dead-worker classifier reads this on transition and persists it as an `exit_status` artifact (absence vs. presence is what discriminates "wrapper observed the agent exit" from "wrapper itself was reaped"). Canonical pattern (after substituting `{prompt_file}` into `agent_invocation`):
 
     ```
-    tmux send-keys -t <session_name> "exec sh -c '<agent_invocation_with_prompt_file>'" C-m
+    tmux send-keys -t <session_name> "exec sh -c '<agent_invocation_with_prompt_file> ; printf %s \"\$?\" > <worktree>/.quay-exit-code'" C-m
     ```
 
-    The `exec` is load-bearing: without it, the configured agent runs as a child of the session's interactive shell, and when the agent exits the shell remains, so `tmux has-session` would report the session as alive *forever* — turning every successful completion into a staleness or wall-clock kill on the next tick. With `exec sh -c`, the `sh` process replaces the login shell; when the agent inside it exits, `sh` exits, and tmux destroys the pane (and session, since the pane is the only one). `is_alive(handle)` flipping to false is then the canonical "worker has finished" signal that drives the dead-worker branch in §5.
+    The `exec` is load-bearing: without it, the configured agent runs as a child of the session's interactive shell, and when the agent exits the shell remains, so `tmux has-session` would report the session as alive *forever* — turning every successful completion into a staleness or wall-clock kill on the next tick. With `exec sh -c`, the `sh` process replaces the login shell; when the agent inside it exits, the wrapper writes the exit-code file and `sh` exits, and tmux destroys the pane (and session, since the pane is the only one). `is_alive(handle)` flipping to false is then the canonical "worker has finished" signal that drives the dead-worker branch in §5. The post-agent step adds milliseconds and is a no-op for the liveness contract; if the whole pane is killed (cgroup reap, OOM, `tmux kill`) the wrapper never reaches the post-agent step and `.quay-exit-code` stays absent.
 
     Quoting: Quay constructs the keystroke string by substituting `{prompt_file}` (a Quay-controlled path with no shell metacharacters by construction — see §13 worktree paths) into the operator-configured `agent_invocation`, then wrapping the result in `sh -c '...'`. The single-quoted `sh` command runs `agent_invocation` through `/bin/sh` (matching Quay's documented command-execution model in §13). If the operator's `agent_invocation` already contains a literal single quote, the operator escapes it per standard `sh -c` rules; Quay does not transform `agent_invocation` beyond the `{prompt_file}` substitution.
 

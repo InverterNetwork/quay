@@ -13,13 +13,20 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mergeVocab } from "../core/tags/merge.ts";
+import type { TagVocab } from "../core/tags/service.ts";
 import {
   loadSchema,
   parseSchema,
   SchemaLoadError,
 } from "../validator/load_schema.ts";
-import type { TicketDraft, TicketSchema } from "../validator/types.ts";
+import type {
+  TicketDraft,
+  TicketSchema,
+  ValidationError,
+} from "../validator/types.ts";
 import { validateTicket } from "../validator/validate.ts";
+import { validateTagVocab } from "../validator/validate_tag_vocab.ts";
 import type { CliIO } from "./io.ts";
 
 export interface ValidateTicketEnv {
@@ -31,6 +38,15 @@ export interface ValidateTicketResult {
   exitCode: number;
 }
 
+// Per-repo + deployment vocab lookup wired by the caller. Returning null
+// (lookup unavailable) or an empty `perRepo` (repo opted out) skips
+// enforcement — handleValidateTicket itself stays database-agnostic.
+export interface RepoVocabContext {
+  perRepo: TagVocab;
+  deployment: TagVocab;
+}
+export type RepoVocabLookup = (repoId: string) => RepoVocabContext | null;
+
 export interface ValidateTicketDeps {
   // The shipped-default schema as a TOML string. The compiled binary has
   // no `config/ticket_schema.toml` on disk, so we fall back to this when
@@ -38,6 +54,7 @@ export interface ValidateTicketDeps {
   // SHIPPED_DEFAULT_SCHEMA) all miss. In dev / tests SHIPPED_DEFAULT_SCHEMA
   // resolves to a real file, so this path is only exercised under --compile.
   embeddedSchema?: string;
+  lookupRepoVocab?: RepoVocabLookup;
 }
 
 const EMBEDDED_SCHEMA_PATH = "<embedded:ticket_schema.toml>";
@@ -129,15 +146,42 @@ export function handleValidateTicket(
     );
   }
 
-  const result = validateTicket(parsed as TicketDraft, schema);
+  const baseResult = validateTicket(parsed as TicketDraft, schema);
+  const vocabErrors = enforceRepoVocab(
+    parsed as Record<string, unknown>,
+    deps.lookupRepoVocab,
+  );
+  const errors: ValidationError[] = [...baseResult.errors, ...vocabErrors];
+  const valid = errors.length === 0;
   if (!opts.quiet) {
-    if (result.valid) {
+    if (valid) {
       io.stdout(`${JSON.stringify({ valid: true })}\n`);
     } else {
-      io.stdout(`${JSON.stringify(result)}\n`);
+      io.stdout(`${JSON.stringify({ valid: false, errors })}\n`);
     }
   }
-  return { exitCode: result.valid ? 0 : 1 };
+  return { exitCode: valid ? 0 : 1 };
+}
+
+function enforceRepoVocab(
+  payload: Record<string, unknown>,
+  lookup: RepoVocabLookup | undefined,
+): ValidationError[] {
+  if (lookup === undefined) return [];
+  const repoId = payload["repo"];
+  if (typeof repoId !== "string" || repoId === "") return [];
+  const context = lookup(repoId);
+  if (context === null) return [];
+  const merged = mergeVocab(context.deployment, context.perRepo);
+  // Treat structurally-wrong `tags` (missing or non-array) as empty: the
+  // schema validator handles the TYPE/MISSING report, and required-namespace
+  // checks still fire (bare `tags` field, no index-shift concern) so the
+  // user sees both classes of error in one round-trip. Non-string array
+  // entries are tolerated inside validateTagVocab so per-tag indices stay
+  // aligned with the base validator's tags[i] paths.
+  const tagsRaw = payload["tags"];
+  const tags = Array.isArray(tagsRaw) ? tagsRaw : [];
+  return validateTagVocab(tags, merged);
 }
 
 interface ParsedFlags {

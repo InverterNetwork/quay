@@ -154,6 +154,51 @@ t("logFreshness returns the log file's mtime once output has landed", async () =
   expect(freshMs).toBeGreaterThan(Date.parse(oldSpawnedAt));
 });
 
+test("logFreshness uses .quay-tool-trace.log when only the debug stream is producing output", () => {
+  // With the default agent_invocation routing stdout to .quay-usage.json
+  // and debug to .quay-tool-trace.log, the pane log can stay empty for
+  // an entire run. logFreshness must consider the trace file too —
+  // otherwise tick stale-kills active workers past the staleness
+  // threshold even when debug output is streaming.
+  const { writeFileSync, utimesSync } = require("node:fs") as typeof import("node:fs");
+  const adapter = new TmuxAdapter();
+  const worktreePath = tempWorktree();
+  const tracePath = join(worktreePath, ".quay-tool-trace.log");
+  writeFileSync(tracePath, "tool dispatch line\n");
+
+  const oldSpawnedAt = "2020-01-01T00:00:00.000Z";
+  const recentSec = Math.floor(Date.now() / 1000);
+  utimesSync(tracePath, recentSec, recentSec);
+
+  const fresh = adapter.logFreshness("any-session", worktreePath, oldSpawnedAt);
+  expect(fresh).not.toBe(oldSpawnedAt);
+  expect(Date.parse(fresh)).toBeGreaterThan(Date.parse(oldSpawnedAt));
+});
+
+test("logFreshness picks the freshest of session_log and tool_trace", () => {
+  const { writeFileSync, utimesSync } = require("node:fs") as typeof import("node:fs");
+  const adapter = new TmuxAdapter();
+  const worktreePath = tempWorktree();
+  const sessionPath = join(worktreePath, ".quay-session.log");
+  const tracePath = join(worktreePath, ".quay-tool-trace.log");
+  writeFileSync(sessionPath, "old\n");
+  writeFileSync(tracePath, "newer\n");
+  // session_log mtime: 60s ago. tool_trace mtime: now.
+  const nowSec = Math.floor(Date.now() / 1000);
+  utimesSync(sessionPath, nowSec - 60, nowSec - 60);
+  utimesSync(tracePath, nowSec, nowSec);
+
+  const fresh = adapter.logFreshness(
+    "any-session",
+    worktreePath,
+    "2020-01-01T00:00:00.000Z",
+  );
+  // The newer of the two mtimes wins; should be within a couple seconds
+  // of "now", well past 60s ago.
+  const freshMs = Date.parse(fresh);
+  expect(freshMs).toBeGreaterThan((nowSec - 30) * 1000);
+});
+
 t("logFreshness falls back to spawnedAt before any output has landed", async () => {
   // Spec contract: a freshly-spawned worker that has NOT yet written
   // anything to its log should report spawnedAt as freshness, so the

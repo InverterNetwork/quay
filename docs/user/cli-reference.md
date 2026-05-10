@@ -60,6 +60,11 @@ quay repo remove <repo_id>
 quay repo list [--active]
 quay repo export [--out <path>] [--active]
 quay repo import --in <path>
+
+quay repo set-tags <repo_id> --namespace <name> --value <v>
+quay repo unset-tags <repo_id> --namespace <name> [--value <v>]
+quay repo get-tags <repo_id>
+quay repo apply-tags <repo_id> --from <path>
 ```
 
 `repo add` and `repo update` also accept `--input <json>` for structured
@@ -71,6 +76,29 @@ soft-deleted entries (and `repo export` keeps full-fidelity backup
 semantics). Pass `--active` to limit the output to rows with
 `archived_at IS NULL` — the typical "which repos are in service?"
 question that consumers like `setup-hermes.sh` ask.
+
+## Tags
+
+Deployment-wide vocabulary management and per-repo merged-vocab inspection:
+
+```bash
+quay tags set-deployment --namespace <name> --value <v>
+quay tags unset-deployment --namespace <name> [--value <v>]
+quay tags get-deployment
+quay tags apply-deployment --from <path>
+quay tags import --from <path> [--force]
+quay tags list --repo <repo_id>
+```
+
+`tags set-deployment` and `tags unset-deployment` operate on the deployment-scoped
+vocabulary (no repo required). `tags apply-deployment` accepts `--from -` for stdin.
+`tags import` reads a TOML file containing a `[tags.namespaces.*]` table; if the
+deployment vocab is already non-empty and the desired state differs, it exits 1 with
+`vocab_exists` unless `--force` is passed.
+
+`tags list --repo <repo_id>` merges the deployment vocab with the per-repo vocab and
+returns the result with an `enforced` boolean. `enforced` is true when the repo has
+any per-repo vocabulary configured; deployment-only vocab never enforces.
 
 ## Enqueue
 

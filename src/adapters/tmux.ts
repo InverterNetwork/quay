@@ -26,10 +26,21 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
+import { decodePaneStatus, EXIT_INFO_NONE } from "../core/exit_status.ts";
+import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 
 const PROMPT_FILE = ".quay-prompt.md";
 const SESSION_LOG_FILE = ".quay-session.log";
+// Tool-call trace produced by the agent's debug stream when the operator
+// uses `--debug-file`. With the default agent invocation routing stdout
+// to `.quay-usage.json` and debug output to this file, the pane log can
+// stay empty for an entire run — so freshness must consider this file
+// too or stale-kill fires on healthy long-running attempts.
+const TOOL_TRACE_FILE = ".quay-tool-trace.log";
+// Per-attempt exit-status marker written by the spawn wrapper. Holds the
+// worker shell's `$?` as plain decimal text. Treated identically to
+// other `.quay-*` files by the spawn preflight sweep.
+const EXIT_CODE_FILE = ".quay-exit-code";
 // Marker for direct children of the worktree root that belong to a previous
 // Quay attempt. Anything matching this prefix is sweep-eligible at spawn
 // time — see the spawn preflight for why.
@@ -59,15 +70,31 @@ export class TmuxAdapter implements TmuxPort {
       "{prompt_file}",
       shellQuote(promptFile),
     );
-    // `exec sh -c "..."` so the inner agent replaces the shell. When the
-    // agent exits, the pane has nothing left to run and tmux drops the
-    // session — making `tmux has-session` a reliable liveness probe.
-    const tmuxCommand = `exec sh -c ${shellQuote(expanded)}`;
+    // Wrap the worker so the shell writes its terminal `$?` to
+    // `<worktree>/.quay-exit-code` before the pane goes away. POSIX `$?`
+    // for a child terminated by signal N is 128+N, so the single integer
+    // captures both normal exits (0–127) and signaled exits (≥128); the
+    // classifier decodes it. Two corner cases produce no marker file
+    // (and thus a NULL/NULL row downstream): the agent_invocation uses
+    // `exec` to replace the wrapper shell, or the wrapper itself is
+    // killed before the trailing `printf` runs. We outer-`exec` into the
+    // wrapper so the pane has a single shell process rather than two
+    // nested ones — matching the prior session-exit semantics that
+    // `has-session` liveness depends on.
+    const exitCodeFile = join(input.worktreePath, EXIT_CODE_FILE);
+    const wrapped = `${expanded}\nstatus=$?\nprintf '%d' "$status" > ${shellQuote(exitCodeFile)}\nexit "$status"`;
+    const tmuxCommand = `exec sh -c ${shellQuote(wrapped)}`;
 
     // Step 1: create session with a placeholder command that keeps the
     // session alive while we wire pipe-pane. `cat` reads stdin (nobody is
     // typing in a detached session) and produces no output, so it stays
     // quiet until we respawn the pane in step 3.
+    //
+    // `env: process.env` is forwarded explicitly because Bun snapshots
+    // env at startup. tmux populates the new session's environment from
+    // its connecting client, so anything quay tick mints or refreshes at
+    // runtime (GH_TOKEN, GITHUB_TOKEN, credential-helper sockets, etc.)
+    // would otherwise be invisible to the agent — silent-exit territory.
     const result = Bun.spawnSync({
       cmd: [
         "tmux",
@@ -79,6 +106,7 @@ export class TmuxAdapter implements TmuxPort {
         input.worktreePath,
         "cat",
       ],
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -110,6 +138,7 @@ export class TmuxAdapter implements TmuxPort {
         `${input.sessionName}:0.0`,
         pipeCommand,
       ],
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -122,6 +151,7 @@ export class TmuxAdapter implements TmuxPort {
       try {
         Bun.spawnSync({
           cmd: ["tmux", "kill-session", "-t", `=${input.sessionName}`],
+          env: process.env,
           stdout: "ignore",
           stderr: "ignore",
         });
@@ -147,6 +177,7 @@ export class TmuxAdapter implements TmuxPort {
         `${input.sessionName}:0.0`,
         tmuxCommand,
       ],
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -155,6 +186,7 @@ export class TmuxAdapter implements TmuxPort {
       try {
         Bun.spawnSync({
           cmd: ["tmux", "kill-session", "-t", `=${input.sessionName}`],
+          env: process.env,
           stdout: "ignore",
           stderr: "ignore",
         });
@@ -168,6 +200,7 @@ export class TmuxAdapter implements TmuxPort {
   isAlive(sessionName: string): boolean {
     const result = Bun.spawnSync({
       cmd: ["tmux", "has-session", "-t", `=${sessionName}`],
+      env: process.env,
       stdout: "ignore",
       stderr: "ignore",
     });
@@ -180,9 +213,29 @@ export class TmuxAdapter implements TmuxPort {
     // way.
     Bun.spawnSync({
       cmd: ["tmux", "kill-session", "-t", `=${sessionName}`],
+      env: process.env,
       stdout: "ignore",
       stderr: "ignore",
     });
+  }
+
+  getExitInfo(_sessionName: string, worktreePath: string): PaneExitInfo {
+    // The spawn wrapper writes the worker shell's `$?` to
+    // `<worktreePath>/.quay-exit-code` before the pane terminates. We
+    // chose this over reading tmux's `#{pane_dead_status}` /
+    // `#{pane_dead_signo}` formatters because tmux 3.6a on macOS
+    // (and other versions) returns empty strings for signaled exits —
+    // making native capture unreliable for the "killed by SIGKILL"
+    // hypothesis the column exists to discriminate.
+    const path = join(worktreePath, EXIT_CODE_FILE);
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch {
+      return EXIT_INFO_NONE;
+    }
+    const status = parseIntOrNull(raw);
+    return decodePaneStatus(status, null);
   }
 
   collectLog(_sessionName: string, worktreePath: string): string | null {
@@ -241,23 +294,32 @@ export class TmuxAdapter implements TmuxPort {
     worktreePath: string,
     spawnedAt: string,
   ): string {
-    // The log mtime is the freshness signal: stale-kill fires when the
-    // most recent output is older than `staleness_threshold_seconds`. For
-    // a freshly spawned worker that hasn't written anything yet, no log
-    // file exists; fall back to spawned_at so the freshness window starts
-    // from spawn (not from epoch).
-    const logPath = join(worktreePath, SESSION_LOG_FILE);
-    let stat;
-    try {
-      stat = statSync(logPath);
-    } catch {
-      return spawnedAt;
+    // The freshness signal is the maximum mtime across every observability
+    // file the worker may be writing: the pane log captured by pipe-pane
+    // and (since the default invocation pipes stdout/debug elsewhere) the
+    // tool-trace file written by `--debug-file`. Without including the
+    // trace, an attempt that produces only debug output stale-kills past
+    // `staleness_threshold_seconds` even when actively making tool calls.
+    // Empty / missing files contribute nothing; if no file has any bytes
+    // yet, we fall back to spawned_at so the staleness window starts from
+    // spawn rather than epoch.
+    let freshestMs: number | null = null;
+    for (const name of [SESSION_LOG_FILE, TOOL_TRACE_FILE]) {
+      let stat;
+      try {
+        stat = statSync(join(worktreePath, name));
+      } catch {
+        continue;
+      }
+      if (stat.size === 0) continue;
+      if (freshestMs === null || stat.mtimeMs > freshestMs) {
+        freshestMs = stat.mtimeMs;
+      }
     }
-    // Empty log file (pipe-pane created it but nothing has been printed
-    // yet): same case as "no log yet" — use spawned_at as the floor.
-    if (stat.size === 0) return spawnedAt;
-    return new Date(stat.mtimeMs).toISOString();
+    if (freshestMs === null) return spawnedAt;
+    return new Date(freshestMs).toISOString();
   }
+
 }
 
 // POSIX-shell single-quote escaping. Any single-quote in the input is closed,
@@ -266,14 +328,35 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+// Parses a tmux format substitution into a number. Returns null for the
+// empty string (older tmux that doesn't recognise the format key
+// substitutes empty, not the literal `#{...}`) and for any non-numeric
+// payload, so the decoder can treat "no observation" uniformly.
+function parseIntOrNull(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  if (!/^-?\d+$/.test(trimmed)) return null;
+  return Number.parseInt(trimmed, 10);
+}
+
 // Files whose stale presence directly drives the bug the sweep exists to
 // fix: `.quay-blocked.md` would be ingested as the new attempt's blocker;
 // `.quay-session.log` would mix old bytes into the new attempt's log and
-// skew the mtime-based freshness signal. Failing to remove either of
-// these is treated as a hard spawn failure so the spawn-substrate-failed
-// path takes over (same semantics as a `pipe-pane` failure) — silently
-// proceeding would reintroduce the exact bug this sweep prevents.
-const SWEEP_FAIL_CLOSED = new Set([".quay-blocked.md", ".quay-session.log"]);
+// skew the mtime-based freshness signal. A leftover `.quay-exit-code`
+// would be misread as the current attempt's exit status — and in the
+// exact silent-exit case the wrapper is built to diagnose, the wrapper
+// never overwrites the file, so the previous attempt's `$?` would be
+// stamped onto this attempt's `attempts.exit_code`/`exit_signal` columns
+// and actively poison triage. Failing to remove any of these is treated as a hard
+// spawn failure so the spawn-substrate-failed path takes over (same
+// semantics as a `pipe-pane` failure) — silently proceeding would
+// reintroduce the exact bugs this sweep prevents.
+const SWEEP_FAIL_CLOSED = new Set([
+  ".quay-blocked.md",
+  ".quay-session.log",
+  ".quay-exit-code",
+]);
 
 // Remove every direct child of `worktreePath` whose name starts with the
 // `.quay-` prefix. The two files in `SWEEP_FAIL_CLOSED` are required
