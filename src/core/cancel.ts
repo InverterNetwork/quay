@@ -26,6 +26,7 @@ import type { GitHubPort } from "../ports/github.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import { collectUsageArtifact } from "./usage.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
 
 export type CancelErrorCode = "unknown_task" | "wrong_state";
@@ -286,8 +287,13 @@ export function runCancelFinalizer(deps: CancelDeps, taskId: string): void {
     } catch {}
   }
 
-  // Step 2: best-effort session-log capture. Done inside try/catch — failures
-  // do not block terminal convergence.
+  // Step 2: best-effort session-log + usage capture. Done inside
+  // try/catch — failures do not block terminal convergence. The usage
+  // envelope is rarely complete when cancel arrives (claude
+  // `--output-format json` only writes at clean exit, and cancel
+  // typically kills mid-run), but capturing when present means a
+  // late-arriving cancel against an already-finished worker still
+  // links the row to its usage artifact.
   if (latest !== null) {
     try {
       const sessionName =
@@ -309,6 +315,7 @@ export function runCancelFinalizer(deps: CancelDeps, taskId: string): void {
         }
       }
     } catch {}
+    collectUsageArtifact(deps, taskId, latest.attempt_id, row.worktree_path);
   }
 
   // Step 3: cleanup matrix per §5. Substrate failures are logged-and-continue;
