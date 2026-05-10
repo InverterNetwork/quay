@@ -12,6 +12,7 @@
 // works); the shipped tmux adapter passes only the file's status and
 // leaves the signo argument null.
 
+import { constants } from "node:os";
 import type { PaneExitInfo } from "../ports/tmux.ts";
 
 export const EXIT_INFO_NONE: PaneExitInfo = {
@@ -40,42 +41,24 @@ export function decodePaneStatus(
   return { exitCode: status, exitSignal: null };
 }
 
-// POSIX signal numbers we expect to encounter from a worker process.
-// Numbers follow the Linux/macOS POSIX layout where they overlap; the
-// few divergent slots (SIGUSR1/2, SIGSTOP/TSTP) match on both. A signal
-// we don't recognise renders as `SIG<n>` so the column is never NULL
-// for an observed signaled exit.
-const SIGNAL_NAMES: Record<number, string> = {
-  1: "SIGHUP",
-  2: "SIGINT",
-  3: "SIGQUIT",
-  4: "SIGILL",
-  5: "SIGTRAP",
-  6: "SIGABRT",
-  7: "SIGBUS",
-  8: "SIGFPE",
-  9: "SIGKILL",
-  10: "SIGUSR1",
-  11: "SIGSEGV",
-  12: "SIGUSR2",
-  13: "SIGPIPE",
-  14: "SIGALRM",
-  15: "SIGTERM",
-  17: "SIGCHLD",
-  18: "SIGCONT",
-  19: "SIGSTOP",
-  20: "SIGTSTP",
-  21: "SIGTTIN",
-  22: "SIGTTOU",
-  24: "SIGXCPU",
-  25: "SIGXFSZ",
-  26: "SIGVTALRM",
-  27: "SIGPROF",
-  28: "SIGWINCH",
-  29: "SIGIO",
-  30: "SIGPWR",
-  31: "SIGSYS",
-};
+// Build a signal-number → canonical-name map from node's per-platform
+// signal constants. macOS and Linux disagree on several slots (SIGBUS,
+// SIGSYS, SIGCHLD, SIGUSR1/2, SIGPWR) — hardcoding the Linux values
+// would produce wrong names for half of them on macOS, exactly the
+// platform the wrapper-shell `128+N` capture path was designed for. A
+// signal not present in the platform table renders as `SIG<n>` so the
+// column is never NULL for an observed signaled exit.
+const SIGNAL_NAMES: Record<number, string> = (() => {
+  const map: Record<number, string> = {};
+  for (const [name, num] of Object.entries(constants.signals)) {
+    if (typeof num !== "number") continue;
+    // First name wins — node's table is single-valued per number on each
+    // platform we care about, so this only matters for synonymous slots
+    // and the ordering in node's iteration is stable across releases.
+    if (map[num] === undefined) map[num] = name;
+  }
+  return map;
+})();
 
 export function signalName(signo: number): string {
   return SIGNAL_NAMES[signo] ?? `SIG${signo}`;

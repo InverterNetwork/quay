@@ -12,6 +12,14 @@ interface RunResult {
   stderr: string;
 }
 
+// Per-file array cap on diff_summary capture. A monorepo PR touching
+// thousands of files would otherwise persist a multi-megabyte JSON blob
+// inline on the attempts row. 200 keeps the column compact for the
+// common case while still showing the head of the path list for
+// inspection. Aggregates (files_changed, insertions, deletions) are
+// computed before truncation and reflect the full diff.
+const MAX_DIFF_FILES = 200;
+
 export class LocalGitAdapter implements GitPort {
   constructor(private readonly reposRoot: string) {}
 
@@ -374,9 +382,15 @@ export class LocalGitAdapter implements GitPort {
     // emitting "Rxx old new" while numstat collapses it onto one line
     // with a "{old => new}" path. v1 doesn't try to reunify renames; the
     // delete+add split is good enough for the lines-changed query usecase.
+    //
+    // -c core.quotePath=false keeps non-ASCII filenames literal — without
+    // it git emits octal-escaped quoted strings like "caf\303\251.txt"
+    // and downstream consumers can't index by the actual on-disk path.
     const range = `${baseSha}..${headSha}`;
     const numstatRes = runIn(this.bareDir(repoId), [
       "git",
+      "-c",
+      "core.quotePath=false",
       "diff",
       "--no-renames",
       "--numstat",
@@ -385,6 +399,8 @@ export class LocalGitAdapter implements GitPort {
     if (numstatRes.exitCode !== 0) return null;
     const nameStatusRes = runIn(this.bareDir(repoId), [
       "git",
+      "-c",
+      "core.quotePath=false",
       "diff",
       "--no-renames",
       "--name-status",
@@ -423,11 +439,27 @@ export class LocalGitAdapter implements GitPort {
         del: del !== null && Number.isFinite(del) ? del : null,
       });
     }
+
+    // Truncate the per-file array on monorepo-scale diffs to keep the
+    // attempts row compact (TEXT column read on every list query).
+    // Aggregates are computed BEFORE truncation so they remain accurate;
+    // the truncation marker tells consumers the array is partial. The
+    // first MAX_DIFF_FILES entries are kept — the order matches git's
+    // output, which is alphabetical-ish; for a monorepo touch the head
+    // is as useful as any other slice and avoids needing to score files.
+    const totalFilesChanged = files.length;
+    let truncated = false;
+    let kept = files;
+    if (files.length > MAX_DIFF_FILES) {
+      kept = files.slice(0, MAX_DIFF_FILES);
+      truncated = true;
+    }
     return {
-      files_changed: files.length,
+      files_changed: totalFilesChanged,
       insertions,
       deletions,
-      files,
+      files: kept,
+      ...(truncated ? { truncated: true } : {}),
     };
   }
 

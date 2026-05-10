@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -94,7 +94,7 @@ test("probeAgentIdentity probes the command word past env-var assignments", () =
   expect(id).not.toBe("ANTHROPIC_MODEL=opus/unknown/unknown");
 });
 
-test("probeAgentIdentity memoises by invocation string", () => {
+test("probeAgentIdentity caches per (invocation, binary mtime); a binary upgrade re-probes", () => {
   const tmp = mkdtempSync(join(tmpdir(), "quay-probe-cache-"));
   const fakeBin = join(tmp, "fake-agent");
   writeFileSync(fakeBin, `#!/bin/sh\necho "fake-agent 1.0.0"\n`);
@@ -104,19 +104,30 @@ test("probeAgentIdentity memoises by invocation string", () => {
     const first = probeAgentIdentity(invocation);
     expect(first).toBe("fake-agent/fake-agent 1.0.0/unknown");
 
-    // Replace the binary with one that prints a different version. The
-    // cache must short-circuit and return the original probe result —
-    // probes are per-process and operator config does not change at
-    // runtime, so re-probing every tick would be pointless work.
-    writeFileSync(fakeBin, `#!/bin/sh\necho "fake-agent 9.9.9"\n`);
+    // Same binary, same mtime → cache hit, identical result.
     const second = probeAgentIdentity(invocation);
     expect(second).toBe(first);
 
-    // After cache reset the same invocation re-probes and observes the
-    // updated binary.
-    __resetAgentIdentityCacheForTests();
+    // Replace the binary so its mtime advances: this models the
+    // npm/brew-upgrade-while-quay-is-running case. The next probe MUST
+    // observe the new version rather than returning the stale cached
+    // value — otherwise long-lived processes silently record the
+    // pre-upgrade identity for every subsequent attempt.
+    const beforeMtime = statSync(fakeBin).mtimeMs;
+    // Sleep just long enough to guarantee mtime resolution moves; many
+    // filesystems quantise to ms or coarser.
+    do {
+      writeFileSync(fakeBin, `#!/bin/sh\necho "fake-agent 9.9.9"\n`);
+      chmodSync(fakeBin, 0o755);
+    } while (statSync(fakeBin).mtimeMs === beforeMtime);
     const third = probeAgentIdentity(invocation);
     expect(third).toBe("fake-agent/fake-agent 9.9.9/unknown");
+
+    // After cache reset the same invocation re-probes — same outcome
+    // since the binary is already the new version.
+    __resetAgentIdentityCacheForTests();
+    const fourth = probeAgentIdentity(invocation);
+    expect(fourth).toBe("fake-agent/fake-agent 9.9.9/unknown");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

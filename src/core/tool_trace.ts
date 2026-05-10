@@ -4,8 +4,7 @@
 // module ingests the bytes verbatim as a `tool_trace` artifact at
 // attempt end.
 //
-// Debug logs run to megabytes — the ticket cited ~50KB for a small
-// run, larger for full attempts. Capping reads at MAX_TOOL_TRACE_BYTES
+// Debug logs can run to megabytes. Capping reads at MAX_TOOL_TRACE_BYTES
 // with a tail bias mirrors the session_log behaviour: the most recent
 // events are the ones an operator scrolling backward from "what
 // happened at the end?" reaches first. Same content_hash idempotency

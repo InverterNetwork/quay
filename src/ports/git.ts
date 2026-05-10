@@ -60,4 +60,9 @@ export interface DiffSummary {
   insertions: number;
   deletions: number;
   files: DiffSummaryFile[];
+  // Set to true (and only emitted as true; absent when not truncated) when
+  // `files[]` was capped because the underlying diff exceeded the per-file
+  // array limit. `files_changed` and the line-count totals always reflect
+  // the full diff — only the per-file array is partial.
+  truncated?: true;
 }

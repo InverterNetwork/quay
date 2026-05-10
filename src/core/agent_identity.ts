@@ -10,6 +10,12 @@
 // spawn — which is what makes "is the spawn observability wired?" a
 // non-NULL check rather than a content match.
 //
+// Caching: probes are memoised by invocation string AND keyed by the
+// resolved binary's mtime. Repeat probes within a tick are a single
+// stat() call, but a binary upgrade (npm/brew install while quay is
+// running) flips the mtime and the next probe re-spawns `--version` to
+// pick up the new build.
+//
 // Invocation parsing mirrors a small shell subset: tokens respect single
 // and double quotes, leading `VAR=value` env-var assignments are skipped
 // to find the actual command word, and shell control characters
@@ -20,10 +26,25 @@
 // the underlying agent identity. Operators with non-trivial wrappers
 // should treat the recorded value as best-effort.
 
+import { statSync } from "node:fs";
+
 const VERSION_PROBE_TIMEOUT_MS = 2000;
 const MAX_VERSION_LENGTH = 256;
 
-const probeCache = new Map<string, string>();
+interface CacheEntry {
+  identity: string;
+  // Resolved absolute path of the binary at probe time. Null when the
+  // invocation didn't yield a parseable command word, or when neither
+  // an absolute path nor PATH lookup found the binary.
+  binaryPath: string | null;
+  // mtime (in ms since epoch) of `binaryPath` at probe time. Null when
+  // we couldn't stat the file; treated as a single distinct value so
+  // unstattable→unstattable hits the cache and "appeared on PATH" or
+  // "got upgraded" both miss it.
+  mtimeMs: number | null;
+}
+
+const probeCache = new Map<string, CacheEntry>();
 
 // Extract the binary the shell would exec from an `agent_invocation`
 // template. Returns null when the invocation is empty, contains only
@@ -40,26 +61,48 @@ export function parseAgentBinary(agentInvocation: string): string | null {
 // Probe `<binary> --version` and return `<runtime>/<version>/<model>`.
 // Always returns a non-empty string. Hangs are bounded by an internal
 // timeout so a misbehaving binary cannot stall the spawn path. Memoised
-// by the exact `agent_invocation` string — operator config changes
-// rarely, so steady-state cost is one probe per unique invocation per
-// process lifetime.
+// by `agent_invocation` keyed on the resolved binary path AND its mtime,
+// so a binary upgrade between probes invalidates the cache and re-runs
+// `--version` against the new build.
 export function probeAgentIdentity(agentInvocation: string): string {
+  const binary = parseAgentBinary(agentInvocation);
+  const binaryPath = binary !== null ? resolveBinaryPath(binary) : null;
+  let mtimeMs: number | null = null;
+  if (binaryPath !== null) {
+    try {
+      mtimeMs = statSync(binaryPath).mtimeMs;
+    } catch {
+      mtimeMs = null;
+    }
+  }
   const cached = probeCache.get(agentInvocation);
-  if (cached !== undefined) return cached;
-  const identity = computeAgentIdentity(agentInvocation);
-  probeCache.set(agentInvocation, identity);
+  if (
+    cached !== undefined &&
+    cached.binaryPath === binaryPath &&
+    cached.mtimeMs === mtimeMs
+  ) {
+    return cached.identity;
+  }
+  const identity = computeAgentIdentity(binary, binaryPath);
+  probeCache.set(agentInvocation, { identity, binaryPath, mtimeMs });
   return identity;
 }
 
-function computeAgentIdentity(agentInvocation: string): string {
-  const binary = parseAgentBinary(agentInvocation);
+function computeAgentIdentity(
+  binary: string | null,
+  binaryPath: string | null,
+): string {
   if (binary === null) return "unknown/unknown/unknown";
 
+  // Probe via the resolved absolute path when available, so the binary
+  // we stat (above, for cache keying) is the one we actually exec.
+  // Otherwise fall back to the literal token and let Bun resolve it via
+  // PATH — same behaviour as before, used when Bun.which returned null.
   const runtime = baseName(binary);
   let version = "unknown";
   try {
     const result = Bun.spawnSync({
-      cmd: [binary, "--version"],
+      cmd: [binaryPath ?? binary, "--version"],
       stdout: "pipe",
       stderr: "pipe",
       timeout: VERSION_PROBE_TIMEOUT_MS,
@@ -74,6 +117,18 @@ function computeAgentIdentity(agentInvocation: string): string {
     // Binary not on PATH, EACCES, internal spawn error — treat as unknown.
   }
   return `${runtime}/${version}/unknown`;
+}
+
+// Resolve to an absolute path so the cache key tracks a stable inode and
+// the stat we use for mtime targets the same file the spawn will exec.
+// Absolute paths pass through; relative tokens go through Bun.which (the
+// same PATH resolution Bun.spawnSync would do). Returns null when no
+// binary on the current PATH matches — we still probe in that case (to
+// preserve the "binary missing → unknown/unknown/unknown" outcome) but
+// can't key the cache by mtime.
+function resolveBinaryPath(binary: string): string | null {
+  if (binary.startsWith("/")) return binary;
+  return Bun.which(binary);
 }
 
 function baseName(path: string): string {

@@ -31,6 +31,12 @@ import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 
 const PROMPT_FILE = ".quay-prompt.md";
 const SESSION_LOG_FILE = ".quay-session.log";
+// Tool-call trace produced by the agent's debug stream when the operator
+// uses `--debug-file`. With the default agent invocation routing stdout
+// to `.quay-usage.json` and debug output to this file, the pane log can
+// stay empty for an entire run — so freshness must consider this file
+// too or stale-kill fires on healthy long-running attempts.
+const TOOL_TRACE_FILE = ".quay-tool-trace.log";
 // Per-attempt exit-status marker written by the spawn wrapper. Holds the
 // worker shell's `$?` as plain decimal text. Treated identically to
 // other `.quay-*` files by the spawn preflight sweep.
@@ -275,22 +281,30 @@ export class TmuxAdapter implements TmuxPort {
     worktreePath: string,
     spawnedAt: string,
   ): string {
-    // The log mtime is the freshness signal: stale-kill fires when the
-    // most recent output is older than `staleness_threshold_seconds`. For
-    // a freshly spawned worker that hasn't written anything yet, no log
-    // file exists; fall back to spawned_at so the freshness window starts
-    // from spawn (not from epoch).
-    const logPath = join(worktreePath, SESSION_LOG_FILE);
-    let stat;
-    try {
-      stat = statSync(logPath);
-    } catch {
-      return spawnedAt;
+    // The freshness signal is the maximum mtime across every observability
+    // file the worker may be writing: the pane log captured by pipe-pane
+    // and (since the default invocation pipes stdout/debug elsewhere) the
+    // tool-trace file written by `--debug-file`. Without including the
+    // trace, an attempt that produces only debug output stale-kills past
+    // `staleness_threshold_seconds` even when actively making tool calls.
+    // Empty / missing files contribute nothing; if no file has any bytes
+    // yet, we fall back to spawned_at so the staleness window starts from
+    // spawn rather than epoch.
+    let freshestMs: number | null = null;
+    for (const name of [SESSION_LOG_FILE, TOOL_TRACE_FILE]) {
+      let stat;
+      try {
+        stat = statSync(join(worktreePath, name));
+      } catch {
+        continue;
+      }
+      if (stat.size === 0) continue;
+      if (freshestMs === null || stat.mtimeMs > freshestMs) {
+        freshestMs = stat.mtimeMs;
+      }
     }
-    // Empty log file (pipe-pane created it but nothing has been printed
-    // yet): same case as "no log yet" — use spawned_at as the floor.
-    if (stat.size === 0) return spawnedAt;
-    return new Date(stat.mtimeMs).toISOString();
+    if (freshestMs === null) return spawnedAt;
+    return new Date(freshestMs).toISOString();
   }
 }
 
