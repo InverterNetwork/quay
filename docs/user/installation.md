@@ -41,8 +41,11 @@ to external tools depending on the workflow:
 For GitHub, Slack, Linear, worker credential, and scheduler environment setup,
 see [External Services Setup](external-services.md).
 
-`quay --version` and `quay validate-ticket` short-circuit before database,
-config, and migration setup.
+`quay --version` short-circuits before database, config, and migration
+setup. `quay validate-ticket` skips the dispatcher's adapter wiring for
+fast spawns; it opens the DB lazily only when the ticket payload's `repo`
+has per-repo tag vocab configured (otherwise it degrades to no
+enforcement).
 
 ## Data Directory
 

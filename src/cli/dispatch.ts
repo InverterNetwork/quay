@@ -24,7 +24,10 @@ import type { TmuxPort } from "../ports/tmux.ts";
 import { enqueue, type EnqueueDeps } from "../core/enqueue.ts";
 import type { ValidatorRunner } from "../core/validator_runner.ts";
 import { handleEnqueueLinearIssue } from "./enqueue_linear_issue.ts";
-import { createRepoService } from "../core/repos/service.ts";
+import type { RepoService } from "../core/repos/service.ts";
+import type { TagService, TagVocab } from "../core/tags/service.ts";
+import { mergeVocab } from "../core/tags/merge.ts";
+import { parseImportToml, planImport } from "../core/tags/import_toml.ts";
 import {
   cancel_task,
   type CancelDeps,
@@ -84,6 +87,8 @@ export interface CliDeps {
   linear?: LinearPort;
   validatorRunner?: ValidatorRunner;
   adaptersConfig?: { linearEnabled: boolean; slackEnabled: boolean };
+  repoService: RepoService;
+  tagService: TagService;
 }
 
 export interface DispatchResult {
@@ -143,6 +148,8 @@ export async function dispatch(
         return await handleEnqueue(rest, deps, io);
       case "repo":
         return handleRepo(rest, deps, io);
+      case "tags":
+        return handleTags(rest, deps, io);
       case "cancel":
         return await handleCancel(rest, deps, io);
       case "submit-brief":
@@ -476,7 +483,7 @@ function handleRepo(
   }
   const [sub, ...rest] = argv;
   if (isHelpToken(sub as string)) return printHelp(io, ["repo"]);
-  const service = createRepoService({ db: deps.db, clock: deps.clock });
+  const service = deps.repoService;
   switch (sub) {
     case "add":
       if (wantsHelp(rest)) return printHelp(io, ["repo", "add"]);
@@ -503,6 +510,18 @@ function handleRepo(
     case "import":
       if (wantsHelp(rest)) return printHelp(io, ["repo", "import"]);
       return handleRepoImport(rest, service, io);
+    case "set-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "set-tags"]);
+      return handleRepoSetTags(rest, deps.tagService, io);
+    case "unset-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "unset-tags"]);
+      return handleRepoUnsetTags(rest, deps.tagService, io);
+    case "get-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "get-tags"]);
+      return handleRepoGetTags(rest, deps.tagService, io);
+    case "apply-tags":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "apply-tags"]);
+      return handleRepoApplyTags(rest, deps.tagService, io);
     default:
       // Mirror bare `quay repo`: structured envelope plus the noun's usage
       // block so a typo gets the same recovery hint as the missing-sub case.
@@ -528,7 +547,7 @@ const REPO_FLAGS: Array<{ flag: string; key: string }> = [
 
 function handleRepoAdd(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const json = tryParseJsonFlag(argv);
@@ -541,7 +560,7 @@ function handleRepoAdd(
 
 function handleRepoUpdate(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const repoId = readFlag(argv, "--id") ?? positional(argv);
@@ -564,7 +583,7 @@ function handleRepoUpdate(
 
 function handleRepoList(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const validation = validateFlags(argv, { boolean: ["--active"] });
@@ -578,7 +597,7 @@ function handleRepoList(
 
 function handleRepoExport(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const validation = validateFlags(argv, {
@@ -614,7 +633,7 @@ function handleRepoExport(
 
 function handleRepoImport(
   argv: string[],
-  service: ReturnType<typeof createRepoService>,
+  service: RepoService,
   io: CliIO,
 ): DispatchResult {
   const inputPath = readFlag(argv, "--in");
@@ -656,6 +675,383 @@ function handleRepoImport(
   io.stdout(
     `${JSON.stringify({ imported: ids.length, repo_ids: ids })}\n`,
   );
+  return { exitCode: 0 };
+}
+
+function handleRepoSetTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--namespace", "--value"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo set-tags requires <repo_id>");
+  }
+  const ns = readFlag(argv, "--namespace");
+  const value = readFlag(argv, "--value");
+  if (!ns || !value) {
+    return writeError(
+      io,
+      "usage_error",
+      "repo set-tags requires --namespace <name> --value <v>",
+    );
+  }
+  tagService.setValue("repo", repoId, ns, value);
+  io.stdout(
+    `${JSON.stringify({ ok: true, repo_id: repoId, namespace: ns, value })}\n`,
+  );
+  return { exitCode: 0 };
+}
+
+function handleRepoUnsetTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  // A typo on `--value` (e.g. `--vale`) without flag validation falls through
+  // to the whole-namespace deletion path, silently destroying the entire
+  // namespace + its required-flag.
+  const validation = validateFlags(argv, { valued: ["--namespace", "--value"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo unset-tags requires <repo_id>");
+  }
+  const ns = readFlag(argv, "--namespace");
+  if (!ns) {
+    return writeError(
+      io,
+      "usage_error",
+      "repo unset-tags requires --namespace <name>",
+    );
+  }
+  const value = readFlag(argv, "--value") ?? undefined;
+  tagService.unsetValue("repo", repoId, ns, value);
+  io.stdout(
+    `${JSON.stringify({ ok: true, repo_id: repoId, namespace: ns, value: value ?? null })}\n`,
+  );
+  return { exitCode: 0 };
+}
+
+function handleRepoGetTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {});
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo get-tags requires <repo_id>");
+  }
+  const namespaces = tagService.getVocab("repo", repoId);
+  io.stdout(`${JSON.stringify({ repo_id: repoId, namespaces })}\n`);
+  return { exitCode: 0 };
+}
+
+function handleRepoApplyTags(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--from"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const repoId = positional(argv);
+  if (!repoId) {
+    return writeError(io, "usage_error", "repo apply-tags requires <repo_id>");
+  }
+  const env = readNamespacesEnvelope(argv, "repo apply-tags", io);
+  if (!env.ok) return env.result;
+  const namespaces: TagVocab = tagService.apply("repo", repoId, env.namespaces);
+  io.stdout(`${JSON.stringify({ ok: true, repo_id: repoId, namespaces })}\n`);
+  return { exitCode: 0 };
+}
+
+// Shared `--from <path>` envelope reader for apply-tags / apply-deployment.
+// Reads stdin or file, parses JSON, and validates the `{namespaces: object}`
+// outer shape. Inner-shape validation lives in TagService.apply (zod).
+function readNamespacesEnvelope(
+  argv: string[],
+  commandLabel: string,
+  io: CliIO,
+):
+  | { ok: true; namespaces: unknown }
+  | { ok: false; result: DispatchResult } {
+  const fromPath = readFlag(argv, "--from");
+  if (!fromPath) {
+    return {
+      ok: false,
+      result: writeError(io, "usage_error", `${commandLabel} requires --from <path>`),
+    };
+  }
+  const inputRead = readApplyTagsInput(fromPath, io);
+  if (!inputRead.ok) {
+    return { ok: false, result: writeError(io, "usage_error", inputRead.message) };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inputRead.value);
+  } catch (err) {
+    return {
+      ok: false,
+      result: writeError(
+        io,
+        "usage_error",
+        `${commandLabel}: not valid JSON: ${(err as Error).message}`,
+      ),
+    };
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("namespaces" in parsed) ||
+    typeof (parsed as { namespaces: unknown }).namespaces !== "object" ||
+    (parsed as { namespaces: unknown }).namespaces === null
+  ) {
+    return {
+      ok: false,
+      result: writeError(
+        io,
+        "usage_error",
+        `${commandLabel}: input must be { "namespaces": { ... } }`,
+      ),
+    };
+  }
+  return { ok: true, namespaces: (parsed as { namespaces: unknown }).namespaces };
+}
+
+function readApplyTagsInput(
+  fromPath: string,
+  io: CliIO,
+): { ok: true; value: string } | { ok: false; message: string } {
+  if (fromPath === "-") {
+    if (!io.stdin) return { ok: false, message: "no stdin source configured" };
+    return { ok: true, value: io.stdin() };
+  }
+  return tryReadFile(fromPath);
+}
+
+function handleTags(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  if (argv.length === 0) {
+    return writeErrorWithUsage(
+      io,
+      ["tags"],
+      "usage_error",
+      "tags subcommand required",
+    );
+  }
+  const [sub, ...rest] = argv;
+  if (isHelpToken(sub as string)) return printHelp(io, ["tags"]);
+  const tagService = deps.tagService;
+  switch (sub) {
+    case "set-deployment":
+      if (wantsHelp(rest)) return printHelp(io, ["tags", "set-deployment"]);
+      return handleTagsSetDeployment(rest, tagService, io);
+    case "unset-deployment":
+      if (wantsHelp(rest)) return printHelp(io, ["tags", "unset-deployment"]);
+      return handleTagsUnsetDeployment(rest, tagService, io);
+    case "get-deployment":
+      if (wantsHelp(rest)) return printHelp(io, ["tags", "get-deployment"]);
+      return handleTagsGetDeployment(rest, tagService, io);
+    case "apply-deployment":
+      if (wantsHelp(rest)) return printHelp(io, ["tags", "apply-deployment"]);
+      return handleTagsApplyDeployment(rest, tagService, io);
+    case "import":
+      if (wantsHelp(rest)) return printHelp(io, ["tags", "import"]);
+      return handleTagsImport(rest, tagService, io);
+    case "list":
+      if (wantsHelp(rest)) return printHelp(io, ["tags", "list"]);
+      return handleTagsList(rest, deps, io);
+    default:
+      return writeErrorWithUsage(
+        io,
+        ["tags"],
+        "usage_error",
+        `unknown tags subcommand: ${sub}`,
+      );
+  }
+}
+
+function handleTagsSetDeployment(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--namespace", "--value"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const ns = readFlag(argv, "--namespace");
+  const value = readFlag(argv, "--value");
+  if (!ns || !value) {
+    return writeError(
+      io,
+      "usage_error",
+      "tags set-deployment requires --namespace <name> --value <v>",
+    );
+  }
+  tagService.setValue("deployment", null, ns, value);
+  io.stdout(
+    `${JSON.stringify({ ok: true, scope: "deployment", namespace: ns, value })}\n`,
+  );
+  return { exitCode: 0 };
+}
+
+function handleTagsUnsetDeployment(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--namespace", "--value"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const ns = readFlag(argv, "--namespace");
+  if (!ns) {
+    return writeError(
+      io,
+      "usage_error",
+      "tags unset-deployment requires --namespace <name>",
+    );
+  }
+  const value = readFlag(argv, "--value") ?? undefined;
+  tagService.unsetValue("deployment", null, ns, value);
+  io.stdout(
+    `${JSON.stringify({ ok: true, scope: "deployment", namespace: ns, value: value ?? null })}\n`,
+  );
+  return { exitCode: 0 };
+}
+
+function handleTagsGetDeployment(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {});
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const namespaces = tagService.getVocab("deployment");
+  io.stdout(`${JSON.stringify({ scope: "deployment", namespaces })}\n`);
+  return { exitCode: 0 };
+}
+
+function handleTagsApplyDeployment(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--from"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const env = readNamespacesEnvelope(argv, "tags apply-deployment", io);
+  if (!env.ok) return env.result;
+  const namespaces: TagVocab = tagService.apply("deployment", null, env.namespaces);
+  io.stdout(`${JSON.stringify({ ok: true, scope: "deployment", namespaces })}\n`);
+  return { exitCode: 0 };
+}
+
+function handleTagsImport(
+  argv: string[],
+  tagService: TagService,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {
+    boolean: ["--force"],
+    valued: ["--from"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const fromPath = readFlag(argv, "--from");
+  if (!fromPath) {
+    return writeError(io, "usage_error", "tags import requires --from <path>");
+  }
+  const forceFlag = argv.includes("--force");
+  const fileRead = tryReadFile(fromPath);
+  if (!fileRead.ok) {
+    return writeError(io, "usage_error", fileRead.message);
+  }
+  const desired = parseImportToml(fileRead.value);
+  const current = tagService.getVocab("deployment");
+  const plan = planImport(desired, current);
+  if (plan.isNoop) {
+    io.stdout(
+      `${JSON.stringify({ ok: true, scope: "deployment", noop: true, namespaces: current })}\n`,
+    );
+    return { exitCode: 0 };
+  }
+  // Refuse to wipe a non-empty deployment vocab when the TOML carries no
+  // namespaces — almost always a user typo (e.g. `[namespaces]` instead of
+  // `[tags.namespaces]`). Explicit clearing goes through `apply-deployment`.
+  if (Object.keys(desired).length === 0 && Object.keys(current).length > 0) {
+    io.stderr(
+      `${JSON.stringify({
+        error: "empty_import",
+        message:
+          "TOML has no [tags.namespaces] entries; refusing to clear non-empty deployment vocab. Use `quay tags apply-deployment --from -` with `{\"namespaces\":{}}` to clear explicitly.",
+        current,
+      })}\n`,
+    );
+    return { exitCode: 1 };
+  }
+  if (plan.needsForce && !forceFlag) {
+    io.stderr(
+      `${JSON.stringify({
+        error: "vocab_exists",
+        message: "deployment tag vocab is non-empty; pass --force to overwrite",
+        current,
+      })}\n`,
+    );
+    return { exitCode: 1 };
+  }
+  const namespaces = tagService.apply("deployment", null, desired);
+  io.stdout(
+    `${JSON.stringify({ ok: true, scope: "deployment", namespaces })}\n`,
+  );
+  return { exitCode: 0 };
+}
+
+function handleTagsList(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--repo"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const repoId = readFlag(argv, "--repo");
+  if (!repoId) {
+    return writeError(io, "usage_error", "tags list requires --repo <repo_id>");
+  }
+  // Explicit existence guard: tagService.getVocab("repo", id) also throws
+  // unknown_repo, but routing the contract through the handler keeps
+  // refactors that change the call order from silently dropping the check.
+  if (!deps.repoService.get(repoId)) {
+    return writeError(io, "unknown_repo", `repo "${repoId}" not found`, {
+      repo_id: repoId,
+    });
+  }
+  const perRepo = deps.tagService.getVocab("repo", repoId);
+  const deployment = deps.tagService.getVocab("deployment");
+  const { namespaces, enforced } = mergeVocab(deployment, perRepo);
+  io.stdout(`${JSON.stringify({ repo_id: repoId, namespaces, enforced })}\n`);
   return { exitCode: 0 };
 }
 

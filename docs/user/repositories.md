@@ -88,6 +88,88 @@ to either command to limit the output to repos with `archived_at IS NULL` —
 the typical "which repos are in service?" question. `repo import` upserts
 rows and is intended for restore workflows.
 
+## Tag Vocabulary
+
+The tag vocabulary is layered: a deployment-wide vocab (managed with `quay tags ...`)
+is merged with each repo's per-repo vocab at validation time. See `quay tags --help`
+for the deployment-side CLI surface. The `quay tags list --repo <id>` command is the
+consumer-facing surface (Hermes ticket-creation, future workers) that returns the
+merged shape.
+
+The `enforced` flag returned by `tags list` controls whether ticket-tag enforcement
+is active for a repo. It is `true` when the repo has any per-repo vocabulary
+configured. Deployment vocab alone (with no per-repo vocab) leaves `enforced: false`
+— per-repo presence is the explicit opt-in signal.
+
+Each repo can carry a per-repo tag vocabulary that, merged with the deployment vocab,
+the validator uses to constrain ticket tags. Tags have the shape `<namespace>-<value>`,
+parsed by splitting on the first `-`. Namespaces are constrained to `[a-z0-9]+`
+(no dashes); values may use the full `[a-z0-9-]+` charset. The vocabulary defines
+which `(namespace, value)` pairs are legal for tickets targeting this repo, and
+(per namespace) whether at least one tag from that namespace is required.
+
+A repo with no per-repo vocabulary configured is **not enforced** by the
+validator — its tickets continue to use the legacy charset-only checks. The
+moment any per-repo vocabulary is configured, full enforcement kicks in for
+that repo.
+
+```bash
+quay repo set-tags myrepo --namespace area --value bonding-curve
+quay repo set-tags myrepo --namespace area --value vesting-contract
+quay repo set-tags myrepo --namespace risk --value reentrancy
+
+quay repo get-tags myrepo
+# {"repo_id":"myrepo","namespaces":{
+#   "area":{"values":["bonding-curve","vesting-contract"],"required":false},
+#   "risk":{"values":["reentrancy"],"required":false}
+# }}
+
+quay repo unset-tags myrepo --namespace area --value vesting-contract
+quay repo unset-tags myrepo --namespace risk
+```
+
+`set-tags` is idempotent (re-adding an existing pair is a no-op).
+`unset-tags` without `--value` removes the entire namespace, including its
+required flag. `unset-tags` with `--value` that drains the last value of a
+required namespace also clears the required flag — the alternative would
+brick the repo with a permanently unsatisfiable `TAG_REQUIRED_MISSING`.
+
+A required namespace must always have at least one value. `apply-tags` and
+`tags import` both reject `{values: [], required: true}` at write time.
+
+### Declarative reconciliation
+
+`apply-tags` replaces the repo's vocabulary with the contents of a JSON file
+in one transactional pass — values not in the input are removed, values in
+the input are added, and the per-namespace `required` flag is set from the
+input. This is the shape config-as-code installers use to drive the
+vocabulary from a checked-in file.
+
+```json
+{
+  "namespaces": {
+    "area": {
+      "values": ["bonding-curve", "vesting-contract"],
+      "required": true
+    },
+    "risk": {
+      "values": ["reentrancy"]
+    }
+  }
+}
+```
+
+```bash
+quay repo apply-tags myrepo --from ./tags.json
+quay repo apply-tags myrepo --from -    # read from stdin
+```
+
+`namespace` must match `[a-z0-9]+` (no dashes — the validator splits ticket
+tags on the first dash, so a dashed namespace would be unaddressable).
+`value` may use the full `[a-z0-9-]+` charset. Passing `{"namespaces": {}}`
+clears the repo's vocabulary entirely, returning the repo to the
+unenforced state.
+
 ## Remove A Repo
 
 ```bash

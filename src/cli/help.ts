@@ -119,6 +119,10 @@ const COMMANDS: Record<string, CommandSpec> = {
       "repo list",
       "repo export",
       "repo import",
+      "repo set-tags",
+      "repo unset-tags",
+      "repo get-tags",
+      "repo apply-tags",
     ],
   },
   "repo add": {
@@ -183,6 +187,118 @@ const COMMANDS: Record<string, CommandSpec> = {
     summary: "Upsert each repo row from a JSON array file (idempotent).",
     flags: [{ flag: "--in <path>", desc: "Path to a JSON array file (required)." }],
   },
+  "repo set-tags": {
+    path: "repo set-tags",
+    synopsis: "quay repo set-tags <repo_id> --namespace <name> --value <v>",
+    summary: "Add a value to a tag namespace for a repo (idempotent).",
+    details:
+      "Namespaces must match [a-z0-9]+ (no dashes — the validator splits ticket tags on the first dash). Values may use [a-z0-9-]+. Running the same command twice is safe — duplicate pairs are silently ignored.",
+    flags: [
+      { flag: "--namespace <name>", desc: "Namespace identifier (required). Must match [a-z0-9]+." },
+      { flag: "--value <v>", desc: "Value to add to the namespace (required). Must match [a-z0-9-]+." },
+    ],
+  },
+  "repo unset-tags": {
+    path: "repo unset-tags",
+    synopsis: "quay repo unset-tags <repo_id> --namespace <name> [--value <v>]",
+    summary: "Remove a value (or a whole namespace) from a repo's tag vocab.",
+    details:
+      "When --value is supplied, only that one value is removed. When omitted, the entire namespace and its required/optional metadata are deleted.",
+    flags: [
+      { flag: "--namespace <name>", desc: "Namespace to target (required)." },
+      { flag: "--value <v>", desc: "Specific value to remove. Omit to remove the whole namespace." },
+    ],
+  },
+  "repo get-tags": {
+    path: "repo get-tags",
+    synopsis: "quay repo get-tags <repo_id>",
+    summary: "Print the tag vocabulary for a repo as JSON.",
+    details:
+      'Output shape: { "repo_id": "...", "namespaces": { "<ns>": { "values": [...], "required": bool }, ... } }. Namespaces and values are sorted alphabetically for stable output.',
+  },
+  "repo apply-tags": {
+    path: "repo apply-tags",
+    synopsis: "quay repo apply-tags <repo_id> --from <path>",
+    summary: "Declaratively replace a repo's entire tag vocabulary from a JSON file.",
+    details:
+      'Reads a { "namespaces": { "<ns>": { "values": [...], "required": bool }, ... } } document. Any existing namespaces not present in the input are removed. An empty namespaces object clears everything. Pass - as path to read from stdin. The operation is transactional: on validation failure nothing is written.',
+    flags: [
+      { flag: "--from <path>", desc: "Path to a JSON file (required). Use - for stdin." },
+    ],
+  },
+  tags: {
+    path: "tags",
+    synopsis: "quay tags <subcommand> [options]",
+    summary: "Manage the deployment-wide tag vocabulary and inspect merged vocab",
+    subcommands: [
+      "tags set-deployment",
+      "tags unset-deployment",
+      "tags get-deployment",
+      "tags apply-deployment",
+      "tags import",
+      "tags list",
+    ],
+  },
+  "tags set-deployment": {
+    path: "tags set-deployment",
+    synopsis: "quay tags set-deployment --namespace <name> --value <v>",
+    summary: "Add a value to a deployment-scoped tag namespace (idempotent).",
+    details:
+      "Namespaces must match [a-z0-9]+ (no dashes — the validator splits ticket tags on the first dash). Values may use [a-z0-9-]+. Running the same command twice is safe — duplicate pairs are silently ignored.",
+    flags: [
+      { flag: "--namespace <name>", desc: "Namespace identifier (required). Must match [a-z0-9]+." },
+      { flag: "--value <v>", desc: "Value to add to the namespace (required). Must match [a-z0-9-]+." },
+    ],
+  },
+  "tags unset-deployment": {
+    path: "tags unset-deployment",
+    synopsis: "quay tags unset-deployment --namespace <name> [--value <v>]",
+    summary: "Remove a value (or a whole namespace) from the deployment tag vocab.",
+    details:
+      "When --value is supplied, only that one value is removed. When omitted, the entire namespace and its required/optional metadata are deleted.",
+    flags: [
+      { flag: "--namespace <name>", desc: "Namespace to target (required)." },
+      { flag: "--value <v>", desc: "Specific value to remove. Omit to remove the whole namespace." },
+    ],
+  },
+  "tags get-deployment": {
+    path: "tags get-deployment",
+    synopsis: "quay tags get-deployment",
+    summary: "Print the deployment-wide tag vocabulary as JSON.",
+    details:
+      'Output shape: { "scope": "deployment", "namespaces": { "<ns>": { "values": [...], "required": bool }, ... } }. Namespaces and values are sorted alphabetically for stable output.',
+  },
+  "tags apply-deployment": {
+    path: "tags apply-deployment",
+    synopsis: "quay tags apply-deployment --from <path>",
+    summary: "Declaratively replace the deployment tag vocabulary from a JSON file.",
+    details:
+      'Reads a { "namespaces": { "<ns>": { "values": [...], "required": bool }, ... } } document. Any existing namespaces not present in the input are removed. An empty namespaces object clears everything. Pass - as path to read from stdin. The operation is transactional: on validation failure nothing is written.',
+    flags: [
+      { flag: "--from <path>", desc: "Path to a JSON file (required). Use - for stdin." },
+    ],
+  },
+  "tags import": {
+    path: "tags import",
+    synopsis: "quay tags import --from <path> [--force]",
+    summary: "Import deployment tag vocab from a TOML file.",
+    details:
+      "Reads [tags.namespaces.*] from the TOML file. If the deployment vocab is already non-empty and the desired state differs, the command exits 1 with a vocab_exists error unless --force is passed.",
+    flags: [
+      { flag: "--from <path>", desc: "Path to a TOML file (required)." },
+      { flag: "--force", desc: "Overwrite existing deployment vocab without prompting." },
+    ],
+  },
+  "tags list": {
+    path: "tags list",
+    synopsis: "quay tags list --repo <repo_id>",
+    summary: "Print the merged (deployment + per-repo) tag vocabulary for a repo.",
+    details:
+      'Output shape: { "repo_id": "...", "namespaces": { ... }, "enforced": bool }. The enforced flag is true when the repo has any per-repo vocabulary configured. Deployment vocab alone never enforces.',
+    flags: [
+      { flag: "--repo <repo_id>", desc: "Repo identifier (required)." },
+    ],
+  },
   cancel: {
     path: "cancel",
     synopsis: "quay cancel <task_id> [--close-pr] [--keep-worktree]",
@@ -241,6 +357,7 @@ const TOP_LEVEL_ORDER: string[] = [
   "tick",
   "enqueue",
   "repo",
+  "tags",
   "cancel",
   "submit-brief",
   "escalate-human",
