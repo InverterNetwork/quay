@@ -1,4 +1,8 @@
-import type { TmuxPort, TmuxSpawnInput } from "../../../src/ports/tmux.ts";
+import type {
+  ExitStatus,
+  TmuxPort,
+  TmuxSpawnInput,
+} from "../../../src/ports/tmux.ts";
 
 export interface FakeTmuxSpawnCall {
   sessionName: string;
@@ -13,9 +17,11 @@ export class FakeTmux implements TmuxPort {
   readonly killCalls: string[] = [];
   readonly collectLogCalls: string[] = [];
   readonly logFreshnessCalls: string[] = [];
+  readonly collectExitStatusCalls: string[] = [];
   readonly liveSessions = new Set<string>();
   readonly sessionLogs = new Map<string, string>();
   readonly sessionFreshness = new Map<string, string>();
+  readonly sessionExitStatus = new Map<string, ExitStatus>();
   spawnHandler: ((input: TmuxSpawnInput) => void) | null = null;
 
   spawn(input: TmuxSpawnInput): void {
@@ -50,12 +56,24 @@ export class FakeTmux implements TmuxPort {
     return this.sessionFreshness.get(sessionName) ?? spawnedAt;
   }
 
+  collectExitStatus(
+    sessionName: string,
+    _worktreePath: string,
+  ): ExitStatus | null {
+    this.collectExitStatusCalls.push(sessionName);
+    return this.sessionExitStatus.get(sessionName) ?? null;
+  }
+
   setSessionLog(sessionName: string, content: string): void {
     this.sessionLogs.set(sessionName, content);
   }
 
   setLogFreshness(sessionName: string, at: string): void {
     this.sessionFreshness.set(sessionName, at);
+  }
+
+  setExitStatus(sessionName: string, status: ExitStatus): void {
+    this.sessionExitStatus.set(sessionName, status);
   }
 
   markDead(sessionName: string): void {

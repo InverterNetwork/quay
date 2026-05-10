@@ -84,6 +84,7 @@ binary and invalid UTF-8 artifacts such as `malformed_signal`.
 | `brief` | Human/orchestrator brief for an attempt. |
 | `final_prompt` | Worker preamble plus brief. |
 | `session_log` | Captured tmux output. |
+| `exit_status` | Worker process exit status (`raw_status` plus either `exit_code` or `exit_signal`) recorded by the spawn wrapper for the dead-worker classifier. Absence implies the wrapper itself was reaped before reaching the post-agent step. |
 | `blocker` | Valid `.quay-blocked.md` written by a worker. |
 | `malformed_signal` | Invalid blocker signal bytes. |
 | `ci_failure_excerpt` | CI failure details captured from GitHub checks. |

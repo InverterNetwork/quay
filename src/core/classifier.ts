@@ -86,6 +86,11 @@ export function classifyAndApply(
   // Step 1: best-effort session log capture. Idempotent across re-entry via
   // the recovery-path content_hash unique index.
   collectSessionLog(deps, task, attempt, options.sessionName);
+  // The exit-status capture is the cheap discriminator for the silent-
+  // exit shape: presence + a numeric value separates "wrapper observed
+  // the agent exit" from "wrapper itself was reaped" (no artifact). When
+  // the agent log is empty, this is the only ground truth available.
+  collectExitStatus(deps, task, attempt, options.sessionName);
 
   // Step 2: blocker file (valid → ingest; malformed → persist + retry).
   const blockerPath = join(task.worktree_path, BLOCKER_FILENAME);
@@ -202,6 +207,40 @@ function collectSessionLog(
     });
   } catch {
     // ignore — best-effort.
+  }
+}
+
+function collectExitStatus(
+  deps: ClassifierDeps,
+  task: ClassifyContextTask,
+  attempt: ClassifyContextAttempt,
+  sessionName: string,
+): void {
+  let status;
+  try {
+    status = deps.tmux.collectExitStatus(sessionName, task.worktree_path);
+  } catch {
+    return;
+  }
+  if (status === null) return;
+  // One-line key=value form: parseable by humans during triage and by
+  // future structured readers without committing to a schema yet. The
+  // raw_status field is always present; exit_code XOR signal is set
+  // depending on how the agent terminated.
+  const lines = [`raw_status=${status.rawStatus}`];
+  if (status.exitCode !== null) lines.push(`exit_code=${status.exitCode}`);
+  if (status.signalName !== null) lines.push(`exit_signal=${status.signalName}`);
+  const content = `${lines.join("\n")}\n`;
+  try {
+    deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: attempt.attempt_id,
+      kind: "exit_status",
+      content,
+      extension: "txt",
+    });
+  } catch {
+    // best-effort, same as session_log.
   }
 }
 
