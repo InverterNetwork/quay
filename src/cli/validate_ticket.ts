@@ -149,7 +149,6 @@ export function handleValidateTicket(
   const baseResult = validateTicket(parsed as TicketDraft, schema);
   const vocabErrors = enforceRepoVocab(
     parsed as Record<string, unknown>,
-    baseResult.errors,
     deps.lookupRepoVocab,
   );
   const errors: ValidationError[] = [...baseResult.errors, ...vocabErrors];
@@ -166,7 +165,6 @@ export function handleValidateTicket(
 
 function enforceRepoVocab(
   payload: Record<string, unknown>,
-  _baseErrors: ValidationError[],
   lookup: RepoVocabLookup | undefined,
 ): ValidationError[] {
   if (lookup === undefined) return [];

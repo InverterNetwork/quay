@@ -55,7 +55,7 @@ test("createLazyRepoVocabLookup honors data_dir from config.toml", () => {
   seedDataDir(realDataDir, "repo-a");
 
   const lookup = createLazyRepoVocabLookup(
-    { HOME: home } as NodeJS.ProcessEnv,
+    { HOME: home },
     () => loadMigrationsFromDir(MIGRATIONS_DIR),
   );
   const ctx = lookup("repo-a");
@@ -65,9 +65,8 @@ test("createLazyRepoVocabLookup honors data_dir from config.toml", () => {
 
 test("createLazyRepoVocabLookup returns null when data_dir is absent", () => {
   const home = tempDir("vocab-lookup-home-empty-");
-  // No config.toml, no DB.
   const lookup = createLazyRepoVocabLookup(
-    { HOME: home } as NodeJS.ProcessEnv,
+    { HOME: home },
     () => loadMigrationsFromDir(MIGRATIONS_DIR),
   );
   expect(lookup("any-repo")).toBeNull();
@@ -88,7 +87,7 @@ test("QUAY_DATA_DIR env wins over config.toml data_dir", () => {
   );
 
   const lookup = createLazyRepoVocabLookup(
-    { HOME: home, QUAY_DATA_DIR: envDataDir } as NodeJS.ProcessEnv,
+    { HOME: home, QUAY_DATA_DIR: envDataDir },
     () => loadMigrationsFromDir(MIGRATIONS_DIR),
   );
   // The env-dir DB has repo-env, not repo-config.
@@ -101,7 +100,7 @@ test("createLazyRepoVocabLookup defers loadMigrations until first call", () => {
   // No DB exists, so the lookup short-circuits and migrations are never loaded.
   let migrationCalls = 0;
   const lookup = createLazyRepoVocabLookup(
-    { HOME: home } as NodeJS.ProcessEnv,
+    { HOME: home },
     () => {
       migrationCalls += 1;
       return loadMigrationsFromDir(MIGRATIONS_DIR);

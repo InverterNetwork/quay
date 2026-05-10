@@ -23,7 +23,7 @@ import { resolveDataDir } from "./data_dir.ts";
 import type { RepoVocabLookup } from "./validate_ticket.ts";
 
 export function createLazyRepoVocabLookup(
-  env: NodeJS.ProcessEnv,
+  env: Record<string, string | undefined>,
   loadMigrations: () => readonly Migration[],
 ): RepoVocabLookup {
   let cached: ReturnType<typeof initServices> | undefined;
@@ -41,18 +41,21 @@ export function createLazyRepoVocabLookup(
 }
 
 function initServices(
-  env: NodeJS.ProcessEnv,
+  env: Record<string, string | undefined>,
   loadMigrations: () => readonly Migration[],
 ): {
   tagService: ReturnType<typeof createTagService>;
   repoService: ReturnType<typeof createRepoService>;
 } | null {
-  // Resolve data_dir the same way the dispatcher does (env > config.toml >
-  // ~/.quay) so deployments that pin data_dir in config.toml don't silently
-  // bypass enforcement.
+  // Resolve data_dir with the dispatcher's precedence (env > config > ~/.quay).
+  // When QUAY_DATA_DIR is set, env definitively wins — skip the config read so
+  // the validator's hot path doesn't pay a TOML parse on every spawn.
   const home = env.HOME ?? homedir();
-  const { config } = loadConfig({ env, homeDir: home });
-  const dataDir = resolveDataDir(env, config.data_dir, home);
+  const fromEnv = env.QUAY_DATA_DIR;
+  const dataDir =
+    fromEnv !== undefined && fromEnv !== ""
+      ? fromEnv
+      : resolveDataDir(env, loadConfig({ env, homeDir: home }).config.data_dir, home);
   const dbPath = join(dataDir, "quay.db");
   // Pre-init host: skip enforcement instead of failing the validator.
   // A corrupted or migration-incompatible DB still throws — operators see
