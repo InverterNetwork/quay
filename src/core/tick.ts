@@ -10,6 +10,7 @@ import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { probeAgentIdentity } from "./agent_identity.ts";
 import { runCancelFinalizer } from "./cancel.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
+import { collectUsageArtifact } from "./usage.ts";
 import {
   classifyAndApply,
   type ClassifyContextAttempt,
@@ -33,8 +34,16 @@ export const DEFAULT_MAX_SPAWN_FAILURES = 3;
 export const DEFAULT_CLAIM_TIMEOUT_SECONDS = 1800;
 export const DEFAULT_MAX_CLAIM_EXPIRATIONS = 3;
 export const DEFAULT_MAX_NON_BUDGET_RESPAWNS = 20;
+// `--output-format json` makes claude print one final JSON envelope
+// (tokens, cost, model id, full response) to stdout instead of the
+// streaming human-readable text. We redirect that stdout to
+// `.quay-usage.json` in the worktree so the dead-worker classifier
+// can ingest it as a `usage` artifact. Operators with non-claude
+// agent runtimes (Codex, Cursor, ...) need to override this template
+// and write the same `.quay-usage.json` filename for usage capture
+// to land — quay reads the file by name, not by runtime.
 export const DEFAULT_AGENT_INVOCATION =
-  "claude --permission-mode bypassPermissions < {prompt_file}";
+  "claude --permission-mode bypassPermissions --output-format json < {prompt_file} > .quay-usage.json";
 
 export interface TickDeps {
   db: DB;
@@ -1424,6 +1433,12 @@ function finalizeKillIntent(
       }
     } catch {}
   }
+  // Best-effort usage envelope capture. A wall-clock kill mid-run
+  // typically truncates `--output-format json` output, in which case
+  // the envelope is malformed and the helper drops it; clean exits
+  // racing with a kill window do produce a complete envelope, and
+  // those rows should still link to a usage artifact.
+  collectUsageArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
 
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");

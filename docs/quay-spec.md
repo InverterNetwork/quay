@@ -737,6 +737,7 @@ Snapshot anything that crosses a task boundary. Internal-to-one-actor work is no
 | `slack_reply` | Tick ingests a non-bot reply during `waiting_human` | Slack reply body + author + ts | File |
 | `last_failure` | Retry budget exhausted | Captured at any transition into `awaiting-next-brief` where `attempts_consumed >= retry_budget`. Contents depend on path: for deterministic-retry exhaustion (CI fail / crash / stale / wall-clock / malformed-signal) → the retry brief Quay would have spawned with (template + diagnostics + most-recent brief). For worker-blocker exhaustion (final-attempt blocker) → the blocker prose + a note that no respawn was attempted + a reference to the most-recent brief. Either way, gives the orchestrator everything it needs to decide between `escalate-human` and `cancel`. | File |
 | `malformed_signal` | Tick observes `.quay-blocked.md` that fails validation (empty / unreadable / unparseable) | Raw bytes of the rejected file, captured for forensics before deletion. | File |
+| `usage` | Worker exits (clean or killed) and `<worktree>/.quay-usage.json` exists | Spawn wrapper redirects the agent's `--output-format json` (claude — equivalent flags for Codex / Cursor / etc.) to `.quay-usage.json`. Captured verbatim as the JSON envelope; downstream consumers parse `input_tokens`, `output_tokens`, `total_cost_usd`, `duration_ms`, model id, etc. NULL-output rows (worker killed before write, malformed JSON, agent that doesn't emit a structured envelope) simply have no `usage` artifact — the row's absence is the signal. | File |
 
 ### What is NOT an artifact
 
@@ -855,7 +856,7 @@ CREATE TABLE artifacts (
   artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id TEXT NOT NULL REFERENCES tasks(task_id),
   attempt_id INTEGER REFERENCES attempts(attempt_id),
-  kind TEXT NOT NULL,                 -- ticket_snapshot / brief / final_prompt / blocker / session_log / ci_failure_excerpt / review_comments / conflict_slice / slack_escalation_post / slack_reply / last_failure / malformed_signal
+  kind TEXT NOT NULL,                 -- ticket_snapshot / brief / final_prompt / blocker / session_log / ci_failure_excerpt / review_comments / conflict_slice / slack_escalation_post / slack_reply / last_failure / malformed_signal / usage
   file_path TEXT NOT NULL,
   content_hash TEXT,                  -- used for crash-safe ingestion idempotency (set on blocker / slack_reply / malformed_signal / slack_escalation_post). For slack_escalation_post the hash covers (question_body || escalation_seq || escalation_nonce) so a fresh escalation cannot dedupe against a prior one.
   escalation_seq INTEGER,             -- only set on slack_escalation_post artifacts; copied from tasks.next_escalation_seq at step 1 of the Slack post sequence.

@@ -18,6 +18,7 @@ import type { GitHubPort } from "../ports/github.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import { collectUsageArtifact } from "./usage.ts";
 import {
   scheduleDeterministicRetry,
   writeBlockerBudgetExhausted,
@@ -97,6 +98,13 @@ export function classifyAndApply(
   // Step 1: best-effort session log capture. Idempotent across re-entry via
   // the recovery-path content_hash unique index.
   collectSessionLog(deps, task, attempt, options.sessionName);
+
+  // Step 1b: best-effort usage envelope capture. The spawn wrapper
+  // writes `<worktree>/.quay-usage.json` for any agent invocation that
+  // emits a structured stdout (claude `--output-format json`, similar
+  // for Codex / Cursor). Idempotent via the same content_hash unique
+  // index that protects session_log.
+  collectUsageArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
 
   // Step 2: blocker file (valid → ingest; malformed → persist + retry).
   const blockerPath = join(task.worktree_path, BLOCKER_FILENAME);
