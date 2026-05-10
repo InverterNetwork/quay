@@ -26,7 +26,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
+import type {
+  ExitStatus,
+  TmuxPort,
+  TmuxSpawnInput,
+} from "../ports/tmux.ts";
 
 const PROMPT_FILE = ".quay-prompt.md";
 const SESSION_LOG_FILE = ".quay-session.log";
@@ -316,11 +320,14 @@ export class TmuxAdapter implements TmuxPort {
     } catch {
       return null;
     }
-    if (raw.length === 0) return null;
-    const rawStatus = Number.parseInt(raw, 10);
-    if (!Number.isFinite(rawStatus) || rawStatus < 0 || rawStatus > 255) {
-      return null;
-    }
+    // Strict digit-only match. `Number.parseInt` would silently accept
+    // trailing junk ("42garbage" → 42); the wrapper writes a clean
+    // `printf %s "$?"` today, but the parser shouldn't disagree with
+    // itself by rejecting unparseable content while accepting
+    // partially-parseable content.
+    if (!/^\d+$/.test(raw)) return null;
+    const rawStatus = Number(raw);
+    if (rawStatus > 255) return null;
     if (rawStatus >= 128 && rawStatus <= 128 + 64) {
       const signum = rawStatus - 128;
       return {
@@ -331,18 +338,6 @@ export class TmuxAdapter implements TmuxPort {
     }
     return { rawStatus, exitCode: rawStatus, signalName: null };
   }
-}
-
-export interface ExitStatus {
-  // Raw POSIX `$?` value (0–255). 0–127 is a normal exit code; 128+N
-  // means "killed by signal N".
-  rawStatus: number;
-  // The agent's exit code, or null if the agent was killed by a signal.
-  exitCode: number | null;
-  // SIG<name> if killed by signal, else null. May be `SIG${signum}` if
-  // the number is outside the lookup table (rare, but kept verbatim
-  // rather than dropped so triage still has the raw integer).
-  signalName: string | null;
 }
 
 // POSIX/Linux signal names. macOS overlaps for the common signals
@@ -388,11 +383,20 @@ function shellQuote(s: string): string {
 // Files whose stale presence directly drives the bug the sweep exists to
 // fix: `.quay-blocked.md` would be ingested as the new attempt's blocker;
 // `.quay-session.log` would mix old bytes into the new attempt's log and
-// skew the mtime-based freshness signal. Failing to remove either of
-// these is treated as a hard spawn failure so the spawn-substrate-failed
-// path takes over (same semantics as a `pipe-pane` failure) — silently
-// proceeding would reintroduce the exact bug this sweep prevents.
-const SWEEP_FAIL_CLOSED = new Set([".quay-blocked.md", ".quay-session.log"]);
+// skew the mtime-based freshness signal. A leftover `.quay-exit-code`
+// would be misread as the current attempt's exit status — and in the
+// exact silent-exit case the wrapper is built to diagnose, the wrapper
+// never overwrites the file, so the previous attempt's `$?` would be
+// persisted as this attempt's `exit_status` artifact and actively
+// poison triage. Failing to remove any of these is treated as a hard
+// spawn failure so the spawn-substrate-failed path takes over (same
+// semantics as a `pipe-pane` failure) — silently proceeding would
+// reintroduce the exact bugs this sweep prevents.
+const SWEEP_FAIL_CLOSED = new Set([
+  ".quay-blocked.md",
+  ".quay-session.log",
+  ".quay-exit-code",
+]);
 
 // Remove every direct child of `worktreePath` whose name starts with the
 // `.quay-` prefix. The two files in `SWEEP_FAIL_CLOSED` are required

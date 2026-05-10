@@ -184,14 +184,13 @@ t("env: process.env propagates a runtime-set variable into the agent pane", asyn
   // Bun snapshots PATH (and possibly more) at startup unless the caller
   // forwards `env: process.env`. A tick that mints credentials at
   // runtime would otherwise spawn tmux with a stale env, leaving the
-  // agent without the GH_TOKEN/HTTP-credentials it needs — the
-  // hypothesized AST-100 silent-exit shape. We assert by setting a var
-  // post-startup, having the agent read it, and checking the value
-  // landed in the pane log.
-  const marker = `QUAY_AST100_PROBE_${Math.random().toString(36).slice(2, 10)}`;
-  process.env.QUAY_AST100_PROBE = marker;
+  // agent without the GH_TOKEN/HTTP-credentials it needs. We assert by
+  // setting a var post-startup, having the agent read it, and checking
+  // the value landed in the pane log.
+  const marker = `QUAY_ENV_FORWARD_PROBE_${Math.random().toString(36).slice(2, 10)}`;
+  process.env.QUAY_ENV_FORWARD_PROBE = marker;
   cleanups.push(() => {
-    delete process.env.QUAY_AST100_PROBE;
+    delete process.env.QUAY_ENV_FORWARD_PROBE;
   });
 
   const adapter = new TmuxAdapter();
@@ -205,7 +204,7 @@ t("env: process.env propagates a runtime-set variable into the agent pane", asyn
     promptContent: "ignored",
     // Print the env var the wrapper inherited; sleep so the pane stays
     // alive long enough for pipe-pane to flush.
-    agentInvocation: 'printf "PROBE=%s\\n" "$QUAY_AST100_PROBE"; sleep 1',
+    agentInvocation: 'printf "PROBE=%s\\n" "$QUAY_ENV_FORWARD_PROBE"; sleep 1',
   });
 
   const wrote = await waitFor(
