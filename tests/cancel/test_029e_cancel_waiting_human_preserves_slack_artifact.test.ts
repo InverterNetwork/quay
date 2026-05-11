@@ -49,7 +49,7 @@ test("test_029e_cancel_waiting_human_preserves_slack_artifact", async () => {
   const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
   if (!claim.ok) throw new Error("expected claim");
   h.ids.push("e2902902"); // deterministic nonce suffix
-  const esc = escalate_human(
+  const esc = await escalate_human(
     {
       db: h.db,
       clock: h.clock,

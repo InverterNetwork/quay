@@ -41,7 +41,7 @@ test("test_048c_inter_window_chatter_excluded_after_recovery", async () => {
   const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
   if (!claim.ok) throw new Error("expected claim");
   h.ids.push("nonce048c");
-  const esc = escalate_human(
+  const esc = await escalate_human(
     {
       db: h.db,
       clock: h.clock,

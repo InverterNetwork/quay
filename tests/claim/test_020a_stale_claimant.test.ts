@@ -41,7 +41,7 @@ test("test_020a_stale_claimant_cannot_submit_brief", async () => {
 
   // A wakes up and tries to submit a brief with the stale claim_id.
   const store = createArtifactStore({ db: h.db, artifactRoot: h.artifactRoot, clock: h.clock });
-  const submission = submit_brief(
+  const submission = await submit_brief(
     { db: h.db, clock: h.clock, artifactStore: store },
     {
       taskId,

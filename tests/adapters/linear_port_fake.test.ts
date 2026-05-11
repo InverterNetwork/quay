@@ -111,3 +111,53 @@ test("test_linear_port_fake_throws_on_429_with_retryable_true_and_retry_after", 
   expect(err.details?.retryable).toBe(true);
   expect(err.details?.retry_after).toBe(42);
 });
+
+test("test_linear_port_fake_set_issue_state_records_calls_in_order", async () => {
+  // The fake captures each non-idempotent setIssueState call so wiring
+  // tests can assert on the writeback shape.
+  const fake = new FakeLinearAdapter();
+
+  await fake.setIssueState("ENG-1234", "In Progress");
+  await fake.setIssueState("ENG-1234", "Waiting");
+  await fake.setIssueState("AST-200", "Canceled");
+
+  expect(fake.setIssueStateCalls).toEqual([
+    { identifier: "ENG-1234", stateName: "In Progress" },
+    { identifier: "ENG-1234", stateName: "Waiting" },
+    { identifier: "AST-200", stateName: "Canceled" },
+  ]);
+});
+
+test("test_linear_port_fake_set_issue_state_skips_when_already_at_target", async () => {
+  // The fake mirrors the real adapter's read-before-write semantics: when
+  // the seeded "current" state already matches the requested name, the
+  // call is a no-op and nothing lands in `setIssueStateCalls`.
+  const fake = new FakeLinearAdapter();
+  fake.setCurrentState("ENG-1234", "Waiting");
+
+  await fake.setIssueState("ENG-1234", "Waiting");
+
+  expect(fake.setIssueStateCalls).toEqual([]);
+});
+
+test("test_linear_port_fake_set_issue_state_throws_when_failure_queued", async () => {
+  // `failNextSetIssueState` lets tests pin the best-effort warn-and-
+  // continue contract without poisoning the read side of the fake. Queued
+  // errors are consumed in FIFO order; subsequent calls succeed.
+  const fake = new FakeLinearAdapter();
+  fake.failNextSetIssueState(new Error("simulated 500"));
+
+  let caught: unknown;
+  try {
+    await fake.setIssueState("ENG-1", "In Progress");
+  } catch (e) {
+    caught = e;
+  }
+  expect((caught as Error).message).toBe("simulated 500");
+  expect(fake.setIssueStateCalls).toEqual([]);
+
+  await fake.setIssueState("ENG-1", "In Progress");
+  expect(fake.setIssueStateCalls).toEqual([
+    { identifier: "ENG-1", stateName: "In Progress" },
+  ]);
+});
