@@ -83,7 +83,7 @@ test("test_083_advice_answered_does_not_increment_non_budget_counter", async () 
   expect(claim.ok).toBe(true);
   const claimId = claim.ok ? claim.value.claim_id : "";
 
-  const submitted = submit_brief(built.deps, {
+  const submitted = await submit_brief(built.deps, {
     taskId: taskB,
     claimId,
     brief: "incorporating the human's advice",

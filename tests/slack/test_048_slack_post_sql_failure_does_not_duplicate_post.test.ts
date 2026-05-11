@@ -39,7 +39,7 @@ test("test_048_slack_post_sql_failure_does_not_duplicate_post", async () => {
   const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
   if (!claim.ok) throw new Error("expected claim");
   h.ids.push("nonce0048");
-  const esc = escalate_human(
+  const esc = await escalate_human(
     {
       db: h.db,
       clock: h.clock,

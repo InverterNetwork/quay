@@ -19,7 +19,13 @@ import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { IdGenerator } from "../ports/id_generator.ts";
+import type { LinearPort } from "../ports/linear.ts";
 import { taskIdShort } from "./branch_slug.ts";
+import {
+  LINEAR_STATE_IN_PROGRESS,
+  LINEAR_STATE_WAITING,
+  syncLinearState,
+} from "./linear_state_sync.ts";
 import { loadPreambleBody } from "./preamble.ts";
 
 export type ClaimErrorCode =
@@ -76,11 +82,13 @@ export interface ClaimDeps {
 
 export interface SubmitBriefDeps extends ClaimDeps {
   artifactStore: ArtifactStore;
+  linear?: LinearPort;
 }
 
 export interface EscalateHumanDeps extends ClaimDeps {
   artifactStore: ArtifactStore;
   ids: IdGenerator;
+  linear?: LinearPort;
 }
 
 export interface ClaimTaskInput {
@@ -114,6 +122,7 @@ interface TaskRow {
   budget_exhausted: number;
   slack_thread_ref: string | null;
   next_escalation_seq: number;
+  external_ref: string | null;
 }
 
 function fail(
@@ -132,7 +141,8 @@ function loadTask(db: DB, taskId: string): TaskRow | null {
     db
       .query<TaskRow, [string]>(
         `SELECT task_id, state, claim_id, cancel_requested_at,
-                budget_exhausted, slack_thread_ref, next_escalation_seq
+                budget_exhausted, slack_thread_ref, next_escalation_seq,
+                external_ref
            FROM tasks WHERE task_id = ?`,
       )
       .get(taskId) ?? null
@@ -325,10 +335,10 @@ function loadLatestAttempt(db: DB, taskId: string): PriorAttemptRow | null {
   );
 }
 
-export function submit_brief(
+export async function submit_brief(
   deps: SubmitBriefDeps,
   input: SubmitBriefInput,
-): ServiceResult<SubmitBriefResult> {
+): Promise<ServiceResult<SubmitBriefResult>> {
   const row = loadTask(deps.db, input.taskId);
   if (!row) {
     return fail("unknown_task", `task ${input.taskId} not found`, {
@@ -466,16 +476,18 @@ export function submit_brief(
     throw err;
   }
 
+  await syncLinearState(deps.linear, row.external_ref, LINEAR_STATE_IN_PROGRESS);
+
   return {
     ok: true,
     value: { task_id: input.taskId, state: "queued", attempt_id: attemptId },
   };
 }
 
-export function escalate_human(
+export async function escalate_human(
   deps: EscalateHumanDeps,
   input: EscalateHumanInput,
-): ServiceResult<EscalateHumanResult> {
+): Promise<ServiceResult<EscalateHumanResult>> {
   const row = loadTask(deps.db, input.taskId);
   if (!row) {
     return fail("unknown_task", `task ${input.taskId} not found`, {
@@ -620,6 +632,8 @@ export function escalate_human(
     } catch {}
     throw err;
   }
+
+  await syncLinearState(deps.linear, row.external_ref, LINEAR_STATE_WAITING);
 
   return {
     ok: true,

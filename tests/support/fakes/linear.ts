@@ -10,10 +10,29 @@ type FakeLinearState =
   | { kind: "5xx"; message?: string }
   | { kind: "429"; retryAfter: number | null };
 
+export interface FakeLinearStateChange {
+  identifier: string;
+  stateName: string;
+}
+
 export class FakeLinearAdapter implements LinearPort {
   getIssueCalls: string[] = [];
+  // Every accepted, non-idempotent setIssueState call lands here in arrival
+  // order so tests can assert on the writeback shape AND the absence of
+  // duplicate writes when idempotency should have suppressed the call.
+  setIssueStateCalls: FakeLinearStateChange[] = [];
 
   private states = new Map<string, FakeLinearState>();
+  // Tracks the "current Linear state" the fake reports for an identifier.
+  // Drives idempotency: a `setIssueState` call whose stateName matches the
+  // current value records nothing on `setIssueStateCalls` (skip), mirroring
+  // the real adapter's read-before-write behaviour.
+  private currentStates = new Map<string, string>();
+  // Errors queued via `failNextSetIssueState` are consumed in FIFO order;
+  // calls past the queued count succeed normally. A queue (vs. a single
+  // field) so two failures-in-a-row stay observable rather than silently
+  // collapsing into one.
+  private setIssueStateErrors: Error[] = [];
 
   // Test helpers --------------------------------------------------------
 
@@ -41,6 +60,27 @@ export class FakeLinearAdapter implements LinearPort {
 
   set429(identifier: string, retryAfterSeconds: number | null): void {
     this.states.set(identifier, { kind: "429", retryAfter: retryAfterSeconds });
+  }
+
+  // Seed the fake's view of an issue's current Linear workflow state. Tests
+  // that exercise the idempotent-skip branch call this with the same name
+  // they later pass to setIssueState.
+  setCurrentState(identifier: string, stateName: string): void {
+    this.currentStates.set(identifier, stateName);
+  }
+
+  // Queue an error to throw on the next `setIssueState` call. Lets tests
+  // pin the best-effort warn-and-continue contract without piggybacking on
+  // the `getIssue` error states (which would also poison reads).
+  failNextSetIssueState(err: Error): void {
+    this.setIssueStateErrors.push(err);
+  }
+
+  // Drop the recorded setIssueState log; useful between phases of a
+  // multi-step test (e.g. seed the fake state, ignore the setup writes,
+  // then assert on the writes from the step under test).
+  resetSetIssueStateCalls(): void {
+    this.setIssueStateCalls.length = 0;
   }
 
   // Port impl -----------------------------------------------------------
@@ -75,5 +115,14 @@ export class FakeLinearAdapter implements LinearPort {
           },
         );
     }
+  }
+
+  async setIssueState(identifier: string, stateName: string): Promise<void> {
+    const queuedError = this.setIssueStateErrors.shift();
+    if (queuedError !== undefined) throw queuedError;
+    const current = this.currentStates.get(identifier);
+    if (current === stateName) return;
+    this.currentStates.set(identifier, stateName);
+    this.setIssueStateCalls.push({ identifier, stateName });
   }
 }

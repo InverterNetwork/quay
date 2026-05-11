@@ -40,7 +40,7 @@ test("test_011_escalate_human_cli_does_not_call_slack", async () => {
   const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
   if (!claim.ok) throw new Error("expected claim");
   h.ids.push("nonce0011");
-  const esc = escalate_human(
+  const esc = await escalate_human(
     {
       db: h.db,
       clock: h.clock,

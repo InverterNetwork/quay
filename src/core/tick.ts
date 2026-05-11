@@ -5,11 +5,16 @@ import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PrSnapshot } from "../ports/github.ts";
+import type { LinearPort } from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { probeAgentIdentity } from "./agent_identity.ts";
 import { runCancelFinalizer } from "./cancel.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
+import {
+  LINEAR_STATE_IN_PROGRESS,
+  syncLinearState,
+} from "./linear_state_sync.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
 import {
@@ -64,6 +69,9 @@ export interface TickDeps {
   slack: SlackPort;
   artifactStore: ArtifactStore;
   supervisorLock: SupervisorLock;
+  // Passed through to runCancelFinalizer so the cancel sweep also picks
+  // up the writeback without a separate wiring.
+  linear?: LinearPort;
 }
 
 export interface TickOptions {
@@ -124,6 +132,7 @@ interface QueuedTaskRow {
   tmux_id: string;
   worktree_path: string;
   cancel_requested_at: string | null;
+  external_ref: string | null;
 }
 
 interface RunningTaskRow {
@@ -206,7 +215,7 @@ export async function tick_once(
     const cancelledIds = new Set<string>();
     for (const task of cancelTargets) {
       try {
-        runCancelFinalizer(deps, task.task_id);
+        await runCancelFinalizer(deps, task.task_id);
         cancelledIds.add(task.task_id);
         results.push({ task_id: task.task_id, action: "cancel_finalized" });
       } catch (err) {
@@ -290,7 +299,7 @@ export async function tick_once(
         continue;
       }
       try {
-        results.push(promoteAndSpawn(deps, task, agentInvocation));
+        results.push(await promoteAndSpawn(deps, task, agentInvocation));
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
       }
@@ -322,7 +331,8 @@ function readCancelTargets(db: DB): CancelTargetRow[] {
 function readQueued(db: DB): QueuedTaskRow[] {
   return db
     .query<QueuedTaskRow, []>(
-      `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path, cancel_requested_at
+      `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path,
+              cancel_requested_at, external_ref
          FROM tasks
         WHERE state = 'queued'
         ORDER BY created_at, task_id`,
@@ -357,12 +367,14 @@ interface WaitingHumanTaskRow {
   slack_thread_ref: string | null;
   cancel_requested_at: string | null;
   authors_json: string | null;
+  external_ref: string | null;
 }
 
 function readWaitingHuman(db: DB): WaitingHumanTaskRow[] {
   return db
     .query<WaitingHumanTaskRow, []>(
-      `SELECT task_id, slack_thread_ref, cancel_requested_at, authors_json
+      `SELECT task_id, slack_thread_ref, cancel_requested_at, authors_json,
+              external_ref
          FROM tasks
         WHERE state = 'waiting_human'
         ORDER BY created_at, task_id`,
@@ -1262,7 +1274,7 @@ async function processWaitingHumanTask(
     return results;
   }
 
-  ingestSlackReply(deps, task, art, firstNonBot);
+  await ingestSlackReply(deps, task, art, firstNonBot);
   results.push({ task_id: task.task_id, action: "slack_reply_ingested" });
   return results;
 }
@@ -1320,12 +1332,12 @@ function readEscalationBody(filePath: string): string {
   }
 }
 
-function ingestSlackReply(
+async function ingestSlackReply(
   deps: TickDeps,
   task: WaitingHumanTaskRow,
   art: EscalationArtifactRow,
   reply: { ts: string; authorBot: boolean; text: string },
-): void {
+): Promise<void> {
   const attemptId = art.attempt_id!;
   const replyContent = JSON.stringify({
     ts: reply.ts,
@@ -1334,6 +1346,9 @@ function ingestSlackReply(
   });
   const replyContentHash = createHash("sha256").update(replyContent).digest("hex");
 
+  // Only the writer that wins the waiting_human → awaiting-next-brief race
+  // emits the Linear writeback so a recovery tick doesn't re-fire.
+  let transitioned = false;
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -1389,11 +1404,16 @@ function ingestSlackReply(
       .run(task.task_id, attemptId, artifact.artifactId, now);
 
     deps.db.exec("COMMIT");
+    transitioned = true;
   } catch (err) {
     try {
       deps.db.exec("ROLLBACK");
     } catch {}
     throw err;
+  }
+
+  if (transitioned) {
+    await syncLinearState(deps.linear, task.external_ref, LINEAR_STATE_IN_PROGRESS);
   }
 }
 
@@ -1695,11 +1715,11 @@ function loadFinalPrompt(db: DB, taskId: string, attemptId: number): string {
   }
 }
 
-function promoteAndSpawn(
+async function promoteAndSpawn(
   deps: TickDeps,
   task: QueuedTaskRow,
   agentInvocation: string,
-): TickTaskResult {
+): Promise<TickTaskResult> {
   if (task.cancel_requested_at !== null) {
     return { task_id: task.task_id, action: "skipped_predicate" };
   }
@@ -1795,6 +1815,8 @@ function promoteAndSpawn(
   deps.db
     .query(`UPDATE tasks SET spawn_failures_consecutive = 0 WHERE task_id = ?`)
     .run(task.task_id);
+
+  await syncLinearState(deps.linear, task.external_ref, LINEAR_STATE_IN_PROGRESS);
 
   return { task_id: task.task_id, action: "spawned" };
 }
