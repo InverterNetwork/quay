@@ -156,9 +156,9 @@ test("wall_clock_exceeded event_data carries intent and spawn-age", async () => 
 });
 
 test("spawned event_data carries planned tmux session, worktree, and agent identity", async () => {
-  // AST-103: every events row must carry non-empty event_data. The
-  // queued→running transition records spawn-time intent so retro analysis
-  // can correlate a spawned event with later transitions without joining.
+  // Every events row must carry non-empty event_data. The queued→running
+  // transition records spawn-time intent so retro analysis can correlate a
+  // spawned event with later transitions without joining.
   h = createHarness();
   h.clock.set("2026-05-10T15:10:00.000Z");
 
@@ -196,8 +196,8 @@ test("spawned event_data carries planned tmux session, worktree, and agent ident
 });
 
 test("pr_opened event_data carries head SHA, exit info, and predicate state", async () => {
-  // AST-103: pr_opened was previously inserted without event_data. Pin the
-  // populated payload so the per-attempt observability rollup is complete.
+  // pr_opened was previously inserted without event_data. Pin the populated
+  // payload so the per-attempt observability rollup is complete.
   h = createHarness();
   h.clock.set("2026-05-10T15:11:00.000Z");
 

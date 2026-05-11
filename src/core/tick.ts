@@ -944,7 +944,13 @@ function scheduleReviewNonBudget(
 }
 
 function formatConflictObservation(snapshot: PrSnapshot): string {
-  const base = snapshot.baseSha ?? "";
+  // Key on the base ref *tip*, not `baseSha` (which is the merge-base — stable
+  // across base advances by construction). Keying on the tip means a base
+  // advance that may have worsened the conflict re-enters the respawn path
+  // even when head is unchanged. Fall back to `baseSha` when the tip is
+  // unavailable (unfetched base, older gh) so the key still has *some* base
+  // component rather than collapsing to head-only.
+  const base = snapshot.baseTipSha ?? snapshot.baseSha ?? "";
   return `${snapshot.headSha}:${base}`;
 }
 

@@ -1,10 +1,10 @@
-// AST-102: a successful PR snapshot during pr-open / done polling must
-// persist `pr_number`, `pr_url`, `head_sha`, and `base_sha` onto the task
-// row so the operator-visible task carries the PR linkage. Previously the
-// adapter scrape errored out (Unknown JSON field "baseRefOid" on gh
-// 2.45.0) before any field could be written; this test pins the fixed
-// behavior — even though it doesn't exercise the gh CLI directly, it
-// verifies tick consumes the snapshot fields and writes them to the row.
+// A successful PR snapshot during pr-open / done polling must persist
+// `pr_number`, `pr_url`, `head_sha`, and `base_sha` onto the task row so the
+// operator-visible task carries the PR linkage. Previously the adapter scrape
+// errored out (Unknown JSON field "baseRefOid" on gh 2.45.0) before any field
+// could be written; this test pins the fixed behavior — even though it
+// doesn't exercise the gh CLI directly, it verifies tick consumes the
+// snapshot fields and writes them to the row.
 import { afterEach, expect, test } from "bun:test";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";

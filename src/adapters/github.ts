@@ -136,6 +136,9 @@ export class GitHubCliAdapter implements GitHubPort {
     if (view.baseRef !== null && view.baseRef !== undefined) {
       snapshot.baseRef = view.baseRef;
     }
+    if (view.baseTipSha !== null && view.baseTipSha !== undefined) {
+      snapshot.baseTipSha = view.baseTipSha;
+    }
     if (view.prNumber !== null && view.prNumber !== undefined) {
       snapshot.prNumber = view.prNumber;
     }
@@ -261,6 +264,13 @@ export class GitHubCliAdapter implements GitHubPort {
       baseRef !== null && headSha !== ""
         ? this.computeMergeBaseSha(repoId, `origin/${baseRef}`, headSha)
         : null;
+    // Resolve the base ref tip separately. Conflict dedup keys on the tip so
+    // a base advance can re-trigger respawn even when head is unchanged —
+    // `baseSha` (merge-base) is stable across that scenario by construction.
+    const baseTipSha =
+      baseRef !== null
+        ? this.computeRefTipSha(repoId, `origin/${baseRef}`)
+        : null;
     const prNumber = toFiniteIntegerOrNull(parsed.number);
     const prUrl =
       typeof parsed.url === "string" && parsed.url.length > 0
@@ -274,6 +284,7 @@ export class GitHubCliAdapter implements GitHubPort {
       latestReview,
     };
     if (baseRef !== null) view.baseRef = baseRef;
+    if (baseTipSha !== null) view.baseTipSha = baseTipSha;
     if (prNumber !== null) view.prNumber = prNumber;
     if (prUrl !== null) view.prUrl = prUrl;
     return view;
@@ -294,6 +305,16 @@ export class GitHubCliAdapter implements GitHubPort {
       baseRef,
       headSha,
     ]);
+    if (result.exitCode !== 0) return null;
+    const sha = result.stdout.trim();
+    return sha.length > 0 ? sha : null;
+  }
+
+  // Resolve a ref to its current tip SHA via `git rev-parse`. Same best-effort
+  // posture as `computeMergeBaseSha`: any failure returns null and the caller
+  // omits `baseTipSha` from the snapshot.
+  protected computeRefTipSha(repoId: string, ref: string): string | null {
+    const result = this.run(repoId, ["git", "rev-parse", ref]);
     if (result.exitCode !== 0) return null;
     const sha = result.stdout.trim();
     return sha.length > 0 ? sha : null;

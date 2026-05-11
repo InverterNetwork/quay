@@ -90,6 +90,14 @@ export interface PrSnapshot {
   // callers that need the base ref for diffing can compute against it
   // without re-scraping. Optional for the same reason as prNumber/prUrl.
   baseRef?: string | null;
+  // Current tip SHA of `origin/<baseRef>`, distinct from `baseSha` (which is
+  // the merge-base — stable across base advances by design). Conflict-respawn
+  // dedup keys on the *tip* so a base advance that may have worsened the
+  // conflict can re-trigger a respawn even when head is unchanged. Optional:
+  // if the local rev-parse fails (unfetched base) the field is absent and
+  // the dedup key falls back to baseSha — preserving the prior fallback shape
+  // without silently weakening the trigger when the tip is known.
+  baseTipSha?: string | null;
   mergeable: PrMergeableState;
   latestReview: PrLatestReview;
   checks: PrChecksReport;

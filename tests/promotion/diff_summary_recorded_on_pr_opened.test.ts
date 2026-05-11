@@ -111,8 +111,7 @@ test("pr_opened with spawn SHA NULL (first push) falls back to the repo base bra
   // First-attempt success: the worker pushed `quay/<branch>` for the very
   // first time, so attempts.remote_sha_at_spawn is null. The classifier
   // must fall back to the repo's base branch tip and capture the PR-shaped
-  // diff. Pre-fix this test pinned "diff_summary stays NULL"; that's the
-  // AST-103 regression.
+  // diff. Earlier behavior left diff_summary NULL on this path.
   h = createHarness();
   h.clock.set("2026-05-10T16:02:00.000Z");
 
