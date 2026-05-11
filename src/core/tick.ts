@@ -560,6 +560,12 @@ function processPrOpenTask(
     );
   }
 
+  // Persist the PR's identifying metadata (number, url, head/base SHAs) onto
+  // the task row before downstream branches can short-circuit (terminal
+  // state, conflict, CI). The CLI/operator surface reads these columns; if
+  // we wait until after CI passes we miss the entire pr-open window.
+  persistPrMetadata(deps, task.task_id, snapshot);
+
   // 1. Terminal PR state (merged / closed_unmerged) takes precedence over
   //    everything else — even pending CI. A human merging or closing the PR
   //    while CI is still running must convert to terminal cleanly (spec §5
@@ -627,6 +633,10 @@ function processDoneTask(
       ),
     );
   }
+
+  // Same writeback as the pr-open path: keep PR metadata current while we
+  // poll for review feedback / merge state in the done branch.
+  persistPrMetadata(deps, task.task_id, snapshot);
 
   // 1. Terminal PR state.
   if (snapshot.state === "merged" || snapshot.state === "closed_unmerged") {
@@ -934,8 +944,53 @@ function scheduleReviewNonBudget(
 }
 
 function formatConflictObservation(snapshot: PrSnapshot): string {
-  const base = snapshot.baseSha ?? "";
+  // Key on the base ref *tip*, not `baseSha` (which is the merge-base — stable
+  // across base advances by construction). Keying on the tip means a base
+  // advance that may have worsened the conflict re-enters the respawn path
+  // even when head is unchanged. Fall back to `baseSha` when the tip is
+  // unavailable (unfetched base, older gh) so the key still has *some* base
+  // component rather than collapsing to head-only.
+  const base = snapshot.baseTipSha ?? snapshot.baseSha ?? "";
   return `${snapshot.headSha}:${base}`;
+}
+
+// COALESCE-write so a snapshot with a missing field (older gh, transient
+// failure of the merge-base shell-out) never overwrites a previously
+// captured value with NULL. head_sha follows the same pattern: if the
+// snapshot returns it, we accept the new value (force-pushes legitimately
+// rotate it); if not, we keep what's there.
+function persistPrMetadata(
+  deps: TickDeps,
+  taskId: string,
+  snapshot: PrSnapshot,
+): void {
+  const prNumber = snapshot.prNumber ?? null;
+  const prUrl = snapshot.prUrl ?? null;
+  const headSha = snapshot.headSha === "" ? null : snapshot.headSha;
+  const baseSha = snapshot.baseSha;
+  if (
+    prNumber === null &&
+    prUrl === null &&
+    headSha === null &&
+    baseSha === null
+  ) {
+    return;
+  }
+  try {
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET pr_number = COALESCE(?, pr_number),
+                pr_url    = COALESCE(?, pr_url),
+                head_sha  = COALESCE(?, head_sha),
+                base_sha  = COALESCE(?, base_sha)
+          WHERE task_id = ?`,
+      )
+      .run(prNumber, prUrl, headSha, baseSha, taskId);
+  } catch {
+    // Best-effort: PR-metadata observability never blocks the state
+    // machine. A SQL failure here will be retried on the next tick.
+  }
 }
 
 function loadRepoForTask(
@@ -1671,9 +1726,23 @@ function promoteAndSpawn(
     : 0;
   const now = deps.clock.nowISO();
 
+  // Probe agent identity and compute the canonical session name BEFORE the
+  // promotion transaction so the `spawned` event can carry both in
+  // `event_data`. The probe is documented as in-process and never throws;
+  // computing the session name from `tmux_id` + `attempt_number` is pure.
+  // Persisting `attempts.agent_identity` still happens AFTER spawn succeeds
+  // (paired with `tmux_session`) — this earlier probe is event-only.
+  const sessionName = `quay-task-${task.tmux_id}-${pending.attempt_number}`;
+  const agentIdentity = probeAgentIdentity(agentInvocation);
+
   const promoted = runPromotionTransaction(deps.db, {
     taskId: task.task_id,
     attemptId: pending.attempt_id,
+    attemptNumber: pending.attempt_number,
+    branchName: task.branch_name,
+    worktreePath: task.worktree_path,
+    plannedSession: sessionName,
+    agentIdentity,
     consumedBudget: pending.consumed_budget,
     spawnedAt: now,
     remoteSha,
@@ -1686,7 +1755,6 @@ function promoteAndSpawn(
   // Substrate work happens outside the transaction. If spawn throws, the row
   // stays in (state = running, tmux_session = NULL); the slice-4 spawn-window
   // classifier recovers via the canonical session name.
-  const sessionName = `quay-task-${task.tmux_id}-${pending.attempt_number}`;
   try {
     deps.tmux.spawn({
       sessionName,
@@ -1713,10 +1781,10 @@ function promoteAndSpawn(
   // load-bearing: a substrate failure between promotion and this point must
   // leave the consecutive counter intact so it can accumulate across ticks.
   //
-  // agent_identity is captured here (alongside tmux_session) so a successful
-  // spawn always lands a non-NULL identity. The probe is in-process and
-  // self-bounded — it never throws, so a flaky binary cannot block tick.
-  const agentIdentity = probeAgentIdentity(agentInvocation);
+  // agent_identity is paired with tmux_session — both columns reflect what
+  // the substrate actually accepted, so they're written together. The
+  // earlier probe at promotion time only feeds the `spawned` event_data;
+  // a spawn-failure leaves the column NULL.
   deps.db
     .query(
       `UPDATE attempts
@@ -1769,6 +1837,14 @@ function clearTickError(deps: TickDeps, taskId: string): void {
 interface PromotionInput {
   taskId: string;
   attemptId: number;
+  attemptNumber: number;
+  branchName: string;
+  worktreePath: string;
+  // Canonical tmux session name we'll attempt to spawn into. Recorded in
+  // the `spawned` event_data even when substrate spawn ultimately fails —
+  // the event captures intent, the column captures observed reality.
+  plannedSession: string;
+  agentIdentity: string;
   consumedBudget: number;
   spawnedAt: string;
   remoteSha: string | null;
@@ -1805,11 +1881,26 @@ function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
         WHERE attempt_id = ? AND spawned_at IS NULL`,
     ).run(p.spawnedAt, p.remoteSha, p.prExisted, p.attemptId);
 
+    // event_data captures the spawn-time intent: where the worker is going
+    // to run (worktree, branch, tmux session), what we expect to invoke
+    // (agent_identity), and the spawn-time progress predicate inputs. This
+    // lets retro analysis correlate a spawn with later transitions without
+    // having to join across multiple rows.
+    const eventData = JSON.stringify({
+      tmux_session: p.plannedSession,
+      worktree_path: p.worktreePath,
+      branch_name: p.branchName,
+      attempt_number: p.attemptNumber,
+      agent_identity: p.agentIdentity,
+      remote_sha_at_spawn: p.remoteSha,
+      pr_existed_at_spawn: p.prExisted === 1,
+    });
+
     db.query(
       `INSERT INTO events (
-         task_id, attempt_id, event_type, from_state, to_state, occurred_at
-       ) VALUES (?, ?, 'spawned', 'queued', 'running', ?)`,
-    ).run(p.taskId, p.attemptId, p.spawnedAt);
+         task_id, attempt_id, event_type, from_state, to_state, occurred_at, event_data
+       ) VALUES (?, ?, 'spawned', 'queued', 'running', ?, ?)`,
+    ).run(p.taskId, p.attemptId, p.spawnedAt, eventData);
 
     db.exec("COMMIT");
     return true;

@@ -155,6 +155,78 @@ test("wall_clock_exceeded event_data carries intent and spawn-age", async () => 
   expect(data.last_log_at).toBeUndefined();
 });
 
+test("spawned event_data carries planned tmux session, worktree, and agent identity", async () => {
+  // Every events row must carry non-empty event_data. The queued→running
+  // transition records spawn-time intent so retro analysis can correlate a
+  // spawned event with later transitions without joining.
+  h = createHarness();
+  h.clock.set("2026-05-10T15:10:00.000Z");
+
+  const { insertAttempt, insertFinalPromptArtifact, insertTask } = await import(
+    "../support/fixtures.ts"
+  );
+  const repoId = insertRepo(h.db, "repo-event-spawned");
+  const taskId = insertTask(h.db, { taskId: "task-event-spawned", repoId });
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+  });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, attemptId);
+
+  const built = buildTickDeps(h);
+  built.git.setRemoteHeadSha(repoId, `quay/${taskId}`, "spawn-time-sha");
+  built.github.setPrExists(repoId, `quay/${taskId}`, false);
+
+  await tick_once(built.deps, { agentInvocation: "bun --version" });
+
+  const ev = eventByType(taskId, "spawned");
+  const data = JSON.parse(ev.event_data!);
+  expect(data.tmux_session).toBe(`quay-task-quay-task-${taskId}-1`);
+  expect(typeof data.worktree_path).toBe("string");
+  expect(data.worktree_path.length).toBeGreaterThan(0);
+  expect(data.branch_name).toBe(`quay/${taskId}`);
+  expect(data.attempt_number).toBe(1);
+  // agent_identity follows the runtime/version/model triple shape.
+  expect(typeof data.agent_identity).toBe("string");
+  expect(data.agent_identity.split("/")).toHaveLength(3);
+  expect(data.remote_sha_at_spawn).toBe("spawn-time-sha");
+  expect(data.pr_existed_at_spawn).toBe(false);
+});
+
+test("pr_opened event_data carries head SHA, exit info, and predicate state", async () => {
+  // pr_opened was previously inserted without event_data. Pin the populated
+  // payload so the per-attempt observability rollup is complete.
+  h = createHarness();
+  h.clock.set("2026-05-10T15:11:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-event-propened");
+  const t = insertRunningTask(h.db, {
+    taskId: "task-event-propened",
+    repoId,
+    worktreesRoot: join(h.dataDir, "worktrees"),
+    remoteShaAtSpawn: "spawn-sha-1",
+    prExistedAtSpawn: 0,
+  });
+
+  const built = buildTickDeps(h);
+  built.tmux.markDead(t.sessionName!);
+  built.tmux.setExitInfo(t.sessionName!, { exitCode: 0, exitSignal: null });
+  built.git.setRemoteHeadSha(repoId, t.branchName, "exit-sha-2");
+  built.github.setPrExists(repoId, t.branchName, true);
+
+  await tick_once(built.deps);
+
+  const ev = eventByType(t.taskId, "pr_opened");
+  const data = JSON.parse(ev.event_data!);
+  expect(data.exit_code).toBe(0);
+  expect(data.exit_signal).toBeNull();
+  expect(data.head_sha).toBe("exit-sha-2");
+  expect(data.remote_sha_at_spawn).toBe("spawn-sha-1");
+  expect(data.pr_existed_at_spawn).toBe(false);
+});
+
 test("stale_detected event_data includes last_log_at alongside spawn-age", async () => {
   h = createHarness();
   h.clock.set("2026-05-10T15:20:00.000Z");
