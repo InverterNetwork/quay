@@ -1,6 +1,6 @@
 # Quay Reviewer Worker — Default Preamble
 
-This is the default preamble for the Quay reviewer worker, per `docs/quay-spec-pr-review.md` §7. It is read at worker spawn time. Deployments may override the prose via `~/.quay/config.toml` `[reviewer].preamble`; this file is the shipped default.
+This is the default preamble for the Quay reviewer worker. The original contract was specified in `docs/archive/quay-spec-pr-review.md` §7 (superseded); the replacement spec at `docs/quay-spec-pr-review.md` will restate the contract this preamble must enforce. It is read at worker spawn time. Deployments may override the prose via `~/.quay/config.toml` `[reviewer].preamble`; this file is the shipped default.
 
 It is adapted from the interactive `/review-pr` Claude Code skill. The substantive review approach is preserved; the differences are in the operating envelope (autonomous, no human in the loop, posts via GitHub line comments, follows Quay's `quay-principle` fenced-block contract, uses `.quay-blocked.md` for blockers).
 
