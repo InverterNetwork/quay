@@ -11,7 +11,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_escalate_human_claim_transition_is_sql_only", () => {
+test("test_escalate_human_claim_transition_is_sql_only", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-escalate");
@@ -31,7 +31,7 @@ test("test_escalate_human_claim_transition_is_sql_only", () => {
   const slack = new FakeSlack();
   h.ids.push("randompart"); // deterministic suffix in the nonce
 
-  const result = escalate_human(
+  const result = await escalate_human(
     { db: h.db, clock: h.clock, artifactStore: store, ids: h.ids },
     {
       taskId,
@@ -115,7 +115,7 @@ test("test_escalate_human_claim_transition_is_sql_only", () => {
   });
 });
 
-test("test_escalate_human_thread_ref_override_persists", () => {
+test("test_escalate_human_thread_ref_override_persists", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-escalate-override");
@@ -133,7 +133,7 @@ test("test_escalate_human_thread_ref_override_persists", () => {
   if (!claim.ok) throw new Error("expected claim");
   const store = createArtifactStore({ db: h.db, artifactRoot: h.artifactRoot, clock: h.clock });
 
-  const result = escalate_human(
+  const result = await escalate_human(
     { db: h.db, clock: h.clock, artifactStore: store, ids: h.ids },
     {
       taskId,

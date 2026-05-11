@@ -23,9 +23,14 @@ import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort } from "../ports/github.ts";
+import type { LinearPort } from "../ports/linear.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import {
+  LINEAR_STATE_CANCELED,
+  LinearSyncQueue,
+} from "./linear_state_sync.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
@@ -58,6 +63,7 @@ export interface CancelDeps {
   tmux: TmuxPort;
   artifactStore: ArtifactStore;
   supervisorLock: SupervisorLock;
+  linear?: LinearPort;
 }
 
 export interface CancelTaskInput {
@@ -77,6 +83,7 @@ interface TaskRow {
   cancel_close_pr: number;
   cancel_keep_worktree: number;
   claim_id: string | null;
+  external_ref: string | null;
 }
 
 interface AttemptRow {
@@ -96,7 +103,7 @@ function loadTaskRow(db: DB, taskId: string): TaskRow | null {
       .query<TaskRow, [string]>(
         `SELECT task_id, repo_id, state, branch_name, tmux_id, worktree_path,
                 cancel_requested_at, cancel_close_pr, cancel_keep_worktree,
-                claim_id
+                claim_id, external_ref
            FROM tasks WHERE task_id = ?`,
       )
       .get(taskId) ?? null
@@ -137,10 +144,19 @@ export async function cancel_task(
   deps: CancelDeps,
   input: CancelTaskInput,
 ): Promise<CancelResult> {
-  return deps.supervisorLock.run(() => cancelUnderLock(deps, input));
+  const linearSyncs = new LinearSyncQueue(deps.linear);
+  const result = await deps.supervisorLock.run(() =>
+    cancelUnderLock(deps, input, linearSyncs),
+  );
+  await linearSyncs.drain();
+  return result;
 }
 
-function cancelUnderLock(deps: CancelDeps, input: CancelTaskInput): CancelResult {
+async function cancelUnderLock(
+  deps: CancelDeps,
+  input: CancelTaskInput,
+  linearSyncs: LinearSyncQueue,
+): Promise<CancelResult> {
   const initial = loadTaskRow(deps.db, input.taskId);
   if (!initial) {
     return {
@@ -187,7 +203,7 @@ function cancelUnderLock(deps: CancelDeps, input: CancelTaskInput): CancelResult
   // "task left mid-cancel" recovery path driven by tick.
   fireFailpoint("after_cancel_intent_commit");
 
-  runCancelFinalizer(deps, input.taskId);
+  await runCancelFinalizer(deps, input.taskId, linearSyncs);
 
   return {
     ok: true,
@@ -254,8 +270,15 @@ function killRunningTmux(deps: CancelDeps, initial: TaskRow): void {
 
 // Canonical finalizer (spec §5 "Cancel finalizer"). Callers must hold the
 // supervisor lock — tick recovery already owns the lock for the cycle, and
-// `cancel_task` takes it before invoking us.
-export function runCancelFinalizer(deps: CancelDeps, taskId: string): void {
+// `cancel_task` takes it before invoking us. The Linear writeback is
+// scheduled on `linearSyncs` (drained by the caller after lock release)
+// rather than awaited inline so the supervisor lock is not held for the
+// Linear round-trip duration.
+export async function runCancelFinalizer(
+  deps: CancelDeps,
+  taskId: string,
+  linearSyncs: LinearSyncQueue,
+): Promise<void> {
   const row = loadTaskRow(deps.db, taskId);
   if (!row) return;
   if (row.state === "cancelled") return; // idempotent re-entry
@@ -325,7 +348,13 @@ export function runCancelFinalizer(deps: CancelDeps, taskId: string): void {
   applyCleanupMatrix(deps, row);
 
   // Step 4: atomic terminal transition.
-  commitTerminal(deps, row, latest, exitInfo);
+  const transitioned = commitTerminal(deps, row, latest, exitInfo);
+
+  // Step 5: Linear writeback only on the winning writer — a recovery
+  // re-entry against an already-cancelled task is a quiet no-op.
+  if (transitioned) {
+    linearSyncs.enqueue(row.external_ref, LINEAR_STATE_CANCELED);
+  }
 }
 
 function applyCleanupMatrix(deps: CancelDeps, row: TaskRow): void {
@@ -382,12 +411,17 @@ function applyCleanupMatrix(deps: CancelDeps, row: TaskRow): void {
   } catch {}
 }
 
+// Returns true iff this call won the terminal write — i.e. the task moved
+// from a non-cancelled state to `cancelled` in this transaction. False on
+// the idempotent re-entry / already-cancelled path. The boolean gates the
+// Linear writeback so a recovery tick doesn't re-issue a `setIssueState`
+// for a task that another writer already finalized.
 function commitTerminal(
   deps: CancelDeps,
   row: TaskRow,
   latest: AttemptRow | null,
   exitInfo: PaneExitInfo,
-): void {
+): boolean {
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -409,7 +443,7 @@ function commitTerminal(
       // Another writer beat us; idempotent success. Roll back our own no-op
       // transaction without writing a duplicate event.
       deps.db.exec("ROLLBACK");
-      return;
+      return false;
     }
 
     if (latest !== null) {
@@ -457,6 +491,7 @@ function commitTerminal(
         .run(row.task_id, row.state, now);
     }
     deps.db.exec("COMMIT");
+    return true;
   } catch (err) {
     try {
       deps.db.exec("ROLLBACK");

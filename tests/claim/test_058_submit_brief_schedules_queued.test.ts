@@ -12,7 +12,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_058_submit_brief_schedules_queued_not_running", () => {
+test("test_058_submit_brief_schedules_queued_not_running", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-submit-brief");
@@ -36,7 +36,7 @@ test("test_058_submit_brief_schedules_queued_not_running", () => {
   if (!claim.ok) throw new Error("expected claim");
   const store = createArtifactStore({ db: h.db, artifactRoot: h.artifactRoot, clock: h.clock });
 
-  const submission = submit_brief(
+  const submission = await submit_brief(
     { db: h.db, clock: h.clock, artifactStore: store },
     {
       taskId,
@@ -113,7 +113,7 @@ test("test_058_submit_brief_schedules_queued_not_running", () => {
   expect(built.tmux.spawnCalls).toHaveLength(0);
 });
 
-test("test_058_submit_brief_advice_answered_does_not_consume_budget", () => {
+test("test_058_submit_brief_advice_answered_does_not_consume_budget", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-advice");
@@ -128,7 +128,7 @@ test("test_058_submit_brief_advice_answered_does_not_consume_budget", () => {
   if (!claim.ok) throw new Error("expected claim");
   const store = createArtifactStore({ db: h.db, artifactRoot: h.artifactRoot, clock: h.clock });
 
-  const submission = submit_brief(
+  const submission = await submit_brief(
     { db: h.db, clock: h.clock, artifactStore: store },
     {
       taskId,

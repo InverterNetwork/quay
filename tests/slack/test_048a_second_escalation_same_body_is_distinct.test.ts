@@ -42,7 +42,7 @@ test("test_048a_second_escalation_same_body_is_distinct", async () => {
   const claim1 = claim_task({ db: h.db, clock: h.clock }, { taskId });
   if (!claim1.ok) throw new Error("expected claim 1");
   h.ids.push("first048a");
-  const esc1 = escalate_human(
+  const esc1 = await escalate_human(
     {
       db: h.db,
       clock: h.clock,
@@ -72,7 +72,7 @@ test("test_048a_second_escalation_same_body_is_distinct", async () => {
   const claim2 = claim_task({ db: h.db, clock: h.clock }, { taskId });
   if (!claim2.ok) throw new Error("expected claim 2");
   h.ids.push("second48a");
-  const esc2 = escalate_human(
+  const esc2 = await escalate_human(
     {
       db: h.db,
       clock: h.clock,

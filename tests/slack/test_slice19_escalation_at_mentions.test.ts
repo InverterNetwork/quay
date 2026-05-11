@@ -28,11 +28,11 @@ interface Setup {
   built: ReturnType<typeof buildTickDeps>;
 }
 
-function setupEscalation(opts: {
+async function setupEscalation(opts: {
   slug: string;
   authorsJson: string | null;
   questionBody?: string;
-}): Setup {
+}): Promise<Setup> {
   if (!h) throw new Error("harness not initialized");
   const repoId = insertRepo(h.db, `repo-${opts.slug}`);
   const taskId = insertTask(h.db, {
@@ -57,7 +57,7 @@ function setupEscalation(opts: {
   const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
   if (!claim.ok) throw new Error("expected claim");
   h.ids.push(`nonce-${opts.slug}`);
-  const esc = escalate_human(
+  const esc = await escalate_human(
     {
       db: h.db,
       clock: h.clock,
@@ -88,7 +88,7 @@ test("test_slack_escalation_at_mentions_authors_when_authors_json_set", async ()
     { name: "Fabian", slack_id: "U06TDC56VJB" },
     { name: "Marvin", slack_id: "U07ABCDE" },
   ]);
-  const s = setupEscalation({ slug: "s19a", authorsJson: authors });
+  const s = await setupEscalation({ slug: "s19a", authorsJson: authors });
 
   await tick_once(s.built.deps);
 
@@ -102,7 +102,7 @@ test("test_slack_escalation_at_mentions_authors_when_authors_json_set", async ()
 test("test_slack_escalation_no_mentions_when_authors_json_null", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
-  const s = setupEscalation({ slug: "s19b", authorsJson: null });
+  const s = await setupEscalation({ slug: "s19b", authorsJson: null });
 
   await tick_once(s.built.deps);
 
@@ -127,7 +127,7 @@ test("test_slack_escalation_drops_malformed_slack_ids", async () => {
     { name: "empty", slack_id: "" },
     { name: "ok-2", slack_id: "U07ABCDE" },
   ]);
-  const s = setupEscalation({ slug: "s19-malformed", authorsJson: authors });
+  const s = await setupEscalation({ slug: "s19-malformed", authorsJson: authors });
 
   await tick_once(s.built.deps);
 
@@ -150,7 +150,7 @@ test("test_slack_escalation_dedupes_duplicate_slack_ids", async () => {
     { name: "Fabian (alt)", slack_id: "U06TDC56VJB" },
     { name: "Marvin", slack_id: "U07ABCDE" },
   ]);
-  const s = setupEscalation({ slug: "s19-dupe", authorsJson: authors });
+  const s = await setupEscalation({ slug: "s19-dupe", authorsJson: authors });
 
   await tick_once(s.built.deps);
 
@@ -162,7 +162,7 @@ test("test_slack_escalation_dedupes_duplicate_slack_ids", async () => {
 test("test_slack_escalation_no_mentions_when_authors_json_empty_array", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
-  const s = setupEscalation({ slug: "s19c", authorsJson: "[]" });
+  const s = await setupEscalation({ slug: "s19c", authorsJson: "[]" });
 
   await tick_once(s.built.deps);
 
@@ -182,7 +182,7 @@ test("test_slack_escalation_existing_fence_capture_unchanged", async () => {
     h?.cleanup();
     h = createHarness();
     h.clock.set("2026-04-29T10:00:00.000Z");
-    const s = setupEscalation({ slug, authorsJson });
+    const s = await setupEscalation({ slug, authorsJson });
 
     await tick_once(s.built.deps);
 
@@ -206,7 +206,7 @@ test("test_slack_escalation_existing_recovery_probe_unchanged", async () => {
     h?.cleanup();
     h = createHarness();
     h.clock.set("2026-04-29T10:00:00.000Z");
-    const s = setupEscalation({ slug, authorsJson });
+    const s = await setupEscalation({ slug, authorsJson });
 
     // Crash after Slack accepts the post but before SQL persistence.
     setFailpoint("after_slack_post", () => {
@@ -236,7 +236,7 @@ test("test_slack_escalation_existing_reply_ingestion_unchanged", async () => {
     h?.cleanup();
     h = createHarness();
     h.clock.set("2026-04-29T10:00:00.000Z");
-    const s = setupEscalation({ slug, authorsJson });
+    const s = await setupEscalation({ slug, authorsJson });
 
     // Tick #1: post.
     await tick_once(s.built.deps);
@@ -272,7 +272,7 @@ test("test_slack_escalation_mention_prefix_preserves_escalation_nonce", async ()
     { name: "Fabian", slack_id: "U06TDC56VJB" },
     { name: "Marvin", slack_id: "U07ABCDE" },
   ]);
-  const s = setupEscalation({ slug: "s19g", authorsJson: authors });
+  const s = await setupEscalation({ slug: "s19g", authorsJson: authors });
 
   await tick_once(s.built.deps);
 

@@ -5,11 +5,16 @@ import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PrSnapshot } from "../ports/github.ts";
+import type { LinearPort } from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { probeAgentIdentity } from "./agent_identity.ts";
 import { runCancelFinalizer } from "./cancel.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
+import {
+  LINEAR_STATE_IN_PROGRESS,
+  LinearSyncQueue,
+} from "./linear_state_sync.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
 import {
@@ -64,6 +69,9 @@ export interface TickDeps {
   slack: SlackPort;
   artifactStore: ArtifactStore;
   supervisorLock: SupervisorLock;
+  // Passed through to runCancelFinalizer so the cancel sweep also picks
+  // up the writeback without a separate wiring.
+  linear?: LinearPort;
 }
 
 export interface TickOptions {
@@ -124,6 +132,7 @@ interface QueuedTaskRow {
   tmux_id: string;
   worktree_path: string;
   cancel_requested_at: string | null;
+  external_ref: string | null;
 }
 
 interface RunningTaskRow {
@@ -189,6 +198,10 @@ export async function tick_once(
 ): Promise<TickTaskResult[]> {
   const max = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const agentInvocation = options.agentInvocation ?? DEFAULT_AGENT_INVOCATION;
+  // Linear writebacks are scheduled inside the lock but drained after it
+  // releases, so a slow or unreachable Linear cannot extend the supervisor-
+  // lock-held window and starve concurrent ticks / cancels.
+  const linearSyncs = new LinearSyncQueue(deps.linear);
   // Spec §5: a tick that fires while another tick (or `quay cancel`) holds
   // the supervisor lock exits immediately without action — the next
   // scheduled fire retries. `tryRun` returns `acquired: false` in that case;
@@ -206,7 +219,7 @@ export async function tick_once(
     const cancelledIds = new Set<string>();
     for (const task of cancelTargets) {
       try {
-        runCancelFinalizer(deps, task.task_id);
+        await runCancelFinalizer(deps, task.task_id, linearSyncs);
         cancelledIds.add(task.task_id);
         results.push({ task_id: task.task_id, action: "cancel_finalized" });
       } catch (err) {
@@ -276,7 +289,7 @@ export async function tick_once(
 
     for (const task of waitingHumanSnapshot) {
       try {
-        const taskResults = await processWaitingHumanTask(deps, task);
+        const taskResults = await processWaitingHumanTask(deps, task, linearSyncs);
         for (const r of taskResults) results.push(r);
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
@@ -290,7 +303,7 @@ export async function tick_once(
         continue;
       }
       try {
-        results.push(promoteAndSpawn(deps, task, agentInvocation));
+        results.push(promoteAndSpawn(deps, task, agentInvocation, linearSyncs));
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
       }
@@ -301,6 +314,10 @@ export async function tick_once(
 
     return results;
   });
+  // Drain Linear writebacks outside the supervisor lock so the network
+  // round-trips do not extend the lock-held window. Still awaited before
+  // tick_once returns so tests observe the writebacks deterministically.
+  await linearSyncs.drain();
   return attempt.acquired ? attempt.value : [];
 }
 
@@ -322,7 +339,8 @@ function readCancelTargets(db: DB): CancelTargetRow[] {
 function readQueued(db: DB): QueuedTaskRow[] {
   return db
     .query<QueuedTaskRow, []>(
-      `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path, cancel_requested_at
+      `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path,
+              cancel_requested_at, external_ref
          FROM tasks
         WHERE state = 'queued'
         ORDER BY created_at, task_id`,
@@ -357,12 +375,14 @@ interface WaitingHumanTaskRow {
   slack_thread_ref: string | null;
   cancel_requested_at: string | null;
   authors_json: string | null;
+  external_ref: string | null;
 }
 
 function readWaitingHuman(db: DB): WaitingHumanTaskRow[] {
   return db
     .query<WaitingHumanTaskRow, []>(
-      `SELECT task_id, slack_thread_ref, cancel_requested_at, authors_json
+      `SELECT task_id, slack_thread_ref, cancel_requested_at, authors_json,
+              external_ref
          FROM tasks
         WHERE state = 'waiting_human'
         ORDER BY created_at, task_id`,
@@ -1116,6 +1136,7 @@ function loadLatestEscalationArtifact(
 async function processWaitingHumanTask(
   deps: TickDeps,
   task: WaitingHumanTaskRow,
+  linearSyncs: LinearSyncQueue,
 ): Promise<TickTaskResult[]> {
   if (task.cancel_requested_at !== null) return [];
   if (task.slack_thread_ref === null) {
@@ -1262,7 +1283,7 @@ async function processWaitingHumanTask(
     return results;
   }
 
-  ingestSlackReply(deps, task, art, firstNonBot);
+  ingestSlackReply(deps, task, art, firstNonBot, linearSyncs);
   results.push({ task_id: task.task_id, action: "slack_reply_ingested" });
   return results;
 }
@@ -1325,6 +1346,7 @@ function ingestSlackReply(
   task: WaitingHumanTaskRow,
   art: EscalationArtifactRow,
   reply: { ts: string; authorBot: boolean; text: string },
+  linearSyncs: LinearSyncQueue,
 ): void {
   const attemptId = art.attempt_id!;
   const replyContent = JSON.stringify({
@@ -1395,6 +1417,12 @@ function ingestSlackReply(
     } catch {}
     throw err;
   }
+
+  // Reaching this line implies the commit landed: every early-return guard
+  // above exits before this point, and the catch block re-throws. Concurrent
+  // writers that lose the UPDATE race took the early-return branch and
+  // never get here.
+  linearSyncs.enqueue(task.external_ref, LINEAR_STATE_IN_PROGRESS);
 }
 
 function loadLatestAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
@@ -1699,6 +1727,7 @@ function promoteAndSpawn(
   deps: TickDeps,
   task: QueuedTaskRow,
   agentInvocation: string,
+  linearSyncs: LinearSyncQueue,
 ): TickTaskResult {
   if (task.cancel_requested_at !== null) {
     return { task_id: task.task_id, action: "skipped_predicate" };
@@ -1795,6 +1824,8 @@ function promoteAndSpawn(
   deps.db
     .query(`UPDATE tasks SET spawn_failures_consecutive = 0 WHERE task_id = ?`)
     .run(task.task_id);
+
+  linearSyncs.enqueue(task.external_ref, LINEAR_STATE_IN_PROGRESS);
 
   return { task_id: task.task_id, action: "spawned" };
 }

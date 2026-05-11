@@ -98,7 +98,24 @@ The adapter pattern lives **inside Quay** but behind a port interface. `ticketCo
 
 **Atomicity invariant.** The order is **strict**: `fetchTicketContext → validate → enter the existing enqueue core function`. The existing `enqueue` (`src/core/enqueue.ts`) is entered **only after** both adapter assembly and validation succeed. No substrate side-effects (worktree creation, git branch creation, DB writes, artifact files) start before that point. Failure on Linear fetch, Slack fetch, block parse, or validator → clean no-op, nothing to roll back.
 
-Hermes's role collapses to: poll Linear for new tickets, call `quay enqueue --linear-issue`, log the result, then perform any Linear-side state transitions (e.g., move the ticket to "in progress") itself if the deployment wants that behavior. Quay is read-only on Linear; status updates live in Hermes (or whatever orchestrator the deployment runs).
+Hermes's role collapses to: poll Linear for new tickets, call `quay enqueue --linear-issue`, log the result. Quay handles state writeback for the windows Linear's GitHub integration does not cover (see §4a below); other Linear-side transitions still live in the orchestrator if the deployment wants them.
+
+### Linear state writeback
+
+Linear's native GitHub integration moves the ticket to "In PR Review" on PR-open and "Done" on merge — those windows are covered for free and Quay does **not** write back on them (double-writing would race the integration). Three other windows are not covered, and Quay syncs them best-effort from the tick / cancel / claims emit sites:
+
+| Quay state | Linear state |
+| --- | --- |
+| `queued` / `spawned` (post-enqueue, pre-PR) | `In Progress` |
+| `waiting_human` (worker wrote `.quay-blocked.md`, Slack thread open) | `Waiting` |
+| `waiting_human` → resumed (Slack reply ingested) | `In Progress` |
+| `cancelled` (`quay cancel` or recovery finalizer) | `Canceled` |
+
+**Required Linear workflow state names.** Every Linear team using Quay must have workflow states named exactly `In Progress`, `Waiting`, and `Canceled`. Renamed-or-missing states surface as an `unknown_state` warning on stderr; the tick continues — Quay's own state is the source of truth and a missing Linear writeback never fails a tick or rolls back a transition.
+
+**Required API scope.** The writeback issues `issueUpdate(input: { stateId })` mutations, so the configured API key must include `write:issue` in addition to the read scopes. Read-only keys still work for `enqueue --linear-issue` (the fetch path) but every writeback will warn once and be skipped.
+
+**Failure mode.** Best-effort: a Linear outage, timeout, or unknown-state error logs a single stderr line of shape `[linear-sync] failed to set state="..." on <IDENTIFIER>: <message>` (deduped per `(identifier, stateName)` per process), then the tick / cancel proceeds. Writeback HTTP round-trips run **outside** the supervisor lock — a slow Linear cannot extend the lock-held window or starve concurrent ticks.
 
 ## 4. Configuration surface
 
@@ -108,9 +125,10 @@ Adapters are opt-in via `~/.quay/config.toml`:
 [adapters.linear]
 enabled = true
 api_key_env = "LINEAR_API_KEY"
-# Required scopes on the Linear API key: `read:issue` and `read:comment`.
-# No write scopes — the adapter is read-only on Linear; status transitions
-# (move-to-in-progress on enqueue, etc.) live in the orchestrator (Hermes).
+# Required scopes on the Linear API key: `read:issue`, `read:comment`, and
+# `write:issue` (the last for the §4a state writeback — see above; a
+# read-only key still works but every writeback emits one warn-once
+# stderr line).
 # No workspace field needed: Linear's GraphQL Issue type surfaces the
 # canonical `url` directly; no client-side construction. If the workspace
 # key is ever needed for anything else, the adapter resolves it once at
@@ -746,7 +764,7 @@ Features 1 and 2 are *out of scope* for this spec — they're implemented under 
 - **Adapters for non-Linear ticket systems.** The `LinearPort` interface is shaped to accommodate them (the `LinearIssue` type would generalize to `Ticket`), but no implementations land in v1.
 - **Adapters for non-Slack chat systems.** Similar.
 - **Linear webhook ingestion in Quay.** Hermes still polls.
-- **Bidirectional Linear sync.** Quay reads only.
+- **Bidirectional Linear sync.** Quay reads ticket bodies / comments and writes back ticket state on the windows Linear's GitHub integration does not cover (see §4a "Linear state writeback"); it does **not** sync titles, bodies, comments, labels, assignees, or anything else back to Linear.
 - **`quay refresh-ticket-context`.** No use case demands it yet.
 - **Validator promotion to library.** Validator stays as a CLI invoked via child process.
 - **Per-deployment custom field mappings** (e.g., "auto-derive a tag from Linear's `priority` field"). v1 reads only the `quay-config` block; no Linear-native field interpretation. Keeps the contract single-sourced.

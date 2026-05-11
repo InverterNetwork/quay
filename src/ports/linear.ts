@@ -28,4 +28,15 @@ export interface LinearPort {
   // `retryable:false` on 5xx, `adapter_error` with `retryable:true` and
   // `retry_after` on 429, and on network/auth errors.
   getIssue(identifier: string): Promise<LinearIssue | null>;
+
+  // Best-effort idempotent state writeback. Resolves `stateName` to the
+  // issue's team workflow state via Linear's `team.states` query
+  // (per-process cache keyed on team id) and fires
+  // `issueUpdate(input:{stateId})`. No-op when the issue is already at the
+  // target state. Throws `unknown_state` when the team has no workflow
+  // state with that name; `adapter_error` shape mirrors `getIssue` for
+  // every other failure mode. Returns silently on a 404 issue lookup —
+  // the ticket may have been deleted on Linear's side, which is not a
+  // quay-fixable condition.
+  setIssueState(identifier: string, stateName: string): Promise<void>;
 }
