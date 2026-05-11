@@ -1090,7 +1090,8 @@ async function handleCancel(
     artifactStore: deps.artifactStore,
     supervisorLock: deps.supervisorLock,
   };
-  if (deps.linear !== undefined) cancelDeps.linear = deps.linear;
+  const cancelLinear = pickLinearAdapter(deps);
+  if (cancelLinear !== undefined) cancelDeps.linear = cancelLinear;
   const result: CancelResult = await cancel_task(cancelDeps, {
     taskId,
     closePr,
@@ -1167,7 +1168,8 @@ async function handleSubmitBrief(
     clock: deps.clock,
     artifactStore: deps.artifactStore,
   };
-  if (deps.linear !== undefined) submitDeps.linear = deps.linear;
+  const submitLinear = pickLinearAdapter(deps);
+  if (submitLinear !== undefined) submitDeps.linear = submitLinear;
   return emitServiceResult(
     await submit_brief(submitDeps, {
       taskId: input.taskId,
@@ -1222,7 +1224,8 @@ async function handleEscalateHuman(
     ids: deps.ids,
     artifactStore: deps.artifactStore,
   };
-  if (deps.linear !== undefined) escalateDeps.linear = deps.linear;
+  const escalateLinear = pickLinearAdapter(deps);
+  if (escalateLinear !== undefined) escalateDeps.linear = escalateLinear;
   return emitServiceResult(await escalate_human(escalateDeps, input), io);
 }
 
@@ -1337,10 +1340,20 @@ function pickTickDeps(deps: CliDeps): TickDeps {
     artifactStore: deps.artifactStore,
     supervisorLock: deps.supervisorLock,
   };
-  // Forward the Linear adapter when wired so promote / cancel /
-  // slack-reply sites can issue best-effort state writebacks.
-  if (deps.linear !== undefined) tickDeps.linear = deps.linear;
+  const linear = pickLinearAdapter(deps);
+  if (linear !== undefined) tickDeps.linear = linear;
   return tickDeps;
+}
+
+// Forward the Linear adapter only when the deployment opted in via
+// `[adapters.linear].enabled = true`. Production wiring constructs the
+// adapter unconditionally (token resolution is lazy, so an unused adapter
+// is free), so the dispatcher gates here to keep `linearEnabled = false`
+// deployments from mutating Linear state via the writeback paths.
+export function pickLinearAdapter(deps: CliDeps): LinearPort | undefined {
+  if (deps.linear === undefined) return undefined;
+  if (deps.adaptersConfig?.linearEnabled !== true) return undefined;
+  return deps.linear;
 }
 
 // --- argv helpers --------------------------------------------------------

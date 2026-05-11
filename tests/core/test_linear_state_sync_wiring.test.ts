@@ -8,6 +8,7 @@
 // writebacks (or their deliberate absence).
 
 import { afterEach, expect, test } from "bun:test";
+import { join } from "node:path";
 import { cancel_task } from "../../src/core/cancel.ts";
 import { claim_task, escalate_human } from "../../src/core/claims.ts";
 import { tick_once } from "../../src/core/tick.ts";
@@ -16,6 +17,7 @@ import {
   insertAttempt,
   insertFinalPromptArtifact,
   insertRepo,
+  insertRunningTask,
   insertTask,
 } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
@@ -96,7 +98,7 @@ test("test_linear_sync_escalate_human_writes_waiting", async () => {
     {
       taskId,
       claimId: claim.value.claim_id,
-      questionBody: "need a humans answer?",
+      questionBody: "need a human's answer?",
     },
   );
   if (!esc.ok) throw new Error("expected escalate");
@@ -181,39 +183,77 @@ test("test_linear_sync_cancel_writes_canceled", async () => {
   ).toBe(true);
 });
 
-test("test_linear_sync_pr_terminal_transitions_do_not_write", async () => {
-  // Linear's GitHub integration owns PR-driven transitions. Quay must NOT
-  // double-write on `pr_opened`, `merged`, or `closed_unmerged` events —
-  // doing so would race the integration.
+// Parameterised across the three PR-driven terminal states. Each must
+// process through tick without a Linear writeback — the GH integration
+// owns the transition and a double-write would race it.
+const PR_TERMINAL_CASES = [
+  { suffix: "merged", state: "merged" as const, action: "pr_merged" },
+  {
+    suffix: "closed-unmerged",
+    state: "closed_unmerged" as const,
+    action: "pr_closed_unmerged",
+  },
+];
+
+for (const { suffix, state, action } of PR_TERMINAL_CASES) {
+  test(`test_linear_sync_pr_${suffix}_does_not_write_to_linear`, async () => {
+    h = createHarness();
+    h.clock.set("2026-05-11T10:00:00.000Z");
+    const built = buildTickDeps(h);
+    const repoId = insertRepo(h.db, `repo-sync-pr-${suffix}`);
+    const taskId = insertTask(h.db, {
+      taskId: `task-sync-pr-${suffix}`,
+      repoId,
+      state: "pr-open",
+    });
+    setExternalRef(h, taskId, "ENG-400");
+    insertAttempt(h.db, {
+      taskId,
+      attemptNumber: 1,
+      spawnedAt: "2026-05-11T08:00:00.000Z",
+    });
+
+    built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+      prNumber: 42,
+      prUrl: "https://example/pr/42",
+      headSha: "headsha",
+      baseSha: "basesha",
+      state,
+      mergeable: "mergeable",
+      checks: { items: [], checkSha: "headsha" },
+      latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    });
+
+    const results = await tick_once(built.deps);
+    expect(results.some((r) => r.action === action)).toBe(true);
+    expect(built.linear.setIssueStateCalls).toEqual([]);
+  });
+}
+
+test("test_linear_sync_pr_opened_classifier_does_not_write_to_linear", async () => {
+  // The classifier emits `pr_opened` when a running worker exits with a
+  // freshly-opened PR (githubPort.prExistsForBranch flips true on this
+  // attempt). The transition must NOT trigger a Linear writeback — the
+  // GH integration handles "In PR Review" and a double-write would race.
   h = createHarness();
   h.clock.set("2026-05-11T10:00:00.000Z");
   const built = buildTickDeps(h);
-  const repoId = insertRepo(h.db, "repo-sync-pr");
-  const taskId = insertTask(h.db, {
-    taskId: "task-sync-pr",
+  const repoId = insertRepo(h.db, "repo-sync-pr-opened");
+  const t = insertRunningTask(h.db, {
+    taskId: "task-sync-pr-opened",
     repoId,
-    state: "pr-open",
-  });
-  setExternalRef(h, taskId, "ENG-400");
-  insertAttempt(h.db, {
-    taskId,
+    worktreesRoot: join(h.dataDir, "worktrees"),
     attemptNumber: 1,
-    spawnedAt: "2026-05-11T08:00:00.000Z",
+    remoteShaAtSpawn: "pushed-by-prev",
+    prExistedAtSpawn: 0,
   });
-
-  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
-    prNumber: 42,
-    prUrl: "https://example/pr/42",
-    headSha: "headsha",
-    baseSha: "basesha",
-    state: "merged",
-    mergeable: "mergeable",
-    checks: { items: [], checkSha: "headsha" },
-    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
-  });
+  setExternalRef(h, t.taskId, "ENG-500");
+  built.tmux.markDead(t.sessionName!);
+  built.git.setRemoteHeadSha(repoId, t.branchName, "pushed-by-prev");
+  built.github.setPrExists(repoId, t.branchName, true);
 
   const results = await tick_once(built.deps);
-  expect(results.some((r) => r.action === "pr_merged")).toBe(true);
+  expect(results.some((r) => r.action === "pr_opened")).toBe(true);
   expect(built.linear.setIssueStateCalls).toEqual([]);
 });
 

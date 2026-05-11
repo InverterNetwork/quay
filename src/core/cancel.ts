@@ -29,7 +29,7 @@ import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
 import {
   LINEAR_STATE_CANCELED,
-  syncLinearState,
+  LinearSyncQueue,
 } from "./linear_state_sync.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
@@ -144,12 +144,18 @@ export async function cancel_task(
   deps: CancelDeps,
   input: CancelTaskInput,
 ): Promise<CancelResult> {
-  return deps.supervisorLock.run(() => cancelUnderLock(deps, input));
+  const linearSyncs = new LinearSyncQueue(deps.linear);
+  const result = await deps.supervisorLock.run(() =>
+    cancelUnderLock(deps, input, linearSyncs),
+  );
+  await linearSyncs.drain();
+  return result;
 }
 
 async function cancelUnderLock(
   deps: CancelDeps,
   input: CancelTaskInput,
+  linearSyncs: LinearSyncQueue,
 ): Promise<CancelResult> {
   const initial = loadTaskRow(deps.db, input.taskId);
   if (!initial) {
@@ -197,7 +203,7 @@ async function cancelUnderLock(
   // "task left mid-cancel" recovery path driven by tick.
   fireFailpoint("after_cancel_intent_commit");
 
-  await runCancelFinalizer(deps, input.taskId);
+  await runCancelFinalizer(deps, input.taskId, linearSyncs);
 
   return {
     ok: true,
@@ -264,10 +270,14 @@ function killRunningTmux(deps: CancelDeps, initial: TaskRow): void {
 
 // Canonical finalizer (spec §5 "Cancel finalizer"). Callers must hold the
 // supervisor lock — tick recovery already owns the lock for the cycle, and
-// `cancel_task` takes it before invoking us.
+// `cancel_task` takes it before invoking us. The Linear writeback is
+// scheduled on `linearSyncs` (drained by the caller after lock release)
+// rather than awaited inline so the supervisor lock is not held for the
+// Linear round-trip duration.
 export async function runCancelFinalizer(
   deps: CancelDeps,
   taskId: string,
+  linearSyncs: LinearSyncQueue,
 ): Promise<void> {
   const row = loadTaskRow(deps.db, taskId);
   if (!row) return;
@@ -343,7 +353,7 @@ export async function runCancelFinalizer(
   // Step 5: Linear writeback only on the winning writer — a recovery
   // re-entry against an already-cancelled task is a quiet no-op.
   if (transitioned) {
-    await syncLinearState(deps.linear, row.external_ref, LINEAR_STATE_CANCELED);
+    linearSyncs.enqueue(row.external_ref, LINEAR_STATE_CANCELED);
   }
 }
 

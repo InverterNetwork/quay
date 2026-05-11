@@ -109,7 +109,15 @@ export class LinearAdapter implements LinearPort {
   // read-then-write round trip entirely. Worst-case staleness: when Linear
   // moved on its side, the next *different* sync target reconciles —
   // quay's hot path never re-asserts an already-set state.
+  //
+  // Bounded LRU: Map preserves insertion order, so the oldest entry is
+  // always `keys().next()`. Eviction happens at the write site below,
+  // keeping the cache footprint at ~one map slot per distinct ticket the
+  // process has touched up to the cap. The cap is high enough that any
+  // realistic operator load stays inside it; the bound only matters for
+  // pathological workloads or test fixtures that mint tickets in a loop.
   private readonly lastSyncedStateNameByIssue = new Map<string, string>();
+  private static readonly LAST_SYNCED_STATE_CACHE_MAX = 4096;
 
   constructor(opts?: {
     token?: string;
@@ -214,10 +222,27 @@ export class LinearAdapter implements LinearPort {
     // Idempotent skip — compared on id, so a Linear-side rename doesn't
     // accidentally re-write.
     if (refs.state !== null && refs.state.id === targetStateId) {
-      this.lastSyncedStateNameByIssue.set(identifier, stateName);
+      this.rememberSyncedState(identifier, stateName);
       return;
     }
     await this.runIssueUpdate(identifier, targetStateId);
+    this.rememberSyncedState(identifier, stateName);
+  }
+
+  private rememberSyncedState(identifier: string, stateName: string): void {
+    // Re-inserting an existing key is a no-op for the cap check; net new
+    // identifiers trip the eviction. `keys().next().value` is the oldest
+    // entry by Map insertion order — that's the LRU victim.
+    if (
+      !this.lastSyncedStateNameByIssue.has(identifier) &&
+      this.lastSyncedStateNameByIssue.size >=
+        LinearAdapter.LAST_SYNCED_STATE_CACHE_MAX
+    ) {
+      const oldest = this.lastSyncedStateNameByIssue.keys().next().value;
+      if (oldest !== undefined) {
+        this.lastSyncedStateNameByIssue.delete(oldest);
+      }
+    }
     this.lastSyncedStateNameByIssue.set(identifier, stateName);
   }
 
