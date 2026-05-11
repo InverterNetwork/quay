@@ -11,6 +11,7 @@ import { afterEach, expect, test } from "bun:test";
 import { join } from "node:path";
 import { cancel_task } from "../../src/core/cancel.ts";
 import { claim_task, escalate_human } from "../../src/core/claims.ts";
+import { resetLinearSyncWarnings } from "../../src/core/linear_state_sync.ts";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import {
@@ -26,6 +27,11 @@ let h: Harness | null = null;
 afterEach(() => {
   h?.cleanup();
   h = null;
+  // The warn-dedup memo is module-level (per-process). Clear it between
+  // tests so a failure-triggering case doesn't silently swallow a future
+  // case in this file (or another) that happens to use the same
+  // identifier + state.
+  resetLinearSyncWarnings();
 });
 
 // Helpers ---------------------------------------------------------------
