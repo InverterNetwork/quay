@@ -172,6 +172,7 @@ quay enqueue --repo <id> --brief-file <p>  # legacy enqueue (operator-composed b
 quay enqueue --linear-issue <ENG-1234>     # Linear-adapter enqueue (target repo
                                            # comes from the ticket's `repo:` field;
                                            # `--repo <id>` is an optional override)
+quay review-pr --pr <owner/repo>:<num>     # CI entry point for synthetic/Quay PR review
 quay validate-ticket [--ticket-json <p|->] [--schema-file <p>] [--quiet]
                                            # standalone validator: JSON in, JSON out
 
@@ -212,8 +213,13 @@ Resolution order (first match wins): `$QUAY_CONFIG_FILE`, `$QUAY_CONFIG_DIR/conf
 data_dir = "/var/lib/quay"
 repos_root = "/Users/me/.acc/repos"     # bare-clone cache; defaults to ${data_dir}/repos
 max_concurrent = 4
+max_concurrent_reviewers = 2
 retry_budget = 5
 agent_invocation = "claude < {prompt_file}"
+
+[reviewer]
+enabled = false
+gate_quay_owned_done = false
 
 # Linear/Slack adapters (see docs/user/linear-and-slack.md)
 [adapters.linear]

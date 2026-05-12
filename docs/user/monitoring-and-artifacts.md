@@ -89,7 +89,8 @@ binary and invalid UTF-8 artifacts such as `malformed_signal`.
 | `blocker` | Valid `.quay-blocked.md` written by a worker. |
 | `malformed_signal` | Invalid blocker signal bytes. |
 | `ci_failure_excerpt` | CI failure details captured from GitHub checks. |
-| `review_comments` | Snapshot of review feedback used for a review respawn. |
+| `review_comments` | Snapshot of posted review body and inline comments. Used for review respawns and synthetic review forensics. |
+| `review_blocker` | Reviewer blocker or infrastructure-failure diagnostic. |
 | `conflict_slice` | Snapshot of merge-conflict observation. |
 | `slack_escalation_post` | Question body Quay posts to Slack. |
 | `slack_reply` | Human Slack reply ingested by tick. |
