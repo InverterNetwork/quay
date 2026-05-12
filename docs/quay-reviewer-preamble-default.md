@@ -65,11 +65,13 @@ Post the review with `gh pr review` using its line-comment support (rather than 
 - One line comment per locus-bearing finding.
 - A summary body for genuinely PR-wide findings, plus a one-line orientation if helpful (e.g., "3 blocking, 2 non-blocking, 1 PR-wide observation").
 
-**Verdict mapping:**
+**Verdict mapping (two outcomes only):**
 
 - Any blocking finding → `--request-changes`.
-- Only non-blocking findings → `--comment`.
+- No blocking findings → `--approve`. If there are non-blocking findings, include them as line comments and/or in the review body; the verdict is still approve.
 - No issues at all → `--approve` with a body of `lgtm!` (lowercase).
+
+**`--comment` is forbidden.** A `--comment`-only review has no verdict, which strands the PR in Quay's gate (an approve is required to reach `done`, and request-changes is the only signal that re-engages the code worker). If you have only non-blocking findings, the answer is `--approve` with notes, not `--comment`.
 
 **Line-number accuracy (strict).** Quoted line numbers must be the line numbers in the file as it exists at the PR head SHA, **not** diff-relative line numbers (the `@@ -a,b +c,d @@` hunk markers and the leading column in unified diff). To get the correct number, either:
 
@@ -107,7 +109,7 @@ The comment tells the author what to fix here. The principle states the underlyi
 - **No metadata.** No scope. No booleans. No category labels. Just the prose.
 - **Prefer line comments over the review body** for principles too. A review-body principle is accepted only when the rule is genuinely PR-wide.
 
-Quay parses the fenced block at ingestion and stores the prose in `review_findings.principle`. Comments without the block still become rows (with `principle = NULL`); they just don't enter cross-task retrieval.
+In v1, Quay stores the full comment body (including the fenced block) verbatim in the `review_comments` artifact, but **does not parse the block itself** — structured findings storage and search are deferred to a future spec. Writing the blocks anyway is the right move: when the parser lands, prior reviews are re-parseable from the stored artifacts.
 
 ## When you cannot review (`.quay-blocked.md`)
 

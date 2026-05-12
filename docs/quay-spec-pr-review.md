@@ -14,37 +14,42 @@
 
 ## 1. Goal
 
-Make PR review a **first-class state in Quay's task lifecycle**, entered by every PR — whether Quay opened the PR or a human did. While a task is in the new `pr-review` state, Quay spawns its own reviewer worker (same substrate as a code worker: worktree, tmux, supervisor lock; read-only worktree, reviewer preamble). The reviewer posts a real GitHub PR review via `gh pr review`. Tick observes the posted review, parses it, and writes structured rows into a `review_findings` table.
+Make PR review a **first-class state in Quay's task lifecycle**, entered by every PR — whether Quay opened the PR or a human did. While a task is in the new `pr-review` state, Quay spawns its own reviewer worker (same substrate as a code worker: tmux, supervisor lock; the worker doesn't modify code or git state, only the substrate's own `.quay-*` files). The reviewer posts a real GitHub PR review via `gh pr review`. Tick captures the verdict on the attempt row and stores the posted review (body + inline comments) as a `review_comments` artifact, then transitions the task based on the verdict.
 
 An **approved review is required** for a task to reach `done`. Until the reviewer approves, the task stays in the review loop: changes-requested keeps the task waiting for a new SHA, and every new SHA triggers a fresh review attempt.
 
-The state machine is **identical for Quay-owned and synthetic tasks**. Only one thing differs by task kind: who produces the next SHA after CHANGES_REQUESTED — a Quay code worker (Quay-owned) or the external author (synthetic).
+The review loop is conceptually the same for both task kinds (review → approved/changes-requested → on changes, wait for next SHA → review again), but the *resources* differ: Quay-owned tasks have a code worker that can produce the next SHA; synthetic tasks have only the external human author. v1 reflects that honestly with one shared "in review" state (`pr-review`) and a separate state for the synthetic post-feedback wait (`waiting_external_changes`), while Quay-owned tasks reuse the existing `queued` state for their post-feedback wait via the existing respawn path.
 
 ## 2. Scope and non-goals
 
 ### In scope (v1)
 
-- Two new top-level task states: `pr-review` (reviewer running or queued) and `awaiting-changes` (post-CHANGES_REQUESTED, waiting for the next SHA). Entry into `pr-review` is gated on PR open + CI green for Quay-owned tasks; synthetic tasks are created directly in `pr-review` by the entry point and skip `queued` / `pr-open` entirely (those states represent Quay-authoring stages synthetic tasks don't have).
+- Two new top-level task states: `pr-review` (reviewer running or queued for this PR) and `waiting_external_changes` (synthetic-only; post-CHANGES_REQUESTED wait for the external author to push).
+- Entry into `pr-review` is gated on PR open + CI green for Quay-owned tasks; synthetic tasks are created directly in `pr-review` by the entry point and skip `queued` / `pr-open` (those represent Quay-authoring stages synthetic tasks don't have).
 - Single idempotent entry point — internal function — that moves a task into `pr-review` and schedules a review-only attempt at the current head SHA. Two callers: tick (for Quay-owned tasks, when the precondition is met) and the new `quay review-pr` CLI (for synthetic tasks, called by CI). Dedup on `(task_id, head_sha)`: repeat calls at the same SHA are no-ops.
-- New attempt reason `review_only`, distinguishing reviewer attempts from code-worker attempts. New column `attempts.head_sha` for SHA-level dedup.
-- Reviewer-as-Quay-worker, single per-PR worker (N=1). Spawned by tick like any other worker; reviewer preamble stored in the existing `preambles` SQL table (new `kind = 'review'` row), seeded from a TS constant whose prose mirrors `docs/quay-reviewer-preamble-default.md`. Same storage and override pattern as code-worker preambles.
-- Separate concurrency cap `max_concurrent_review_runs` (default 15), independent of `max_concurrent` for code workers.
-- Approval gate on `done`: a task reaches `done` only when an approved review has been filed at the current head SHA.
-- CHANGES_REQUESTED handling, unified: task transitions `pr-review → awaiting-changes`. For Quay-owned tasks, tick then spawns a code worker (from `awaiting-changes`, the same way it spawns from `queued`); for synthetic tasks, tick does nothing and the task waits. Either way, the next new SHA flows back into `pr-review` via the same entry point.
-- Synthetic-task identity: deterministic `task_id = "pr-review-" + slug(repo_id) + "-" + pr_number`, one synthetic task per human PR forever (carried forward from the archive).
-- `quay review-pr --pr <repo>:<num>` as the single CI-callable entry point. Fire-and-forget — returns once the review attempt is scheduled.
-- Findings storage: `review_findings` SQL table + FTS5 virtual table over `principle` and `comment_body`. `quay-principle` fenced-block contract parsed from posted review bodies and inline comments (carried forward from the archive).
-- `task_tags` table and `--tag` flag on `quay enqueue` (carried forward from the archive; tags cluster findings for cross-task queries).
-- `quay query-findings` read CLI with filters for file, directory, tag, repo, recency, principle-only, and FTS5 keyword match (carried forward from the archive).
+- New attempt reason `review_only`. New columns: `attempts.head_sha` (dedup), `attempts.review_verdict` (state-transition driver), `attempts.review_id` (GitHub review id for traceability).
+- Reviewer-as-Quay-worker, single per-PR worker (N=1). Spawned by tick like any other worker; reviewer preamble stored in the existing `preambles` SQL table (new `kind = 'review'` row), seeded from a TS constant whose prose mirrors `docs/quay-reviewer-preamble-default.md`.
+- **Single concurrency cap** (shared with code workers): the existing `max_concurrent` is the total cap on simultaneously running attempts (code workers + reviewer workers). `countRunning()` is generalized to count attempts with `spawned_at IS NOT NULL AND ended_at IS NULL` regardless of task state, so reviewer workers honestly consume the cap.
+- Two-flag rollout control:
+  - `[reviewer].enabled` — whether the reviewer subsystem runs at all (synthetic review CLI + Quay-owned review trigger). Default false.
+  - `[reviewer].gate_quay_owned_done` — whether Quay-owned tasks require an approved Quay review to reach `done`. Default false. Off → pre-existing `pr-open → done` path on CI green remains. On → only `pr-review → done` (via approval) advances Quay-owned tasks.
+- CHANGES_REQUESTED handling:
+  - **Quay-owned**: write `review_comments` artifact and transition `pr-review → queued`, reusing the existing `non_budget_respawn` logic in `src/core/non_budget_respawn.ts:191`. Tick spawns a code worker from `queued` via the existing path. Counts toward `non_budget_respawns_consumed`.
+  - **Synthetic**: write `review_comments` artifact and transition `pr-review → waiting_external_changes`. No code worker to spawn; the task sits until CI calls `quay review-pr` with a new SHA. Then `waiting_external_changes → pr-review` with a fresh attempt.
+- Supersession on new SHA: if a `review_only` attempt is pending or running at SHA A and `enterReview` arrives at SHA B (≠ A), the SHA A attempt is cancelled (`ended_at` set, `review_verdict = 'superseded'`). Prevents the `one_pending_attempt_per_task` index from blocking new attempts and guarantees "one active reviewer per PR at any time."
+- Synthetic-task identity: deterministic `task_id = "pr-review-" + slug(repo_id) + "-" + pr_number`, one synthetic task per human PR forever.
+- `quay review-pr --pr <repo>:<num>` as the single CI-callable entry point. Fire-and-forget.
+- `--tag` flag on `quay enqueue` and `quay review-pr` populating the existing `task_tags` table (already in `migrations/0002_deployment_adapters.sql:12`).
 - Cron cadence config (recommended 30 s for review-running deployments).
+- Storage of the posted review as a `review_comments` artifact (already a kind today). Plus `attempts.review_id` for the GitHub review id and `attempts.head_sha` for the SHA reviewed. That's enough state to drive the state machine; richer structured storage (a `review_findings` table) is **out of v1 scope** — see below.
 
 ### Out of v1 scope
 
-- **Closing the loop / brief enrichment.** Findings are *captured and stored*; they are not yet injected into anything. External consumers can build over `quay query-findings`.
+- **Structured findings storage (`review_findings` table), `quay-principle` fenced-block parser, FTS5 search, `quay query-findings` CLI.** Deferred. The v1 flow stores the raw posted review as an artifact + `review_id` / `head_sha` / `review_verdict` columns. That is enough to drive the state machine and feed the existing code-worker respawn. A future spec adds parsed/searchable findings when a consumer actually uses them; v1 artifacts are sufficient input for that future backfill.
+- **Closing the loop / brief enrichment.** Findings aren't injected into future briefs in v1 (depends on the deferred storage).
 - **Multi-model panel review.** N=1 single reviewer only.
 - **Blocking mode (`--wait` / `--timeout`).** `quay review-pr` is fire-and-forget. CI sees the verdict on GitHub when the reviewer posts it.
-- **Validation evidence on findings.** No `addressed_by_commit_sha` / re-review delta logic.
-- **Multi-repo principles.** Findings scoped per-repo by their task's repo via JOIN.
+- **Separate reviewer concurrency cap.** Single shared cap in v1. Add `max_concurrent_review_runs` later if starvation is observed.
 - **Auto-comment-back to GitHub on review failure.** Worker either posts a review or writes a blocker file; no GitHub-comment loop.
 - **PR conversation-tab comments and review-comment replies.** Quay observes only `gh pr review` payloads (review body + inline comments). General PR comments and reply threads are not ingested.
 - **Consultation of GitHub's review-request state.** Quay does not look at whether a review has been "re-requested" on GitHub. The SHA is the only trigger.
@@ -70,19 +75,19 @@ sequenceDiagram
     Note over Entry: lookup task by repo and pr_number. Create synthetic directly in pr-review if no match. Then schedule review_only attempt
 
     Note over Tick: next tick promotes the attempt and spawns the reviewer
-    Tick->>Worker: spawn with read-only worktree and reviewer preamble
+    Tick->>Worker: spawn with reviewer preamble. Worker doesn't modify code or git
     Worker->>GH: gh pr review approve or request-changes
     Worker-->>Tick: exit
     Tick->>GH: gh pr view to fetch posted review
     GH-->>Tick: review payload
-    Note over Tick: write review_comments artifact. Parse quay-principle blocks. Insert review_findings rows
+    Note over Tick: set attempts.review_verdict and review_id. Write review_comments artifact
 
     alt approved
         Note over Tick: state moves to done
-    else changes_requested
-        Note over Tick: state moves to awaiting-changes. Task awaits next SHA
-        Note over Tick: Quay-owned. Tick spawns code worker from awaiting-changes. Worker pushes. CI green re-enters via entry point
-        Note over Tick: Synthetic. Wait for external push. CI fires quay review-pr to re-enter via entry point
+    else changes_requested Quay-owned
+        Note over Tick: call existing non_budget_respawn. State moves to queued. Tick spawns code worker. CI green re-enters via entry point
+    else changes_requested synthetic
+        Note over Tick: state moves to waiting_external_changes. Wait for external push. CI fires quay review-pr to re-enter
     end
 ```
 
@@ -90,11 +95,11 @@ The dispatch decision is **internal to the entry point**: it looks up `(repo_id,
 
 ## 4. State machine
 
-### New top-level states: `pr-review` and `awaiting-changes`
+### New top-level states: `pr-review` and `waiting_external_changes`
 
-**Schematic.** The diagram below is a simplified view of the task lifecycle focused on the Quay reviewer path. Existing substrate states that don't participate in the review loop are omitted: `waiting_human` (Slack escalation), `non_budget_loop` (parked after too many non-budget respawns), `worktree_error`, terminal `cancelled`. The existing detours into those states from `running`, `pr-open`, and the new review states are unchanged by this spec and not redrawn here. Arrows added by this spec are annotated **NEW**.
+**Schematic.** The diagram below is a simplified view of the task lifecycle focused on the Quay reviewer path. Existing substrate states that don't participate in the review loop are omitted: `waiting_human` (Slack escalation), `non_budget_loop`, `worktree_error`, terminal `cancelled`. Arrows added by this spec are annotated **NEW**.
 
-Not drawn: the human-CHANGES_REQUESTED edge that can move a Quay-owned task from **any non-terminal state** (including `done`) into `awaiting-changes`. That edge is observed by the existing `non_budget_respawn` path and is described in prose below under "Human reviews coexist with the Quay reviewer."
+Not drawn: the human-CHANGES_REQUESTED edge that can move a Quay-owned task from **any non-terminal state** (including `done`) back to `queued`. That edge is observed by the existing `non_budget_respawn` path and is described in prose below under "Human reviews coexist with the Quay reviewer."
 
 ```mermaid
 stateDiagram-v2
@@ -102,120 +107,106 @@ stateDiagram-v2
     [*] --> pr_review: synthetic task created by entry point (NEW)
     queued --> running: tick spawns code worker (existing)
     running --> pr_open: worker pushes and opens PR (existing)
-    pr_open --> pr_review: tick observes CI green and calls entry point (NEW; replaces pr_open to done)
+    pr_open --> pr_review: tick observes CI green and calls entry point (NEW; only when gate_quay_owned_done is on)
+    pr_open --> done: tick observes CI green (existing; only when gate_quay_owned_done is off)
     pr_review --> done: reviewer posts approved review (NEW)
-    pr_review --> awaiting_changes: reviewer posts changes-requested (NEW)
-    awaiting_changes --> running: Quay-owned, tick spawns code worker (NEW)
-    awaiting_changes --> pr_review: synthetic, new SHA arrives via CI re-trigger (NEW)
+    pr_review --> queued: Quay-owned, reviewer posts changes-requested (NEW; via existing non_budget_respawn path)
+    pr_review --> waiting_external_changes: synthetic, reviewer posts changes-requested (NEW)
+    waiting_external_changes --> pr_review: synthetic, new SHA arrives via CI (NEW)
     done --> [*]
 
-    note right of awaiting_changes
-      Quay-owned: tick spawns a code worker
-      from awaiting_changes the same way it
-      spawns from queued. Worker reads the brief
-      and feedback artifact, pushes a fix.
-      Lifecycle returns through running to pr-open
-      to pr-review.
-
-      Synthetic: tick does nothing. Task waits
-      for the external author to push. CI fires
-      quay review-pr; entry point dedup unlocks
-      on the new SHA; task re-enters pr-review.
-
-      State machine does not branch on task kind.
-      Only tick's worker-spawn logic does.
+    note right of pr_review
+      A review_only attempt is queued or running
+      at the attempts table level. The reviewer
+      does not modify code or git state. The PR
+      head SHA at attempt-schedule time is on
+      attempts.head_sha.
     end note
 
-    note right of pr_review
-      A review-only attempt is running or queued
-      at the attempts table level. Reviewer is
-      read-only on the worktree. The PR head SHA
-      at attempt-schedule time is captured on
-      attempts.head_sha.
+    note right of waiting_external_changes
+      Synthetic only. Task is parked because
+      Quay has no worker to spawn for a
+      human-authored PR — the external author
+      must push. CI fires quay review-pr on
+      the next push; entry point schedules a
+      new attempt at the new SHA.
     end note
 ```
 
-The pre-existing `pr-open → done` transition (CI green and no review feature enabled) is replaced by `pr-open → pr-review` for deployments that enable the reviewer. Deployments without the reviewer enabled keep the existing path. See §4 "Approval gate on `done`" below for the precise contract and rollout note.
+The pre-existing `pr-open → done` transition stays in place for deployments where `[reviewer].gate_quay_owned_done = false` (the default). Turning the gate on swaps that arrow for `pr-open → pr-review`. The `[reviewer].enabled` flag is separate: it controls whether the reviewer subsystem runs at all (see §6.8).
 
-**Why two states, not one.** Reusing `queued` for the post-CHANGES_REQUESTED wait would overload it: today `queued` means "task created, first code worker needed" and tick's worker-spawn pass (`src/core/tick.ts:345`) reads it with that meaning. Putting synthetic tasks into `queued` would either incorrectly invite a code-worker spawn or force tick to learn task-kind discriminators in the worker-spawn path. A dedicated `awaiting-changes` state keeps the existing `queued` semantics intact and locates the kind-aware logic in exactly one place: how tick treats `awaiting-changes`.
+**Why asymmetric for the post-CHANGES_REQUESTED wait.** Quay-owned tasks have a code worker that can address feedback; synthetic tasks don't. Quay-owned CHANGES_REQUESTED reuses the existing `non_budget_respawn` path (`src/core/non_budget_respawn.ts:191`), which writes the `review_comments` artifact and sets the task to `queued` so the existing code-worker spawn picks it up. Synthetic tasks have no respawn target, so they need an explicit waiting state. Using `pr-review` for both would overload its meaning (running review vs. waiting for author); `waiting_external_changes` names the synthetic case honestly.
 
-**Why synthetic tasks skip `queued` and `pr-open`.** Those states represent stages of Quay-authoring work (waiting for a code worker; PR has been opened by a code worker). Synthetic tasks have no Quay-authoring stage — the human author already opened the PR. The entry point creates synthetic tasks directly in `pr-review` with a `review_only` attempt staged at the PR's current head SHA. The **review loop itself** (`pr-review ↔ awaiting-changes → done`) is identical for both kinds — that's the part the unified state machine guarantees.
+**Why synthetic tasks skip `queued` and `pr-open`.** Those represent Quay-authoring stages (waiting for a code worker; worker has opened a PR). Synthetic tasks have no Quay-authoring stage — the human already opened the PR. The entry point creates synthetic tasks directly in `pr-review` with a `review_only` attempt staged at the current head SHA.
 
 ### Entry into `pr-review`
 
-A single idempotent function (called here `enterReview(task_id, head_sha)`) is the only way a task enters `pr-review`. Two callers:
+A single idempotent function (`enterReview(task_id, head_sha)`) is the only way a task enters `pr-review`. Two callers:
 
-1. **Tick** — for Quay-owned tasks. Trigger: task is in `pr-open`, CI is green at the current head SHA, no terminal review-only attempt exists for `(task_id, head_sha)`.
-2. **`quay review-pr --pr <repo>:<num>` (called by CI)** — for human-authored PRs. The CLI fetches the PR's current head SHA, resolves or creates the synthetic task, then calls `enterReview`. Safe to call redundantly for Quay-owned PRs too; the lookup-then-dedup makes it a no-op if tick already moved the task.
+1. **Tick** — for Quay-owned tasks. Trigger: `[reviewer].gate_quay_owned_done = true` and `[reviewer].enabled = true`, task is in `pr-open`, CI is green at the current head SHA, no terminal `review_only` attempt exists for `(task_id, head_sha)`.
+2. **`quay review-pr --pr <repo>:<num>`** (called by CI) — for any PR. Only requires `[reviewer].enabled = true`; works regardless of `gate_quay_owned_done`. Safe to call redundantly; lookup-then-dedup makes it a no-op when an attempt at this SHA exists.
 
 `enterReview` semantics:
 
-1. **Resolve `task_id`.** Lookups in order; first hit wins:
-   1. **By `(repo_id, pr_number)`** in `tasks`. The fast path for Quay-owned PRs once tick has observed `pr-open` and persisted the metadata via `persistPrMetadata` (`src/core/tick.ts:587`).
-   2. **By `(repo_id, branch_name)`** in `tasks`, matching the PR's `headRefName` (read from the same `gh pr view` call that supplies `head_sha`; no extra round-trip). Closes the race window between the worker pushing/opening the PR and tick's next observation — during that window step 1 misses but step 2 hits because the task's `branch_name` is already set.
-   3. **Synthetic.** Both lookups missed. Compute the synthetic `task_id` (`pr-review-<slug(repo_id)>-<pr_number>`). If no row exists, create one **directly in `pr-review`** with a thin synthetic brief composed from `gh pr view`. Synthetic tasks never pass through `queued` or `pr-open`. (Worktree materialization for synthetic tasks: see §6.7.)
-2. **Dedup on `(task_id, head_sha)`** against the `attempts` table (enforced by the unique partial index in §5.2):
-   - If a `review_only` attempt exists at this SHA in any state → return its id, do nothing.
-   - If not → transition the task into `pr-review` if it isn't already there (valid source states: `pr-open` for Quay-owned, `awaiting-changes` for either kind; synthetic tasks created in step 1.3 are already in `pr-review`). Insert a `review_only` attempt row, with `head_sha` populated and `spawned_at IS NULL` (attempt-level "queued"; not the task state).
-3. Return the `attempt_id`.
+1. **Resolve `task_id`**, first hit wins:
+   1. **By `(repo_id, pr_number)`** in `tasks`. Fast path once tick's `persistPrMetadata` (`src/core/tick.ts:587`) has run.
+   2. **By `(repo_id, branch_name)`** matching the PR's `headRefName` (from the same `gh pr view` call that supplies `head_sha`). Closes the race window before `persistPrMetadata` runs.
+   3. **Synthetic.** Both lookups missed. Compute the synthetic `task_id` (`pr-review-<slug(repo_id)>-<pr_number>`). If no row exists, create one directly in `pr-review` with a thin synthetic brief composed from `gh pr view`. Synthetic tasks never pass through `queued` or `pr-open`. (Worktree materialization: §6.7.)
+2. **Supersede stale pending attempts.** Before insert, cancel any `review_only` attempt with `head_sha ≠ <new>` that is still pending or running for this task: set `ended_at = now()`, `review_verdict = 'superseded'`. This frees the `one_pending_attempt_per_task` index (`migrations/0001_init.sql:83`) so the new attempt can be inserted, and enforces "one active reviewer per PR at any time" even when SHAs change rapidly.
+3. **Dedup on `(task_id, head_sha)`** against the `attempts` table (unique partial index, §5.2):
+   - If a `review_only` attempt exists at this SHA → return its id, do nothing.
+   - Else → transition the task to `pr-review` (from `pr-open` for Quay-owned, from `waiting_external_changes` for synthetic — synthetic tasks created in step 1.3 are already there). Insert a `review_only` attempt with `head_sha` populated and `spawned_at IS NULL`.
+4. Return the `attempt_id`.
 
-The branch-name fallback in step 1.2 is the load-bearing piece against the lookup race: without it, a CI call landing in the brief window between push and tick-observation would mis-classify a Quay-owned PR as synthetic and the system would maintain two parallel tasks for the same PR.
-
-**Edge case explicitly not handled in v1:** a fork PR whose `headRefName` happens to collide with an existing Quay task's `branch_name` on the same repo would be mis-classified as Quay-owned. With Quay's branch-naming convention (e.g., `quay-task/<id>`) this collision is contrived enough to ignore. The worst case is one wrong-respawn cycle parking in `non_budget_loop`; if it ever surfaces in practice, a `isCrossRepository` check on the `gh pr view` response is the trivial fix.
-
-Note: "attempt queued" is the attempt's own `spawned_at IS NULL` state, independent of the task's lifecycle state. Tick's reviewer-spawn pass (§6.1) picks it up and spawns the reviewer.
-
-Tick promotes the queued review-only attempt to `running` on its next pass and spawns the reviewer worker (separate `max_concurrent_review_runs` cap).
+**Edge case explicitly not handled in v1:** a fork PR whose `headRefName` happens to collide with an existing Quay task's `branch_name` on the same repo would be mis-classified. Worst case is one wrong-respawn cycle parking in `non_budget_loop`; a `isCrossRepository` check on the `gh pr view` response is the trivial fix if it ever shows up.
 
 ### Exit from `pr-review`
 
-Tick observes the reviewer worker terminate, fetches the posted review via `gh pr view`, and:
+When the reviewer worker terminates, the reaper (§6.6) fetches the posted review and runs:
 
-| Reviewer verdict | Task transition |
-|---|---|
-| `APPROVED` | `pr-review → done` |
-| `CHANGES_REQUESTED` | `pr-review → awaiting-changes` |
-| `COMMENTED` (no verdict) | **Contract violation** — `--comment` is forbidden (§7.1 piece 3). `review_verdict = 'errored'`, no findings ingested, task → `awaiting-changes`. Treated identically to a worker-error exit. |
-| Worker errored before posting | `pr-review → awaiting-changes` — next SHA re-enters review. Worker writes `.quay-blocked.md` on force-push or hard error; tick reads it as the exit reason. |
+| Reviewer outcome | Quay-owned task transition | Synthetic task transition |
+|---|---|---|
+| `APPROVED` | `pr-review → done` (if `gate_quay_owned_done = true`; otherwise no change — task should already be in `done` via the legacy CI-green path) | `pr-review → done` |
+| `CHANGES_REQUESTED` | `pr-review → queued` via the existing `non_budget_respawn` path (writes `review_comments` artifact, sets state, counts toward `non_budget_respawns_consumed`) | `pr-review → waiting_external_changes` (writes `review_comments` artifact for forensics; nothing to respawn) |
+| `COMMENTED` | Contract violation (§7.1 piece 3). See "Reviewer infrastructure failures" below. | Same. |
+| Worker errored before posting (blocker file, no posted review, network error fetching) | See "Reviewer infrastructure failures" below. | Same. |
 
-In every non-approved case, the task lands in `awaiting-changes` and waits for the next new SHA. The kind-aware behavior lives entirely in how tick handles `awaiting-changes`: spawn a code worker (Quay-owned) or do nothing (synthetic).
+### Reviewer infrastructure failures
 
-### Approval gate on `done`
+Infrastructure failures — worker crash, missing posted review, contract violations like `COMMENTED`, transient network errors — are **not** author feedback. Stranding the task in a "wait for changes" state would be wrong (especially synthetic, where there's nobody to push a fix). Instead:
 
-A Quay-owned task can only reach `done` via the `pr-review → done` arrow above. The pre-existing CI-green path that today moves a task to `done` becomes the precondition for entering `pr-review`, not for reaching `done` directly. Concretely: a Quay-owned task with green CI and no approved review stays in `pr-review` (or in `awaiting-changes` after a CHANGES_REQUESTED), not in `done`.
+- Set `attempts.review_verdict = 'errored'` on the failed attempt and let it terminate normally.
+- A new `tasks.review_infra_failures_consecutive INTEGER NOT NULL DEFAULT 0` column tracks consecutive failures. Increment on each `errored` exit.
+- Retry at the same `head_sha`: leave the task in `pr-review` and schedule a fresh `review_only` attempt for `(task_id, head_sha)`. The unique partial index allows this because the prior attempt is terminal (`ended_at IS NOT NULL`).
+- After **3 consecutive failures** at the same SHA, park the task: set `tasks.tick_error` with a diagnostic message and transition the task to `non_budget_loop`. Surfaces to humans via the existing escalation surface.
+- A successful review at the same SHA (any verdict) resets the counter to 0.
 
-This is a substantive change from current behavior. Two implications worth noting:
+This is parallel to the existing `claim_expirations_consecutive` / `spawn_failures_consecutive` patterns — bounded retry with eventual parking. No new state.
 
-- **The Quay reviewer is now load-bearing on merge.** A false-positive `CHANGES_REQUESTED` keeps the task out of `done` until the next SHA approves. There is no in-spec human-override switch in v1; deployments that need one will need to add it before turning the feature on, or accept the risk while reviewer accuracy is being measured.
-- **Tasks that today reach `done` purely on CI green will, post-spec, need a review pass.** The migration path is operational, not schema: deployments enable the reviewer when they're ready for the new gate, not as a flag-day. Existing tasks already in `done` are unaffected (no retroactive review).
+### Approval gate on `done` (conditional)
+
+When `[reviewer].gate_quay_owned_done = true`, the pre-existing `pr-open → done` transition is replaced by `pr-open → pr-review` for Quay-owned tasks; `done` is only reachable through `pr-review → done` on approval. When the flag is `false` (the default), the legacy `pr-open → done` path is unchanged, and `quay review-pr` calls (synthetic only, since tick won't trigger for Quay-owned without the gate) still work — they just don't gate anything Quay-owned.
+
+Rollout: land the migration with both flags false; enable synthetic review by flipping `[reviewer].enabled = true`; validate reviewer quality on synthetic PRs (no Quay-owned merges affected); when confident, flip `gate_quay_owned_done = true`. Reversible by flipping back.
 
 ### GitHub review-request state is not consulted
 
-The trigger for a fresh review attempt is purely **a new head SHA** observed at the entry point. Whether GitHub considers a prior review "stale" or "re-requested" is not consulted. Practical effects:
-
-- A human clicking "Re-request review" on a Quay-reviewed PR is a no-op for Quay.
-- A Quay-owned worker pushing a new commit doesn't need to do anything on GitHub's side; tick observes the new SHA and re-enters review.
-- A synthetic PR receiving a force-push triggers a fresh review via the next CI `quay review-pr` call (CI runs on `pull_request: synchronize`).
+The trigger for a fresh review attempt is purely a new head SHA at the entry point. GitHub's "Re-request review" button is not consulted. A Quay-owned worker pushing a new commit needs to do nothing on GitHub's side; tick observes the new SHA and re-enters review. A synthetic PR receiving a force-push triggers fresh review via the next CI `quay review-pr` call (CI runs on `pull_request: synchronize`).
 
 ### Human reviews coexist with the Quay reviewer
 
-The Quay reviewer is not the only review signal Quay observes. The existing path in `src/core/non_budget_respawn.ts` polls `gh pr view` for human reviews on Quay-owned PRs and, on a new `CHANGES_REQUESTED` (deduped on `tasks.last_review_id_acted_on`), writes a `review_comments` artifact and respawns a code worker. That path **stays.** The two signals are independent and additive:
+The existing path in `src/core/non_budget_respawn.ts` polls `gh pr view` for human reviews on Quay-owned PRs and, on a new `CHANGES_REQUESTED` (deduped on `tasks.last_review_id_acted_on`), writes a `review_comments` artifact and respawns a code worker. That path **stays.** It's the same code path the Quay-reviewer reaper now calls for Quay-owned `CHANGES_REQUESTED` (§4 exit table).
 
-| Signal | Source | Effect on state | Cap |
+| Signal | Source | Effect | Cap |
 |---|---|---|---|
-| Quay reviewer posts `APPROVED` | `review_only` attempt's `review_verdict` set by tick | `pr-review → done` | n/a |
-| Quay reviewer posts `CHANGES_REQUESTED` | `review_only` attempt's `review_verdict` set by tick | `pr-review → awaiting-changes` | counts toward `non_budget_respawns_consumed` (because it will trigger a code-worker respawn from `awaiting-changes`) |
-| Human posts `CHANGES_REQUESTED` (Quay-owned PR) | `non_budget_respawn` poll, deduped on `last_review_id_acted_on` | **From any non-terminal state** → `awaiting-changes`. Writes `review_comments` artifact. | counts toward `non_budget_respawns_consumed` |
-| Human posts `APPROVED` (Quay-owned PR) | observed but not acted on | No state change. Quay reviewer's approval is still the gate. | n/a |
-| Human posts `COMMENT` only | observed but not acted on | No state change. | n/a |
+| Quay reviewer `APPROVED` | `review_only` attempt verdict | Quay-owned: `pr-review → done` (if gate on). Synthetic: `pr-review → done`. | n/a |
+| Quay reviewer `CHANGES_REQUESTED` | `review_only` attempt verdict | Quay-owned: `pr-review → queued` via `non_budget_respawn`. Synthetic: `pr-review → waiting_external_changes`. | non_budget_respawns_consumed (Quay-owned only) |
+| Human `CHANGES_REQUESTED` (Quay-owned PR) | `non_budget_respawn` poll, dedup on `last_review_id_acted_on` | From any non-terminal state → `queued` via `non_budget_respawn`. Writes `review_comments` artifact. | non_budget_respawns_consumed |
+| Human `APPROVED` / `COMMENT` | observed but not acted on | No state change. | n/a |
 
-A human's `CHANGES_REQUESTED` overrides a prior Quay approval: if the task is in `done` (Quay approved at the current SHA) and a human then leaves changes-requested, the task transitions `done → awaiting-changes` and a code worker is spawned to address the human's feedback (existing behavior, preserved). Once the worker pushes a fix, the lifecycle returns through `running → pr-open → pr-review`, where the Quay reviewer reviews the new SHA and the cycle continues.
+Human approvals are **advisory only in v1.** They don't substitute for the Quay reviewer gate when `gate_quay_owned_done = true`. If an escape valve becomes needed, it can be added later as a `pr-review → done` arrow on human approval.
 
-Human approvals are **advisory only in v1.** A human approving doesn't transition state and doesn't substitute for Quay's gate. Rationale: the Quay reviewer's false-positive rate is unmeasured; letting a human approval shortcut Quay's gate makes the contract conditional on the reviewer's accuracy, which we want to keep separate from this spec. If a "human can override" escape valve becomes needed (e.g., on observed Quay-reviewer flakiness), it can be added as an additive transition (`pr-review → done` on human approval) without renaming or removing anything in v1.
-
-Both Quay-reviewer-driven and human-driven respawns share the existing `non_budget_respawns_consumed` cap (default 20). After 20 respawns from `awaiting-changes` (regardless of which signal caused them), the task parks in `non_budget_loop` — same terminal as today. This prevents runaway loops where Quay and a human keep producing fresh CHANGES_REQUESTED on every iteration.
-
-Synthetic tasks observe only the Quay reviewer signal in v1 — the existing human-review respawn path is Quay-PR-specific (it's keyed on having a code worker to respawn, which synthetic tasks don't). Humans reviewing a synthetic-task PR are just reviewing it on GitHub; Quay doesn't ingest their reviews into the state machine, since there's no worker to act on the feedback.
+Synthetic tasks observe only the Quay reviewer signal in v1 — the existing human-review respawn path is Quay-PR-specific (no worker to respawn for synthetic).
 
 ### Synthetic-task identity and reopen
 
@@ -223,7 +214,7 @@ Synthetic `task_id = "pr-review-" + slug(repo_id) + "-" + pr_number`. One synthe
 
 ### Force-pushes mid-review
 
-If a PR is force-pushed while a review attempt is `running`, the worker's worktree no longer matches the new head SHA. Per the reviewer preamble, the worker writes `.quay-blocked.md` and exits without posting. Tick treats this as a worker-errored exit: task → `awaiting-changes`. The next entry-point call (tick for Quay-owned, CI for synthetic) at the new SHA flows through dedup normally and schedules a fresh attempt.
+If a PR is force-pushed while a review attempt is `running`, the worker's worktree no longer matches the new head SHA. Per the reviewer preamble, the worker writes `.quay-blocked.md` and exits without posting. Tick treats this as a reviewer infrastructure failure (above). The next entry-point call at the new SHA flows through dedup normally; if the failure was already counted against `review_infra_failures_consecutive`, the supersession step (§4 enterReview step 2) cancels the prior pending attempt and a fresh one is scheduled.
 
 ## 5. Schema delta
 
@@ -231,7 +222,7 @@ The `tasks.state` and `attempts.reason` columns are free-form `TEXT` with no `CH
 
 ### 5.1 New enum values (code only, no migration)
 
-- `tasks.state` gains `pr-review` and `awaiting-changes`.
+- `tasks.state` gains `pr-review` and `waiting_external_changes` (synthetic-only).
 - `attempts.reason` gains `review_only` (the Quay reviewer worker's attempt kind).
 
 The existing `attempts.reason = 'review'` value, set by `src/core/non_budget_respawn.ts` when a human posts CHANGES_REQUESTED on a Quay-owned PR, **stays**. It and `review_only` denote two different attempt kinds (human-driven code-worker respawn vs. Quay reviewer worker) that coexist. See §4 "Human reviews coexist with the Quay reviewer" below for how the two signals interact at the state-machine level.
@@ -254,20 +245,27 @@ The index is **unique** and partial: it enforces "at most one `review_only` atte
 
 The existing `attempts.remote_sha_at_spawn` is **not reused** for this purpose. That column records what the substrate observed when a code worker spawned (may differ from what the worker pushes); `head_sha` records what was promised to be reviewed. Different meaning, different column.
 
-### 5.3 `attempts.review_verdict`
+### 5.3 `attempts.review_verdict` and `attempts.review_id`
 
 ```sql
 ALTER TABLE attempts ADD COLUMN review_verdict TEXT;
--- Set by tick when the reviewer worker exits and the posted review is
--- fetched via gh pr view. One of: 'approved', 'changes_requested',
--- 'errored'. NULL for non-review attempts and for review attempts that
--- have not yet ended. Drives the state transition out of pr-review
--- (see §4 exit table). 'commented' is not a value — the worker contract
--- (§7.1 piece 3) forbids --comment; a COMMENTED GitHub-review state
--- maps to 'errored' (§6.6).
+-- Set by the reaper when the reviewer worker exits and the posted review is
+-- fetched. One of: 'approved', 'changes_requested', 'errored', 'superseded'.
+-- NULL for non-review attempts and for review attempts that have not yet
+-- ended. Drives the state transition out of pr-review (§4 exit table).
+-- 'commented' is not a value — §7.1 piece 3 forbids --comment.
+-- 'superseded' is set by enterReview when a new SHA arrives before the
+-- prior attempt completed (§4 enterReview semantics, step 2).
+
+ALTER TABLE attempts ADD COLUMN review_id TEXT;
+-- GitHub review id (numeric, stringified) of the posted review. Populated
+-- by the reaper on a successful fetch. NULL for non-review attempts and
+-- for review attempts that errored before posting. Used for traceability
+-- (e.g., linking back to the GH review URL) and as a stable handle for any
+-- future findings-storage backfill.
 ```
 
-Not reused: `attempts.exit_kind` records *how* the worker terminated (clean exit, killed, etc.); `review_verdict` records *what the worker did*. Both are needed independently — a worker can exit cleanly with `errored` verdict (worktree force-pushed under it → blocked file written → clean exit) or exit dirty with an approved review already posted.
+Not reused: `attempts.exit_kind` records *how* the worker terminated (clean exit, killed, etc.); `review_verdict` records *what the worker did*. Both are needed independently.
 
 ### 5.4 `preambles.kind`
 
@@ -310,96 +308,68 @@ CREATE INDEX task_tags_by_tag ON task_tags(tag);
 What this spec **adds** around `task_tags`:
 
 - A `--tag <name>` flag on `quay enqueue` (manual/CI deployments that want to attach tags outside the Linear adapter path). Repeatable. Inserts rows at enqueue time, deduped on `(task_id, tag)`.
-- Synthetic-task tagging: a `--tag` flag on `quay review-pr` (same shape) so CI workflows can attach tags to synthetic tasks at creation time, when no Linear ticket exists to derive tags from.
+- Synthetic-task tagging: a `--tag` flag on `quay review-pr` (same shape) so CI workflows can attach tags to synthetic tasks at creation time.
 
-Tags are opaque strings to Quay. Used for clustering findings in `quay query-findings --tag`.
+Tags are opaque strings to Quay. In v1 they're carried through but not yet queried by Quay itself; a future findings/search spec is where they earn their keep.
 
-### 5.6 `review_findings` + FTS5
-
-Carried forward from the archive (`docs/archive/quay-spec-pr-review.md` §5) with the same shape. Provided here for self-containment.
+### 5.6 `tasks.review_infra_failures_consecutive`
 
 ```sql
-CREATE TABLE review_findings (
-  finding_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id TEXT NOT NULL REFERENCES tasks(task_id),
-  attempt_id INTEGER REFERENCES attempts(attempt_id),
-  review_id TEXT NOT NULL,         -- GH review id (numeric, stringified)
-  principle TEXT,                  -- prose extracted from quay-principle fenced block; NULL when absent
-  comment_body TEXT NOT NULL,      -- full original comment body (or review body for review-body findings)
-  file_path TEXT,                  -- from the GH line comment; NULL for review-body findings
-  line_number INTEGER,             -- from the GH line comment; NULL for review-body findings
-  source_url TEXT NOT NULL,        -- deep link to the comment / review on GitHub
-  captured_at TEXT NOT NULL
-);
-CREATE INDEX review_findings_by_principle ON review_findings(principle);
-CREATE INDEX review_findings_by_task ON review_findings(task_id);
-CREATE INDEX review_findings_by_file ON review_findings(file_path);
-
-CREATE VIRTUAL TABLE review_findings_fts USING fts5(
-  principle,
-  comment_body,
-  content='review_findings',
-  content_rowid='finding_id'
-);
-
-CREATE TRIGGER review_findings_ai AFTER INSERT ON review_findings BEGIN
-  INSERT INTO review_findings_fts(rowid, principle, comment_body)
-  VALUES (new.finding_id, new.principle, new.comment_body);
-END;
-CREATE TRIGGER review_findings_ad AFTER DELETE ON review_findings BEGIN
-  INSERT INTO review_findings_fts(review_findings_fts, rowid, principle, comment_body)
-  VALUES ('delete', old.finding_id, old.principle, old.comment_body);
-END;
-CREATE TRIGGER review_findings_au AFTER UPDATE ON review_findings BEGIN
-  INSERT INTO review_findings_fts(review_findings_fts, rowid, principle, comment_body)
-  VALUES ('delete', old.finding_id, old.principle, old.comment_body);
-  INSERT INTO review_findings_fts(rowid, principle, comment_body)
-  VALUES (new.finding_id, new.principle, new.comment_body);
-END;
+ALTER TABLE tasks ADD COLUMN review_infra_failures_consecutive INTEGER NOT NULL DEFAULT 0;
+-- Counts consecutive reviewer infrastructure failures (worker crash, missing
+-- posted review, contract violations like COMMENTED, transient errors fetching
+-- the review). Incremented by the reaper on each errored exit. Reset to 0 on
+-- any successful review at the same head_sha (any verdict). After 3 consecutive
+-- failures at the same SHA, the task is parked in non_budget_loop. Parallel to
+-- existing claim_expirations_consecutive / spawn_failures_consecutive patterns.
 ```
-
-One `review_findings` row per inline comment plus one row per review-body finding (where applicable). Rows are inserted by tick at review-ingestion time, after the reviewer worker exits and `gh pr view` returns the posted review payload.
 
 ### 5.7 `artifacts.kind = 'review_comments'`
 
-No schema change to the `artifacts` table — `kind` is free-form TEXT. The existing `review_comments` artifact kind (today written by `non_budget_respawn` to capture human-review feedback for the next code-worker pass) is reused: tick writes one `review_comments` artifact per `review_only` attempt that finishes with `changes_requested`. The artifact is what the next code worker reads to address the feedback (Quay-owned tasks); the structured `review_findings` rows are what cross-task queries hit.
+No schema change to the `artifacts` table — `kind` is free-form TEXT. The existing `review_comments` artifact kind (today written by `non_budget_respawn` to capture human-review feedback for the next code-worker pass) is reused:
+
+- On Quay-owned `CHANGES_REQUESTED` from the Quay reviewer: the reaper calls the existing `non_budget_respawn` path, which writes the artifact and respawns. Same artifact shape, same consumer (next code worker).
+- On synthetic `CHANGES_REQUESTED`: the reaper writes the artifact for forensics (nothing to respawn).
+
+The raw posted review (body + inline comments) is preserved in the artifact. Combined with `attempts.review_id` / `head_sha` / `review_verdict`, that's a complete record of what the reviewer said — enough to drive the state machine and to feed any future structured-findings backfill.
 
 ### 5.8 Synthetic task discriminator
 
-No new column. Synthetic tasks are identified by `task_id LIKE 'pr-review-%'`. Code paths that need the distinction (tick's worker-spawn decision in `awaiting-changes`; the entry point's lookup-or-create branch) match on this prefix.
+No new column. Synthetic tasks are identified by `task_id LIKE 'pr-review-%'`. Code paths that need the distinction (the reaper's branch between non_budget_respawn vs. `waiting_external_changes`; the entry point's lookup-or-create branch) match on this prefix.
 
-Trade-off considered: a `tasks.is_synthetic` BOOLEAN column would be slightly faster to query and self-documenting at the row level. But the prefix is already a hard invariant (it's how the synthetic `task_id` is derived); a column would be duplicate state and would need a CHECK constraint to stay consistent with the prefix. Stick with derivation.
+Trade-off considered: a `tasks.is_synthetic` BOOLEAN column would be slightly faster to query and self-documenting at the row level. But the prefix is already a hard invariant (it's how the synthetic `task_id` is derived); a column would be duplicate state. Stick with derivation.
 
 ### 5.9 Migration order
 
-One migration file (after `migrations/0002_deployment_adapters.sql`, which already creates `task_tags`), applied as a single transaction:
+One migration file (after `migrations/0002_deployment_adapters.sql`), applied as a single transaction:
 
 1. `ALTER TABLE attempts ADD COLUMN head_sha TEXT`.
 2. `ALTER TABLE attempts ADD COLUMN review_verdict TEXT`.
-3. `CREATE UNIQUE INDEX attempts_review_dedup_idx ...` (partial, on `reason = 'review_only' AND head_sha IS NOT NULL`).
-4. `ALTER TABLE preambles ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'`.
-5. `CREATE INDEX preambles_kind_idx ...`.
-6. `CREATE TABLE review_findings ...` + indexes.
-7. `CREATE VIRTUAL TABLE review_findings_fts ...` + triggers.
+3. `ALTER TABLE attempts ADD COLUMN review_id TEXT`.
+4. `CREATE UNIQUE INDEX attempts_review_dedup_idx ...` (partial, on `reason = 'review_only' AND head_sha IS NOT NULL`).
+5. `ALTER TABLE preambles ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'`.
+6. `CREATE INDEX preambles_kind_idx ...`.
+7. `ALTER TABLE tasks ADD COLUMN review_infra_failures_consecutive INTEGER NOT NULL DEFAULT 0`.
 
-`task_tags` is **not** in this list — it is owned by 0002.
+`task_tags` is **not** in this list — it is owned by 0002. No new tables, no FTS5, no triggers (deferred — see §2 out-of-scope).
 
 Config-schema update (`src/cli/config.ts`, not in the SQL migration):
 
-- Add `max_concurrent_review_runs: positiveInt.optional()` to the strict top-level `ConfigSchema` (§6.4).
-- Add `reviewer: ReviewerConfigSchema.optional()` with `enabled: z.boolean().optional()` (§6.8).
+- Add `reviewer: ReviewerConfigSchema.optional()` with `enabled: z.boolean().optional()` and `gate_quay_owned_done: z.boolean().optional()`.
 
-No backfill required: pre-existing attempts have `head_sha = NULL` and `review_verdict = NULL` (both valid for non-review attempts), existing `preambles` rows backfill to `kind = 'code'` via the column default, no `review_findings` rows exist for old tasks.
+No new top-level `max_concurrent_review_runs` key. Reviewer attempts consume the existing `max_concurrent` cap — see §6.4.
+
+No backfill required: pre-existing attempts have all new columns NULL; existing `preambles` rows backfill to `kind = 'code'`; existing tasks get `review_infra_failures_consecutive = 0`.
 
 The first reviewer spawn after migration triggers seeding of the default `kind = 'review'` preamble row, analogous to how `ensurePreambleId` seeds the first `kind = 'code'` row in `src/core/preamble.ts:16` today.
 
 ## 6. Reviewer worker
 
-The reviewer is a Quay worker, spawned by tick through the same substrate as a code worker (tmux session + supervisor lock). Three differences from a code worker: read-only worktree, reviewer preamble, separate concurrency cap.
+The reviewer is a Quay worker, spawned by tick through the same substrate as a code worker (tmux session + supervisor lock). Differences from a code worker: it doesn't modify code or git state, it uses a different preamble (`kind = 'review'`), and on a synthetic task its worktree is materialized lazily via `gh pr checkout`. It shares the existing `max_concurrent` cap.
 
 ### 6.1 Spawn trigger — reusing the existing scheduler
 
-The reviewer's spawn path is the existing scheduler (`promoteAndSpawn`, `tick.ts:1726`) **parameterized**, not a new subsystem. The substrate that does the actual work — atomic promotion transaction, tmux spawn, agent-identity probe, prompt loading from `preambles` — is reused as-is. What differs is the predicate, the cap, and a couple of formatting / state-transition arguments.
+The reviewer's spawn path is the existing scheduler (`promoteAndSpawn`, `tick.ts:1726`) **parameterized**, not a new subsystem. The substrate that does the actual work — atomic promotion transaction, tmux spawn, agent-identity probe, prompt loading from `preambles` — is reused as-is. What differs is the predicate, a couple of formatting / state-transition arguments, and the post-exit reaper.
 
 The existing scheduler reads:
 
@@ -419,7 +389,7 @@ SELECT a.attempt_id, a.task_id, a.head_sha, a.preamble_id, t.repo_id, t.branch_n
  ORDER BY a.attempt_id
 ```
 
-…subject to `max_concurrent_review_runs` (§6.4).
+…subject to the shared `max_concurrent` cap (§6.4).
 
 Per-row processing reuses `promoteAndSpawn`'s flow with these parameter changes:
 
@@ -431,23 +401,21 @@ Per-row processing reuses `promoteAndSpawn`'s flow with these parameter changes:
 | Promotion txn | `task: queued → running`, attempt: `spawned_at = now` | attempt: `spawned_at = now`. Task stays in `pr-review` (no state transition). |
 | Tmux spawn | Same substrate | Same substrate (`deps.tmux.spawn(...)`) |
 
-The implementation choice — generalize `promoteAndSpawn` to take a "scheduler profile" arg vs. add a parallel `promoteAndSpawnReviewer` function that shares helpers — is left to the implementer. Both shapes work; the spec only requires that the substrate is shared (so future substrate changes apply uniformly) and that the two caps are independent.
+The implementation choice — generalize `promoteAndSpawn` to take a "scheduler profile" arg vs. add a parallel `promoteAndSpawnReviewer` function that shares helpers — is left to the implementer.
 
-The two spawn passes (code-worker and reviewer) run in the same tick cycle but check independent caps; a saturated code-worker pool does not block reviewer spawns and vice versa.
+**The reaper is materially new.** Code-worker exit feeds `pr-open` snapshot polling, classifier logic, conflict detection, CI status. Reviewer exit feeds a different chain (§6.6): blocker-file check → fetch posted review → set `review_verdict` / `review_id` / write `review_comments` artifact → kind-aware state transition. Genuinely separate code, not a parameterization of the existing reaper.
 
-**The reaper is materially new.** Code-worker exit (today) feeds `pr-open` snapshot polling, classifier logic, conflict detection, CI status, etc. Reviewer exit (this spec, §6.6) feeds a different post-processing chain: blocker-file check → `gh pr view` for posted review → fenced-block parsing (§8.2) → `review_findings` insert → state transition out of `pr-review`. This is genuinely separate code, not a parameterization of the existing reaper.
+### 6.2 Worktree access — no code or git mutation
 
-### 6.2 Worktree access — read-only
+The reviewer doesn't modify code or git state, but it isn't truly "read-only" — the tmux substrate writes `.quay-prompt.md`, `.quay-session.log`, and `.quay-exit-code` into the worktree as part of every spawn (`src/adapters/tmux.ts`). The contract is more honest as **"no code or git mutation"**:
 
-The reviewer reads the worktree but does not modify it. The worker contract (enforced by preamble prose) forbids:
+- No `git commit`, `git push`, branch creation, or any write to the git index.
+- No package installs or any command that mutates `node_modules` / `vendor` / etc.
+- No file writes to repo paths. The substrate's own `.quay-*` files (set by tmux + supervisor) are fine; the worker should also write `.quay-blocked.md` if it can't proceed.
 
-- `git commit`, `git push`, branch creation, or any write to the git index.
-- Package installs or any command that mutates `node_modules` / `vendor` / etc.
-- Any file write **except** `.quay-blocked.md` (the substrate-level blocker file, treated by tick as a clean blocker-exit signal).
+Concurrent code-worker activity on the same worktree is uncommon (substrate serializes worktree-creating events) but not impossible. If a force-push or worktree-mutating event changes the working tree under a running reviewer, the worker writes `.quay-blocked.md` and exits — same handling as force-pushes mid-review in §4.
 
-Concurrent code-worker activity on the same worktree is uncommon (substrate already serializes worktree-creating events) but not impossible. If a force-push or worktree-mutating event changes the working tree under a running reviewer, the worker writes `.quay-blocked.md` and exits — same handling as the force-pushes-mid-review case in §4.
-
-No new worktree lock is introduced. The existing exclusive lock held by code workers is sufficient: a code worker holding the lock blocks reviewer spawn; tick retries the reviewer spawn on the next pass. Reviewers themselves don't take an exclusive lock — they only need a stable read view, and the substrate's existing serialization is enough for v1.
+No new worktree lock is introduced. A code worker holding the exclusive lock blocks reviewer spawn; tick retries on the next pass. Reviewers themselves don't take the exclusive lock — they only need a stable read view, and the substrate's existing serialization is enough for v1.
 
 ### 6.3 Reviewer preamble
 
@@ -469,48 +437,53 @@ Deployment override: a deployment customizes the reviewer preamble by inserting 
 
 No `[reviewer].preamble_path` config key. The storage mechanism is the database, identical to code workers; deployments don't manage two preamble systems.
 
-The preamble carries the entirety of the reviewer-worker contract surface: what the worker reads, how it composes findings, the `quay-principle` fenced-block format, posting via `gh pr review`. The contract pieces themselves are enumerated in §7.1; the prose enforcing them lives in `docs/quay-reviewer-preamble-default.md` (the source-of-truth) and is mirrored verbatim in `DEFAULT_REVIEWER_PREAMBLE_BODY` in the source.
+The preamble carries the entirety of the reviewer-worker contract surface: what the worker reads, how it composes the review (line comments vs. review body, severity, line-number accuracy), the verdict mapping (approve vs. request-changes only — no comment-only), and posting via `gh pr review`. The contract pieces themselves are enumerated in §7.1; the prose enforcing them lives in `docs/quay-reviewer-preamble-default.md` (the source-of-truth) and is mirrored verbatim in `DEFAULT_REVIEWER_PREAMBLE_BODY` in the source. The preamble also asks the worker to write optional `quay-principle` fenced blocks for generalizable rules; v1 stores the blocks verbatim in the `review_comments` artifact but doesn't parse them — that's deferred to the future findings/search spec.
 
-### 6.4 Capacity cap
+### 6.4 Capacity cap (shared)
 
-The existing config (`src/cli/config.ts:52`) uses **strict top-level keys** (no nested `[capacity]` section). `max_concurrent` already lives there as the code-worker cap. This spec adds a sibling top-level key:
+Reviewer workers and code workers share the existing `max_concurrent` cap in v1. No new config key.
 
-```toml
-# ~/.quay/config.toml
-max_concurrent = 8                # existing — code workers
-max_concurrent_review_runs = 15   # new — reviewer workers
+The catch: today's `countRunning()` in `src/core/tick.ts` counts tasks with `state = 'running'`, which would miss reviewer workers (they run on tasks in `pr-review`). For the shared cap to honestly include reviewer attempts, `countRunning()` must be **generalized to count actually-running attempts across both kinds**, e.g.:
+
+```sql
+SELECT COUNT(*) FROM attempts
+ WHERE spawned_at IS NOT NULL AND ended_at IS NULL
 ```
 
-In the schema (`src/cli/config.ts:52` `ConfigSchema`): add `max_concurrent_review_runs: positiveInt.optional()` to the strict object. Existing strict-mode rejection of unknown keys carries over: misspellings fail loudly at config-load time.
+This is a small change to existing logic and is **required** as part of this spec — without it, reviewer workers run unbounded alongside the code-worker cap, defeating the shared-cap design.
 
-Reviewer workers consume `max_concurrent_review_runs` (default 15), independent of `max_concurrent`. Tick's reviewer-spawn pass (§6.1) promotes `review_only` attempts only up to this cap.
-
-Rationale for two caps: reviewers are read-only on the worktree and don't compete with code workers for substrate write-paths; a shared cap would let a burst of reviews starve code workers (or vice versa). The 15 default is a starting point; deployments tune based on observed reviewer-worker latency.
+A separate `max_concurrent_review_runs` cap is deferred to a future spec; v1 ships with one number to tune, and starvation (if observed) becomes the trigger for the split.
 
 ### 6.5 Worker contract (summary)
 
 By the end of its run, the worker must:
 
-1. Either post **exactly one** review via `gh pr review` with a **definite verdict** (`--approve` or `--request-changes`), OR write `.quay-blocked.md` describing the blocker. Not both, not neither. **`--comment` is not allowed** — it produces an undecided review that strands the task; see §7.1 piece 3.
-2. Not modify the worktree (per §6.2).
+1. Either post **exactly one** review via `gh pr review` with a **definite verdict** (`--approve` or `--request-changes`), OR write `.quay-blocked.md` describing the blocker. Not both, not neither. **`--comment` is not allowed** (§7.1 piece 3).
+2. Not modify code or git state (§6.2).
 3. Exit cleanly.
 
-If the worker exits without posting a review and without writing a blocker file, tick treats it as `review_verdict = 'errored'` and transitions per §4 exit table.
+If the worker exits without posting a review and without writing a blocker file, the reaper records `review_verdict = 'errored'` and follows the infrastructure-failure handling in §4 ("Reviewer infrastructure failures").
 
-The detailed contract pieces — use the brief, fetch only what's missing, `quay-principle` fenced-block format for generalizable rules, review-comment formatting — are enforced by the preamble prose, not by tick. See §7.1 for the full contract list and `docs/quay-reviewer-preamble-default.md` for the enforcing prose.
+Contract details (use the brief, post inline comments where the issue has a locus, etc.) are enforced by preamble prose, not by tick — see §7.1.
 
-### 6.6 Worker exit and tick observation
+### 6.6 Worker exit and reaper
 
-When the supervisor reports the worker has terminated, tick performs the following sequence (single pass, per-attempt):
+When the supervisor reports the worker has terminated, the reaper runs per attempt:
 
-1. **Check for blocker file.** If `.quay-blocked.md` exists in the worktree: set `attempts.review_verdict = 'errored'`, capture the blocker text as a `review_blocker` artifact, transition task `pr-review → awaiting-changes`. Done.
-2. **Fetch the posted review** via `gh pr view --json reviews`, filtering to reviews authored by the bot account at the current head SHA. (The bot account is the identity of the `GH_TOKEN` the worker used; deployments configure it.)
-   - **Found, definite verdict** (`APPROVED` or `CHANGES_REQUESTED`) → set `attempts.review_verdict` from the review's `state` (`APPROVED → 'approved'`, `CHANGES_REQUESTED → 'changes_requested'`). Write the `review_comments` artifact (review body + inline comments). Parse `quay-principle` blocks (§8.2) and insert `review_findings` rows. Transition task per §4 exit table.
-   - **Found, COMMENTED** → contract violation (§7.1 piece 3 forbids `--comment`). Set `attempts.review_verdict = 'errored'`, log diagnostic, transition task `pr-review → awaiting-changes`. Findings are **not** ingested for this attempt because the verdict is undefined. Deployments observing this signal should fix the preamble.
-   - **Not found** → set `attempts.review_verdict = 'errored'`, log diagnostic ("worker exited cleanly but no review posted at head_sha"), transition task `pr-review → awaiting-changes`.
+1. **Check for blocker file.** If `.quay-blocked.md` exists in the worktree: set `attempts.review_verdict = 'errored'`, write a `review_blocker` artifact with the blocker text, increment `tasks.review_infra_failures_consecutive`, follow §4 "Reviewer infrastructure failures" (retry at same SHA up to 3 times, then park in `non_budget_loop`). Done.
+2. **Fetch the posted review** via `gh pr view --json reviews`, filtering to reviews authored by the bot account at `attempts.head_sha`.
+   - **Found, definite verdict** (`APPROVED` or `CHANGES_REQUESTED`):
+     - Set `attempts.review_verdict` (`approved` or `changes_requested`) and `attempts.review_id`.
+     - Reset `tasks.review_infra_failures_consecutive = 0`.
+     - On `APPROVED`: transition per §4 exit table (Quay-owned to `done` if `gate_quay_owned_done = true`; synthetic to `done`).
+     - On `CHANGES_REQUESTED`:
+       - **Quay-owned**: write the `review_comments` artifact and call the existing `non_budget_respawn` path (`src/core/non_budget_respawn.ts:191`) — same code that already handles human CHANGES_REQUESTED. Sets the task to `queued` and counts toward `non_budget_respawns_consumed`.
+       - **Synthetic**: write the `review_comments` artifact (forensics only — no respawn target) and transition `pr-review → waiting_external_changes`.
+   - **Found, COMMENTED**: contract violation (§7.1 piece 3 forbids `--comment`). Set `review_verdict = 'errored'`, follow §4 "Reviewer infrastructure failures."
+   - **Not found** at `head_sha`: set `review_verdict = 'errored'`, follow §4 "Reviewer infrastructure failures."
 3. Mark the attempt ended (`ended_at`, `exit_kind`).
 
-Steps 1 and 2 are mutually exclusive — the worker contract says "exactly one." If both a blocker file and a posted review are present (worker bug), the blocker file wins and the posted review is logged but not actioned: deployments noticing this signal should fix the preamble.
+Steps 1 and 2 are mutually exclusive — the worker contract says "exactly one." If both a blocker file and a posted review are present (worker bug), the blocker file wins and the posted review is logged but not actioned.
 
 ### 6.7 Synthetic worktree materialization
 
@@ -523,42 +496,48 @@ Quay-owned tasks already have a worktree (created during the code-worker lifecyc
 
 The worktree itself is **not** created here — that's lazy at spawn.
 
-**At reviewer spawn** (§6.1 step 1): ensure the worktree exists at `worktree_path` and is checked out to `attempts.head_sha`. Use `gh pr checkout <pr_number>` — it handles fork PRs, same-repo PRs, and new commits since the last spawn uniformly. If the SHA can't be fetched (PR closed and ref deleted, fork removed), mark the attempt errored and the task transitions `pr-review → awaiting-changes`; repeated failures park in `non_budget_loop` via the existing cap.
+**At reviewer spawn** (§6.1 step 1): ensure the worktree exists at `worktree_path` and is checked out to `attempts.head_sha`. Use `gh pr checkout <pr_number>` — it handles fork PRs, same-repo PRs, and new commits since the last spawn uniformly. If the SHA can't be fetched (PR closed and ref deleted, fork removed), the spawn fails and the reaper records `review_verdict = 'errored'` per §4 "Reviewer infrastructure failures."
 
 Force-push, new SHA, and reopen are handled by re-running the same step on the next spawn. No special-case logic.
 
 **Cleanup** is deferred to a future `quay gc` (out of v1 scope). Synthetic worktrees are cheap and re-materializing has higher cost than retaining.
 
-### 6.8 Enabling the reviewer (rollout safety)
+### 6.8 Rollout: two flags, separated
 
-Because this spec makes Quay reviewer approval load-bearing on `done` (§4 "Approval gate"), the reviewer must be opt-in per deployment. **Required** in v1, not deferred:
+The spec uses two config flags so the reviewer subsystem and the `done`-gating change can roll out independently.
 
 ```toml
 # ~/.quay/config.toml
 [reviewer]
-enabled = false   # default
+enabled = false                # default. Whether the reviewer subsystem runs at all.
+gate_quay_owned_done = false   # default. Whether Quay-owned done requires an approved Quay review.
 ```
 
 Schema addition (`src/cli/config.ts`):
 
 ```ts
-const ReviewerConfigSchema = z.object({ enabled: z.boolean().optional() }).strict();
-// ...add to top-level ConfigSchema:
+const ReviewerConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  gate_quay_owned_done: z.boolean().optional(),
+}).strict();
+// add to top-level ConfigSchema:
 //   reviewer: ReviewerConfigSchema.optional(),
 ```
 
-When `[reviewer].enabled = false` (the default), tick:
+Behavior matrix:
 
-- Does **not** call the entry point on `pr-open` + CI green. The pre-existing `pr-open → done` transition stays in effect.
-- `quay review-pr` still works for synthetic tasks (CI-triggered review of human PRs) — it's the gating change that's opt-in, not the synthetic-review feature.
-- The reviewer-spawn pass (§6.1) is a no-op (it would only find review-only attempts created by CI for synthetic PRs).
+| `enabled` | `gate_quay_owned_done` | Effect |
+|---|---|---|
+| false | (any) | Reviewer subsystem off. `quay review-pr` returns an error. Reviewer-spawn pass is a no-op. Tick doesn't call the entry point. Pre-existing `pr-open → done` path unchanged. |
+| true | false | Synthetic review works (CI fires `quay review-pr` → reviewer worker spawns → posts review). Quay-owned tasks still reach `done` via the legacy `pr-open → done` path on CI green. Reviewer never affects Quay-owned merges. |
+| true | true | Synthetic review works (same as above). For Quay-owned tasks, tick calls the entry point on `pr-open` + CI green; only `pr-review → done` on approval reaches `done`. |
 
-When `[reviewer].enabled = true`:
+Rollout sequence:
 
-- Tick calls the entry point on `pr-open` + CI green for Quay-owned tasks (the new path).
-- Approval gate is in effect: Quay-owned tasks only reach `done` via `pr-review → done`.
-
-Rollout sequence: a deployment lands the migration with `enabled = false`, validates the reviewer on synthetic PRs (CI-triggered, doesn't gate any Quay work), measures false-positive rate, then flips `enabled = true` when confident. Reversible by flipping back to `false` — tasks in `pr-review` or `awaiting-changes` graduate naturally on their next CI-green observation under the legacy path.
+1. Land the migration; both flags default to `false` — nothing changes.
+2. Flip `enabled = true` to validate the reviewer on synthetic PRs (no Quay-owned work is gated).
+3. Measure false-positive rate. When confident, flip `gate_quay_owned_done = true`.
+4. Reversible: flipping `gate_quay_owned_done` back to `false` lets in-flight Quay-owned tasks reach `done` via the legacy path on their next CI-green observation.
 
 ## 7. Worker contract and CLI
 
@@ -571,19 +550,13 @@ The contract pieces are **enforced by preamble prose, not by tick.** Tick observ
 1. **Use the brief, then the diff.** Read the task brief (`.quay-prompt.md` or equivalent — same location as for code workers) before doing anything else. Read the diff via `gh pr diff` or by inspecting the worktree against the base branch. Don't repeat work the brief already did.
 2. **Fetch only what's missing.** If the brief contains unexpanded identifiers (synthetic-task path on adapter-less deployments — see `docs/quay-spec-deployment-adapters.md` §6.1), follow them via available tooling (Linear MCP, web fetch, etc.) before composing findings.
 3. **Post exactly one review with a definite verdict.** Call `gh pr review <pr> --approve` or `gh pr review <pr> --request-changes` once. Include the review body with `--body` or `-F`. Inline comments are posted as part of the same review via the file's GraphQL payload, not as separate `gh pr comment` calls. **`--comment` is forbidden** — it produces an undecided review that strands the PR (Quay's gate requires `approved` to advance to `done`, and `changes-requested` is the only signal that re-engages the code worker). If the reviewer has no clear verdict, the right answer is `--approve` (with non-blocking notes in the body or as inline comments) or `--request-changes` (if anything is blocking).
-4. **Wrap generalizable rules in `quay-principle` fenced blocks.** For findings that state a rule applicable beyond the immediate change (e.g., "all callers of `assertOwner` must run under a Quay claim"), append a fenced block to the comment body:
-   ````
-   ```quay-principle
-   Callers of assertOwner must run under a Quay claim. Otherwise concurrent
-   ticks can each pass the check and race on substrate writes.
-   ```
-   ````
-   Tick parses these blocks (§8.2) and stores the prose in `review_findings.principle`. Locus-bearing findings without a generalizable rule omit the block; tick still stores them in `review_findings` with `principle = NULL`.
-5. **Inline comments where the issue has a locus.** A finding tied to specific code lives as an inline comment with `path` + `line`. A finding about the change as a whole lives in the review body. Don't smear locus-bearing findings into the body; don't manufacture line refs for body-level findings.
-6. **Read-only on the worktree.** No commits, no pushes, no installs, no file writes except `.quay-blocked.md`. (Substrate-level constraint from §6.2; restated here so the contract list is complete.)
-7. **Exit cleanly when done.** Either a review is posted or `.quay-blocked.md` is written; then exit. Don't loop, don't sleep waiting for input, don't poll GitHub for further state.
+4. **Inline comments where the issue has a locus.** A finding tied to specific code lives as an inline comment with `path` + `line`. A finding about the change as a whole lives in the review body. Don't smear locus-bearing findings into the body; don't manufacture line refs for body-level findings.
+5. **No code or git mutation.** No commits, no pushes, no installs, no file writes to repo paths. The substrate's own `.quay-*` files are fine; if you can't proceed, write `.quay-blocked.md` and exit. (Substrate-level constraint from §6.2; restated here so the contract list is complete.)
+6. **Exit cleanly when done.** Either a review is posted or `.quay-blocked.md` is written; then exit. Don't loop, don't sleep waiting for input, don't poll GitHub for further state.
 
-The default preamble at `docs/quay-reviewer-preamble-default.md` enforces all seven pieces in prose. Deployments overriding the preamble (via a new `kind = 'review'` row in `preambles`; §6.3) are responsible for preserving the pieces tick depends on — specifically (3), (4), (6), and (7). Pieces (1), (2), and (5) affect review quality but not Quay's machinery.
+The default preamble at `docs/quay-reviewer-preamble-default.md` enforces all six pieces in prose. Deployments overriding the preamble (via a new `kind = 'review'` row in `preambles`; §6.3) are responsible for preserving the pieces tick depends on — specifically (3), (5), and (6). Pieces (1), (2), and (4) affect review quality but not Quay's machinery.
+
+(A `quay-principle` fenced-block contract for tagging generalizable rules in review comments was specced in earlier drafts. It's deferred to the future findings/search spec — see §2 out-of-scope and the archived prior draft in `docs/archive/quay-spec-pr-review.md` §5 for the prior shape.)
 
 ### 7.2 `quay review-pr` CLI
 
@@ -611,7 +584,7 @@ quay review-pr --pr <repo>:<num> [--head-sha <sha>]
 The entry point's dedup is the only idempotency guarantee:
 
 - **`(task_id, head_sha)` dedup** holds across all callers and all retries. Tick can call the entry point; CI can call it for the same PR; both can fire concurrently. The first call that wins the row-insert race schedules the attempt; the rest return its id.
-- **Concurrency:** the entry point uses a transaction with the lookup-then-insert sequenced; concurrent callers serialize on the `attempts_review_dedup_idx` unique-ish view. (Implementation note for §11: a partial unique index on `(task_id, head_sha) WHERE reason = 'review_only' AND head_sha IS NOT NULL` provides DB-level enforcement.)
+- **Concurrency:** the entry point uses a transaction with the lookup-then-insert sequenced; concurrent callers serialize on the `attempts_review_dedup_idx` unique partial index (§5.2).
 - **No external dedup:** Quay does **not** consult GitHub for "is there already a Quay review on this SHA?" before scheduling. The `attempts` table is the single source of truth. GitHub-side state (deleted reviews, restored reviews, manually filed bot reviews) is not consulted.
 
 ### 7.4 CLI output and exit codes
@@ -637,235 +610,68 @@ Exit codes:
 
 CI workflows treat exit 0 as "review will eventually appear on GitHub" and exit non-zero as "Quay couldn't accept this trigger; investigate." There is no exit code for "review filed" — that information lives on GitHub, not in this CLI.
 
-## 8. Findings ingestion
+## 8. References, dependencies, and forward compatibility
 
-After the reviewer worker exits and tick fetches the posted review (per §6.6 step 2), tick parses the review payload into `review_findings` rows. This section pins what gets parsed and how.
+### 8.1 Dependencies
 
-### 8.1 What becomes a finding
+`docs/quay-spec-deployment-adapters.md` is a **soft dependency**, not a hard one. The adapters migration is already in place (`migrations/0002_deployment_adapters.sql` — owns `task_tags`). The reviewer subsystem can ship without adapters being wired into `quay enqueue --linear-issue`; the synthetic-task path simply uses a thin `gh pr view` brief, and the worker self-serves any external context per §7.1 piece 2.
 
-One `review_findings` row per **inline comment** (a GitHub review comment with `path` and `line` fields), plus optionally one row for the **review body** if it contains substantive content:
+What adapters *improve* (but don't gate):
+- **Synthetic-task rich briefs.** With Linear + Slack adapters available, the synthetic-task brief composition can use `ticketContext.fetch(identifier)` to pull Linear ticket bodies and Slack-thread context (per the adapters spec §6.1). Without adapters, the worker reads the thin brief and follows identifiers itself.
 
-| Source | Row produced? | `file_path` | `line_number` |
-|---|---|---|---|
-| Inline comment (`path` + `line` set) | Always | from GH | from GH |
-| Review body, non-empty and non-trivial | Yes (one row) | NULL | NULL |
-| Review body, empty or boilerplate-only | No row | — | — |
-| `gh pr comment` (PR conversation tab) | Not ingested (per §2 out-of-scope) | — | — |
+### 8.2 Preserved code paths
 
-"Substantive" for the review body means: contains at least one non-whitespace character after stripping the conventional GitHub auto-summary lines (`> N issues found`, `> Approved`, etc.). If the body is purely procedural — "Approved." or "Requesting changes per inline comments" — no body-level finding is created; the verdict already carries that information. Implementation: strip trailing whitespace and trivial-decision phrases, then check the remainder length.
+Nothing removed. The existing human-review respawn loop in `src/core/non_budget_respawn.ts` stays in place and is **reused** for Quay-owned CHANGES_REQUESTED from the Quay reviewer (per §6.6). Specifically:
 
-The body-level finding (when present) carries the body prose in `comment_body`; the `principle` column is populated only if the body contains a `quay-principle` fenced block.
-
-### 8.2 `quay-principle` fenced-block parsing
-
-The block format (worker contract piece §7.1 #4):
-
-````
-```quay-principle
-<one or more lines of prose stating the generalizable rule>
-```
-````
-
-Parser rules:
-
-1. **Detection.** Match the fence regex `^```quay-principle\s*$` to `^```\s*$` (non-greedy across newlines). Standard markdown fenced-block syntax; the info-string is exactly `quay-principle` (case-sensitive, no language hint after).
-2. **Multiple blocks in one comment.** If a comment body contains more than one `quay-principle` block, the **first** is taken and the rest are ignored (logged as a parse warning). Rationale: one comment = one principle; if the worker really wants to state two rules they should be separate comments. Keeps `review_findings.principle` 1:1 with the row.
-3. **Block content.** Whatever lies between the fences, with leading/trailing whitespace stripped. Empty blocks (only whitespace between fences) produce `principle = NULL` and a parse warning.
-4. **No block.** Comment body without any `quay-principle` block produces `principle = NULL`. The finding is still stored; it's just locus-bearing-only with no generalizable rule attached.
-5. **`comment_body` preserves the fenced block.** The parser does not strip the block from `comment_body` — the column stores the full original prose. Queries that want "the rule prose alone" use `principle`; queries that want "the full author voice" use `comment_body`.
-
-The parser is pure (no DB access, no GitHub access); it takes a string and returns `{principle: string | null, warnings: string[]}`. Living in its own module makes it testable in isolation and reusable by the future `quay query-findings` CLI for re-parsing.
-
-### 8.3 `source_url` composition
-
-The `source_url` column links each finding back to its GitHub origin:
-
-- **Inline comment finding:** `<pr_url>#discussion_r<comment_id>` (GitHub's canonical deep-link to a review comment).
-- **Review body finding:** `<pr_url>#pullrequestreview-<review_id>` (canonical deep-link to a review).
-
-`pr_url` is taken from `tasks.pr_url`. The numeric ids are taken from the `gh pr view` payload. Quay does not construct URLs from `<repo>/<num>` — it uses the payload-supplied PR url verbatim to avoid mismatches between configured base URLs and what GitHub canonicalizes to.
-
-### 8.4 Transaction boundary
-
-All findings for a single review attempt are inserted in **one SQLite transaction**, alongside the `attempts.review_verdict` update and the task-state transition. If the transaction fails (e.g., a parser exception on one comment), no findings are inserted, the verdict is not set, and the task stays in `pr-review`. Tick retries on the next pass: the worker exit is observable, the review payload is re-fetchable from `gh pr view`, and the parser is pure — the operation is idempotent at the cost of one extra GitHub round-trip.
-
-The transaction also writes the `review_comments` artifact (free-form text blob for the next code worker, per §5.7). Both inserts succeed or both roll back; the code worker reading the artifact and a `quay query-findings` consumer see consistent state.
-
-### 8.5 Error handling
-
-| Error | Behavior |
-|---|---|
-| `gh pr view` returns no review for the bot at this SHA | `review_verdict = 'errored'`, no findings inserted, task → `awaiting-changes`. Diagnostic logged. |
-| GraphQL fetch for inline comments fails | Transaction aborted, retried next tick. After 3 retries, `review_verdict = 'errored'` and findings ingestion abandoned for this attempt; review still visible on GitHub. |
-| `quay-principle` block malformed (unclosed fence, invalid UTF-8) | Comment's `principle = NULL`, warning logged, parsing continues for other comments. Never blocks ingestion. |
-| Two `quay-principle` blocks in one comment | First wins, warning logged. |
-| Empty review body that GitHub still surfaces as a review | No body-level finding, no error. Inline findings still ingested. |
-
-The principle: **partial failure on parsing produces partial results, not zero results.** A single malformed comment doesn't lose the rest of the review's findings. A complete fetch failure does block ingestion and surfaces as `review_verdict = 'errored'`, which the state machine handles cleanly (task back to `awaiting-changes`).
-
-## 9. `quay query-findings` CLI
-
-The single self-serve read surface over stored findings. Used by workers (to look up prior findings on files they're touching), by humans (debugging, exploration), and by any external consumer that wants to build over `review_findings`.
-
-### 9.1 Signature
-
-```
-quay query-findings [filters...] [output...] [pagination...]
-```
-
-**Filters** (combinable; all conditions AND-ed together):
-
-| Flag | Effect | Example |
-|---|---|---|
-| `--file PATH` | Exact match on `review_findings.file_path`. | `--file src/core/tick.ts` |
-| `--dir PATH` | Prefix match on `file_path` (trailing slash optional). | `--dir src/core/` |
-| `--tag NAME` | Inner-join `task_tags`, filter on tag. Repeatable: multiple `--tag` are OR-ed. | `--tag auth --tag billing` |
-| `--repo REPO_ID` | Inner-join `tasks`, filter on `tasks.repo_id`. | `--repo acc-quay` |
-| `--task-id ID` | Direct match on `review_findings.task_id`. | `--task-id pr-review-acc-quay-847` |
-| `--since DURATION` | `captured_at >= now() - DURATION`. Accepts `7d`, `30d`, `12h`, or an ISO-8601 date. | `--since 14d` |
-| `--principle-only` | `WHERE principle IS NOT NULL`. Filters to findings with a generalizable rule. | |
-| `--match QUERY` | FTS5 MATCH against `review_findings_fts` (covers `principle` and `comment_body`). Standard SQLite FTS5 query syntax. | `--match "claim AND lock"` |
-
-**Output:**
-
-| Flag | Effect |
-|---|---|
-| `--json` | Emit one JSON object per line (newline-delimited JSON). Default is human-readable text (see §9.3). |
-| `--format <text\|json\|tsv>` | Same as `--json` but explicit; `tsv` for spreadsheet pipelines. |
-
-**Pagination:**
-
-| Flag | Effect |
-|---|---|
-| `--limit N` | Cap results. Default **50**, max 1000. |
-| `--order <recent\|oldest\|task>` | Sort key. Default `recent` (`captured_at DESC`). `task` groups by `task_id` then orders by `captured_at DESC` within each. |
-
-No `--offset`. Pagination beyond `--limit` is out of v1 scope; callers needing deep paging use `--since` with successive time windows.
-
-### 9.2 Filter semantics
-
-- **All filters AND.** Specifying `--file src/core/tick.ts --tag auth` returns findings on `tick.ts` that *also* belong to tasks tagged `auth`.
-- **`--tag` is the one exception:** repeated `--tag` flags within one invocation are OR-ed (matches any of the named tags). To require *all* tags, run the query multiple times and intersect externally; this is rare enough to not justify a flag in v1.
-- **No filter = no filter.** `quay query-findings` with no flags returns the most recent 50 findings across the deployment, ordered by `captured_at DESC`. Useful sanity check; not a recommended workflow.
-- **`--match` plays with FTS5 ranking.** When `--match` is supplied, results are ordered by FTS5 rank by default (not `captured_at`). `--order` overrides; `--order recent` falls back to date ordering at the cost of relevance.
-
-### 9.3 Output formats
-
-**Text (default):**
-
-```
-finding_id=42 task=pr-review-acc-quay-847 file=src/core/tick.ts:312
-  source: https://github.com/acc/quay/pull/847#discussion_r1234567
-  principle: Callers of assertOwner must run under a Quay claim.
-  comment: The call on line 312 isn't claim-wrapped. ...
-  captured: 2026-05-08T14:32:11Z
-
-finding_id=41 task=...
-```
-
-Each finding is one stanza with blank-line separators. The `comment` field truncates at 200 chars with `...` in text mode; full prose is available via `--json`.
-
-**JSON (`--json`):**
-
-Newline-delimited JSON — one finding per line:
-
-```json
-{"finding_id":42,"task_id":"pr-review-acc-quay-847","attempt_id":91,"review_id":"5523112201","principle":"Callers of assertOwner must run under a Quay claim.","comment_body":"The call on line 312 isn't claim-wrapped. ...","file_path":"src/core/tick.ts","line_number":312,"source_url":"https://github.com/acc/quay/pull/847#discussion_r1234567","captured_at":"2026-05-08T14:32:11Z"}
-```
-
-NDJSON (not a JSON array) so it streams cleanly through pipes and stays useful at any result count.
-
-**TSV (`--format tsv`):**
-
-Tab-separated, one header line then one finding per line. Columns: `finding_id`, `task_id`, `file_path`, `line_number`, `principle`, `captured_at`, `source_url`. `comment_body` omitted (would break TSV with embedded newlines); callers needing body prose use `--json`.
-
-### 9.4 Exit codes
-
-| Code | Meaning |
-|---|---|
-| 0 | Query succeeded. Zero matching rows is still exit 0 (empty output). |
-| 2 | Argument error (malformed `--since`, unknown `--format`, etc.). |
-| 4 | Quay-side error (DB unreachable, schema mismatch). |
-
-No exit code for "no results" — that's a query outcome, not an error.
-
-### 9.5 Intended use cases
-
-The CLI is the **single read surface** the spec ships. Three intended consumers:
-
-1. **Reviewer worker, looking up prior findings on touched files.** The reviewer reads the diff, then runs `quay query-findings --file <path>` (or `--dir`) per touched path, folds the results into its own context, and reviews with that history available. Loop-closing is left to whoever owns the worker preamble — Quay just makes the data queryable.
-2. **Code worker, before pushing a fix.** Same shape, different consumer. A worker addressing CHANGES_REQUESTED can query prior findings on the same area before composing the fix.
-3. **Humans, ad-hoc.** `quay query-findings --match "race" --since 30d` to look up recent findings about race conditions. `quay query-findings --task-id <id>` to see one task's full review history. `quay query-findings --tag auth --principle-only` for the curated rules in a clustered area.
-
-No other read surface ships. Web UIs, dashboards, Slack bots — all build over this CLI (or directly over the `review_findings` schema, which is part of the substrate contract).
-
-## 10. References, dependencies, and forward compatibility
-
-### 10.1 Hard dependency
-
-This spec **MUST NOT be implemented before** `docs/quay-spec-deployment-adapters.md` has landed and is wired into the task-creation path (`quay enqueue --linear-issue`). Concrete dependency points:
-
-- The **synthetic-task path** composes a thin brief from `gh pr view` when adapters are absent, and a rich brief via `ticketContext.fetch(identifier)` when adapters are present. The latter requires the adapter spec's primitive.
-- The **`task_tags` table** is shared between adapter-enabled enqueue (Linear `quay-config` block → tags) and this spec's `--tag` flag on `quay enqueue` and `quay query-findings --tag`. Whichever migration lands first should create the table; this spec assumes it's available.
-- The **rich brief structure** (per `docs/quay-spec-deployment-adapters.md` §6.1) is a contract the reviewer worker depends on for adapter-enabled deployments — its preamble references the section headings the adapter spec pins.
-
-Adapter-less deployments (no Linear, no Slack) can still ship this spec; the synthetic path falls back to the thin `gh pr view` brief and the worker self-serves any external context per §7.1 piece 2.
-
-### 10.2 Preserved code paths (nothing removed)
-
-This spec **adds** the Quay-spawned reviewer alongside the existing human-review respawn loop in `src/core/non_budget_respawn.ts`. Nothing is removed:
-
-- The existing `attempts.reason = 'review'` value (used by `non_budget_respawn.ts` when a human posts CHANGES_REQUESTED) stays. It is distinct from the new `reason = 'review_only'` (the Quay reviewer worker) — see §5.1.
+- The existing `attempts.reason = 'review'` value (set by `non_budget_respawn.ts` on human CHANGES_REQUESTED) stays. The new `reason = 'review_only'` (the Quay reviewer worker itself) is distinct (§5.1).
 - The existing `tasks.last_review_id_acted_on` dedup (`migrations/0001_init.sql:50`) stays and continues to drive human-review respawns.
-- The existing `non_budget_respawns_consumed` cap and `non_budget_loop` terminal state stay; both Quay-reviewer-driven and human-driven respawns count toward the same cap (§4 "Human reviews coexist with the Quay reviewer").
+- The existing `non_budget_respawns_consumed` cap and `non_budget_loop` terminal state stay; both Quay-reviewer-driven and human-driven respawns count toward the same cap.
 
-Migration of behavior is **opt-in per deployment.** Deployments without the reviewer enabled (no `kind = 'review'` row in `preambles`, or feature flag off) keep the legacy `pr-open → done` path on CI green. Deployments with the reviewer enabled get the new `pr-open → pr-review → done | awaiting-changes` flow. The substrate carries both shapes.
-
-### 10.3 Related specs
+### 8.3 Related specs
 
 - `docs/quay-spec.md` — substrate spec (locked v1). Source of the existing state machine, worker substrate (tmux + supervisor + worktree), `attempts` table, `tasks.head_sha`, `tasks.last_review_id_acted_on`, `non_budget_respawns_consumed` counter.
-- `docs/quay-spec-ticket-validation.md` — `quay validate-ticket` library/CLI. Independent of this spec; validates ticket-shape, not review activity.
-- `docs/quay-spec-deployment-adapters.md` — Linear + Slack adapters. Hard dependency for synthetic-task rich-brief composition (§10.1).
-- `docs/archive/quay-spec-pr-review.md` — superseded prior draft. Source for the still-valid design pieces this spec carries forward verbatim (synthetic `task_id` identity, `(task_id, head_sha)` dedup, `review_findings` schema, `quay-principle` contract, force-push handling).
+- `docs/quay-spec-ticket-validation.md` — `quay validate-ticket` library/CLI. Independent of this spec.
+- `docs/quay-spec-deployment-adapters.md` — Linear + Slack adapters. Soft dependency for richer synthetic-task briefs (§8.1).
+- `docs/archive/quay-spec-pr-review.md` — superseded prior draft. Source for still-valid design pieces this spec carries forward (synthetic `task_id` identity, `(task_id, head_sha)` dedup, force-push handling). Also the original home of the `review_findings` schema and `quay-principle` contract, which v1 defers.
 - `docs/orchestrator-design-notes.md` §3.1, §3.2, §5, §7 — broader rationale, v2+ shape, deferred-work catalogue.
 - `docs/quay-reviewer-preamble-default.md` — human-readable source-of-truth for the default reviewer preamble. Inlined verbatim into the `DEFAULT_REVIEWER_PREAMBLE_BODY` constant at edit time (§6.3).
 
-### 10.4 Forward compatibility / v2 graduation
+### 8.4 Forward compatibility / v2 graduation
 
 Every additive piece this spec defers is designed to land **without rewriting v1 data.**
 
-| v2 feature | Cutover path |
+| Future feature | Cutover path |
 |---|---|
+| **Structured findings storage** (`review_findings` + FTS5 + `quay-principle` parser + `quay query-findings` CLI) | A future spec adds the table and parser; v1 backfills by re-parsing the `review_comments` artifacts stored against each `review_only` attempt. `attempts.review_id` provides the GitHub-side identity. No v1 data is dropped or renamed. |
 | **Multi-model panel review** (`review_runs`, `review_panelists`, consolidator) | New tables added. v1 `review_only` attempts stay valid; v2 backfills them as N=1 runs into the new `review_runs` table keyed `(repo_id, pr_number, head_sha)`. |
-| **`reviewer_preambles` SQL table** with named, append-only versioning | Copy `preambles WHERE kind = 'review'` rows over. v1's `preambles.kind` column can stay or be dropped. `attempts.preamble_id` references graduate to per-panelist `reviewer_preamble_id`. |
-| **Blocking mode** (`quay review-pr --wait --timeout`) | Two CLI flags added. v1's `(task_id, head_sha)` dedup graduates to run-level `UNIQUE(repo_id, pr_number, head_sha)` on `review_runs`. |
+| **`reviewer_preambles` SQL table** with named, append-only versioning | Copy `preambles WHERE kind = 'review'` rows over. v1's `preambles.kind` column can stay or be dropped. |
+| **Blocking mode** (`quay review-pr --wait --timeout`) | Two CLI flags added. v1's `(task_id, head_sha)` dedup graduates to run-level when `review_runs` lands. |
 | **Reviewer-improvement loop** (agent-vs-human divergence capture) | Nullable column adds on `attempts` (or per-run on `review_runs`); new artifact kind `agent_review`. v1 data is honest about borderline cases — nothing to backfill. |
-| **Brief enrichment / loop closing** (principle injection into future briefs) | External consumer over `quay query-findings`. Quay-side: optional `--enrich-principles` flag on `enqueue`. v1 `review_findings` rows are valid input verbatim. |
+| **Separate `max_concurrent_review_runs` cap** | Add a top-level config key and split the scheduler counting. v1's shared `countRunning()` over actually-running attempts stays valid as a more conservative baseline. |
 | **Human approval as an override for Quay's gate** | Additive `pr-review → done` arrow gated on a new human-approval observation. v1's "advisory only" semantics stay valid as the default. |
-| **Multi-repo principles** | Optional `scope TEXT` column on `review_findings`. v1 rows backfill to per-task-repo via JOIN. |
 
-The forward-compatible naming choice in v1: this spec uses **`review_only`** for the attempt reason rather than `review_run` or `panel_review`, so when `review_runs` lands as a table the namespace is unclaimed.
+Forward-compatible naming choice in v1: this spec uses **`review_only`** for the attempt reason rather than `review_run` or `panel_review`, so when `review_runs` lands as a table the namespace is unclaimed.
 
-### 10.5 Open questions
+### 8.5 Open questions
 
-- ~~**State-machine shape.**~~ Resolved: `pr-review` as a new top-level state; `awaiting-changes` as the post-CHANGES_REQUESTED wait. Synthetic tasks share the review loop, skip `queued` / `pr-open`. §4.
-- ~~**Approval gate semantics.**~~ Resolved: strict gating on Quay reviewer approval for `done`. Human approvals are advisory in v1 (§4 "Human reviews coexist with the Quay reviewer").
+- ~~**State-machine shape.**~~ Resolved (§4): `pr-review` and `waiting_external_changes` (synthetic-only) as new top-level states. Quay-owned CHANGES_REQUESTED reuses the existing `non_budget_respawn` path to `queued`.
+- ~~**Approval gate semantics.**~~ Resolved: strict gating on Quay reviewer approval for `done`, **conditional on `[reviewer].gate_quay_owned_done = true`**. Default off for rollout safety. Human approvals advisory only.
 - ~~**Trigger uniformity.**~~ Resolved: single idempotent entry point (`enterReview`); both tick and `quay review-pr` call it. Dedup on `(task_id, head_sha)`.
-- ~~**Reviewer preamble storage.**~~ Resolved: `preambles` SQL table with new `kind` column (`'code'` / `'review'`). Mirrors existing code-worker preamble pattern.
-- ~~**Per-deployment reviewer-disable flag.**~~ Resolved: **required in v1**, not deferred. `[reviewer].enabled` is the rollout-safety knob the gate-on-done property needs. §6.8.
-- **Reviewer concurrency starvation.** If `max_concurrent_review_runs` is set too low and the deployment has many open PRs, review attempts will queue indefinitely. The v1 design does not include a backpressure signal back to CI. Whether to add one (and what shape — exit code, message in stdout, separate poll endpoint) is deferred until measured behavior justifies it.
-- **`quay query-findings` access control.** v1 has no auth on this CLI — anyone with shell access to the Quay host can query any finding. Multi-tenant deployments may want per-repo scoping; not in v1. The schema supports it (`task_tags`, `tasks.repo_id`), so adding a `--as-repo <id>` filter constrained by config is additive.
+- ~~**Reviewer preamble storage.**~~ Resolved: `preambles` SQL table with new `kind` column. Mirrors existing code-worker preamble pattern.
+- ~~**Rollout flags.**~~ Resolved: two flags, `[reviewer].enabled` (subsystem on/off) and `[reviewer].gate_quay_owned_done` (whether Quay reviewer approval gates Quay-owned `done`). §6.8.
+- ~~**Concurrency cap.**~~ Resolved: shared `max_concurrent` for v1, with `countRunning()` generalized to count actually-running attempts across both kinds. Separate `max_concurrent_review_runs` deferred (§8.4 graduation row).
+- ~~**Findings storage / search.**~~ Resolved: **deferred** to a future spec (§2 out-of-scope). v1 stores the raw review as an artifact + `attempts.review_id` / `head_sha` / `review_verdict`. Backfillable from those artifacts when a consumer needs structured findings.
+- **Reviewer concurrency starvation.** If the deployment has many open PRs and `max_concurrent` is set low, review attempts compete with code workers for the same slots. The v1 design does not include a backpressure signal back to CI. Add the separate cap (deferred, §8.4) if starvation is observed.
+- **Synthetic task access control.** v1 doesn't restrict who can call `quay review-pr`. Multi-tenant deployments may want per-repo scoping; not in v1.
 
-### 10.7 Implementation notes
+### 8.6 Implementation notes
 
-A few notes that aren't requirements but should shape implementation:
+- **Make the review-ingestion port explicit.** The existing `src/adapters/github.ts` provides `fetchInlineReviewComments` with robust GraphQL pagination (`src/adapters/github.ts:323`) and a `prSnapshot` shape used by `non_budget_respawn`. The reaper's review-ingestion path (§6.6) is a distinct operation — it fetches a specific bot-authored review at a specific SHA. Don't stretch `prSnapshot` to carry the new fields; expose a focused port like `fetchPostedReview(repo, pr, head_sha, author)` returning a `PostedReview` shape with review body + inline comments + `review_id`. Keeps the adapter surface composable.
+- **Reviewer scheduling reuses the existing scheduler, the reaper is new.** Per §6.1: `promoteAndSpawn`'s substrate (atomic promotion, tmux spawn, agent identity, prompt loading) is shared between code-worker and reviewer spawns; what differs is the predicate, a couple of formatting / state-transition arguments, and the post-exit reaper.
+- **The shared cap change is load-bearing.** `countRunning()` must be generalized to count attempts (not tasks-in-running) for the shared cap to honestly include reviewer workers (§6.4). Without this, reviewer attempts run unbounded.
 
-- **Make the review-ingestion port explicit.** The existing `src/adapters/github.ts` provides `fetchInlineReviewComments` with robust GraphQL pagination (`src/adapters/github.ts:323`) and a `prSnapshot` shape used by `non_budget_respawn`. The review-ingestion path (§8) is a distinct operation — it fetches a specific bot-authored review at a specific SHA, parses fenced blocks, and writes structured findings. Don't stretch `prSnapshot` to carry the new fields; expose a focused port like `fetchPostedReview(repo, pr, head_sha, author)` returning a `PostedReview` shape with review body + inline comments + review_id + source URLs. Keeps the adapter surface composable and the parser (§8.2) unit-testable against fixtures.
-- **Reviewer scheduling reuses the existing scheduler, the reaper is new.** Per §6.1: `promoteAndSpawn`'s substrate (atomic promotion, tmux spawn, agent identity, prompt loading) is shared between code-worker and reviewer spawns; what differs is the predicate, the cap, and a few formatting / state-transition arguments. The post-exit reaper is genuinely new logic (verdict mapping, findings ingestion, transitions out of `pr-review`) and should be its own code path.
-- **Test fixtures for fenced-block parsing.** §8.2 is a pure function over comment-body strings. Build a fixture suite covering: zero blocks, one block, two blocks (first wins), empty block, unclosed fence, mixed languages in the same body, blocks at the very end of the body without trailing newline. The parser is small but the surface to get wrong is real.
+### 8.7 External references
 
-### 10.6 External references
-
-- `https://docs.github.com/en/rest/pulls/reviews` — GitHub REST docs for `gh pr review` payload shape; consulted by tick's review-fetch step (§6.6 step 2).
-- `https://www.sqlite.org/fts5.html` — SQLite FTS5 docs; FTS5 MATCH syntax used by `quay query-findings --match` (§9.1).
+- `https://docs.github.com/en/rest/pulls/reviews` — GitHub REST docs for `gh pr review` payload shape; consulted by the reaper (§6.6 step 2).
 - `https://cli.github.com/manual/gh_pr_view` — `gh pr view` CLI used by both worker (per-review fetching) and tick (verdict polling).
+- `https://cli.github.com/manual/gh_pr_checkout` — `gh pr checkout` used by the synthetic-task worktree materialization (§6.7).
