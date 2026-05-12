@@ -16,6 +16,14 @@ export interface TmuxSpawnInput {
   worktreePath: string;
   promptContent: string;
   agentInvocation: string;
+  // Per-spawn environment variables to inject into the pane. Used today by
+  // the reviewer spawn path to hand `GH_TOKEN` from a distinct gh identity
+  // (GitHub refuses self-review, so reviewer and worker must authenticate
+  // as different identities). Passed through `tmux new-session -e` and
+  // `respawn-pane -e` so the values reach the pane regardless of the tmux
+  // server's `update-environment` list. Empty/undefined leaves the pane's
+  // env identical to the worker pane's.
+  extraEnv?: Record<string, string>;
 }
 
 export interface TmuxPort {

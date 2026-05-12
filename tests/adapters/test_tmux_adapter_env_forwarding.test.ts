@@ -108,3 +108,34 @@ t("env: process.env propagates a runtime-set variable into the agent pane", asyn
   expect(log).not.toBeNull();
   expect(log!).toContain(`PROBE=${marker}`);
 });
+
+t("extraEnv injects per-spawn variables into the agent pane", async () => {
+  // The reviewer spawn path uses extraEnv to hand the pane a distinct
+  // GH_TOKEN without affecting other panes under the same tmux server.
+  // The `-e` flag is the only mechanism that's reliable across tmux
+  // versions regardless of `update-environment`, so verify the pane
+  // actually sees the value.
+  const adapter = new TmuxAdapter();
+  const worktreePath = tempWorktree();
+  const sessionName = uniqueSession("env-extra");
+  const logPath = join(worktreePath, ".quay-session.log");
+  const marker = `gh_extra_${Math.random().toString(36).slice(2, 10)}`;
+
+  adapter.spawn({
+    sessionName,
+    worktreePath,
+    promptContent: "ignored",
+    agentInvocation: 'printf "GH=%s\\n" "$GH_TOKEN"; sleep 1',
+    extraEnv: { GH_TOKEN: marker },
+  });
+
+  const wrote = await waitFor(
+    () => existsSync(logPath) && statSync(logPath).size > 0,
+    3000,
+  );
+  expect(wrote).toBe(true);
+
+  const log = adapter.collectLog(sessionName, worktreePath);
+  expect(log).not.toBeNull();
+  expect(log!).toContain(`GH=${marker}`);
+});

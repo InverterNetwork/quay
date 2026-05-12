@@ -95,6 +95,13 @@ export class TmuxAdapter implements TmuxPort {
     // its connecting client, so anything quay tick mints or refreshes at
     // runtime (GH_TOKEN, GITHUB_TOKEN, credential-helper sockets, etc.)
     // would otherwise be invisible to the agent — silent-exit territory.
+    //
+    // `extraEnv` entries are additionally passed as `-e KEY=VAL` so they
+    // land in the pane regardless of the tmux server's `update-environment`
+    // list. This is the mechanism the reviewer spawn uses to inject a
+    // distinct `GH_TOKEN` without affecting any worker pane that ran
+    // earlier under the same tmux server.
+    const extraEnvArgs = buildExtraEnvArgs(input.extraEnv);
     const result = Bun.spawnSync({
       cmd: [
         "tmux",
@@ -104,6 +111,7 @@ export class TmuxAdapter implements TmuxPort {
         input.sessionName,
         "-c",
         input.worktreePath,
+        ...extraEnvArgs,
         "cat",
       ],
       env: process.env,
@@ -173,6 +181,7 @@ export class TmuxAdapter implements TmuxPort {
         "-k",
         "-c",
         input.worktreePath,
+        ...extraEnvArgs,
         "-t",
         `${input.sessionName}:0.0`,
         tmuxCommand,
@@ -326,6 +335,22 @@ export class TmuxAdapter implements TmuxPort {
 // escaped with `'\''`, and reopened.
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+// Expand `{ KEY: "value" }` into the argv pairs tmux expects for env
+// injection: `-e KEY=value -e KEY2=value2 ...`. tmux receives each pair as
+// a single argv element so no quoting is needed; values that include `=`
+// keep working because tmux splits on the first one only. Empty names are
+// dropped — tmux rejects them and the resulting spawn failure would mask
+// the real config bug. An undefined map collapses to no args.
+function buildExtraEnvArgs(extraEnv: Record<string, string> | undefined): string[] {
+  if (!extraEnv) return [];
+  const args: string[] = [];
+  for (const [name, value] of Object.entries(extraEnv)) {
+    if (name.length === 0) continue;
+    args.push("-e", `${name}=${value}`);
+  }
+  return args;
 }
 
 // Parses a tmux format substitution into a number. Returns null for the

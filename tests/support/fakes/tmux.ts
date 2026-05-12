@@ -10,6 +10,7 @@ export interface FakeTmuxSpawnCall {
   worktreePath: string;
   promptContent: string;
   agentInvocation: string;
+  extraEnv?: Record<string, string>;
 }
 
 export class FakeTmux implements TmuxPort {

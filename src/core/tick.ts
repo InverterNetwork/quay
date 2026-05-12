@@ -96,6 +96,13 @@ export interface TickOptions {
   // ingest matches the right author when tick and worker authenticate as
   // different identities. Defaults to whatever `gh api user` reports.
   reviewerLogin?: string;
+  // Absolute path to a file (expected mode 0600) whose contents are
+  // exported as `GH_TOKEN` in the reviewer tmux pane's environment, so
+  // the reviewer can authenticate as a different GitHub identity than the
+  // worker that opened the PR (GitHub blocks self-review). Read fresh on
+  // every reviewer spawn so a token-refresher timer can rotate the file
+  // without bouncing tick. Worker spawns are unaffected.
+  reviewerGhTokenFile?: string;
   // Either `agentResolver` (production: looks up the registered agent
   // for a given (repo_id, role)) or `agentInvocation` (test shorthand:
   // same string for every attempt). When both are set, the resolver
@@ -2496,12 +2503,35 @@ function promoteAndSpawnReviewer(
   }
 
   const sessionName = `quay-review-${task.tmux_id}-${task.attempt_number}`;
+  // Read the reviewer-only gh token (if configured) immediately before
+  // spawn so the freshest contents of the file land in the pane. A
+  // missing/unreadable file is a hard spawn failure: silently falling
+  // back to the host gh auth would reintroduce the self-review block
+  // this config knob exists to dodge.
+  let extraEnv: Record<string, string> | undefined;
+  if (options.reviewerGhTokenFile !== undefined) {
+    try {
+      const token = readFileSync(options.reviewerGhTokenFile, "utf8").trim();
+      if (token.length === 0) {
+        throw new Error("file is empty");
+      }
+      extraEnv = { GH_TOKEN: token };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        task_id: task.task_id,
+        action: "spawn_substrate_failed",
+        error: `reviewer gh_token_file (${options.reviewerGhTokenFile}) unreadable: ${message}`,
+      };
+    }
+  }
   try {
     deps.tmux.spawn({
       sessionName,
       worktreePath: task.worktree_path,
       promptContent,
       agentInvocation,
+      ...(extraEnv !== undefined ? { extraEnv } : {}),
     });
   } catch (err) {
     return {
