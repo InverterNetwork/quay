@@ -221,6 +221,7 @@ agent_invocation = "claude < {prompt_file}"
 enabled = false
 gate_quay_owned_done = false
 # login = "quay-bot"  # gh login tick matches posted reviews against; set when the worker authenticates as a different gh identity than tick. Defaults to `gh api user`.
+# gh_token_file = "/run/hermes/reviewer-gh-token"  # mode 0600 file the reviewer pane reads as GH_TOKEN; required when reviewer must be a different GitHub identity than the worker. Missing/empty = spawn_substrate_failed.
 
 # Linear/Slack adapters (see docs/user/linear-and-slack.md)
 [adapters.linear]

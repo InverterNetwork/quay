@@ -2503,19 +2503,22 @@ function promoteAndSpawnReviewer(
   }
 
   const sessionName = `quay-review-${task.tmux_id}-${task.attempt_number}`;
-  // Read the reviewer-only gh token (if configured) immediately before
-  // spawn so the freshest contents of the file land in the pane. A
-  // missing/unreadable file is a hard spawn failure: silently falling
-  // back to the host gh auth would reintroduce the self-review block
-  // this config knob exists to dodge.
-  let extraEnv: Record<string, string> | undefined;
+  // Preflight the reviewer-only gh token file (if configured). A
+  // missing/empty file is a hard spawn failure: silently falling back to
+  // the host gh auth would reintroduce the self-review block this knob
+  // exists to dodge. The file content is NOT passed to the spawn — only
+  // the path is, so the pane wrapper reads it inline via `$(cat ...)`
+  // and the secret never lands in argv (where another user on the host
+  // could read it via `ps`). The preflight read is just an existence /
+  // non-empty check; the value is discarded.
+  let envFiles: Array<{ name: string; path: string }> | undefined;
   if (options.reviewerGhTokenFile !== undefined) {
     try {
       const token = readFileSync(options.reviewerGhTokenFile, "utf8").trim();
       if (token.length === 0) {
         throw new Error("file is empty");
       }
-      extraEnv = { GH_TOKEN: token };
+      envFiles = [{ name: "GH_TOKEN", path: options.reviewerGhTokenFile }];
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {
@@ -2531,7 +2534,7 @@ function promoteAndSpawnReviewer(
       worktreePath: task.worktree_path,
       promptContent,
       agentInvocation,
-      ...(extraEnv !== undefined ? { extraEnv } : {}),
+      ...(envFiles !== undefined ? { envFiles } : {}),
     });
   } catch (err) {
     return {

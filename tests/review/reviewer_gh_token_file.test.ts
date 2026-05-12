@@ -49,15 +49,16 @@ function seedPendingReview(harness: Harness, slug: string): {
   return { taskId, attemptId };
 }
 
-test("reviewer spawn injects GH_TOKEN extraEnv from gh_token_file", async () => {
+test("reviewer spawn passes only the token file path, never the token bytes", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
   const { taskId } = seedPendingReview(h, "token-ok");
   const tokenPath = join(h.dataDir, "reviewer-gh-token");
   mkdirSync(h.dataDir, { recursive: true });
-  // Trailing newline simulates what a hermes-agent token mint script
-  // would write; tick should strip it before exporting.
-  writeFileSync(tokenPath, "ghs_thereviewertoken\n");
+  // Marker distinctive enough that a serialization check can prove the
+  // token bytes don't appear anywhere in the spawn input.
+  const tokenBytes = "ghs_TOKEN_MARKER_424242";
+  writeFileSync(tokenPath, `${tokenBytes}\n`);
 
   const results = await tick_once(built.deps, {
     reviewerEnabled: true,
@@ -66,12 +67,16 @@ test("reviewer spawn injects GH_TOKEN extraEnv from gh_token_file", async () => 
 
   expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
   expect(built.tmux.spawnCalls).toHaveLength(1);
-  expect(built.tmux.spawnCalls[0]!.extraEnv).toEqual({
-    GH_TOKEN: "ghs_thereviewertoken",
-  });
+  const call = built.tmux.spawnCalls[0]!;
+  expect(call.envFiles).toEqual([{ name: "GH_TOKEN", path: tokenPath }]);
+  // The whole point of the in-pane `$(cat ...)` design: the token's bytes
+  // must NOT travel through the spawn input (and therefore not through
+  // any argv on the host). A naive implementation that read the file and
+  // stuffed the value into the spawn would regress this.
+  expect(JSON.stringify(call)).not.toContain(tokenBytes);
 });
 
-test("worker spawn never receives GH_TOKEN extraEnv even when reviewer config is set", async () => {
+test("worker spawn never receives GH_TOKEN envFiles even when reviewer config is set", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
   const tokenPath = join(h.dataDir, "reviewer-gh-token");
@@ -102,7 +107,7 @@ test("worker spawn never receives GH_TOKEN extraEnv even when reviewer config is
   expect(built.tmux.spawnCalls).toHaveLength(1);
   // The worker pane must inherit the host's default gh auth — never the
   // reviewer-specific token.
-  expect(built.tmux.spawnCalls[0]!.extraEnv).toBeUndefined();
+  expect(built.tmux.spawnCalls[0]!.envFiles).toBeUndefined();
 });
 
 test("reviewer spawn fails when gh_token_file is missing", async () => {
