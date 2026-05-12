@@ -83,6 +83,7 @@ export interface PrChecksReport {
 }
 
 export interface PrSnapshot {
+  prNumber?: number | null;
   state: PrTerminalState;
   headSha: string;
   baseSha: string | null;

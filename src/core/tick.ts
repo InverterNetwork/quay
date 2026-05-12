@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
-import type { GitHubPort, PrSnapshot } from "../ports/github.ts";
+import type { GitHubPort, PostedReview, PrSnapshot } from "../ports/github.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { probeAgentIdentity } from "./agent_identity.ts";
@@ -21,6 +21,7 @@ import {
 import { classifyCi } from "./ci_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
 import { scheduleNonBudgetRespawn } from "./non_budget_respawn.ts";
+import { enterReview, isSyntheticTaskId } from "./pr_review.ts";
 import {
   scheduleCleanSpawnRetry,
   scheduleDeterministicRetry,
@@ -103,6 +104,11 @@ export type TickAction =
   | "pr_merged"
   | "pr_closed_unmerged"
   | "review_respawn_scheduled"
+  | "review_requested"
+  | "review_approved"
+  | "review_changes_requested"
+  | "review_errored"
+  | "review_retry_scheduled"
   | "conflict_respawn_scheduled"
   | "non_budget_loop_parked"
   | "claim_expired"
@@ -147,6 +153,25 @@ interface PrOpenTaskRow {
   cancel_requested_at: string | null;
   last_review_id_acted_on: string | null;
   last_conflict_observation: string | null;
+}
+
+interface ReviewAttemptTaskRow {
+  task_id: string;
+  repo_id: string;
+  branch_name: string;
+  tmux_id: string;
+  worktree_path: string;
+  pr_number: number | null;
+  cancel_requested_at: string | null;
+  review_infra_failures_consecutive: number;
+  review_infra_failure_head_sha: string | null;
+  attempt_id: number;
+  attempt_number: number;
+  preamble_id: number;
+  head_sha: string;
+  tmux_session: string | null;
+  spawned_at: string | null;
+  kill_intent: string | null;
 }
 
 interface DoneTaskRow {
@@ -238,6 +263,12 @@ export async function tick_once(
     const waitingHumanSnapshot = readWaitingHuman(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
+    const runningReviewSnapshot = readRunningReviewAttempts(deps.db).filter(
+      (t) => !cancelledIds.has(t.task_id),
+    );
+    const pendingReviewSnapshot = readPendingReviewAttempts(deps.db).filter(
+      (t) => !cancelledIds.has(t.task_id),
+    );
     const queuedSnapshot = readQueued(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
@@ -284,6 +315,33 @@ export async function tick_once(
         for (const r of taskResults) results.push(r);
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
+    if (options.reviewerEnabled === true) {
+      for (const task of runningReviewSnapshot) {
+        try {
+          const result = processRunningReviewAttempt(deps, task, options);
+          if (result !== null) results.push(result);
+        } catch (err) {
+          results.push(recordTickError(deps, task.task_id, err));
+        }
+      }
+
+      const reviewCap =
+        options.maxConcurrentReviewers ?? DEFAULT_MAX_CONCURRENT_REVIEWERS;
+      let reviewerRunningCount = countRunningReviewers(deps.db);
+      for (const task of pendingReviewSnapshot) {
+        if (reviewerRunningCount >= reviewCap) {
+          results.push({ task_id: task.task_id, action: "skipped_capacity" });
+          continue;
+        }
+        try {
+          results.push(promoteAndSpawnReviewer(deps, task, agentInvocation, options));
+        } catch (err) {
+          results.push(recordTickError(deps, task.task_id, err));
+        }
+        reviewerRunningCount = countRunningReviewers(deps.db);
       }
     }
 
@@ -400,6 +458,46 @@ function readDone(db: DB): DoneTaskRow[] {
     .all();
 }
 
+function readRunningReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
+  return db
+    .query<ReviewAttemptTaskRow, []>(
+      `SELECT t.task_id, t.repo_id, t.branch_name, t.tmux_id, t.worktree_path,
+              t.pr_number, t.cancel_requested_at,
+              t.review_infra_failures_consecutive,
+              t.review_infra_failure_head_sha,
+              a.attempt_id, a.attempt_number, a.preamble_id, a.head_sha,
+              a.tmux_session, a.spawned_at, a.kill_intent
+         FROM attempts a
+         JOIN tasks t ON t.task_id = a.task_id
+        WHERE t.state = 'pr-review'
+          AND a.reason = 'review_only'
+          AND a.spawned_at IS NOT NULL
+          AND a.ended_at IS NULL
+        ORDER BY a.attempt_id`,
+    )
+    .all();
+}
+
+function readPendingReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
+  return db
+    .query<ReviewAttemptTaskRow, []>(
+      `SELECT t.task_id, t.repo_id, t.branch_name, t.tmux_id, t.worktree_path,
+              t.pr_number, t.cancel_requested_at,
+              t.review_infra_failures_consecutive,
+              t.review_infra_failure_head_sha,
+              a.attempt_id, a.attempt_number, a.preamble_id, a.head_sha,
+              a.tmux_session, a.spawned_at, a.kill_intent
+         FROM attempts a
+         JOIN tasks t ON t.task_id = a.task_id
+        WHERE t.state = 'pr-review'
+          AND a.reason = 'review_only'
+          AND a.spawned_at IS NULL
+          AND a.ended_at IS NULL
+        ORDER BY a.attempt_id`,
+    )
+    .all();
+}
+
 function loadCurrentAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
   return (
     db
@@ -502,6 +600,81 @@ function processRunningTask(
     { sessionName: attempt.tmux_session, spawnWindow: false, exitInfo },
   );
   return outcomeToResult(task.task_id, res.outcome, false);
+}
+
+function processRunningReviewAttempt(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  options: TickOptions,
+): TickTaskResult | null {
+  if (task.cancel_requested_at !== null) return null;
+  if (task.tmux_session === null) {
+    return markReviewInfraFailure(
+      deps,
+      task,
+      "reviewer spawn did not record a tmux session",
+      EXIT_INFO_NONE,
+      options,
+    );
+  }
+  if (deps.tmux.isAlive(task.tmux_session)) return null;
+
+  const exitInfo = readExitInfo(deps, task.tmux_session, task.worktree_path);
+  const blockerPath = `${task.worktree_path}/.quay-blocked.md`;
+  if (existsSync(blockerPath)) {
+    let blocker = "";
+    try {
+      blocker = readFileSync(blockerPath, "utf8");
+    } catch (err) {
+      blocker = `Unable to read reviewer blocker file: ${(err as Error).message}`;
+    }
+    deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: task.attempt_id,
+      kind: "review_blocker",
+      content: blocker,
+      extension: "md",
+    });
+    try {
+      rmSync(blockerPath, { force: true });
+    } catch {}
+    return markReviewInfraFailure(deps, task, blocker, exitInfo, options);
+  }
+
+  if (task.pr_number === null) {
+    return markReviewInfraFailure(
+      deps,
+      task,
+      "review task has no pr_number",
+      exitInfo,
+      options,
+    );
+  }
+
+  const posted = deps.github.fetchPostedReview(
+    task.repo_id,
+    task.pr_number,
+    task.head_sha,
+  );
+  if (posted === null) {
+    return markReviewInfraFailure(
+      deps,
+      task,
+      `no Quay-authored review found at head SHA ${task.head_sha}`,
+      exitInfo,
+      options,
+    );
+  }
+  if (posted.decision === "COMMENTED") {
+    return markReviewInfraFailure(
+      deps,
+      task,
+      `review ${posted.reviewId} used COMMENTED instead of an approve/request-changes verdict`,
+      exitInfo,
+      options,
+    );
+  }
+  return finalizePostedReview(deps, task, posted, exitInfo, options);
 }
 
 // Worker exit info is best-effort: a missing marker file (worker exec'd
@@ -607,6 +780,37 @@ function processPrOpenTask(
     return { task_id: task.task_id, action: "ci_pending" };
   }
   if (ci === "pass") {
+    if (options.reviewerEnabled === true && options.gateQuayOwnedDone === true) {
+      if (snapshot.prNumber === undefined || snapshot.prNumber === null) {
+        return recordTickError(
+          deps,
+          task.task_id,
+          new Error(
+            `PR snapshot for ${task.branch_name} did not include a PR number; cannot enter pr-review`,
+          ),
+        );
+      }
+      const result = enterReview(
+        {
+          db: deps.db,
+          clock: deps.clock,
+          github: deps.github,
+          artifactStore: deps.artifactStore,
+          paths: { worktreesRoot: task.worktree_path },
+        },
+        {
+          repoId: task.repo_id,
+          prNumber: snapshot.prNumber,
+          headSha: snapshot.headSha,
+          reviewerEnabled: true,
+          gateQuayOwnedDone: true,
+        },
+      );
+      return {
+        task_id: task.task_id,
+        action: result.scheduled ? "review_requested" : "skipped_predicate",
+      };
+    }
     return transitionCiPassed(deps, task, attempt);
   }
   return scheduleCiFailRetry(deps, task, attempt, snapshot);
@@ -935,6 +1139,300 @@ function scheduleReviewNonBudget(
     return { task_id: taskId, action: "review_respawn_scheduled" };
   }
   return { task_id: taskId, action: "skipped_predicate" };
+}
+
+function finalizePostedReview(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  posted: PostedReview,
+  exitInfo: PaneExitInfo,
+  options: TickOptions,
+): TickTaskResult {
+  const verdict =
+    posted.decision === "APPROVED" ? "approved" : "changes_requested";
+  const content = reviewArtifactContent(posted, task.head_sha);
+  const now = deps.clock.nowISO();
+
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    deps.db
+      .query(
+        `UPDATE attempts
+            SET ended_at = ?,
+                exit_kind = ?,
+                exit_code = ?,
+                exit_signal = ?,
+                review_verdict = ?,
+                review_id = ?
+          WHERE attempt_id = ? AND ended_at IS NULL`,
+      )
+      .run(
+        now,
+        verdict === "approved" ? "review_approved" : "review_changes_requested",
+        exitInfo.exitCode,
+        exitInfo.exitSignal,
+        verdict,
+        posted.reviewId,
+        task.attempt_id,
+      );
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET review_infra_failures_consecutive = 0,
+                review_infra_failure_head_sha = NULL,
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ?`,
+      )
+      .run(now, task.task_id);
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+
+  if (verdict === "changes_requested" && !isSyntheticTaskId(task.task_id)) {
+    const cap = options.maxNonBudgetRespawns ?? DEFAULT_MAX_NON_BUDGET_RESPAWNS;
+    const codePreambleId = loadLatestCodePreambleId(deps.db) ?? task.preamble_id;
+    const result = scheduleNonBudgetRespawn(deps, {
+      taskId: task.task_id,
+      prevAttempt: {
+        attempt_id: task.attempt_id,
+        attempt_number: task.attempt_number,
+        preamble_id: codePreambleId,
+      },
+      reason: "review",
+      diagnostics: `Quay reviewer marked CHANGES_REQUESTED in review ${posted.reviewId}.`,
+      fromState: "pr-review",
+      snapshotKind: "review_comments",
+      snapshotContent: content,
+      snapshotExtension: "json",
+      dedupeColumn: "last_review_id_acted_on",
+      dedupeValue: posted.reviewId,
+      maxNonBudgetRespawns: cap,
+    });
+    if (result.outcome === "parked") {
+      return { task_id: task.task_id, action: "non_budget_loop_parked" };
+    }
+    if (result.outcome === "scheduled") {
+      return { task_id: task.task_id, action: "review_respawn_scheduled" };
+    }
+    return { task_id: task.task_id, action: "skipped_predicate" };
+  }
+
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    const artifact = deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: task.attempt_id,
+      kind: "review_comments",
+      content,
+      extension: "json",
+    });
+    const toState =
+      verdict === "approved" ? "done" : "waiting_external_changes";
+    const eventType =
+      verdict === "approved" ? "review_approved" : "changes_requested";
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET state = ?,
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ? AND state = 'pr-review'
+            AND cancel_requested_at IS NULL`,
+      )
+      .run(toState, now, task.task_id);
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state,
+           payload_artifact_id, occurred_at
+         ) VALUES (?, ?, ?, 'pr-review', ?, ?, ?)`,
+      )
+      .run(task.task_id, task.attempt_id, eventType, toState, artifact.artifactId, now);
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+
+  return {
+    task_id: task.task_id,
+    action:
+      verdict === "approved" ? "review_approved" : "review_changes_requested",
+  };
+}
+
+function markReviewInfraFailure(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  diagnostic: string,
+  exitInfo: PaneExitInfo,
+  options: TickOptions,
+): TickTaskResult {
+  const now = deps.clock.nowISO();
+  const sameSha = task.review_infra_failure_head_sha === task.head_sha;
+  const failures = sameSha ? task.review_infra_failures_consecutive + 1 : 1;
+  const parking = failures >= 3;
+  const priorBrief = loadAttemptArtifactContent(
+    deps.db,
+    task.task_id,
+    task.attempt_id,
+    "brief",
+  );
+  const priorPrompt = loadAttemptArtifactContent(
+    deps.db,
+    task.task_id,
+    task.attempt_id,
+    "final_prompt",
+  );
+
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: task.attempt_id,
+      kind: "review_blocker",
+      content: diagnostic,
+      extension: "md",
+    });
+    deps.db
+      .query(
+        `UPDATE attempts
+            SET ended_at = ?,
+                exit_kind = 'review_errored',
+                exit_code = ?,
+                exit_signal = ?,
+                review_verdict = 'errored'
+          WHERE attempt_id = ? AND ended_at IS NULL`,
+      )
+      .run(now, exitInfo.exitCode, exitInfo.exitSignal, task.attempt_id);
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET review_infra_failures_consecutive = ?,
+                review_infra_failure_head_sha = ?,
+                state = ?,
+                tick_error = ?,
+                updated_at = ?
+          WHERE task_id = ? AND state = 'pr-review'
+            AND cancel_requested_at IS NULL`,
+      )
+      .run(
+        failures,
+        task.head_sha,
+        parking ? "non_budget_loop" : "pr-review",
+        parking ? diagnostic : null,
+        now,
+        task.task_id,
+      );
+
+    if (!parking) {
+      const retryAttempt = deps.db
+        .query<{ attempt_id: number }, [string, number, number, string, number, string]>(
+          `INSERT INTO attempts (
+             task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha
+           ) VALUES (?, ?, ?, ?, ?, ?)
+           RETURNING attempt_id`,
+        )
+        .get(
+          task.task_id,
+          task.attempt_number + 1,
+          task.preamble_id,
+          "review_only",
+          0,
+          task.head_sha,
+        );
+      if (!retryAttempt) throw new Error("review retry insert returned no row");
+      deps.artifactStore.writeArtifact({
+        taskId: task.task_id,
+        attemptId: retryAttempt.attempt_id,
+        kind: "brief",
+        content: priorBrief,
+        extension: "md",
+      });
+      deps.artifactStore.writeArtifact({
+        taskId: task.task_id,
+        attemptId: retryAttempt.attempt_id,
+        kind: "final_prompt",
+        content: priorPrompt,
+        extension: "md",
+      });
+    }
+
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state, occurred_at
+         ) VALUES (?, ?, 'review_infra_failed', 'pr-review', ?, ?)`,
+      )
+      .run(
+        task.task_id,
+        task.attempt_id,
+        parking ? "non_budget_loop" : "pr-review",
+        now,
+      );
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+
+  return {
+    task_id: task.task_id,
+    action: parking ? "non_budget_loop_parked" : "review_retry_scheduled",
+  };
+}
+
+function reviewArtifactContent(posted: PostedReview, headSha: string): string {
+  return JSON.stringify({
+    review_id: posted.reviewId,
+    decision: posted.decision,
+    head_sha: headSha,
+    body: posted.body,
+    comments: posted.comments,
+  });
+}
+
+function loadLatestCodePreambleId(db: DB): number | null {
+  const row = db
+    .query<{ preamble_id: number }, []>(
+      `SELECT preamble_id FROM preambles
+        WHERE kind = 'code'
+        ORDER BY preamble_id DESC
+        LIMIT 1`,
+    )
+    .get();
+  return row?.preamble_id ?? null;
+}
+
+function loadAttemptArtifactContent(
+  db: DB,
+  taskId: string,
+  attemptId: number,
+  kind: "brief" | "final_prompt",
+): string {
+  const row = db
+    .query<{ file_path: string }, [string, number, string]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND attempt_id = ? AND kind = ?
+        ORDER BY artifact_id DESC
+        LIMIT 1`,
+    )
+    .get(taskId, attemptId, kind);
+  if (!row) return "";
+  try {
+    return readFileSync(row.file_path, "utf8");
+  } catch {
+    return "";
+  }
 }
 
 function formatConflictObservation(snapshot: PrSnapshot): string {
@@ -1613,13 +2111,25 @@ function countRunning(db: DB): number {
   return row?.n ?? 0;
 }
 
+function countRunningReviewers(db: DB): number {
+  const row = db
+    .query<{ n: number }, []>(
+      `SELECT COUNT(*) AS n FROM attempts
+        WHERE reason = 'review_only'
+          AND spawned_at IS NOT NULL
+          AND ended_at IS NULL`,
+    )
+    .get();
+  return row?.n ?? 0;
+}
+
 function loadPendingAttempt(db: DB, taskId: string): PendingAttemptRow | null {
   return (
     db
       .query<PendingAttemptRow, [string]>(
         `SELECT attempt_id, attempt_number, consumed_budget, preamble_id
            FROM attempts
-          WHERE task_id = ? AND spawned_at IS NULL`,
+          WHERE task_id = ? AND spawned_at IS NULL AND ended_at IS NULL`,
       )
       .get(taskId) ?? null
   );
@@ -1731,6 +2241,103 @@ function promoteAndSpawn(
   deps.db
     .query(`UPDATE tasks SET spawn_failures_consecutive = 0 WHERE task_id = ?`)
     .run(task.task_id);
+
+  return { task_id: task.task_id, action: "spawned" };
+}
+
+function promoteAndSpawnReviewer(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  agentInvocation: string,
+  options: TickOptions,
+): TickTaskResult {
+  if (task.cancel_requested_at !== null) {
+    return { task_id: task.task_id, action: "skipped_predicate" };
+  }
+  if (task.pr_number === null) {
+    return markReviewInfraFailure(
+      deps,
+      task,
+      "review task has no pr_number",
+      EXIT_INFO_NONE,
+      options,
+    );
+  }
+
+  if (isSyntheticTaskId(task.task_id)) {
+    try {
+      deps.git.checkoutPullRequest(
+        task.repo_id,
+        task.worktree_path,
+        task.pr_number,
+        task.head_sha,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return markReviewInfraFailure(deps, task, message, EXIT_INFO_NONE, options);
+    }
+  }
+
+  const promptContent = loadFinalPrompt(deps.db, task.task_id, task.attempt_id);
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN");
+  try {
+    const upd = deps.db
+      .query(
+        `UPDATE attempts
+            SET spawned_at = ?,
+                remote_sha_at_spawn = ?,
+                pr_existed_at_spawn = 1
+          WHERE attempt_id = ?
+            AND spawned_at IS NULL
+            AND ended_at IS NULL`,
+      )
+      .run(now, task.head_sha, task.attempt_id);
+    const changes = (upd as { changes?: number }).changes ?? 0;
+    if (changes === 0) {
+      deps.db.exec("ROLLBACK");
+      return { task_id: task.task_id, action: "skipped_predicate" };
+    }
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state, occurred_at
+         ) VALUES (?, ?, 'review_spawned', 'pr-review', 'pr-review', ?)`,
+      )
+      .run(task.task_id, task.attempt_id, now);
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+
+  const sessionName = `quay-review-${task.tmux_id}-${task.attempt_number}`;
+  try {
+    deps.tmux.spawn({
+      sessionName,
+      worktreePath: task.worktree_path,
+      promptContent,
+      agentInvocation,
+    });
+  } catch (err) {
+    return {
+      task_id: task.task_id,
+      action: "spawn_substrate_failed",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  fireFailpoint("after_tmux_session_created");
+  const agentIdentity = probeAgentIdentity(agentInvocation);
+  deps.db
+    .query(
+      `UPDATE attempts
+          SET tmux_session = ?, agent_identity = ?
+        WHERE attempt_id = ?`,
+    )
+    .run(sessionName, agentIdentity, task.attempt_id);
 
   return { task_id: task.task_id, action: "spawned" };
 }

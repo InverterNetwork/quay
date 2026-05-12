@@ -95,6 +95,7 @@ function synthesizeSnapshotFromCheckStatus(s: PrCheckStatus): PrSnapshot {
   };
   if (s.excerpt !== undefined) checks.failureExcerpt = s.excerpt;
   return {
+    prNumber: null,
     state: "open",
     headSha: "fake-head",
     baseSha: "fake-base",

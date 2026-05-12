@@ -118,6 +118,7 @@ export class GitHubCliAdapter implements GitHubPort {
     const headShaAfter = this.fetchHeadShaOnly(repoId, branch) ?? headShaBefore;
     return {
       state: view.state,
+      prNumber: view.prNumber ?? null,
       headSha: headShaAfter,
       baseSha: view.baseSha,
       mergeable: view.mergeable,
@@ -285,6 +286,7 @@ export class GitHubCliAdapter implements GitHubPort {
     | null {
     const fields = [
       "state",
+      "number",
       "headRefOid",
       "baseRefOid",
       "mergeable",
@@ -329,6 +331,8 @@ export class GitHubCliAdapter implements GitHubPort {
     const latestReview = this.enrichWithInlineComments(repoId, baseLatestReview);
     return {
       state: mapPrState(parsed.state),
+      prNumber:
+        typeof parsed.number === "number" ? parsed.number : null,
       headSha: String(parsed.headRefOid ?? ""),
       baseSha:
         parsed.baseRefOid !== null && parsed.baseRefOid !== undefined
