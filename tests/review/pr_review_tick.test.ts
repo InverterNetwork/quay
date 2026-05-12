@@ -179,3 +179,201 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     .get(taskId);
   expect(artifact?.n).toBe(1);
 });
+
+test("dead synthetic reviewer changes_requested waits for external changes", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-wait");
+  const taskId = "pr-review-repo-review-wait-8";
+  const worktreePath = `${h.dataDir}/worktrees/review-8`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/8', 'quay-review-repo-review-wait-8',
+                 ?, 8, 'sha-8', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-8', tmux_session = 'quay-review-session-8'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  built.github.setPostedReview(repoId, 8, "sha-8", {
+    reviewId: "R_changes",
+    decision: "CHANGES_REQUESTED",
+    body: "Please fix this.",
+    comments: "Inline review comments (1):\n- src/a.ts:1 - fix this",
+  });
+
+  const results = await tick_once(built.deps, { reviewerEnabled: true });
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "review_changes_requested",
+  });
+  const task = h.db
+    .query<{ state: string }, [string]>(`SELECT state FROM tasks WHERE task_id = ?`)
+    .get(taskId);
+  expect(task?.state).toBe("waiting_external_changes");
+});
+
+test("Quay-owned reviewer changes_requested schedules non-budget code respawn", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-respawn");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-review-respawn",
+    state: "pr-review",
+  });
+  h.db
+    .query(`UPDATE tasks SET pr_number = 11, head_sha = 'sha-11' WHERE task_id = ?`)
+    .run(taskId);
+  const codeAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId: codeAttemptId,
+    kind: "brief",
+    content: "original code brief",
+    extension: "md",
+  });
+  const reviewAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-11', tmux_session = 'quay-review-session-11'
+        WHERE attempt_id = ?`,
+    )
+    .run(reviewAttemptId);
+  built.github.setPostedReview(repoId, 11, "sha-11", {
+    reviewId: "R_quay_changes",
+    decision: "CHANGES_REQUESTED",
+    body: "Blocking issue.",
+    comments: "Blocking issue.",
+  });
+
+  const results = await tick_once(built.deps, { reviewerEnabled: true });
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "review_respawn_scheduled",
+  });
+  const task = h.db
+    .query<{ state: string; non_budget_respawns_consumed: number }, [string]>(
+      `SELECT state, non_budget_respawns_consumed FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({ state: "queued", non_budget_respawns_consumed: 1 });
+  const latest = h.db
+    .query<{ reason: string; consumed_budget: number }, [string]>(
+      `SELECT reason, consumed_budget FROM attempts
+        WHERE task_id = ? ORDER BY attempt_id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  expect(latest).toEqual({ reason: "review", consumed_budget: 0 });
+});
+
+test("reviewer infrastructure failures retry twice then park at same SHA", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-fail");
+  const taskId = "pr-review-repo-review-fail-9";
+  const worktreePath = `${h.dataDir}/worktrees/review-9`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, review_infra_failures_consecutive,
+         review_infra_failure_head_sha, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/9', 'quay-review-repo-review-fail-9',
+                 ?, 9, 'sha-9', 1, 2, 'sha-9', ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-9', tmux_session = 'quay-review-session-9'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "brief",
+    content: "review brief",
+    extension: "md",
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "final_prompt",
+    content: "review prompt",
+    extension: "md",
+  });
+
+  const results = await tick_once(built.deps, { reviewerEnabled: true });
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "non_budget_loop_parked",
+  });
+  const task = h.db
+    .query<
+      { state: string; review_infra_failures_consecutive: number; tick_error: string | null },
+      [string]
+    >(
+      `SELECT state, review_infra_failures_consecutive, tick_error
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task?.state).toBe("non_budget_loop");
+  expect(task?.review_infra_failures_consecutive).toBe(3);
+  expect(task?.tick_error).toContain("no Quay-authored review");
+  const pending = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM attempts
+        WHERE task_id = ? AND reason = 'review_only' AND ended_at IS NULL`,
+    )
+    .get(taskId);
+  expect(pending?.n).toBe(0);
+});
