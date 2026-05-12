@@ -73,6 +73,7 @@ gate_quay_owned_done = false
 [reviewer]
 enabled = true
 gate_quay_owned_done = false
+# login = "quay-bot"
 ```
 
 `enabled` turns on the reviewer subsystem, including `quay review-pr` and the
@@ -80,6 +81,15 @@ reviewer spawn pass in `quay tick`. `gate_quay_owned_done` changes Quay-owned
 PRs from the legacy `pr-open -> done` CI-green transition to `pr-open ->
 pr-review -> done`, where the final transition requires an approved Quay
 review. Synthetic PR reviews still work when the gate is false.
+
+`login` is the gh login tick matches posted reviews against when it ingests a
+finished reviewer attempt. Defaults to whatever `gh api user --jq .login`
+returns in the tick process. Set it explicitly when the reviewer worker
+authenticates as a different gh identity than tick (for example, when tick
+runs as the deployment service account and the worker posts under a dedicated
+bot account); leaving it unset in that setup will silently never match the
+posted review and park the task in `non_budget_loop` after the infra-failure
+retry budget runs out.
 
 ## Agent Invocation
 

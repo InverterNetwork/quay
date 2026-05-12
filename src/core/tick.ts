@@ -2334,6 +2334,11 @@ function promoteAndSpawnReviewer(
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");
   try {
+    // For code workers `remote_sha_at_spawn` records what the remote looked
+    // like when we spawned; for reviewer attempts the SHA we promised to
+    // review is the only meaningful "remote SHA at spawn," so we reuse the
+    // column to point at `attempts.head_sha`. `pr_existed_at_spawn` is 1 by
+    // definition: there's nothing to review until a PR exists.
     const upd = deps.db
       .query(
         `UPDATE attempts

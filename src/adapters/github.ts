@@ -219,7 +219,7 @@ export class GitHubCliAdapter implements GitHubPort {
       if (authorLogin !== login) continue;
       const commit = (r.commit ?? {}) as Record<string, unknown>;
       const oid = String(commit.oid ?? r.commitId ?? "");
-      if (oid !== "" && oid !== headSha) continue;
+      if (oid !== headSha) continue;
       const decision = mapPostedReviewDecision(r.state);
       if (decision === null) continue;
       const reviewId = r.id !== undefined ? String(r.id) : "";

@@ -53,9 +53,10 @@ const ReviewerConfigSchema = z
   .object({
     enabled: z.boolean().optional(),
     gate_quay_owned_done: z.boolean().optional(),
-    // gh login that the reviewer worker posts under. When unset the tick
-    // process's own `gh api user` is used; set this when tick and worker
-    // authenticate as different identities.
+    // gh login tick matches posted reviews against when ingesting a finished
+    // reviewer attempt. When unset the tick process's own `gh api user` is
+    // used; set this when tick and worker authenticate as different gh
+    // identities so the ingest doesn't silently drop the posted review.
     login: z.string().min(1).optional(),
   })
   .strict();
