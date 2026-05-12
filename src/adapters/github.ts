@@ -26,9 +26,11 @@ import type {
   PrChecksReport,
   PrLatestReview,
   PrMergeableState,
+  PostedReview,
   PrReviewDecision,
   PrSnapshot,
   PrTerminalState,
+  PullRequestView,
 } from "../ports/github.ts";
 
 export interface RunResult {
@@ -38,6 +40,8 @@ export interface RunResult {
 }
 
 export class GitHubCliAdapter implements GitHubPort {
+  private cachedLogin: string | null = null;
+
   constructor(private readonly reposRoot: string) {}
 
   prExistsForBranch(repoId: string, branch: string): boolean {
@@ -116,12 +120,119 @@ export class GitHubCliAdapter implements GitHubPort {
     const headShaAfter = this.fetchHeadShaOnly(repoId, branch) ?? headShaBefore;
     return {
       state: view.state,
+      prNumber: view.prNumber ?? null,
       headSha: headShaAfter,
       baseSha: view.baseSha,
       mergeable: view.mergeable,
       latestReview: view.latestReview,
       checks: { ...checks, checkSha: headShaBefore },
     };
+  }
+
+  prView(repoId: string, prNumber: number): PullRequestView | null {
+    const fields = [
+      "number",
+      "title",
+      "body",
+      "url",
+      "headRefName",
+      "headRefOid",
+    ].join(",");
+    const result = this.run(repoId, [
+      "gh",
+      "pr",
+      "view",
+      String(prNumber),
+      "--json",
+      fields,
+    ]);
+    if (result.exitCode !== 0) {
+      const lower = result.stderr.toLowerCase();
+      if (
+        lower.includes("no pull request") ||
+        lower.includes("no pull requests")
+      ) {
+        return null;
+      }
+      throw new Error(
+        `gh pr view ${prNumber} failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+    } catch (err) {
+      throw new Error(
+        `gh pr view returned unparseable JSON for PR #${prNumber}: ${(err as Error).message}`,
+      );
+    }
+    return {
+      number:
+        typeof parsed.number === "number" ? parsed.number : Number(prNumber),
+      title: String(parsed.title ?? ""),
+      body: String(parsed.body ?? ""),
+      url:
+        parsed.url !== null && parsed.url !== undefined
+          ? String(parsed.url)
+          : null,
+      headRefName: String(parsed.headRefName ?? ""),
+      headSha: String(parsed.headRefOid ?? ""),
+    };
+  }
+
+  fetchPostedReview(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+    expectedLogin?: string,
+  ): PostedReview | null {
+    const login = expectedLogin ?? this.currentLogin(repoId);
+    const fields = ["reviews"].join(",");
+    const result = this.run(repoId, [
+      "gh",
+      "pr",
+      "view",
+      String(prNumber),
+      "--json",
+      fields,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh pr view ${prNumber} --json reviews failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+    } catch (err) {
+      throw new Error(
+        `gh pr view returned unparseable review JSON for PR #${prNumber}: ${(err as Error).message}`,
+      );
+    }
+    const reviews = Array.isArray(parsed.reviews)
+      ? (parsed.reviews as Array<Record<string, unknown>>)
+      : [];
+    for (let i = reviews.length - 1; i >= 0; i -= 1) {
+      const r = reviews[i] ?? {};
+      const author = (r.author ?? {}) as Record<string, unknown>;
+      const authorLogin = String(author.login ?? "");
+      if (authorLogin !== login) continue;
+      const commit = (r.commit ?? {}) as Record<string, unknown>;
+      const oid = String(commit.oid ?? r.commitId ?? "");
+      if (oid !== headSha) continue;
+      const decision = mapPostedReviewDecision(r.state);
+      if (decision === null) continue;
+      const reviewId = r.id !== undefined ? String(r.id) : "";
+      if (reviewId === "") continue;
+      const inline = this.fetchReviewInlineComments(repoId, reviewId);
+      return {
+        reviewId,
+        decision,
+        body: String(r.body ?? ""),
+        comments: composeReviewFeedback(String(r.body ?? ""), inline),
+      };
+    }
+    return null;
   }
 
   // -- helpers ------------------------------------------------------------
@@ -178,6 +289,7 @@ export class GitHubCliAdapter implements GitHubPort {
     | null {
     const fields = [
       "state",
+      "number",
       "headRefOid",
       "baseRefOid",
       "mergeable",
@@ -222,6 +334,8 @@ export class GitHubCliAdapter implements GitHubPort {
     const latestReview = this.enrichWithInlineComments(repoId, baseLatestReview);
     return {
       state: mapPrState(parsed.state),
+      prNumber:
+        typeof parsed.number === "number" ? parsed.number : null,
       headSha: String(parsed.headRefOid ?? ""),
       baseSha:
         parsed.baseRefOid !== null && parsed.baseRefOid !== undefined
@@ -534,6 +648,20 @@ export class GitHubCliAdapter implements GitHubPort {
     );
   }
 
+  private currentLogin(repoId: string): string {
+    if (this.cachedLogin !== null) return this.cachedLogin;
+    const result = this.run(repoId, ["gh", "api", "user", "--jq", ".login"]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh api user failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    const login = result.stdout.trim();
+    if (login === "") throw new Error("gh api user returned an empty login");
+    this.cachedLogin = login;
+    return login;
+  }
+
   private fetchRequiredCheckKeys(repoId: string, branch: string): Set<string> {
     const fields = ["workflow", "name"].join(",");
     const result = this.run(repoId, [
@@ -821,6 +949,16 @@ function mapReviewDecision(raw: unknown): PrReviewDecision {
   if (s === "CHANGES_REQUESTED") return "CHANGES_REQUESTED";
   if (s === "COMMENTED") return "COMMENTED";
   return "NONE";
+}
+
+function mapPostedReviewDecision(
+  raw: unknown,
+): PostedReview["decision"] | null {
+  const s = String(raw ?? "").toUpperCase();
+  if (s === "APPROVED") return "APPROVED";
+  if (s === "CHANGES_REQUESTED") return "CHANGES_REQUESTED";
+  if (s === "COMMENTED") return "COMMENTED";
+  return null;
 }
 
 function decode(buf: Buffer | Uint8Array | undefined): string {

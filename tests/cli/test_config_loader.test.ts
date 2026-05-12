@@ -53,6 +53,7 @@ test("loads a well-formed config.toml from QUAY_CONFIG_FILE override", () => {
     path,
     `agent_invocation = "claude --custom < {prompt_file}"
 max_concurrent = 4
+max_concurrent_reviewers = 3
 retry_budget = 8
 staleness_threshold_seconds = 900
 supervisor_lock_stale_seconds = 60
@@ -63,6 +64,10 @@ max_spawn_failures = 5
 claim_timeout_seconds = 600
 max_claim_expirations = 2
 max_non_budget_respawns = 30
+
+[reviewer]
+enabled = true
+gate_quay_owned_done = false
 `,
   );
   const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
@@ -71,6 +76,9 @@ max_non_budget_respawns = 30
     "claude --custom < {prompt_file}",
   );
   expect(result.config.max_concurrent).toBe(4);
+  expect(result.config.max_concurrent_reviewers).toBe(3);
+  expect(result.config.reviewer?.enabled).toBe(true);
+  expect(result.config.reviewer?.gate_quay_owned_done).toBe(false);
   expect(result.config.retry_budget).toBe(8);
   expect(result.config.staleness_threshold_seconds).toBe(900);
   expect(result.config.supervisor_lock_stale_seconds).toBe(60);
@@ -177,11 +185,15 @@ test("tickOptionsFromConfig only forwards keys that are present", () => {
   expect(
     tickOptionsFromConfig({
       max_concurrent: 6,
+      max_concurrent_reviewers: 2,
       agent_invocation: "claude < {prompt_file}",
+      reviewer: { enabled: true },
     }),
   ).toEqual({
     maxConcurrent: 6,
+    maxConcurrentReviewers: 2,
     agentInvocation: "claude < {prompt_file}",
+    reviewerEnabled: true,
   });
 });
 
@@ -241,6 +253,7 @@ unknown_field = "x"
 test("tickOptionsFromConfig maps every supported key", () => {
   const opts = tickOptionsFromConfig({
     max_concurrent: 1,
+    max_concurrent_reviewers: 2,
     agent_invocation: "x",
     max_attempt_duration_seconds: 2,
     staleness_threshold_seconds: 3,
@@ -248,9 +261,11 @@ test("tickOptionsFromConfig maps every supported key", () => {
     claim_timeout_seconds: 5,
     max_claim_expirations: 6,
     max_non_budget_respawns: 7,
+    reviewer: { enabled: true, gate_quay_owned_done: true },
   });
   expect(opts).toEqual({
     maxConcurrent: 1,
+    maxConcurrentReviewers: 2,
     agentInvocation: "x",
     maxAttemptDurationSeconds: 2,
     stalenessThresholdSeconds: 3,
@@ -258,5 +273,7 @@ test("tickOptionsFromConfig maps every supported key", () => {
     claimTimeoutSeconds: 5,
     maxClaimExpirations: 6,
     maxNonBudgetRespawns: 7,
+    reviewerEnabled: true,
+    gateQuayOwnedDone: true,
   });
 });

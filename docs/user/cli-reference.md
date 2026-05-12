@@ -110,7 +110,8 @@ quay enqueue \
   --brief-file <path> \
   [--ticket-snapshot-file <path>] \
   [--external-ref <ref>] \
-  [--slack-thread-ref <channel:ts>]
+  [--slack-thread-ref <channel:ts>] \
+  [--tag <tag>]...
 ```
 
 Linear:
@@ -124,6 +125,17 @@ quay enqueue \
 
 `--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,
 and `--slack-thread-ref`.
+
+## PR Review
+
+```bash
+quay review-pr --pr <repo>:<num> [--head-sha <sha>] [--tag <tag>]...
+```
+
+`review-pr` is the fire-and-forget CI entry point for the Quay reviewer. The
+repo portion may be the configured `repo_id` or the owner/name derived from the
+registered repo URL. The command prints one JSON object with `scheduled` and
+`skipped_reason` so callers can distinguish new work from an idempotent no-op.
 
 ## Tick
 

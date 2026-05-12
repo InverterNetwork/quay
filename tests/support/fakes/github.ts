@@ -1,7 +1,9 @@
 import type {
   GitHubPort,
+  PostedReview,
   PrCheckStatus,
   PrSnapshot,
+  PullRequestView,
 } from "../../../src/ports/github.ts";
 
 export class FakeGitHub implements GitHubPort {
@@ -13,6 +15,8 @@ export class FakeGitHub implements GitHubPort {
   // Explicit per-(repo, branch) PR snapshots take precedence over the legacy
   // `setPrCheckStatus`-derived synthesis.
   readonly snapshots = new Map<string, PrSnapshot | null>();
+  readonly prViews = new Map<string, PullRequestView | null>();
+  readonly postedReviews = new Map<string, PostedReview | null>();
 
   prExistsForBranch(repoId: string, branch: string): boolean {
     this.calls.push({ repoId, branch });
@@ -56,6 +60,31 @@ export class FakeGitHub implements GitHubPort {
   setPrSnapshot(repoId: string, branch: string, snapshot: PrSnapshot | null): void {
     this.snapshots.set(`${repoId}\0${branch}`, snapshot);
   }
+
+  prView(repoId: string, prNumber: number): PullRequestView | null {
+    return this.prViews.get(`${repoId}\0${prNumber}`) ?? null;
+  }
+
+  setPrView(repoId: string, prNumber: number, view: PullRequestView | null): void {
+    this.prViews.set(`${repoId}\0${prNumber}`, view);
+  }
+
+  fetchPostedReview(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+  ): PostedReview | null {
+    return this.postedReviews.get(`${repoId}\0${prNumber}\0${headSha}`) ?? null;
+  }
+
+  setPostedReview(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+    review: PostedReview | null,
+  ): void {
+    this.postedReviews.set(`${repoId}\0${prNumber}\0${headSha}`, review);
+  }
 }
 
 function synthesizeSnapshotFromCheckStatus(s: PrCheckStatus): PrSnapshot {
@@ -66,6 +95,7 @@ function synthesizeSnapshotFromCheckStatus(s: PrCheckStatus): PrSnapshot {
   };
   if (s.excerpt !== undefined) checks.failureExcerpt = s.excerpt;
   return {
+    prNumber: null,
     state: "open",
     headSha: "fake-head",
     baseSha: "fake-base",

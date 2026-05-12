@@ -9,7 +9,7 @@ These ideas sit on top of the locked v1 spec (`quay-spec.md`); nothing here chan
 Two feature specs have been extracted from this notes doc and live as standalone, lockable documents. **They are the contracts.** This notes doc continues to capture the broader design conversation — including v2+ shape and rationale that the specs deliberately defer.
 
 - **`docs/quay-spec-ticket-validation.md`** — `quay validate-ticket` library/CLI (the ticket-shape validator). Spec status: Draft. Covers §2 of these notes.
-- **`docs/quay-spec-pr-review.md`** — `quay review-pr` + reviewer worker + `review_findings` storage. Spec status: Draft. Covers §3.1, §3.2, §5, and the v1 subset of §7. **The v1 cut deliberately ships only the input pipeline (CI trigger → reviewer → findings stored), not the output pipeline (loop closing / brief enrichment).** Whoever wants to close the loop builds it as an external consumer over Quay's stored data.
+- **`docs/archive/quay-spec-pr-review.md`** (superseded) — prior draft of `quay review-pr` + reviewer worker + `review_findings` storage. Modelled review as a side-attempt hung off Quay-owned tasks; that framing is being replaced by one where PR review is a first-class state on the task itself. The replacement spec is being drafted; until it lands, the archived draft is the source for the still-valid design pieces (dispatch shape, synthetic `task_id`, `(task_id, head_sha)` dedup, `review_findings` + FTS5, `quay-principle` fenced-block contract, force-push handling).
 
 Sections of these notes that did *not* graduate to a v1 spec (§3.3 brief enrichment, §4 the closed loop, the parts of §7 covering panel review / blocking mode / Hermes RPC / reviewer-improvement loop) describe **deferred work** with full design captured here. They graduate to their own spec docs when the trigger conditions in §9's deferred table are met.
 
@@ -1037,7 +1037,7 @@ The narrow spec exception: the Hermes HTTP receiver call inside `review-pr`. Jus
 - **Tag granularity guidance.** What does the Hermes ticket-creation skill actually use as its tag-granularity heuristic? Probably: *"tags should be specific enough that two tasks sharing a tag should plausibly share design considerations."* Worth iterating on with real data.
 - **Multi-repo principles.** A principle from repo A — does it ever apply to repo B? V1 ignores the question (`review_findings` has no `scope` column; queries are implicitly per-repo via the task → repo join). When/if cross-repo transfer becomes valuable: either add a `scope TEXT` column to `review_findings` (`'repo'` / `'org'`) populated from a second fenced-block field, or derive scope at query time from the principle text. Both options are additive; defer until there's data demonstrating the need.
 - **Reviewer agent prompt.** Out of scope here, but the quality of principles depends entirely on the prompt. Worth treating the reviewer prompt as a versioned artifact (analogous to `preambles` in Quay) so prompt changes are tracked alongside the principles they produce.
-- **How the intelligent layer accesses findings (output pipeline shape).** v1 (per `docs/quay-spec-pr-review.md`) deliberately ships only the input pipeline — findings are captured and stored, not injected into anything. When the team eventually wants to close the loop, three plausible shapes are on the table, listed without commitment:
+- **How the intelligent layer accesses findings (output pipeline shape).** The (superseded) v1 PR-review draft at `docs/archive/quay-spec-pr-review.md` deliberately shipped only the input pipeline — findings captured and stored, not injected into anything. The replacement spec is expected to preserve that boundary; the open question about output-pipeline shape is unchanged. When the team eventually wants to close the loop, three plausible shapes are on the table, listed without commitment:
   1. **Per-task LLM pass.** Orchestrator queries Quay for findings by tag, hands them to an LLM along with the new task's draft brief, LLM composes a brief that includes whichever findings it judges relevant. Highest quality, most expensive.
   2. **Per-tag digest, refreshed periodically.** A separate cron runs an LLM pass over all findings tagged `auth-session` and produces a curated digest (stored either in Quay as a `tag_digests` table or as an external Markdown file). Orchestrator includes the matching digests when composing a brief. Cheaper amortized; lossy.
   3. **Hybrid.** Digest as default; per-task LLM pass on top for the highest-stakes tasks.
@@ -1048,15 +1048,15 @@ The narrow spec exception: the Hermes HTTP receiver call inside `review-pr`. Jus
 
 ## 9. Shippable v1 cut for the review feature
 
-The brainstorm above describes the full target shape. **v1 ships a strict subset of it: the input pipeline + storage only, no closing of the loop.** The full v1 contract lives in **`docs/quay-spec-pr-review.md`** (a standalone, lockable spec). This section is now a brief overview + a deferred-work catalogue with re-introduction triggers.
+The brainstorm above describes the full target shape. **v1 ships a strict subset of it: the input pipeline + storage only, no closing of the loop.** The prior v1 contract draft lived in `docs/archive/quay-spec-pr-review.md` and has been superseded; a replacement is being drafted. This section is a brief overview + a deferred-work catalogue with re-introduction triggers.
 
-> **The v1 contract is in `docs/quay-spec-pr-review.md`.** This section is rationale and the deferred-work index. If the two ever conflict, the spec wins.
+> **The v1 contract document is being rewritten.** Until the replacement lands at `docs/quay-spec-pr-review.md`, the archived prior draft is the closest reference but does **not** reflect the current direction (review as a first-class task state rather than a side-attempt). This section is rationale and the deferred-work index. If the two ever conflict, the new spec wins.
 
 ### v1 in one paragraph
 
 CI calls `quay review-pr --pr <repo>:<num>`. Quay dispatches between a Quay-task path (matched by `pr_number`) and a synthetic-task path (Option B pull-style fallback for human-authored PRs). A Quay-spawned reviewer worker (single, N=1, deployment-config preamble, read-only worktree) posts a standard GitHub PR review via `gh pr review` and emits `quay-principle` fenced blocks for generalizable rules. Tick observes the review, snapshots the existing `review_comments` artifact, and writes structured rows into a new `review_findings` SQL table. Tasks carry `task_tags` set at enqueue time, so findings are tag-clusterable via JOIN. Two read CLIs (`quay artifact list --kind review_findings --tag <name>` and `quay task review-findings <task_id>`) expose the storage. **That's it.** No brief enrichment, no principle injection into future tasks, no `--enrich-principles` flag, no `tasks.raw_brief`/`brief` split, no `query-principles` CLI, no `task_enrichment_log` table — those all defer.
 
-The closed loop ("review → principle → next task's brief") doesn't function automatically in v1. v1 captures the input; whoever wants to consume the stored data builds it as an external consumer. See the full v1 contract in `docs/quay-spec-pr-review.md`; see the deferred-work catalogue below for what comes later.
+The closed loop ("review → principle → next task's brief") doesn't function automatically in v1. v1 captures the input; whoever wants to consume the stored data builds it as an external consumer. The full v1 contract is being re-drafted (archived prior draft: `docs/archive/quay-spec-pr-review.md`); see the deferred-work catalogue below for what comes later.
 
 ### v1 — explicitly deferred (with re-introduction trigger)
 
@@ -1094,7 +1094,7 @@ These are honest trade-offs, not hidden ones. Each maps directly to a deferred p
 ### Spec graduation status
 
 - ✅ **`docs/quay-spec-ticket-validation.md`** — Draft. Covers §2 of these notes (the `quay validate-ticket` library/CLI). Independent of the review feature.
-- ✅ **`docs/quay-spec-pr-review.md`** — Draft. Covers §3.1, §3.2, §5, and the v1 subset of §7 (input pipeline + storage). Independent of the validator.
+- 🛠 **`docs/quay-spec-pr-review.md`** — being re-drafted. The prior draft (archived at `docs/archive/quay-spec-pr-review.md`) covered §3.1, §3.2, §5, and the v1 subset of §7 (input pipeline + storage), but modelled review as a side-attempt rather than a first-class task state and is being replaced. Independent of the validator.
 - ⏳ **Future spec: brief-enrichment / loop-closing.** When the orchestrator team chooses an output-pipeline shape (see deferred table row 1), graduate the chosen approach into its own spec.
 - ⏳ **Future spec: multi-model panel review** (deferred table row 2).
 - ⏳ **Future spec: reviewer-improvement loop** (deferred table row 5).

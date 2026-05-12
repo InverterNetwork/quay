@@ -105,6 +105,21 @@ export class FakeGit implements GitPort {
     this.worktreeBranches.set(worktreePath, { repoId, branch });
   }
 
+  checkoutPullRequest(
+    repoId: string,
+    worktreePath: string,
+    prNumber: number,
+    headSha: string,
+  ): void {
+    this.record("checkoutPullRequest", { repoId, worktreePath, prNumber, headSha });
+    mkdirSync(worktreePath, { recursive: true });
+    this.worktrees.add(worktreePath);
+    this.worktreeBranches.set(worktreePath, {
+      repoId,
+      branch: `pr/${prNumber}@${headSha}`,
+    });
+  }
+
   worktreeDetach(worktreePath: string): void {
     this.record("worktreeDetach", { worktreePath });
     if (this.fail.worktreeDetach?.(worktreePath)) {

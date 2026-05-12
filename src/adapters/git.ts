@@ -2,7 +2,7 @@
 // bare-clone root (`<reposRoot>/<repo_id>.git`). All shell-out calls go
 // through `Bun.spawnSync`; none of them invoke a shell, so repo ids and branch
 // names cannot smuggle metacharacters into the command line.
-import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { DiffSummary, DiffSummaryFile, GitPort } from "../ports/git.ts";
 
@@ -210,6 +210,57 @@ export class LocalGitAdapter implements GitPort {
     if (result.exitCode !== 0) {
       throw new Error(
         `git worktree add ${branch} ${worktreePath} failed: ${result.stderr.trim()}`,
+      );
+    }
+  }
+
+  checkoutPullRequest(
+    repoId: string,
+    worktreePath: string,
+    prNumber: number,
+    headSha: string,
+  ): void {
+    if (!existsSync(worktreePath)) {
+      mkdirSync(resolve(worktreePath, ".."), { recursive: true });
+      const added = runIn(this.bareDir(repoId), [
+        "git",
+        "worktree",
+        "add",
+        "--detach",
+        worktreePath,
+      ]);
+      if (added.exitCode !== 0) {
+        throw new Error(
+          `git worktree add --detach ${worktreePath} failed for PR #${prNumber}: ${added.stderr.trim()}`,
+        );
+      }
+    }
+
+    // Pure-git fetch + detach. Avoid `gh pr checkout`: it creates a local
+    // branch named after the PR's head ref, and the worktree is reused
+    // across SHAs for the same PR — a second review on a new SHA would
+    // hit "branch already exists" and strand the task.
+    const fetched = runIn(worktreePath, [
+      "git",
+      "fetch",
+      "origin",
+      `pull/${prNumber}/head`,
+    ]);
+    if (fetched.exitCode !== 0) {
+      throw new Error(
+        `git fetch origin pull/${prNumber}/head failed for ${repoId}: ${fetched.stderr.trim() || fetched.stdout.trim()}`,
+      );
+    }
+
+    const detached = runIn(worktreePath, [
+      "git",
+      "checkout",
+      "--detach",
+      headSha,
+    ]);
+    if (detached.exitCode !== 0) {
+      throw new Error(
+        `git checkout --detach ${headSha} failed for PR #${prNumber}: ${detached.stderr.trim()}`,
       );
     }
   }
