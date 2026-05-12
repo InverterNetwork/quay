@@ -45,6 +45,7 @@ max_thread_messages = 200
 [reviewer]
 enabled = false
 gate_quay_owned_done = false
+# gh_token_file = "/run/hermes/reviewer-gh-token"
 ```
 
 ## Keys
@@ -74,6 +75,7 @@ gate_quay_owned_done = false
 enabled = true
 gate_quay_owned_done = false
 # login = "quay-bot"
+# gh_token_file = "/run/hermes/reviewer-gh-token"
 ```
 
 `enabled` turns on the reviewer subsystem, including `quay review-pr` and the
@@ -90,6 +92,21 @@ runs as the deployment service account and the worker posts under a dedicated
 bot account); leaving it unset in that setup will silently never match the
 posted review and park the task in `non_budget_loop` after the infra-failure
 retry budget runs out.
+
+`gh_token_file` makes the reviewer tmux pane authenticate to GitHub as a
+different identity than the worker that opened the PR. GitHub refuses
+self-review, so a deployment where worker and reviewer share the same `gh`
+auth cannot approve quay-opened PRs. When set, the file (expected mode `0600`,
+contents read fresh on every reviewer spawn) is `cat`'d inside the pane and
+exported as `GH_TOKEN`; the worker pane is unaffected and continues to use
+the host's default `gh` auth. The path lands in the pane wrapper script — the
+token bytes themselves never appear in any process argv, so `ps` on the host
+cannot leak them. Rotation is transparent: write the new token to the file
+and the next reviewer attempt picks it up. A missing or empty file is a hard
+spawn failure (`spawn_substrate_failed`), so silent fall-back to the host
+auth (and the resulting self-review block) is impossible. Pair this with an
+out-of-band token minter (e.g. an `hermes-agent` systemd timer that refreshes
+a GitHub App installation token).
 
 ## Agent Invocation
 
