@@ -73,6 +73,20 @@ interface RawLinearIssue {
   comments: RawLinearCommentsPage;
 }
 
+interface RawIssueStateRefs {
+  state: { id: string; name: string } | null;
+  team: { id: string } | null;
+}
+
+interface RawTeamStateNode {
+  id: string;
+  name: string;
+}
+
+interface RawTeamStates {
+  states: { nodes: RawTeamStateNode[] };
+}
+
 interface GraphQLEnvelope<T> {
   data?: T | null;
   errors?: Array<{ message?: string; extensions?: Record<string, unknown> }>;
@@ -84,6 +98,26 @@ export class LinearAdapter implements LinearPort {
   private readonly tokenEnvVar: string;
   private readonly timeoutMs: number;
   private readonly transport: LinearTransport;
+  // Per-team workflow state cache (state-name → state-id). Linear's workflow
+  // states are stable enough to cache for the process lifetime; the cost of a
+  // miss is one extra round-trip. Keyed on `team.id` (UUID), not the team's
+  // short key, so deployments where two adapters target the same instance
+  // don't collide on short-key aliases.
+  private readonly teamStatesCache = new Map<string, Map<string, string>>();
+  // Last stateName this process wrote (or observed equal to) for each
+  // issue. Lets repeated writebacks of the same name short-circuit the
+  // read-then-write round trip entirely. Worst-case staleness: when Linear
+  // moved on its side, the next *different* sync target reconciles —
+  // quay's hot path never re-asserts an already-set state.
+  //
+  // Bounded LRU: Map preserves insertion order, so the oldest entry is
+  // always `keys().next()`. Eviction happens at the write site below,
+  // keeping the cache footprint at ~one map slot per distinct ticket the
+  // process has touched up to the cap. The cap is high enough that any
+  // realistic operator load stays inside it; the bound only matters for
+  // pathological workloads or test fixtures that mint tickets in a loop.
+  private readonly lastSyncedStateNameByIssue = new Map<string, string>();
+  private static readonly LAST_SYNCED_STATE_CACHE_MAX = 4096;
 
   constructor(opts?: {
     token?: string;
@@ -151,6 +185,67 @@ export class LinearAdapter implements LinearPort {
     };
   }
 
+  async setIssueState(identifier: string, stateName: string): Promise<void> {
+    // Local fast path: nothing to do when the last writeback for this issue
+    // landed on the same target. Skips all three round-trips for steady-
+    // state (e.g. retries that keep firing "In Progress").
+    if (this.lastSyncedStateNameByIssue.get(identifier) === stateName) return;
+    // Read current state + team in a single round-trip. A 404 (ticket
+    // deleted upstream) is a quiet no-op — quay has nothing to write back.
+    const refs = await this.queryIssueStateRefs(identifier);
+    if (refs === null) return;
+    if (refs.team === null) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: issue has no team`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+    // Resolve target stateName via the team's workflow states. A stale cache
+    // shows up as a `state.id` Linear rejects with a 4xx — surfaces as
+    // `adapter_error`, reaches the operator as a warning, and is preferred
+    // over a fetch-per-call.
+    const teamId = refs.team.id;
+    let stateMap = this.teamStatesCache.get(teamId);
+    if (stateMap === undefined) {
+      stateMap = await this.queryTeamStates(identifier, teamId);
+      this.teamStatesCache.set(teamId, stateMap);
+    }
+    const targetStateId = stateMap.get(stateName);
+    if (targetStateId === undefined) {
+      throw new QuayError(
+        "unknown_state",
+        `Linear team ${teamId} has no workflow state named "${stateName}"`,
+        { adapter: "linear", team_id: teamId, state_name: stateName },
+      );
+    }
+    // Idempotent skip — compared on id, so a Linear-side rename doesn't
+    // accidentally re-write.
+    if (refs.state !== null && refs.state.id === targetStateId) {
+      this.rememberSyncedState(identifier, stateName);
+      return;
+    }
+    await this.runIssueUpdate(identifier, targetStateId);
+    this.rememberSyncedState(identifier, stateName);
+  }
+
+  private rememberSyncedState(identifier: string, stateName: string): void {
+    // Re-inserting an existing key is a no-op for the cap check; net new
+    // identifiers trip the eviction. `keys().next().value` is the oldest
+    // entry by Map insertion order — that's the LRU victim.
+    if (
+      !this.lastSyncedStateNameByIssue.has(identifier) &&
+      this.lastSyncedStateNameByIssue.size >=
+        LinearAdapter.LAST_SYNCED_STATE_CACHE_MAX
+    ) {
+      const oldest = this.lastSyncedStateNameByIssue.keys().next().value;
+      if (oldest !== undefined) {
+        this.lastSyncedStateNameByIssue.delete(oldest);
+      }
+    }
+    this.lastSyncedStateNameByIssue.set(identifier, stateName);
+  }
+
   // -- helpers ----------------------------------------------------------
 
   private resolveToken(): string {
@@ -171,16 +266,108 @@ export class LinearAdapter implements LinearPort {
     identifier: string,
     commentsAfter: string | null,
   ): Promise<RawLinearIssue | null> {
-    const token = this.resolveToken();
-    const body = JSON.stringify({
-      query: GET_ISSUE_QUERY,
-      variables: {
-        id: identifier,
-        commentsFirst: COMMENTS_PAGE_SIZE,
-        commentsAfter,
-      },
+    const response = await this.postGraphQL(identifier, GET_ISSUE_QUERY, {
+      id: identifier,
+      commentsFirst: COMMENTS_PAGE_SIZE,
+      commentsAfter,
     });
-    const response = await this.transport({
+    const data = this.parseGraphQLEnvelope<{ issue: RawLinearIssue | null }>(
+      identifier,
+      response,
+    );
+    if (data === null) return null;
+    if (!("issue" in data)) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: response missing issue field`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+    return data.issue;
+  }
+
+  private async queryIssueStateRefs(
+    identifier: string,
+  ): Promise<RawIssueStateRefs | null> {
+    const response = await this.postGraphQL(
+      identifier,
+      GET_ISSUE_STATE_REFS_QUERY,
+      { id: identifier },
+    );
+    const parsed = this.parseGraphQLEnvelope<{
+      issue: RawIssueStateRefs | null;
+    }>(identifier, response);
+    if (parsed === null) return null;
+    if (!("issue" in parsed)) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: response missing issue field`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+    return parsed.issue;
+  }
+
+  private async queryTeamStates(
+    identifier: string,
+    teamId: string,
+  ): Promise<Map<string, string>> {
+    const response = await this.postGraphQL(
+      identifier,
+      GET_TEAM_STATES_QUERY,
+      { teamId, statesFirst: TEAM_STATES_PAGE_SIZE },
+    );
+    const parsed = this.parseGraphQLEnvelope<{ team: RawTeamStates | null }>(
+      identifier,
+      response,
+    );
+    if (parsed === null || parsed.team === null) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear team ${teamId}: not found while resolving workflow states`,
+        { adapter: "linear", team_id: teamId, retryable: false },
+      );
+    }
+    const map = new Map<string, string>();
+    for (const node of parsed.team.states.nodes) {
+      map.set(node.name, node.id);
+    }
+    return map;
+  }
+
+  private async runIssueUpdate(
+    identifier: string,
+    stateId: string,
+  ): Promise<void> {
+    const response = await this.postGraphQL(
+      identifier,
+      UPDATE_ISSUE_STATE_MUTATION,
+      { id: identifier, stateId },
+    );
+    const parsed = this.parseGraphQLEnvelope<{
+      issueUpdate: { success: boolean } | null;
+    }>(identifier, response);
+    // A null envelope means HTTP 404 on the issue — the ticket vanished
+    // between the read and the write. Treat as best-effort no-op rather than
+    // an error: the next sync (if any) will be a fresh read-before-write.
+    if (parsed === null) return;
+    if (parsed.issueUpdate === null || parsed.issueUpdate.success !== true) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: issueUpdate returned success=false`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+  }
+
+  private async postGraphQL(
+    identifier: string,
+    query: string,
+    variables: Record<string, unknown>,
+  ): Promise<LinearTransportResponse> {
+    const token = this.resolveToken();
+    const body = JSON.stringify({ query, variables });
+    return this.transport({
       url: this.endpoint,
       method: "POST",
       headers: {
@@ -189,13 +376,12 @@ export class LinearAdapter implements LinearPort {
       },
       body,
     });
-    return this.parseResponse(identifier, response);
   }
 
-  private parseResponse(
+  private parseGraphQLEnvelope<T>(
     identifier: string,
     response: LinearTransportResponse,
-  ): RawLinearIssue | null {
+  ): T | null {
     const status = response.status;
     if (status === 404) return null;
     if (status === 429) {
@@ -220,7 +406,7 @@ export class LinearAdapter implements LinearPort {
         { adapter: "linear", retryable: false, status },
       );
     }
-    let parsed: GraphQLEnvelope<{ issue: RawLinearIssue | null }>;
+    let parsed: GraphQLEnvelope<T>;
     try {
       parsed = JSON.parse(response.body);
     } catch (err) {
@@ -231,8 +417,8 @@ export class LinearAdapter implements LinearPort {
       );
     }
     if (parsed.errors !== undefined && parsed.errors.length > 0) {
-      // Per spec §12: any non-empty `errors[]` is a hard adapter failure,
-      // regardless of whether `data.issue` is also populated.
+      // Spec §12: any non-empty `errors[]` is a hard adapter failure even
+      // when `data` is also populated.
       const messages = parsed.errors
         .map((e) => e.message ?? "(no message)")
         .join("; ");
@@ -249,17 +435,13 @@ export class LinearAdapter implements LinearPort {
         { adapter: "linear", retryable: false },
       );
     }
-    if (!("issue" in parsed.data)) {
-      throw new QuayError(
-        "adapter_error",
-        `Linear ${identifier}: response missing issue field`,
-        { adapter: "linear", retryable: false },
-      );
-    }
-    if (parsed.data.issue === null) return null;
-    return parsed.data.issue;
+    return parsed.data;
   }
 }
+
+// First page of team workflow states. Workflow state counts per team are
+// typically <20 in Linear; 50 is generous headroom without paging.
+const TEAM_STATES_PAGE_SIZE = 50;
 
 // `AbortController` bounds each request to `timeoutMs` so a stalled
 // connection cannot wedge the supervisor's bounded budget.
@@ -314,6 +496,34 @@ const GET_ISSUE_QUERY = `query GetIssue($id: String!, $commentsFirst: Int!, $com
         botActor { name }
       }
     }
+  }
+}`;
+
+// Minimal projection for the writeback path: we only need `state.id` (for
+// idempotent-skip) and `team.id` (to resolve the target state). Skipping the
+// comments/description fields keeps the writeback's per-call payload small.
+const GET_ISSUE_STATE_REFS_QUERY = `query GetIssueStateRefs($id: String!) {
+  issue(id: $id) {
+    state { id name }
+    team { id }
+  }
+}`;
+
+// Per-team workflow state map. Cached for the process lifetime; one
+// round-trip per team per process.
+const GET_TEAM_STATES_QUERY = `query GetTeamStates($teamId: String!, $statesFirst: Int!) {
+  team(id: $teamId) {
+    states(first: $statesFirst) {
+      nodes { id name }
+    }
+  }
+}`;
+
+// `issueUpdate` with a `stateId` input is Linear's canonical state move. The
+// adapter never persists the returned issue body — only `success` matters.
+const UPDATE_ISSUE_STATE_MUTATION = `mutation UpdateIssueState($id: String!, $stateId: String!) {
+  issueUpdate(id: $id, input: { stateId: $stateId }) {
+    success
   }
 }`;
 

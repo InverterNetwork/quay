@@ -107,7 +107,11 @@ test("pr_opened with unchanged remote SHA leaves diff_summary NULL", async () =>
   expect(built.git.countCalls("diffSummary")).toBe(0);
 });
 
-test("pr_opened with spawn SHA NULL (first push) leaves diff_summary NULL", async () => {
+test("pr_opened with spawn SHA NULL (first push) falls back to the repo base branch", async () => {
+  // First-attempt success: the worker pushed `quay/<branch>` for the very
+  // first time, so attempts.remote_sha_at_spawn is null. The classifier
+  // must fall back to the repo's base branch tip and capture the PR-shaped
+  // diff. Earlier behavior left diff_summary NULL on this path.
   h = createHarness();
   h.clock.set("2026-05-10T16:02:00.000Z");
 
@@ -125,16 +129,60 @@ test("pr_opened with spawn SHA NULL (first push) leaves diff_summary NULL", asyn
   const built = buildTickDeps(h);
   built.tmux.markDead(t.sessionName!);
   built.git.setRemoteHeadSha(repoId, t.branchName, "first-push-sha");
+  // Base branch tip is what the classifier resolves from `repos.base_branch`
+  // (defaults to `main` per `insertRepo`).
+  built.git.setRemoteHeadSha(repoId, "main", "main-tip-sha");
+  built.git.setDiffSummary(repoId, "main-tip-sha", "first-push-sha", {
+    files_changed: 1,
+    insertions: 5,
+    deletions: 0,
+    files: [{ path: "src/new.ts", status: "A", ins: 5, del: 0 }],
+  });
   built.github.setPrExists(repoId, t.branchName, true);
 
   await tick_once(built.deps);
 
   const row = readAttempt(t.attemptId);
   expect(row.exit_kind).toBe("pr_opened");
-  // No base SHA → can't compute a diff range. Stays NULL by design;
-  // first-push diff is reconstructable from `<empty-tree>..head` if
-  // anyone ever wants it.
+  expect(row.diff_summary).not.toBeNull();
+  const summary = JSON.parse(row.diff_summary!);
+  expect(summary.files_changed).toBe(1);
+  expect(summary.insertions).toBe(5);
+  expect(summary.files[0].path).toBe("src/new.ts");
+});
+
+test("pr_opened with no base-branch SHA cached locally leaves diff_summary NULL", async () => {
+  // Edge case: `remote_sha_at_spawn` is null AND the bare clone has never
+  // fetched the base branch (so `git.remoteHeadSha(base)` returns null).
+  // Without a base SHA there's no range to diff against — capture is
+  // skipped silently rather than emitting a tick_error.
+  h = createHarness();
+  h.clock.set("2026-05-10T16:02:30.000Z");
+
+  const repoId = insertRepo(h.db, "repo-diff-no-base");
+  const worktreesRoot = join(h.dataDir, "worktrees");
+
+  const t = insertRunningTask(h.db, {
+    taskId: "task-diff-no-base",
+    repoId,
+    worktreesRoot,
+    remoteShaAtSpawn: null,
+    prExistedAtSpawn: 0,
+  });
+
+  const built = buildTickDeps(h);
+  built.tmux.markDead(t.sessionName!);
+  built.git.setRemoteHeadSha(repoId, t.branchName, "first-push-sha");
+  // Base branch SHA intentionally NOT stubbed; FakeGit returns null.
+  built.github.setPrExists(repoId, t.branchName, true);
+
+  await tick_once(built.deps);
+
+  const row = readAttempt(t.attemptId);
+  expect(row.exit_kind).toBe("pr_opened");
   expect(row.diff_summary).toBeNull();
+  // No spurious diffSummary call — we never had a base SHA to pass.
+  expect(built.git.countCalls("diffSummary")).toBe(0);
 });
 
 test("git failure leaves diff_summary NULL and emits a tick_error event", async () => {

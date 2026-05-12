@@ -12,7 +12,11 @@ export type QuayErrorCode =
   | "ticket_not_found"
   | "adapter_not_enabled"
   | "adapter_not_configured"
-  | "adapter_error";
+  | "adapter_error"
+  // Raised by the Linear adapter when the configured state-name map
+  // references a workflow state that doesn't exist on the issue's team.
+  // Caught upstream by `syncLinearState` and downgraded to a warning.
+  | "unknown_state";
 
 export class QuayError extends Error {
   override readonly name = "QuayError";

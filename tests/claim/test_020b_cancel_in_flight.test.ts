@@ -15,7 +15,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_020b_cancel_in_flight_fences_claim_scoped_writes", () => {
+test("test_020b_cancel_in_flight_fences_claim_scoped_writes", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-cancel-race");
@@ -45,7 +45,7 @@ test("test_020b_cancel_in_flight_fences_claim_scoped_writes", () => {
   const store = createArtifactStore({ db: h.db, artifactRoot: h.artifactRoot, clock: h.clock });
   const slack = new FakeSlack();
 
-  const submission = submit_brief(
+  const submission = await submit_brief(
     { db: h.db, clock: h.clock, artifactStore: store },
     { taskId, claimId, brief: "follow-up brief", reason: "blocker_resolved" },
   );
@@ -53,7 +53,7 @@ test("test_020b_cancel_in_flight_fences_claim_scoped_writes", () => {
   if (submission.ok) throw new Error("expected submit to fail");
   expect(submission.error.code).toBe("cancelled");
 
-  const escalation = escalate_human(
+  const escalation = await escalate_human(
     { db: h.db, clock: h.clock, artifactStore: store, ids: h.ids },
     { taskId, claimId, questionBody: "should not post" },
   );

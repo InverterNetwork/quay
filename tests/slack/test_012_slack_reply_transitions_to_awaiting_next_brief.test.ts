@@ -38,7 +38,7 @@ test("test_012_slack_reply_transitions_to_awaiting_next_brief", async () => {
   const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
   if (!claim.ok) throw new Error("expected claim");
   h.ids.push("nonce0012");
-  const esc = escalate_human(
+  const esc = await escalate_human(
     {
       db: h.db,
       clock: h.clock,

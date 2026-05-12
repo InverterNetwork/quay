@@ -488,14 +488,25 @@ function transitionPrOpened(
         exitInfo.exitSignal,
         attempt.attempt_id,
       );
+    // event_data records what the (event_type, from_state, to_state) triple
+    // can't express: what SHA actually landed, the OS-level exit info, and
+    // whether the PR existed before this attempt (distinguishes a brand-new
+    // PR from a respawn that didn't push but kept the existing PR).
+    const eventData = JSON.stringify({
+      exit_code: exitInfo.exitCode,
+      exit_signal: exitInfo.exitSignal,
+      head_sha: remoteShaAtExit,
+      remote_sha_at_spawn: attempt.remote_sha_at_spawn,
+      pr_existed_at_spawn: attempt.pr_existed_at_spawn === 1,
+    });
     deps.db
       .query(
         `INSERT INTO events (
            task_id, attempt_id, event_type,
-           from_state, to_state, occurred_at
-         ) VALUES (?, ?, 'pr_opened', 'running', 'pr-open', ?)`,
+           from_state, to_state, occurred_at, event_data
+         ) VALUES (?, ?, 'pr_opened', 'running', 'pr-open', ?, ?)`,
       )
-      .run(task.task_id, attempt.attempt_id, now);
+      .run(task.task_id, attempt.attempt_id, now, eventData);
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -508,24 +519,37 @@ function transitionPrOpened(
   return { outcome: "pr_opened" };
 }
 
-// Best-effort lines-changed capture between `remote_sha_at_spawn` and
-// `remote_sha_at_exit`. Runs after the transition has committed so a slow
+// Best-effort lines-changed capture between an attempt's spawn-time base
+// and its exit-time head. Runs after the transition has committed so a slow
 // or failing git invocation never blocks the state machine. Failure leaves
 // `attempts.diff_summary` NULL and emits a `tick_error` event so retro
 // analysis can tell "no diff captured (capture failed)" apart from "no
 // diff produced (column populated with zero-files JSON)".
+//
+// Base SHA selection (in order):
+//   1. attempt.remote_sha_at_spawn — the natural choice for respawns where
+//      `quay/<branch>` already existed on origin and the worker pushed on
+//      top.
+//   2. The repo's base_branch tip when the spawn-time SHA is null (first
+//      push: the branch was created and pushed for the very first time
+//      this attempt). Without this fallback, every successful first-attempt
+//      PR loses its diff_summary — exactly the AST-103 regression.
+//
+// `git.diffSummary` uses three-dot range semantics, so passing the base
+// branch tip as `baseSha` produces a clean PR-shaped diff even when the
+// base has advanced past the worker's branch point.
 function captureDiffSummary(
   deps: ClassifierDeps,
   task: ClassifyContextTask,
   attempt: ClassifyContextAttempt,
   remoteShaAtExit: string | null,
 ): void {
-  const baseSha = attempt.remote_sha_at_spawn;
-  if (
-    baseSha === null ||
-    remoteShaAtExit === null ||
-    baseSha === remoteShaAtExit
-  ) {
+  if (remoteShaAtExit === null) return;
+  let baseSha = attempt.remote_sha_at_spawn;
+  if (baseSha === null) {
+    baseSha = loadBaseBranchSha(deps, task.repo_id);
+  }
+  if (baseSha === null || baseSha === remoteShaAtExit) {
     return;
   }
   let summary;
@@ -556,6 +580,34 @@ function captureDiffSummary(
       )
       .run(task.task_id, attempt.attempt_id, deps.clock.nowISO(), eventData);
   } catch {}
+}
+
+// Best-effort lookup for the base-branch tip SHA used as the diff_summary
+// fallback on first push. We refresh the local cache via the tolerant
+// fetch first so the merge-base inside `git.diffSummary` reflects current
+// origin state. Any failure (no row, missing remote) returns null and the
+// caller leaves diff_summary NULL.
+function loadBaseBranchSha(
+  deps: ClassifierDeps,
+  repoId: string,
+): string | null {
+  const row = deps.db
+    .query<{ base_branch: string }, [string]>(
+      `SELECT base_branch FROM repos WHERE repo_id = ?`,
+    )
+    .get(repoId);
+  if (!row) return null;
+  try {
+    deps.git.fetchBranchIfExists(repoId, row.base_branch);
+  } catch {
+    // Best-effort: a transient fetch failure falls through to whatever
+    // SHA is already cached locally.
+  }
+  try {
+    return deps.git.remoteHeadSha(repoId, row.base_branch);
+  } catch {
+    return null;
+  }
 }
 
 function scheduleCrashRetry(

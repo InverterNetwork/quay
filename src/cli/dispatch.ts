@@ -160,9 +160,9 @@ export async function dispatch(
       case "cancel":
         return await handleCancel(rest, deps, io);
       case "submit-brief":
-        return handleSubmitBrief(rest, deps, io);
+        return await handleSubmitBrief(rest, deps, io);
       case "escalate-human":
-        return handleEscalateHuman(rest, deps, io);
+        return await handleEscalateHuman(rest, deps, io);
       case "artifact":
         return handleArtifact(rest, deps, io);
       default:
@@ -1200,6 +1200,8 @@ async function handleCancel(
     artifactStore: deps.artifactStore,
     supervisorLock: deps.supervisorLock,
   };
+  const cancelLinear = pickLinearAdapter(deps);
+  if (cancelLinear !== undefined) cancelDeps.linear = cancelLinear;
   const result: CancelResult = await cancel_task(cancelDeps, {
     taskId,
     closePr,
@@ -1237,11 +1239,11 @@ function handleReleaseClaim(
   return emitServiceResult(release_claim(claimDeps, { taskId, claimId }), io);
 }
 
-function handleSubmitBrief(
+async function handleSubmitBrief(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
-): DispatchResult {
+): Promise<DispatchResult> {
   if (wantsHelp(argv)) return printHelp(io, ["submit-brief"]);
   const json = tryParseJsonFlag(argv);
   if (!json.ok) return writeError(io, "usage_error", json.message);
@@ -1276,8 +1278,10 @@ function handleSubmitBrief(
     clock: deps.clock,
     artifactStore: deps.artifactStore,
   };
+  const submitLinear = pickLinearAdapter(deps);
+  if (submitLinear !== undefined) submitDeps.linear = submitLinear;
   return emitServiceResult(
-    submit_brief(submitDeps, {
+    await submit_brief(submitDeps, {
       taskId: input.taskId,
       claimId: input.claimId,
       brief: input.brief,
@@ -1287,11 +1291,11 @@ function handleSubmitBrief(
   );
 }
 
-function handleEscalateHuman(
+async function handleEscalateHuman(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
-): DispatchResult {
+): Promise<DispatchResult> {
   if (wantsHelp(argv)) return printHelp(io, ["escalate-human"]);
   const json = tryParseJsonFlag(argv);
   if (!json.ok) return writeError(io, "usage_error", json.message);
@@ -1330,7 +1334,9 @@ function handleEscalateHuman(
     ids: deps.ids,
     artifactStore: deps.artifactStore,
   };
-  return emitServiceResult(escalate_human(escalateDeps, input), io);
+  const escalateLinear = pickLinearAdapter(deps);
+  if (escalateLinear !== undefined) escalateDeps.linear = escalateLinear;
+  return emitServiceResult(await escalate_human(escalateDeps, input), io);
 }
 
 interface ArtifactRow {
@@ -1434,7 +1440,7 @@ function emitServiceResult<T>(
 }
 
 function pickTickDeps(deps: CliDeps): TickDeps {
-  return {
+  const tickDeps: TickDeps = {
     db: deps.db,
     clock: deps.clock,
     git: deps.git,
@@ -1444,6 +1450,20 @@ function pickTickDeps(deps: CliDeps): TickDeps {
     artifactStore: deps.artifactStore,
     supervisorLock: deps.supervisorLock,
   };
+  const linear = pickLinearAdapter(deps);
+  if (linear !== undefined) tickDeps.linear = linear;
+  return tickDeps;
+}
+
+// Forward the Linear adapter only when the deployment opted in via
+// `[adapters.linear].enabled = true`. Production wiring constructs the
+// adapter unconditionally (token resolution is lazy, so an unused adapter
+// is free), so the dispatcher gates here to keep `linearEnabled = false`
+// deployments from mutating Linear state via the writeback paths.
+export function pickLinearAdapter(deps: CliDeps): LinearPort | undefined {
+  if (deps.linear === undefined) return undefined;
+  if (deps.adaptersConfig?.linearEnabled !== true) return undefined;
+  return deps.linear;
 }
 
 // --- argv helpers --------------------------------------------------------

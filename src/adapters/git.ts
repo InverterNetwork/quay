@@ -437,7 +437,15 @@ export class LocalGitAdapter implements GitPort {
     // -c core.quotePath=false keeps non-ASCII filenames literal — without
     // it git emits octal-escaped quoted strings like "caf\303\251.txt"
     // and downstream consumers can't index by the actual on-disk path.
-    const range = `${baseSha}..${headSha}`;
+    //
+    // Three-dot range (`A...B`) so the diff is computed from the merge-base
+    // of A and B rather than from A itself. For the respawn case (A is the
+    // prior remote head, an ancestor of B) the merge-base is A, so this is
+    // identical to two-dot. For the first-push case where A is the base
+    // branch tip and the worker may not have rebased onto the latest base,
+    // three-dot still produces a clean PR-shaped diff — two-dot would
+    // surface base-only commits as deletions, which is wrong.
+    const range = `${baseSha}...${headSha}`;
     const numstatRes = runIn(this.bareDir(repoId), [
       "git",
       "-c",

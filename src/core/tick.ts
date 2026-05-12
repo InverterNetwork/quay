@@ -6,11 +6,16 @@ import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PostedReview, PrSnapshot } from "../ports/github.ts";
+import type { LinearPort } from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { probeAgentIdentity } from "./agent_identity.ts";
 import { runCancelFinalizer } from "./cancel.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
+import {
+  LINEAR_STATE_IN_PROGRESS,
+  LinearSyncQueue,
+} from "./linear_state_sync.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
 import {
@@ -67,6 +72,9 @@ export interface TickDeps {
   slack: SlackPort;
   artifactStore: ArtifactStore;
   supervisorLock: SupervisorLock;
+  // Passed through to runCancelFinalizer so the cancel sweep also picks
+  // up the writeback without a separate wiring.
+  linear?: LinearPort;
 }
 
 export interface TickOptions {
@@ -139,6 +147,7 @@ interface QueuedTaskRow {
   tmux_id: string;
   worktree_path: string;
   cancel_requested_at: string | null;
+  external_ref: string | null;
 }
 
 interface RunningTaskRow {
@@ -223,6 +232,10 @@ export async function tick_once(
 ): Promise<TickTaskResult[]> {
   const max = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const agentInvocation = options.agentInvocation ?? DEFAULT_AGENT_INVOCATION;
+  // Linear writebacks are scheduled inside the lock but drained after it
+  // releases, so a slow or unreachable Linear cannot extend the supervisor-
+  // lock-held window and starve concurrent ticks / cancels.
+  const linearSyncs = new LinearSyncQueue(deps.linear);
   // Spec §5: a tick that fires while another tick (or `quay cancel`) holds
   // the supervisor lock exits immediately without action — the next
   // scheduled fire retries. `tryRun` returns `acquired: false` in that case;
@@ -240,7 +253,7 @@ export async function tick_once(
     const cancelledIds = new Set<string>();
     for (const task of cancelTargets) {
       try {
-        runCancelFinalizer(deps, task.task_id);
+        await runCancelFinalizer(deps, task.task_id, linearSyncs);
         cancelledIds.add(task.task_id);
         results.push({ task_id: task.task_id, action: "cancel_finalized" });
       } catch (err) {
@@ -316,7 +329,7 @@ export async function tick_once(
 
     for (const task of waitingHumanSnapshot) {
       try {
-        const taskResults = await processWaitingHumanTask(deps, task);
+        const taskResults = await processWaitingHumanTask(deps, task, linearSyncs);
         for (const r of taskResults) results.push(r);
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
@@ -364,7 +377,7 @@ export async function tick_once(
         continue;
       }
       try {
-        results.push(promoteAndSpawn(deps, task, agentInvocation));
+        results.push(promoteAndSpawn(deps, task, agentInvocation, linearSyncs));
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
       }
@@ -375,6 +388,10 @@ export async function tick_once(
 
     return results;
   });
+  // Drain Linear writebacks outside the supervisor lock so the network
+  // round-trips do not extend the lock-held window. Still awaited before
+  // tick_once returns so tests observe the writebacks deterministically.
+  await linearSyncs.drain();
   return attempt.acquired ? attempt.value : [];
 }
 
@@ -396,7 +413,8 @@ function readCancelTargets(db: DB): CancelTargetRow[] {
 function readQueued(db: DB): QueuedTaskRow[] {
   return db
     .query<QueuedTaskRow, []>(
-      `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path, cancel_requested_at
+      `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path,
+              cancel_requested_at, external_ref
          FROM tasks
         WHERE state = 'queued'
         ORDER BY created_at, task_id`,
@@ -431,12 +449,14 @@ interface WaitingHumanTaskRow {
   slack_thread_ref: string | null;
   cancel_requested_at: string | null;
   authors_json: string | null;
+  external_ref: string | null;
 }
 
 function readWaitingHuman(db: DB): WaitingHumanTaskRow[] {
   return db
     .query<WaitingHumanTaskRow, []>(
-      `SELECT task_id, slack_thread_ref, cancel_requested_at, authors_json
+      `SELECT task_id, slack_thread_ref, cancel_requested_at, authors_json,
+              external_ref
          FROM tasks
         WHERE state = 'waiting_human'
         ORDER BY created_at, task_id`,
@@ -750,6 +770,12 @@ function processPrOpenTask(
     );
   }
 
+  // Persist the PR's identifying metadata (number, url, head/base SHAs) onto
+  // the task row before downstream branches can short-circuit (terminal
+  // state, conflict, CI). The CLI/operator surface reads these columns; if
+  // we wait until after CI passes we miss the entire pr-open window.
+  persistPrMetadata(deps, task.task_id, snapshot);
+
   // 1. Terminal PR state (merged / closed_unmerged) takes precedence over
   //    everything else — even pending CI. A human merging or closing the PR
   //    while CI is still running must convert to terminal cleanly (spec §5
@@ -848,6 +874,10 @@ function processDoneTask(
       ),
     );
   }
+
+  // Same writeback as the pr-open path: keep PR metadata current while we
+  // poll for review feedback / merge state in the done branch.
+  persistPrMetadata(deps, task.task_id, snapshot);
 
   // 1. Terminal PR state.
   if (snapshot.state === "merged" || snapshot.state === "closed_unmerged") {
@@ -1462,8 +1492,53 @@ function loadAttemptArtifactContent(
 }
 
 function formatConflictObservation(snapshot: PrSnapshot): string {
-  const base = snapshot.baseSha ?? "";
+  // Key on the base ref *tip*, not `baseSha` (which is the merge-base — stable
+  // across base advances by construction). Keying on the tip means a base
+  // advance that may have worsened the conflict re-enters the respawn path
+  // even when head is unchanged. Fall back to `baseSha` when the tip is
+  // unavailable (unfetched base, older gh) so the key still has *some* base
+  // component rather than collapsing to head-only.
+  const base = snapshot.baseTipSha ?? snapshot.baseSha ?? "";
   return `${snapshot.headSha}:${base}`;
+}
+
+// COALESCE-write so a snapshot with a missing field (older gh, transient
+// failure of the merge-base shell-out) never overwrites a previously
+// captured value with NULL. head_sha follows the same pattern: if the
+// snapshot returns it, we accept the new value (force-pushes legitimately
+// rotate it); if not, we keep what's there.
+function persistPrMetadata(
+  deps: TickDeps,
+  taskId: string,
+  snapshot: PrSnapshot,
+): void {
+  const prNumber = snapshot.prNumber ?? null;
+  const prUrl = snapshot.prUrl ?? null;
+  const headSha = snapshot.headSha === "" ? null : snapshot.headSha;
+  const baseSha = snapshot.baseSha;
+  if (
+    prNumber === null &&
+    prUrl === null &&
+    headSha === null &&
+    baseSha === null
+  ) {
+    return;
+  }
+  try {
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET pr_number = COALESCE(?, pr_number),
+                pr_url    = COALESCE(?, pr_url),
+                head_sha  = COALESCE(?, head_sha),
+                base_sha  = COALESCE(?, base_sha)
+          WHERE task_id = ?`,
+      )
+      .run(prNumber, prUrl, headSha, baseSha, taskId);
+  } catch {
+    // Best-effort: PR-metadata observability never blocks the state
+    // machine. A SQL failure here will be retried on the next tick.
+  }
 }
 
 function loadRepoForTask(
@@ -1589,6 +1664,7 @@ function loadLatestEscalationArtifact(
 async function processWaitingHumanTask(
   deps: TickDeps,
   task: WaitingHumanTaskRow,
+  linearSyncs: LinearSyncQueue,
 ): Promise<TickTaskResult[]> {
   if (task.cancel_requested_at !== null) return [];
   if (task.slack_thread_ref === null) {
@@ -1735,7 +1811,7 @@ async function processWaitingHumanTask(
     return results;
   }
 
-  ingestSlackReply(deps, task, art, firstNonBot);
+  ingestSlackReply(deps, task, art, firstNonBot, linearSyncs);
   results.push({ task_id: task.task_id, action: "slack_reply_ingested" });
   return results;
 }
@@ -1798,6 +1874,7 @@ function ingestSlackReply(
   task: WaitingHumanTaskRow,
   art: EscalationArtifactRow,
   reply: { ts: string; authorBot: boolean; text: string },
+  linearSyncs: LinearSyncQueue,
 ): void {
   const attemptId = art.attempt_id!;
   const replyContent = JSON.stringify({
@@ -1868,6 +1945,12 @@ function ingestSlackReply(
     } catch {}
     throw err;
   }
+
+  // Reaching this line implies the commit landed: every early-return guard
+  // above exits before this point, and the catch block re-throws. Concurrent
+  // writers that lose the UPDATE race took the early-return branch and
+  // never get here.
+  linearSyncs.enqueue(task.external_ref, LINEAR_STATE_IN_PROGRESS);
 }
 
 function loadLatestAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
@@ -2210,6 +2293,7 @@ function promoteAndSpawn(
   deps: TickDeps,
   task: QueuedTaskRow,
   agentInvocation: string,
+  linearSyncs: LinearSyncQueue,
 ): TickTaskResult {
   if (task.cancel_requested_at !== null) {
     return { task_id: task.task_id, action: "skipped_predicate" };
@@ -2237,9 +2321,23 @@ function promoteAndSpawn(
     : 0;
   const now = deps.clock.nowISO();
 
+  // Probe agent identity and compute the canonical session name BEFORE the
+  // promotion transaction so the `spawned` event can carry both in
+  // `event_data`. The probe is documented as in-process and never throws;
+  // computing the session name from `tmux_id` + `attempt_number` is pure.
+  // Persisting `attempts.agent_identity` still happens AFTER spawn succeeds
+  // (paired with `tmux_session`) — this earlier probe is event-only.
+  const sessionName = `quay-task-${task.tmux_id}-${pending.attempt_number}`;
+  const agentIdentity = probeAgentIdentity(agentInvocation);
+
   const promoted = runPromotionTransaction(deps.db, {
     taskId: task.task_id,
     attemptId: pending.attempt_id,
+    attemptNumber: pending.attempt_number,
+    branchName: task.branch_name,
+    worktreePath: task.worktree_path,
+    plannedSession: sessionName,
+    agentIdentity,
     consumedBudget: pending.consumed_budget,
     spawnedAt: now,
     remoteSha,
@@ -2252,7 +2350,6 @@ function promoteAndSpawn(
   // Substrate work happens outside the transaction. If spawn throws, the row
   // stays in (state = running, tmux_session = NULL); the slice-4 spawn-window
   // classifier recovers via the canonical session name.
-  const sessionName = `quay-task-${task.tmux_id}-${pending.attempt_number}`;
   try {
     deps.tmux.spawn({
       sessionName,
@@ -2279,10 +2376,10 @@ function promoteAndSpawn(
   // load-bearing: a substrate failure between promotion and this point must
   // leave the consecutive counter intact so it can accumulate across ticks.
   //
-  // agent_identity is captured here (alongside tmux_session) so a successful
-  // spawn always lands a non-NULL identity. The probe is in-process and
-  // self-bounded — it never throws, so a flaky binary cannot block tick.
-  const agentIdentity = probeAgentIdentity(agentInvocation);
+  // agent_identity is paired with tmux_session — both columns reflect what
+  // the substrate actually accepted, so they're written together. The
+  // earlier probe at promotion time only feeds the `spawned` event_data;
+  // a spawn-failure leaves the column NULL.
   deps.db
     .query(
       `UPDATE attempts
@@ -2293,6 +2390,8 @@ function promoteAndSpawn(
   deps.db
     .query(`UPDATE tasks SET spawn_failures_consecutive = 0 WHERE task_id = ?`)
     .run(task.task_id);
+
+  linearSyncs.enqueue(task.external_ref, LINEAR_STATE_IN_PROGRESS);
 
   return { task_id: task.task_id, action: "spawned" };
 }
@@ -2437,6 +2536,14 @@ function clearTickError(deps: TickDeps, taskId: string): void {
 interface PromotionInput {
   taskId: string;
   attemptId: number;
+  attemptNumber: number;
+  branchName: string;
+  worktreePath: string;
+  // Canonical tmux session name we'll attempt to spawn into. Recorded in
+  // the `spawned` event_data even when substrate spawn ultimately fails —
+  // the event captures intent, the column captures observed reality.
+  plannedSession: string;
+  agentIdentity: string;
   consumedBudget: number;
   spawnedAt: string;
   remoteSha: string | null;
@@ -2473,11 +2580,26 @@ function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
         WHERE attempt_id = ? AND spawned_at IS NULL`,
     ).run(p.spawnedAt, p.remoteSha, p.prExisted, p.attemptId);
 
+    // event_data captures the spawn-time intent: where the worker is going
+    // to run (worktree, branch, tmux session), what we expect to invoke
+    // (agent_identity), and the spawn-time progress predicate inputs. This
+    // lets retro analysis correlate a spawn with later transitions without
+    // having to join across multiple rows.
+    const eventData = JSON.stringify({
+      tmux_session: p.plannedSession,
+      worktree_path: p.worktreePath,
+      branch_name: p.branchName,
+      attempt_number: p.attemptNumber,
+      agent_identity: p.agentIdentity,
+      remote_sha_at_spawn: p.remoteSha,
+      pr_existed_at_spawn: p.prExisted === 1,
+    });
+
     db.query(
       `INSERT INTO events (
-         task_id, attempt_id, event_type, from_state, to_state, occurred_at
-       ) VALUES (?, ?, 'spawned', 'queued', 'running', ?)`,
-    ).run(p.taskId, p.attemptId, p.spawnedAt);
+         task_id, attempt_id, event_type, from_state, to_state, occurred_at, event_data
+       ) VALUES (?, ?, 'spawned', 'queued', 'running', ?, ?)`,
+    ).run(p.taskId, p.attemptId, p.spawnedAt, eventData);
 
     db.exec("COMMIT");
     return true;

@@ -7,8 +7,16 @@
 // Schema mapping (see ports/github.ts for the type definitions):
 //   - PR existence:       `gh pr list --head <branch> --state all --json number`
 //   - PR open?:           `gh pr list --head <branch> --state open --json number`
-//   - PR snapshot fields: `gh pr view <branch> --json state,headRefOid,baseRefOid,
-//                                                mergeable,reviewDecision,latestReviews`
+//   - PR snapshot fields: `gh pr view <branch> --json number,url,state,headRefOid,
+//                                                baseRefName,mergeable,
+//                                                reviewDecision,latestReviews`
+//     `baseRefOid` is intentionally NOT in this set — it was added in gh
+//     2.46 and a successful read on older gh installs (e.g. 2.45.0) errors
+//     with "Unknown JSON field: baseRefOid", which would knock out the whole
+//     scrape and leave tasks.pr_number / pr_url / base_sha NULL. We carry
+//     `baseRefName` (universally supported) and resolve it to a SHA via a
+//     `git merge-base origin/<baseRefName> <headRefOid>` shell-out against
+//     the bare clone (already fetched by tick before calling this).
 //   - Inline review comments (CHANGES_REQUESTED only):
 //                         `gh api graphql -f query='... PullRequestReview.comments ...'`
 //                         keyed by the review's node id from `latestReviews`. Folded
@@ -118,7 +126,7 @@ export class GitHubCliAdapter implements GitHubPort {
     const headShaBefore = view.headSha;
     const checks = this.fetchChecks(repoId, branch);
     const headShaAfter = this.fetchHeadShaOnly(repoId, branch) ?? headShaBefore;
-    return {
+    const snapshot: PrSnapshot = {
       state: view.state,
       prNumber: view.prNumber ?? null,
       headSha: headShaAfter,
@@ -127,6 +135,22 @@ export class GitHubCliAdapter implements GitHubPort {
       latestReview: view.latestReview,
       checks: { ...checks, checkSha: headShaBefore },
     };
+    // Optional metadata fields use conditional assignment so they're only
+    // present when populated — `exactOptionalPropertyTypes` rejects an
+    // explicit `undefined` on optional members.
+    if (view.baseRef !== null && view.baseRef !== undefined) {
+      snapshot.baseRef = view.baseRef;
+    }
+    if (view.baseTipSha !== null && view.baseTipSha !== undefined) {
+      snapshot.baseTipSha = view.baseTipSha;
+    }
+    if (view.prNumber !== null && view.prNumber !== undefined) {
+      snapshot.prNumber = view.prNumber;
+    }
+    if (view.prUrl !== null && view.prUrl !== undefined) {
+      snapshot.prUrl = view.prUrl;
+    }
+    return snapshot;
   }
 
   prView(repoId: string, prNumber: number): PullRequestView | null {
@@ -287,11 +311,15 @@ export class GitHubCliAdapter implements GitHubPort {
   ):
     | (Omit<PrSnapshot, "checks">)
     | null {
+    // `baseRefOid` was deliberately removed from this list — see the header
+    // comment on this file. Anything added here that's newer than gh 2.45 is
+    // a stop-the-scrape regression for operators on the old CLI.
     const fields = [
-      "state",
       "number",
+      "url",
+      "state",
       "headRefOid",
-      "baseRefOid",
+      "baseRefName",
       "mergeable",
       "reviewDecision",
       "latestReviews",
@@ -332,18 +360,75 @@ export class GitHubCliAdapter implements GitHubPort {
     }
     const baseLatestReview = extractLatestReview(parsed);
     const latestReview = this.enrichWithInlineComments(repoId, baseLatestReview);
-    return {
+    const headSha = String(parsed.headRefOid ?? "");
+    const baseRef =
+      parsed.baseRefName !== null && parsed.baseRefName !== undefined
+        ? String(parsed.baseRefName)
+        : null;
+    // Resolve baseRefName → SHA via `git merge-base`. We deliberately use the
+    // merge-base rather than the current tip of `origin/<baseRef>` so the
+    // recorded base_sha is the commit the PR was branched from — stable even
+    // if the base advances during the PR's lifetime. Best-effort: a missing
+    // ref or unfetched base falls through as null and tick records pr_open
+    // metadata without it.
+    const baseSha =
+      baseRef !== null && headSha !== ""
+        ? this.computeMergeBaseSha(repoId, `origin/${baseRef}`, headSha)
+        : null;
+    // Resolve the base ref tip separately. Conflict dedup keys on the tip so
+    // a base advance can re-trigger respawn even when head is unchanged —
+    // `baseSha` (merge-base) is stable across that scenario by construction.
+    const baseTipSha =
+      baseRef !== null
+        ? this.computeRefTipSha(repoId, `origin/${baseRef}`)
+        : null;
+    const prNumber = toFiniteIntegerOrNull(parsed.number);
+    const prUrl =
+      typeof parsed.url === "string" && parsed.url.length > 0
+        ? parsed.url
+        : null;
+    const view: Omit<PrSnapshot, "checks"> = {
       state: mapPrState(parsed.state),
-      prNumber:
-        typeof parsed.number === "number" ? parsed.number : null,
-      headSha: String(parsed.headRefOid ?? ""),
-      baseSha:
-        parsed.baseRefOid !== null && parsed.baseRefOid !== undefined
-          ? String(parsed.baseRefOid)
-          : null,
+      headSha,
+      baseSha,
       mergeable: mapMergeable(parsed.mergeable),
       latestReview,
     };
+    if (baseRef !== null) view.baseRef = baseRef;
+    if (baseTipSha !== null) view.baseTipSha = baseTipSha;
+    if (prNumber !== null) view.prNumber = prNumber;
+    if (prUrl !== null) view.prUrl = prUrl;
+    return view;
+  }
+
+  // Resolve a (base, head) pair to the merge-base SHA via a git shell-out
+  // inside the bare clone. Best-effort: any failure (missing ref, empty
+  // output, unfetched base) returns null so the caller can still publish a
+  // partial snapshot — base_sha just stays null until the next tick.
+  protected computeMergeBaseSha(
+    repoId: string,
+    baseRef: string,
+    headSha: string,
+  ): string | null {
+    const result = this.run(repoId, [
+      "git",
+      "merge-base",
+      baseRef,
+      headSha,
+    ]);
+    if (result.exitCode !== 0) return null;
+    const sha = result.stdout.trim();
+    return sha.length > 0 ? sha : null;
+  }
+
+  // Resolve a ref to its current tip SHA via `git rev-parse`. Same best-effort
+  // posture as `computeMergeBaseSha`: any failure returns null and the caller
+  // omits `baseTipSha` from the snapshot.
+  protected computeRefTipSha(repoId: string, ref: string): string | null {
+    const result = this.run(repoId, ["git", "rev-parse", ref]);
+    if (result.exitCode !== 0) return null;
+    const sha = result.stdout.trim();
+    return sha.length > 0 ? sha : null;
   }
 
   // For CHANGES_REQUESTED reviews, the actionable feedback usually lives in
@@ -964,6 +1049,13 @@ function mapPostedReviewDecision(
 function decode(buf: Buffer | Uint8Array | undefined): string {
   if (!buf) return "";
   return new TextDecoder().decode(buf);
+}
+
+function toFiniteIntegerOrNull(raw: unknown): number | null {
+  if (typeof raw !== "number") return null;
+  if (!Number.isFinite(raw)) return null;
+  if (!Number.isInteger(raw)) return null;
+  return raw;
 }
 
 // `join` is exported so adapter contract tests can compute the bare-clone
