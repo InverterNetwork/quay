@@ -49,12 +49,20 @@ const AdaptersConfigSchema = z
   })
   .strict();
 
+const ReviewerConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    gate_quay_owned_done: z.boolean().optional(),
+  })
+  .strict();
+
 export const ConfigSchema = z
   .object({
     data_dir: z.string().min(1).optional(),
     repos_root: z.string().min(1).optional(),
     worktree_root: z.string().min(1).optional(),
     max_concurrent: positiveInt.optional(),
+    max_concurrent_reviewers: positiveInt.optional(),
     retry_budget: positiveInt.optional(),
     agent_invocation: z.string().min(1).optional(),
     max_attempt_duration_seconds: positiveInt.optional(),
@@ -66,6 +74,7 @@ export const ConfigSchema = z
     tick_lock_path: z.string().min(1).optional(),
     supervisor_lock_stale_seconds: positiveInt.optional(),
     adapters: AdaptersConfigSchema.optional(),
+    reviewer: ReviewerConfigSchema.optional(),
   })
   .strict();
 
@@ -113,6 +122,15 @@ export function tickOptionsFromConfig(config: QuayConfig): TickOptions {
   const opts: TickOptions = {};
   if (config.max_concurrent !== undefined) {
     opts.maxConcurrent = config.max_concurrent;
+  }
+  if (config.max_concurrent_reviewers !== undefined) {
+    opts.maxConcurrentReviewers = config.max_concurrent_reviewers;
+  }
+  if (config.reviewer?.enabled !== undefined) {
+    opts.reviewerEnabled = config.reviewer.enabled;
+  }
+  if (config.reviewer?.gate_quay_owned_done !== undefined) {
+    opts.gateQuayOwnedDone = config.reviewer.gate_quay_owned_done;
   }
   if (config.agent_invocation !== undefined) {
     opts.agentInvocation = config.agent_invocation;

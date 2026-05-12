@@ -94,7 +94,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   enqueue: {
     path: "enqueue",
     synopsis:
-      "quay enqueue --repo <id> --brief-file <path> [--ticket-snapshot-file <p>] [--external-ref <r>] [--slack-thread-ref <r>]",
+      "quay enqueue --repo <id> --brief-file <path> [--ticket-snapshot-file <p>] [--external-ref <r>] [--slack-thread-ref <r>] [--tag <name>]...",
     summary: "Enqueue a new task from a brief file (or a Linear issue).",
     details:
       "Pass --linear-issue <id> instead of --brief-file to derive the task from a Linear ticket via the configured adapter.",
@@ -105,7 +105,19 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--external-ref <ref>", desc: "Optional ticket reference (e.g., ITRY-900)." },
       { flag: "--slack-thread-ref <ref>", desc: "Optional Slack thread reference." },
       { flag: "--linear-issue <id>", desc: "Adapter-driven flow; mutually exclusive with --brief-file/--external-ref/--slack-thread-ref." },
-      { flag: "--tag <name>", desc: "Repeatable. Adapter-flow tag passthrough." },
+      { flag: "--tag <name>", desc: "Repeatable. Attach a task tag." },
+    ],
+  },
+  "review-pr": {
+    path: "review-pr",
+    synopsis: "quay review-pr --pr <repo>:<num> [--head-sha <sha>] [--tag <name>]...",
+    summary: "Schedule a Quay reviewer for a GitHub PR.",
+    details:
+      "Fire-and-forget entry point for CI. The command returns after scheduling or idempotently skipping the review attempt.",
+    flags: [
+      { flag: "--pr <repo>:<num>", desc: "Pull request identifier, e.g. owner/repo:47." },
+      { flag: "--head-sha <sha>", desc: "Optional dedup SHA. Defaults to gh pr view headRefOid." },
+      { flag: "--tag <name>", desc: "Repeatable. Attach tags to synthetic review tasks." },
     ],
   },
   repo: {
@@ -356,6 +368,7 @@ const TOP_LEVEL_ORDER: string[] = [
   "task",
   "tick",
   "enqueue",
+  "review-pr",
   "repo",
   "tags",
   "cancel",

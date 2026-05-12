@@ -29,6 +29,7 @@ import {
 import type { SupervisorLock } from "./supervisor_lock.ts";
 
 export const DEFAULT_MAX_CONCURRENT = 2;
+export const DEFAULT_MAX_CONCURRENT_REVIEWERS = 2;
 export const DEFAULT_MAX_ATTEMPT_DURATION_SECONDS = 3600;
 export const DEFAULT_STALENESS_THRESHOLD_SECONDS = 600;
 export const DEFAULT_MAX_SPAWN_FAILURES = 3;
@@ -68,6 +69,9 @@ export interface TickDeps {
 
 export interface TickOptions {
   maxConcurrent?: number;
+  maxConcurrentReviewers?: number;
+  reviewerEnabled?: boolean;
+  gateQuayOwnedDone?: boolean;
   agentInvocation?: string;
   maxAttemptDurationSeconds?: number;
   stalenessThresholdSeconds?: number;
