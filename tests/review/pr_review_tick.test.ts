@@ -377,3 +377,79 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
     .get(taskId);
   expect(pending?.n).toBe(0);
 });
+
+test("tick reaps a superseded reviewer whose tmux outlived enterReview's commit", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-reap");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "pr-review-repo-reap-7",
+    state: "pr-review",
+  });
+  h.db
+    .query(`UPDATE tasks SET pr_number = 7, head_sha = 'new-sha' WHERE task_id = ?`)
+    .run(taskId);
+
+  // Fake the state enterReview leaves behind after COMMIT but before its
+  // own tmux.kill: attempt is ended + kill_intent='superseded', yet the
+  // tmux session is still alive in the substrate.
+  const supersededId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+         SET head_sha = 'old-sha',
+             tmux_session = 'quay-review-orphan',
+             ended_at = '2026-01-01T00:00:01.000Z',
+             review_verdict = 'superseded',
+             kill_intent = 'superseded'
+       WHERE attempt_id = ?`,
+    )
+    .run(supersededId);
+  built.tmux.liveSessions.add("quay-review-orphan");
+
+  await tick_once(built.deps, { reviewerEnabled: true });
+
+  expect(built.tmux.killCalls).toContain("quay-review-orphan");
+  expect(built.tmux.liveSessions.has("quay-review-orphan")).toBe(false);
+});
+
+test("tick reaper skips a dead session and does not call kill twice", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-reap-idem");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "pr-review-repo-reap-idem-8",
+    state: "pr-review",
+  });
+  h.db
+    .query(`UPDATE tasks SET pr_number = 8, head_sha = 'new-sha' WHERE task_id = ?`)
+    .run(taskId);
+  const supersededId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+         SET head_sha = 'old-sha',
+             tmux_session = 'quay-review-already-dead',
+             ended_at = '2026-01-01T00:00:01.000Z',
+             review_verdict = 'superseded',
+             kill_intent = 'superseded'
+       WHERE attempt_id = ?`,
+    )
+    .run(supersededId);
+  // Session intentionally NOT added to liveSessions.
+
+  await tick_once(built.deps, { reviewerEnabled: true });
+  expect(built.tmux.killCalls).not.toContain("quay-review-already-dead");
+});

@@ -324,6 +324,13 @@ export async function tick_once(
     }
 
     if (options.reviewerEnabled === true) {
+      // Reap any review-only attempts that were marked ended + kill_intent
+      // but whose tmux session is still alive. enterReview sets kill_intent
+      // before COMMIT and kills the session after; a crash in between would
+      // otherwise leave the worker running. Idempotent: a dead session is a
+      // no-op.
+      reapAbandonedReviewers(deps);
+
       for (const task of runningReviewSnapshot) {
         try {
           const result = processRunningReviewAttempt(deps, task, options);
@@ -2140,6 +2147,32 @@ function countRunningReviewers(db: DB): number {
     )
     .get();
   return row?.n ?? 0;
+}
+
+// Closes the crash window between enterReview's COMMIT (which marks the
+// attempt ended + kill_intent='superseded') and its tmux.kill call. After
+// COMMIT the row falls out of every active-attempt view, so without this
+// sweep the worker would keep running and could still post a review for the
+// stale head SHA. We scan every tick for review-only attempts that have a
+// recorded tmux session, a non-null kill_intent, and ended_at IS NOT NULL,
+// then kill any session that's still alive. Idempotent: a dead session is a
+// no-op, and once killed the row stays ended.
+function reapAbandonedReviewers(deps: TickDeps): void {
+  const rows = deps.db
+    .query<{ tmux_session: string }, []>(
+      `SELECT tmux_session FROM attempts
+        WHERE reason = 'review_only'
+          AND tmux_session IS NOT NULL
+          AND kill_intent IS NOT NULL
+          AND ended_at IS NOT NULL`,
+    )
+    .all();
+  for (const row of rows) {
+    if (!deps.tmux.isAlive(row.tmux_session)) continue;
+    try {
+      deps.tmux.kill(row.tmux_session);
+    } catch {}
+  }
 }
 
 function loadPendingAttempt(db: DB, taskId: string): PendingAttemptRow | null {
