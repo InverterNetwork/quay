@@ -29,7 +29,7 @@ The review loop is conceptually the same for both task kinds (review → approve
 - Single idempotent entry point — internal function — that moves a task into `pr-review` and schedules a review-only attempt at the current head SHA. Two callers: tick (for Quay-owned tasks, when the precondition is met) and the new `quay review-pr` CLI (for synthetic tasks, called by CI). Dedup on `(task_id, head_sha)`: repeat calls at the same SHA are no-ops.
 - New attempt reason `review_only`. New columns: `attempts.head_sha` (dedup), `attempts.review_verdict` (state-transition driver), `attempts.review_id` (GitHub review id for traceability).
 - Reviewer-as-Quay-worker, single per-PR worker (N=1). Spawned by tick like any other worker; reviewer preamble stored in the existing `preambles` SQL table (new `kind = 'review'` row), seeded from a TS constant whose prose mirrors `docs/quay-reviewer-preamble-default.md`.
-- **Single concurrency cap** (shared with code workers): the existing `max_concurrent` is the total cap on simultaneously running attempts (code workers + reviewer workers). `countRunning()` is generalized to count attempts with `spawned_at IS NOT NULL AND ended_at IS NULL` regardless of task state, so reviewer workers honestly consume the cap.
+- **Separate reviewer concurrency cap.** New top-level config key `max_concurrent_reviewers` (default 2). Independent of the existing `max_concurrent` (code-worker cap). Code-worker `countRunning()` stays unchanged; reviewer spawn-pass uses its own count over `review_only` attempts with `spawned_at IS NOT NULL AND ended_at IS NULL`.
 - Two-flag rollout control:
   - `[reviewer].enabled` — whether the reviewer subsystem runs at all (synthetic review CLI + Quay-owned review trigger). Default false.
   - `[reviewer].gate_quay_owned_done` — whether Quay-owned tasks require an approved Quay review to reach `done`. Default false. Off → pre-existing `pr-open → done` path on CI green remains. On → only `pr-review → done` (via approval) advances Quay-owned tasks.
@@ -49,7 +49,6 @@ The review loop is conceptually the same for both task kinds (review → approve
 - **Closing the loop / brief enrichment.** Findings aren't injected into future briefs in v1 (depends on the deferred storage).
 - **Multi-model panel review.** N=1 single reviewer only.
 - **Blocking mode (`--wait` / `--timeout`).** `quay review-pr` is fire-and-forget. CI sees the verdict on GitHub when the reviewer posts it.
-- **Separate reviewer concurrency cap.** Single shared cap in v1. Add `max_concurrent_review_runs` later if starvation is observed.
 - **Auto-comment-back to GitHub on review failure.** Worker either posts a review or writes a blocker file; no GitHub-comment loop.
 - **PR conversation-tab comments and review-comment replies.** Quay observes only `gh pr review` payloads (review body + inline comments). General PR comments and reply threads are not ingested.
 - **Consultation of GitHub's review-request state.** Quay does not look at whether a review has been "re-requested" on GitHub. The SHA is the only trigger.
@@ -357,7 +356,7 @@ Config-schema update (`src/cli/config.ts`, not in the SQL migration):
 
 - Add `reviewer: ReviewerConfigSchema.optional()` with `enabled: z.boolean().optional()` and `gate_quay_owned_done: z.boolean().optional()`.
 
-No new top-level `max_concurrent_review_runs` key. Reviewer attempts consume the existing `max_concurrent` cap — see §6.4.
+Add a new top-level key `max_concurrent_reviewers: positiveInt.optional()` (default 2) — see §6.4.
 
 No backfill required: pre-existing attempts have all new columns NULL; existing `preambles` rows backfill to `kind = 'code'`; existing tasks get `review_infra_failures_consecutive = 0`.
 
@@ -389,7 +388,7 @@ SELECT a.attempt_id, a.task_id, a.head_sha, a.preamble_id, t.repo_id, t.branch_n
  ORDER BY a.attempt_id
 ```
 
-…subject to the shared `max_concurrent` cap (§6.4).
+…subject to `max_concurrent_reviewers` (§6.4).
 
 Per-row processing reuses `promoteAndSpawn`'s flow with these parameter changes:
 
@@ -439,20 +438,35 @@ No `[reviewer].preamble_path` config key. The storage mechanism is the database,
 
 The preamble carries the entirety of the reviewer-worker contract surface: what the worker reads, how it composes the review (line comments vs. review body, severity, line-number accuracy), the verdict mapping (approve vs. request-changes only — no comment-only), and posting via `gh pr review`. The contract pieces themselves are enumerated in §7.1; the prose enforcing them lives in `docs/quay-reviewer-preamble-default.md` (the source-of-truth) and is mirrored verbatim in `DEFAULT_REVIEWER_PREAMBLE_BODY` in the source. The preamble also asks the worker to write optional `quay-principle` fenced blocks for generalizable rules; v1 stores the blocks verbatim in the `review_comments` artifact but doesn't parse them — that's deferred to the future findings/search spec.
 
-### 6.4 Capacity cap (shared)
+### 6.4 Capacity cap (separate)
 
-Reviewer workers and code workers share the existing `max_concurrent` cap in v1. No new config key.
+Reviewers have their own cap, independent of `max_concurrent` (code workers):
 
-The catch: today's `countRunning()` in `src/core/tick.ts` counts tasks with `state = 'running'`, which would miss reviewer workers (they run on tasks in `pr-review`). For the shared cap to honestly include reviewer attempts, `countRunning()` must be **generalized to count actually-running attempts across both kinds**, e.g.:
+```toml
+# ~/.quay/config.toml
+max_concurrent = 8              # existing — code workers
+max_concurrent_reviewers = 2    # new — reviewer workers (default 2)
+```
+
+Schema addition in `src/cli/config.ts`'s strict top-level `ConfigSchema`:
+
+```ts
+max_concurrent_reviewers: positiveInt.optional(),
+```
+
+The reviewer spawn-pass counts its own running attempts:
 
 ```sql
 SELECT COUNT(*) FROM attempts
- WHERE spawned_at IS NOT NULL AND ended_at IS NULL
+ WHERE reason = 'review_only'
+   AND spawned_at IS NOT NULL AND ended_at IS NULL
 ```
 
-This is a small change to existing logic and is **required** as part of this spec — without it, reviewer workers run unbounded alongside the code-worker cap, defeating the shared-cap design.
+The existing code-worker `countRunning()` (`state = 'running'`) stays unchanged — reviewer attempts don't put their task into `running`, so they're naturally invisible to it.
 
-A separate `max_concurrent_review_runs` cap is deferred to a future spec; v1 ships with one number to tune, and starvation (if observed) becomes the trigger for the split.
+**Default is intentionally conservative (2).** Reviewers can be I/O-heavy (gh API calls, `gh pr checkout`) and they're new in the system. Two parallel reviewer workers is enough to keep an ordinary review queue moving without surprising the host on day one. Deployments with measured headroom can tune up.
+
+Rationale for two caps over one: separating them keeps code-worker scheduling exactly as today (no `countRunning()` change required) and gives operators an independent throttle for the new, less-characterized workload. The cost is one extra config key.
 
 ### 6.5 Worker contract (summary)
 
@@ -647,7 +661,6 @@ Every additive piece this spec defers is designed to land **without rewriting v1
 | **`reviewer_preambles` SQL table** with named, append-only versioning | Copy `preambles WHERE kind = 'review'` rows over. v1's `preambles.kind` column can stay or be dropped. |
 | **Blocking mode** (`quay review-pr --wait --timeout`) | Two CLI flags added. v1's `(task_id, head_sha)` dedup graduates to run-level when `review_runs` lands. |
 | **Reviewer-improvement loop** (agent-vs-human divergence capture) | Nullable column adds on `attempts` (or per-run on `review_runs`); new artifact kind `agent_review`. v1 data is honest about borderline cases — nothing to backfill. |
-| **Separate `max_concurrent_review_runs` cap** | Add a top-level config key and split the scheduler counting. v1's shared `countRunning()` over actually-running attempts stays valid as a more conservative baseline. |
 | **Human approval as an override for Quay's gate** | Additive `pr-review → done` arrow gated on a new human-approval observation. v1's "advisory only" semantics stay valid as the default. |
 
 Forward-compatible naming choice in v1: this spec uses **`review_only`** for the attempt reason rather than `review_run` or `panel_review`, so when `review_runs` lands as a table the namespace is unclaimed.
@@ -659,16 +672,16 @@ Forward-compatible naming choice in v1: this spec uses **`review_only`** for the
 - ~~**Trigger uniformity.**~~ Resolved: single idempotent entry point (`enterReview`); both tick and `quay review-pr` call it. Dedup on `(task_id, head_sha)`.
 - ~~**Reviewer preamble storage.**~~ Resolved: `preambles` SQL table with new `kind` column. Mirrors existing code-worker preamble pattern.
 - ~~**Rollout flags.**~~ Resolved: two flags, `[reviewer].enabled` (subsystem on/off) and `[reviewer].gate_quay_owned_done` (whether Quay reviewer approval gates Quay-owned `done`). §6.8.
-- ~~**Concurrency cap.**~~ Resolved: shared `max_concurrent` for v1, with `countRunning()` generalized to count actually-running attempts across both kinds. Separate `max_concurrent_review_runs` deferred (§8.4 graduation row).
+- ~~**Concurrency cap.**~~ Resolved: separate `max_concurrent_reviewers` (default 2). Code-worker `max_concurrent` and its `countRunning()` are unchanged.
 - ~~**Findings storage / search.**~~ Resolved: **deferred** to a future spec (§2 out-of-scope). v1 stores the raw review as an artifact + `attempts.review_id` / `head_sha` / `review_verdict`. Backfillable from those artifacts when a consumer needs structured findings.
-- **Reviewer concurrency starvation.** If the deployment has many open PRs and `max_concurrent` is set low, review attempts compete with code workers for the same slots. The v1 design does not include a backpressure signal back to CI. Add the separate cap (deferred, §8.4) if starvation is observed.
+- **Reviewer cap tuning.** The default `max_concurrent_reviewers = 2` is conservative. Deployments with many open PRs may need to raise it; the spec doesn't include a backpressure signal back to CI when the cap is saturated. Whether to add one (and what shape — exit code, message in stdout, separate poll endpoint) is deferred until measured behavior justifies it.
 - **Synthetic task access control.** v1 doesn't restrict who can call `quay review-pr`. Multi-tenant deployments may want per-repo scoping; not in v1.
 
 ### 8.6 Implementation notes
 
 - **Make the review-ingestion port explicit.** The existing `src/adapters/github.ts` provides `fetchInlineReviewComments` with robust GraphQL pagination (`src/adapters/github.ts:323`) and a `prSnapshot` shape used by `non_budget_respawn`. The reaper's review-ingestion path (§6.6) is a distinct operation — it fetches a specific bot-authored review at a specific SHA. Don't stretch `prSnapshot` to carry the new fields; expose a focused port like `fetchPostedReview(repo, pr, head_sha, author)` returning a `PostedReview` shape with review body + inline comments + `review_id`. Keeps the adapter surface composable.
 - **Reviewer scheduling reuses the existing scheduler, the reaper is new.** Per §6.1: `promoteAndSpawn`'s substrate (atomic promotion, tmux spawn, agent identity, prompt loading) is shared between code-worker and reviewer spawns; what differs is the predicate, a couple of formatting / state-transition arguments, and the post-exit reaper.
-- **The shared cap change is load-bearing.** `countRunning()` must be generalized to count attempts (not tasks-in-running) for the shared cap to honestly include reviewer workers (§6.4). Without this, reviewer attempts run unbounded.
+- **Code-worker scheduling is unchanged.** Separate caps mean `countRunning()` keeps its existing semantics (`state = 'running'`); reviewer attempts have their own count over `review_only` running attempts. One less risk vector during rollout.
 
 ### 8.7 External references
 
