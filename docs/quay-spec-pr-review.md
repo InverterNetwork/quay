@@ -2,13 +2,13 @@
 
 **Status:** Draft. Not locked. Replaces the superseded earlier draft at `docs/archive/quay-spec-pr-review.md`. Second feature spec graduating from `docs/orchestrator-design-notes.md`.
 
-**Implementation order / hard dependency.** This spec **MUST NOT be implemented before** `docs/quay-spec-deployment-adapters.md` lands and is hooked into the task-creation path. Reasoning: the synthetic-task path benefits from rich brief composition (Linear ticket body + tags + Slack thread context) when adapters are available; without adapters, the synthetic path falls back to a thin brief from `gh pr view` and relies on the worker self-serving context.
+**Implementation order / soft dependency.** This spec can ship without the deployment adapters being fully wired into task creation. The adapters migration is already in place and owns `task_tags`; when Linear/Slack adapters are available the synthetic-task path can compose richer briefs, but without adapters it falls back to a thin brief from `gh pr view` and relies on the worker self-serving context.
 
 **Required reading:**
 - `docs/quay-spec.md` — substrate spec (locked v1).
-- `docs/quay-spec-deployment-adapters.md` — Linear + Slack adapter contract (must land first).
+- `docs/quay-spec-deployment-adapters.md` — Linear + Slack adapter contract; improves synthetic-task brief richness but does not gate this v1.
 - `docs/orchestrator-design-notes.md` §3.1, §3.2, §5, §7 — broader rationale.
-- `docs/archive/quay-spec-pr-review.md` — the superseded prior draft. Still the source for design pieces this spec carries forward (synthetic `task_id` identity, `(task_id, head_sha)` dedup, `review_findings` table + FTS5, the `quay-principle` fenced-block contract, force-push handling, v1/v2 graduation).
+- `docs/archive/quay-spec-pr-review.md` — the superseded prior draft. Still useful for design history (synthetic `task_id` identity, SHA dedup, force-push handling, and the deferred findings/search shape).
 
 ---
 
@@ -26,7 +26,7 @@ The review loop is conceptually the same for both task kinds (review → approve
 
 - Two new top-level task states: `pr-review` (reviewer running or queued for this PR) and `waiting_external_changes` (synthetic-only; post-CHANGES_REQUESTED wait for the external author to push).
 - Entry into `pr-review` is gated on PR open + CI green for Quay-owned tasks; synthetic tasks are created directly in `pr-review` by the entry point and skip `queued` / `pr-open` (those represent Quay-authoring stages synthetic tasks don't have).
-- Single idempotent entry point — internal function — that moves a task into `pr-review` and schedules a review-only attempt at the current head SHA. Two callers: tick (for Quay-owned tasks, when the precondition is met) and the new `quay review-pr` CLI (for synthetic tasks, called by CI). Dedup on `(task_id, head_sha)`: repeat calls at the same SHA are no-ops.
+- Single idempotent entry point — internal function — that moves a task into `pr-review` and schedules a review-only attempt at the current head SHA. Two callers: tick (for Quay-owned tasks, when the precondition is met) and the new `quay review-pr` CLI (for synthetic tasks, called by CI). Active attempts dedup on `(task_id, head_sha)`: repeat calls at the same SHA are no-ops when a review is already active or already reached a real verdict; errored attempts may be retried at the same SHA by the bounded infra-failure retry path.
 - New attempt reason `review_only`. New columns: `attempts.head_sha` (dedup), `attempts.review_verdict` (state-transition driver), `attempts.review_id` (GitHub review id for traceability).
 - Reviewer-as-Quay-worker, single per-PR worker (N=1). Spawned by tick like any other worker; reviewer preamble stored in the existing `preambles` SQL table (new `kind = 'review'` row), seeded from a TS constant whose prose mirrors `docs/quay-reviewer-preamble-default.md`.
 - **Separate reviewer concurrency cap.** New top-level config key `max_concurrent_reviewers` (default 2). Independent of the existing `max_concurrent` (code-worker cap). Code-worker `countRunning()` stays unchanged; reviewer spawn-pass uses its own count over `review_only` attempts with `spawned_at IS NOT NULL AND ended_at IS NULL`.
@@ -36,7 +36,7 @@ The review loop is conceptually the same for both task kinds (review → approve
 - CHANGES_REQUESTED handling:
   - **Quay-owned**: write `review_comments` artifact and transition `pr-review → queued`, reusing the existing `non_budget_respawn` logic in `src/core/non_budget_respawn.ts:191`. Tick spawns a code worker from `queued` via the existing path. Counts toward `non_budget_respawns_consumed`.
   - **Synthetic**: write `review_comments` artifact and transition `pr-review → waiting_external_changes`. No code worker to spawn; the task sits until CI calls `quay review-pr` with a new SHA. Then `waiting_external_changes → pr-review` with a fresh attempt.
-- Supersession on new SHA: if a `review_only` attempt is pending or running at SHA A and `enterReview` arrives at SHA B (≠ A), the SHA A attempt is cancelled (`ended_at` set, `review_verdict = 'superseded'`). Prevents the `one_pending_attempt_per_task` index from blocking new attempts and guarantees "one active reviewer per PR at any time."
+- Supersession on new SHA: if a `review_only` attempt is pending or running at SHA A and `enterReview` arrives at SHA B (≠ A), the SHA A attempt is cancelled (`ended_at` set, `review_verdict = 'superseded'`). The migration also tightens `one_pending_attempt_per_task` to ignore ended pending attempts, so superseded pending rows do not block new attempts. This guarantees "one active reviewer per PR at any time."
 - Synthetic-task identity: deterministic `task_id = "pr-review-" + slug(repo_id) + "-" + pr_number`, one synthetic task per human PR forever.
 - `quay review-pr --pr <repo>:<num>` as the single CI-callable entry point. Fire-and-forget.
 - `--tag` flag on `quay enqueue` and `quay review-pr` populating the existing `task_tags` table (already in `migrations/0002_deployment_adapters.sql:12`).
@@ -143,7 +143,7 @@ The pre-existing `pr-open → done` transition stays in place for deployments wh
 A single idempotent function (`enterReview(task_id, head_sha)`) is the only way a task enters `pr-review`. Two callers:
 
 1. **Tick** — for Quay-owned tasks. Trigger: `[reviewer].gate_quay_owned_done = true` and `[reviewer].enabled = true`, task is in `pr-open`, CI is green at the current head SHA, no terminal `review_only` attempt exists for `(task_id, head_sha)`.
-2. **`quay review-pr --pr <repo>:<num>`** (called by CI) — for any PR. Only requires `[reviewer].enabled = true`; works regardless of `gate_quay_owned_done`. Safe to call redundantly; lookup-then-dedup makes it a no-op when an attempt at this SHA exists.
+2. **`quay review-pr --pr <repo>:<num>`** (called by CI) — for any PR. Only requires `[reviewer].enabled = true`; works regardless of `gate_quay_owned_done`. Safe to call redundantly. If the PR resolves to a Quay-owned task while `gate_quay_owned_done = false`, the CLI returns a no-op result and leaves the legacy `pr-open → done` path untouched; synthetic PRs still schedule reviews.
 
 `enterReview` semantics:
 
@@ -151,9 +151,11 @@ A single idempotent function (`enterReview(task_id, head_sha)`) is the only way 
    1. **By `(repo_id, pr_number)`** in `tasks`. Fast path once tick's `persistPrMetadata` (`src/core/tick.ts:587`) has run.
    2. **By `(repo_id, branch_name)`** matching the PR's `headRefName` (from the same `gh pr view` call that supplies `head_sha`). Closes the race window before `persistPrMetadata` runs.
    3. **Synthetic.** Both lookups missed. Compute the synthetic `task_id` (`pr-review-<slug(repo_id)>-<pr_number>`). If no row exists, create one directly in `pr-review` with a thin synthetic brief composed from `gh pr view`. Synthetic tasks never pass through `queued` or `pr-open`. (Worktree materialization: §6.7.)
-2. **Supersede stale pending attempts.** Before insert, cancel any `review_only` attempt with `head_sha ≠ <new>` that is still pending or running for this task: set `ended_at = now()`, `review_verdict = 'superseded'`. This frees the `one_pending_attempt_per_task` index (`migrations/0001_init.sql:83`) so the new attempt can be inserted, and enforces "one active reviewer per PR at any time" even when SHAs change rapidly.
-3. **Dedup on `(task_id, head_sha)`** against the `attempts` table (unique partial index, §5.2):
-   - If a `review_only` attempt exists at this SHA → return its id, do nothing.
+2. **Supersede stale active attempts.** Before insert, cancel any `review_only` attempt with `head_sha ≠ <new>` that is still pending or running for this task: set `ended_at = now()`, `review_verdict = 'superseded'`. This works with the revised `one_pending_attempt_per_task` index (§5.2), which ignores ended pending attempts, and enforces "one active reviewer per PR at any time" even when SHAs change rapidly.
+3. **Dedup / retry on `(task_id, head_sha)`** against the `attempts` table:
+   - If an **active** `review_only` attempt exists at this SHA → return its id, do nothing.
+   - If a terminal `review_only` attempt at this SHA has `review_verdict IN ('approved', 'changes_requested')` → return its id, do nothing. A real verdict has already been recorded for this SHA.
+   - If only terminal `errored` or `superseded` attempts exist at this SHA → a retry may insert a fresh `review_only` attempt, subject to the infra-failure cap (§4).
    - Else → transition the task to `pr-review` (from `pr-open` for Quay-owned, from `waiting_external_changes` for synthetic — synthetic tasks created in step 1.3 are already there). Insert a `review_only` attempt with `head_sha` populated and `spawned_at IS NULL`.
 4. Return the `attempt_id`.
 
@@ -175,16 +177,16 @@ When the reviewer worker terminates, the reaper (§6.6) fetches the posted revie
 Infrastructure failures — worker crash, missing posted review, contract violations like `COMMENTED`, transient network errors — are **not** author feedback. Stranding the task in a "wait for changes" state would be wrong (especially synthetic, where there's nobody to push a fix). Instead:
 
 - Set `attempts.review_verdict = 'errored'` on the failed attempt and let it terminate normally.
-- A new `tasks.review_infra_failures_consecutive INTEGER NOT NULL DEFAULT 0` column tracks consecutive failures. Increment on each `errored` exit.
-- Retry at the same `head_sha`: leave the task in `pr-review` and schedule a fresh `review_only` attempt for `(task_id, head_sha)`. The unique partial index allows this because the prior attempt is terminal (`ended_at IS NOT NULL`).
+- New `tasks.review_infra_failures_consecutive INTEGER NOT NULL DEFAULT 0` and `tasks.review_infra_failure_head_sha TEXT` columns track consecutive failures at one SHA. On an `errored` exit, if `review_infra_failure_head_sha` equals the attempt's `head_sha`, increment the counter; otherwise set the SHA column to this `head_sha` and reset the counter to 1.
+- Retry at the same `head_sha`: leave the task in `pr-review` and schedule a fresh `review_only` attempt for `(task_id, head_sha)`. The active-attempt unique partial index allows this because the prior attempt is terminal (`ended_at IS NOT NULL`).
 - After **3 consecutive failures** at the same SHA, park the task: set `tasks.tick_error` with a diagnostic message and transition the task to `non_budget_loop`. Surfaces to humans via the existing escalation surface.
-- A successful review at the same SHA (any verdict) resets the counter to 0.
+- A successful review at the same SHA (any verdict) resets the counter to 0 and clears `review_infra_failure_head_sha`.
 
 This is parallel to the existing `claim_expirations_consecutive` / `spawn_failures_consecutive` patterns — bounded retry with eventual parking. No new state.
 
 ### Approval gate on `done` (conditional)
 
-When `[reviewer].gate_quay_owned_done = true`, the pre-existing `pr-open → done` transition is replaced by `pr-open → pr-review` for Quay-owned tasks; `done` is only reachable through `pr-review → done` on approval. When the flag is `false` (the default), the legacy `pr-open → done` path is unchanged, and `quay review-pr` calls (synthetic only, since tick won't trigger for Quay-owned without the gate) still work — they just don't gate anything Quay-owned.
+When `[reviewer].gate_quay_owned_done = true`, the pre-existing `pr-open → done` transition is replaced by `pr-open → pr-review` for Quay-owned tasks; `done` is only reachable through `pr-review → done` on approval. When the flag is `false` (the default), the legacy `pr-open → done` path is unchanged. `quay review-pr` still schedules synthetic reviews, but returns a no-op for Quay-owned PRs so the reviewer never affects Quay-owned merges while the gate is off.
 
 Rollout: land the migration with both flags false; enable synthetic review by flipping `[reviewer].enabled = true`; validate reviewer quality on synthetic PRs (no Quay-owned merges affected); when confident, flip `gate_quay_owned_done = true`. Reversible by flipping back.
 
@@ -213,7 +215,7 @@ Synthetic `task_id = "pr-review-" + slug(repo_id) + "-" + pr_number`. One synthe
 
 ### Force-pushes mid-review
 
-If a PR is force-pushed while a review attempt is `running`, the worker's worktree no longer matches the new head SHA. Per the reviewer preamble, the worker writes `.quay-blocked.md` and exits without posting. Tick treats this as a reviewer infrastructure failure (above). The next entry-point call at the new SHA flows through dedup normally; if the failure was already counted against `review_infra_failures_consecutive`, the supersession step (§4 enterReview step 2) cancels the prior pending attempt and a fresh one is scheduled.
+If a PR is force-pushed while a review attempt is `running`, the worker's worktree no longer matches the new head SHA. Per the reviewer preamble, the worker writes `.quay-blocked.md` and exits without posting. Tick treats this as a reviewer infrastructure failure (above). The next entry-point call at the new SHA flows through dedup normally, supersedes any active attempt at the old SHA, and resets the infra-failure counter to the new SHA if a retry is needed there.
 
 ## 5. Schema delta
 
@@ -237,10 +239,21 @@ ALTER TABLE attempts ADD COLUMN head_sha TEXT;
 
 CREATE UNIQUE INDEX attempts_review_dedup_idx
   ON attempts(task_id, head_sha)
-  WHERE reason = 'review_only' AND head_sha IS NOT NULL;
+  WHERE reason = 'review_only'
+    AND head_sha IS NOT NULL
+    AND ended_at IS NULL;
 ```
 
-The index is **unique** and partial: it enforces "at most one `review_only` attempt per `(task_id, head_sha)`" at the DB level, so concurrent `enterReview` callers serialize on the insert. Non-review attempts are excluded from the index entirely — they neither have `head_sha` set nor compete on this dedup constraint.
+The index is **unique** and partial: it enforces "at most one active `review_only` attempt per `(task_id, head_sha)`" at the DB level, so concurrent `enterReview` callers serialize on the insert. Terminal attempts are deliberately excluded so reviewer infrastructure failures can retry the same SHA after the failed attempt has `ended_at` set. Non-review attempts are excluded entirely — they neither have `head_sha` set nor compete on this dedup constraint.
+
+This migration also replaces the existing pending-attempt invariant so superseded pending review attempts do not block a new pending attempt:
+
+```sql
+DROP INDEX one_pending_attempt_per_task;
+CREATE UNIQUE INDEX one_pending_attempt_per_task
+  ON attempts(task_id)
+  WHERE spawned_at IS NULL AND ended_at IS NULL;
+```
 
 The existing `attempts.remote_sha_at_spawn` is **not reused** for this purpose. That column records what the substrate observed when a code worker spawned (may differ from what the worker pushes); `head_sha` records what was promised to be reviewed. Different meaning, different column.
 
@@ -290,7 +303,7 @@ Forward compatibility: v2's `reviewer_preambles` table (per `docs/orchestrator-d
 
 ### 5.5 `task_tags` (already exists)
 
-The `task_tags` table is **already created** by `migrations/0002_deployment_adapters.sql:12` as part of the deployment-adapters spec (the hard dependency declared in §10.1). This spec does not recreate it; it depends on its existence.
+The `task_tags` table is **already created** by `migrations/0002_deployment_adapters.sql:12`. This spec does not recreate it; it depends only on that migration having run, not on the full deployment-adapters behavior being wired into task creation.
 
 Shape (for reference; authoritative definition in 0002):
 
@@ -311,16 +324,19 @@ What this spec **adds** around `task_tags`:
 
 Tags are opaque strings to Quay. In v1 they're carried through but not yet queried by Quay itself; a future findings/search spec is where they earn their keep.
 
-### 5.6 `tasks.review_infra_failures_consecutive`
+### 5.6 `tasks.review_infra_failures_consecutive` and `tasks.review_infra_failure_head_sha`
 
 ```sql
 ALTER TABLE tasks ADD COLUMN review_infra_failures_consecutive INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN review_infra_failure_head_sha TEXT;
 -- Counts consecutive reviewer infrastructure failures (worker crash, missing
 -- posted review, contract violations like COMMENTED, transient errors fetching
--- the review). Incremented by the reaper on each errored exit. Reset to 0 on
--- any successful review at the same head_sha (any verdict). After 3 consecutive
--- failures at the same SHA, the task is parked in non_budget_loop. Parallel to
--- existing claim_expirations_consecutive / spawn_failures_consecutive patterns.
+-- the review) at the same head SHA. The SHA column records which head SHA the
+-- counter applies to; a failure at a new SHA resets the counter to 1 for that
+-- SHA. Any successful review verdict resets the counter to 0 and clears the
+-- SHA. After 3 consecutive failures at the same SHA, the task is parked in
+-- non_budget_loop. Parallel to existing claim_expirations_consecutive /
+-- spawn_failures_consecutive patterns.
 ```
 
 ### 5.7 `artifacts.kind = 'review_comments'`
@@ -345,10 +361,12 @@ One migration file (after `migrations/0002_deployment_adapters.sql`), applied as
 1. `ALTER TABLE attempts ADD COLUMN head_sha TEXT`.
 2. `ALTER TABLE attempts ADD COLUMN review_verdict TEXT`.
 3. `ALTER TABLE attempts ADD COLUMN review_id TEXT`.
-4. `CREATE UNIQUE INDEX attempts_review_dedup_idx ...` (partial, on `reason = 'review_only' AND head_sha IS NOT NULL`).
-5. `ALTER TABLE preambles ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'`.
-6. `CREATE INDEX preambles_kind_idx ...`.
-7. `ALTER TABLE tasks ADD COLUMN review_infra_failures_consecutive INTEGER NOT NULL DEFAULT 0`.
+4. `CREATE UNIQUE INDEX attempts_review_dedup_idx ...` (partial, on active `review_only` rows with non-NULL `head_sha`).
+5. `DROP INDEX one_pending_attempt_per_task`; recreate it as `WHERE spawned_at IS NULL AND ended_at IS NULL`.
+6. `ALTER TABLE preambles ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'`.
+7. `CREATE INDEX preambles_kind_idx ...`.
+8. `ALTER TABLE tasks ADD COLUMN review_infra_failures_consecutive INTEGER NOT NULL DEFAULT 0`.
+9. `ALTER TABLE tasks ADD COLUMN review_infra_failure_head_sha TEXT`.
 
 `task_tags` is **not** in this list — it is owned by 0002. No new tables, no FTS5, no triggers (deferred — see §2 out-of-scope).
 
@@ -358,13 +376,13 @@ Config-schema update (`src/cli/config.ts`, not in the SQL migration):
 
 Add a new top-level key `max_concurrent_reviewers: positiveInt.optional()` (default 2) — see §6.4.
 
-No backfill required: pre-existing attempts have all new columns NULL; existing `preambles` rows backfill to `kind = 'code'`; existing tasks get `review_infra_failures_consecutive = 0`.
+No backfill required: pre-existing attempts have all new columns NULL; existing `preambles` rows backfill to `kind = 'code'`; existing tasks get `review_infra_failures_consecutive = 0` and `review_infra_failure_head_sha = NULL`.
 
 The first reviewer spawn after migration triggers seeding of the default `kind = 'review'` preamble row, analogous to how `ensurePreambleId` seeds the first `kind = 'code'` row in `src/core/preamble.ts:16` today.
 
 ## 6. Reviewer worker
 
-The reviewer is a Quay worker, spawned by tick through the same substrate as a code worker (tmux session + supervisor lock). Differences from a code worker: it doesn't modify code or git state, it uses a different preamble (`kind = 'review'`), and on a synthetic task its worktree is materialized lazily via `gh pr checkout`. It shares the existing `max_concurrent` cap.
+The reviewer is a Quay worker, spawned by tick through the same substrate as a code worker (tmux session + supervisor lock). Differences from a code worker: it doesn't modify code or git state, it uses a different preamble (`kind = 'review'`), on a synthetic task its worktree is materialized lazily via `gh pr checkout`, and it uses the separate `max_concurrent_reviewers` cap.
 
 ### 6.1 Spawn trigger — reusing the existing scheduler
 
@@ -488,7 +506,7 @@ When the supervisor reports the worker has terminated, the reaper runs per attem
 2. **Fetch the posted review** via `gh pr view --json reviews`, filtering to reviews authored by the bot account at `attempts.head_sha`.
    - **Found, definite verdict** (`APPROVED` or `CHANGES_REQUESTED`):
      - Set `attempts.review_verdict` (`approved` or `changes_requested`) and `attempts.review_id`.
-     - Reset `tasks.review_infra_failures_consecutive = 0`.
+     - Reset `tasks.review_infra_failures_consecutive = 0` and clear `tasks.review_infra_failure_head_sha`.
      - On `APPROVED`: transition per §4 exit table (Quay-owned to `done` if `gate_quay_owned_done = true`; synthetic to `done`).
      - On `CHANGES_REQUESTED`:
        - **Quay-owned**: write the `review_comments` artifact and call the existing `non_budget_respawn` path (`src/core/non_budget_respawn.ts:191`) — same code that already handles human CHANGES_REQUESTED. Sets the task to `queued` and counts toward `non_budget_respawns_consumed`.
@@ -586,43 +604,46 @@ quay review-pr --pr <repo>:<num> [--head-sha <sha>]
 
 1. Resolve `repo_id` from `--pr` against the `repos` table. If not found → exit non-zero with `repo_not_configured`.
 2. Resolve `head_sha`: from `--head-sha` if provided, else from `gh pr view`. If `gh pr view` fails → exit non-zero with `pr_not_found` or `github_unreachable`.
-3. Call `enterReview(repo_id, pr_number, head_sha)`. The function handles task-id resolution (existing Quay-task vs. new synthetic) and `(task_id, head_sha)` dedup internally.
-4. Print a single line of structured output to stdout (see §7.4) and exit 0.
+3. Call `enterReview(repo_id, pr_number, head_sha)`. The function handles task-id resolution (existing Quay-task vs. new synthetic), active-attempt dedup, same-SHA retry eligibility, and Quay-owned no-op behavior when `gate_quay_owned_done = false`.
+4. Print one JSON object to stdout (see §7.4) and exit 0.
 
-**Fire-and-forget.** The CLI returns immediately after `enterReview` returns. It does not wait for the reviewer worker to spawn, run, or post. CI sees the review on GitHub when the worker posts it; there is no `--wait` flag in v1 (see §2 out-of-scope).
+**Fire-and-forget.** The CLI returns immediately after `enterReview` returns. It does not wait for the reviewer worker to spawn, run, or post. When work is scheduled, CI sees the review on GitHub when the worker posts it; there is no `--wait` flag in v1 (see §2 out-of-scope).
 
-**Safe to call redundantly.** A CI workflow that fires on every `pull_request: synchronize` event calls `quay review-pr` regardless of whether the task is Quay-owned or synthetic. The entry point's lookup-then-dedup makes the call a no-op if tick has already moved the task or if a review-only attempt for `(task_id, head_sha)` exists.
+**Safe to call redundantly.** A CI workflow that fires on every `pull_request: synchronize` event calls `quay review-pr` regardless of whether the task is Quay-owned or synthetic. The entry point's lookup-then-dedup makes the call a no-op if tick has already moved the task, if an active review-only attempt for `(task_id, head_sha)` exists, or if that SHA already has a real terminal verdict.
 
 ### 7.3 Idempotency boundary
 
 The entry point's dedup is the only idempotency guarantee:
 
-- **`(task_id, head_sha)` dedup** holds across all callers and all retries. Tick can call the entry point; CI can call it for the same PR; both can fire concurrently. The first call that wins the row-insert race schedules the attempt; the rest return its id.
-- **Concurrency:** the entry point uses a transaction with the lookup-then-insert sequenced; concurrent callers serialize on the `attempts_review_dedup_idx` unique partial index (§5.2).
+- **Active `(task_id, head_sha)` dedup** holds across all callers. Tick can call the entry point; CI can call it for the same PR; both can fire concurrently. The first call that wins the active-row insert race schedules the attempt; the rest return its id.
+- **Terminal verdict no-op:** a prior terminal `approved` or `changes_requested` attempt at the same SHA is also a no-op. A prior terminal `errored` attempt may be retried under the bounded infra-failure policy.
+- **Concurrency:** the entry point uses a transaction with the lookup-then-insert sequenced; concurrent callers serialize on the active `attempts_review_dedup_idx` unique partial index (§5.2).
 - **No external dedup:** Quay does **not** consult GitHub for "is there already a Quay review on this SHA?" before scheduling. The `attempts` table is the single source of truth. GitHub-side state (deleted reviews, restored reviews, manually filed bot reviews) is not consulted.
 
 ### 7.4 CLI output and exit codes
 
-stdout, one line, plain text (machine-parseable):
+stdout, one JSON object:
 
-```
-task_id=<id> attempt_id=<n> state=<task-state> review_verdict=<verdict|none>
+```json
+{"task_id":"<id>","attempt_id":123,"state":"pr-review","review_verdict":null,"scheduled":true,"skipped_reason":null}
 ```
 
-- `attempt_id` is the scheduled-or-already-existing review-only attempt at the requested SHA.
-- `state` is the task's state after the call (`pr-review`, or unchanged if dedup hit a non-terminal existing attempt).
-- `review_verdict` is the attempt's `attempts.review_verdict` — `none` until the reviewer has run.
+- `attempt_id` is the scheduled-or-already-existing review-only attempt at the requested SHA, or `null` when no attempt is created because the Quay-owned gate is disabled.
+- `state` is the task's state after the call (`pr-review`, or unchanged if the call is a no-op).
+- `review_verdict` is the attempt's `attempts.review_verdict`, or `null` when no attempt exists yet or the reviewer has not run.
+- `scheduled` is `true` only when this invocation inserted a new review attempt.
+- `skipped_reason` is `null` for scheduled work, `"active_attempt_exists"` for active dedup, `"terminal_verdict_exists"` when this SHA already has a real verdict, or `"quay_owned_gate_disabled"` when the PR resolved to a Quay-owned task and `gate_quay_owned_done = false`.
 
 Exit codes:
 
 | Code | Meaning |
 |---|---|
-| 0 | Entry point succeeded. Attempt is either newly scheduled or already present at this SHA. |
+| 0 | Entry point succeeded. Work was either scheduled or skipped for a documented no-op reason in `skipped_reason`. |
 | 2 | Argument or config error (`repo_not_configured`, malformed `--pr`). |
 | 3 | GitHub-side error (`pr_not_found`, `github_unreachable`). |
 | 4 | Quay-side error (DB unreachable, unexpected state). |
 
-CI workflows treat exit 0 as "review will eventually appear on GitHub" and exit non-zero as "Quay couldn't accept this trigger; investigate." There is no exit code for "review filed" — that information lives on GitHub, not in this CLI.
+CI workflows treat exit 0 as "Quay accepted this trigger"; `scheduled` and `skipped_reason` say whether a review worker was actually scheduled. Exit non-zero means "Quay couldn't accept this trigger; investigate." There is no exit code for "review filed" — that information lives on GitHub, not in this CLI.
 
 ## 8. References, dependencies, and forward compatibility
 
@@ -646,7 +667,7 @@ Nothing removed. The existing human-review respawn loop in `src/core/non_budget_
 - `docs/quay-spec.md` — substrate spec (locked v1). Source of the existing state machine, worker substrate (tmux + supervisor + worktree), `attempts` table, `tasks.head_sha`, `tasks.last_review_id_acted_on`, `non_budget_respawns_consumed` counter.
 - `docs/quay-spec-ticket-validation.md` — `quay validate-ticket` library/CLI. Independent of this spec.
 - `docs/quay-spec-deployment-adapters.md` — Linear + Slack adapters. Soft dependency for richer synthetic-task briefs (§8.1).
-- `docs/archive/quay-spec-pr-review.md` — superseded prior draft. Source for still-valid design pieces this spec carries forward (synthetic `task_id` identity, `(task_id, head_sha)` dedup, force-push handling). Also the original home of the `review_findings` schema and `quay-principle` contract, which v1 defers.
+- `docs/archive/quay-spec-pr-review.md` — superseded prior draft. Source for still-valid design pieces this spec carries forward (synthetic `task_id` identity, active `(task_id, head_sha)` dedup, force-push handling). Also the original home of the `review_findings` schema and `quay-principle` contract, which v1 defers.
 - `docs/orchestrator-design-notes.md` §3.1, §3.2, §5, §7 — broader rationale, v2+ shape, deferred-work catalogue.
 - `docs/quay-reviewer-preamble-default.md` — human-readable source-of-truth for the default reviewer preamble. Inlined verbatim into the `DEFAULT_REVIEWER_PREAMBLE_BODY` constant at edit time (§6.3).
 
