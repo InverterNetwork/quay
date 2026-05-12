@@ -83,6 +83,140 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
   expect(out2.attempt_id).toBe(out.attempt_id);
 });
 
+test("review-pr supersedes an in-flight attempt on a new SHA and reaps its tmux session", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  await dispatch(
+    [
+      "repo", "add", "--id", "acme",
+      "--url", "git@github.com:acme/widgets.git",
+      "--base-branch", "main",
+      "--package-manager", "bun",
+      "--install-cmd", "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.github.setPrView("acme", 12, {
+    number: 12,
+    title: "Adversarial PR",
+    body: "first body",
+    url: "https://github.com/acme/widgets/pull/12",
+    headRefName: "feature/x",
+    headSha: "sha-aaa",
+  });
+
+  const io1 = bufferIO();
+  await dispatch(["review-pr", "--pr", "acme/widgets:12"], built.deps, io1);
+  const firstAttemptId = JSON.parse(io1.out()).attempt_id as number;
+
+  // Simulate the worker having spawned: stamp tmux_session and pretend it's
+  // alive in the fake. This is what gets reaped on supersede.
+  h.db
+    .query(
+      `UPDATE attempts SET tmux_session = 'quay-review-stale', spawned_at = ? WHERE attempt_id = ?`,
+    )
+    .run(h.clock.nowISO(), firstAttemptId);
+  built.tmux.liveSessions.add("quay-review-stale");
+
+  // Same PR, new SHA → must supersede the prior attempt.
+  built.github.setPrView("acme", 12, {
+    number: 12,
+    title: "Adversarial PR",
+    body: "second body",
+    url: "https://github.com/acme/widgets/pull/12",
+    headRefName: "feature/x",
+    headSha: "sha-bbb",
+  });
+  const io2 = bufferIO();
+  const second = await dispatch(
+    ["review-pr", "--pr", "acme/widgets:12"],
+    built.deps,
+    io2,
+  );
+  expect(second.exitCode).toBe(0);
+  const out2 = JSON.parse(io2.out());
+  expect(out2.scheduled).toBe(true);
+  expect(out2.attempt_id).not.toBe(firstAttemptId);
+
+  expect(built.tmux.killCalls).toContain("quay-review-stale");
+  expect(built.tmux.liveSessions.has("quay-review-stale")).toBe(false);
+
+  const prior = h.db
+    .query<{ review_verdict: string | null; kill_intent: string | null }, [number]>(
+      `SELECT review_verdict, kill_intent FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(firstAttemptId);
+  expect(prior?.review_verdict).toBe("superseded");
+  expect(prior?.kill_intent).toBe("superseded");
+});
+
+test("review-pr without --pr exits 2 with usage_error", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  const io = bufferIO();
+  const result = await dispatch(["review-pr"], built.deps, io);
+  expect(result.exitCode).toBe(2);
+  expect(io.err()).toContain("usage_error");
+});
+
+test("review-pr against an unknown PR exits 3 with pr_not_found", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  await dispatch(
+    [
+      "repo", "add", "--id", "acme",
+      "--url", "git@github.com:acme/widgets.git",
+      "--base-branch", "main",
+      "--package-manager", "bun",
+      "--install-cmd", "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  // No setPrView → FakeGitHub.prView returns null, surfacing pr_not_found.
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", "acme/widgets:999"],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(3);
+  expect(io.err()).toContain("pr_not_found");
+});
+
+test("review-pr exits 2 reviewer_disabled when the subsystem is off", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  // Note: reviewerEnabled left undefined.
+  await dispatch(
+    [
+      "repo", "add", "--id", "acme",
+      "--url", "git@github.com:acme/widgets.git",
+      "--base-branch", "main",
+      "--package-manager", "bun",
+      "--install-cmd", "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.github.setPrView("acme", 1, {
+    number: 1, title: "x", body: "", url: null,
+    headRefName: "f/x", headSha: "sha-1",
+  });
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", "acme/widgets:1"],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(2);
+  expect(io.err()).toContain("reviewer_disabled");
+});
+
 test("review-pr no-ops for Quay-owned PRs while done gate is disabled", async () => {
   h = createHarness();
   const built = buildCliDeps(h);

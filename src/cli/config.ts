@@ -53,6 +53,10 @@ const ReviewerConfigSchema = z
   .object({
     enabled: z.boolean().optional(),
     gate_quay_owned_done: z.boolean().optional(),
+    // gh login that the reviewer worker posts under. When unset the tick
+    // process's own `gh api user` is used; set this when tick and worker
+    // authenticate as different identities.
+    login: z.string().min(1).optional(),
   })
   .strict();
 
@@ -131,6 +135,9 @@ export function tickOptionsFromConfig(config: QuayConfig): TickOptions {
   }
   if (config.reviewer?.gate_quay_owned_done !== undefined) {
     opts.gateQuayOwnedDone = config.reviewer.gate_quay_owned_done;
+  }
+  if (config.reviewer?.login !== undefined) {
+    opts.reviewerLogin = config.reviewer.login;
   }
   if (config.agent_invocation !== undefined) {
     opts.agentInvocation = config.agent_invocation;

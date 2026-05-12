@@ -15,7 +15,7 @@ CREATE UNIQUE INDEX attempts_review_dedup_idx
     AND head_sha IS NOT NULL
     AND ended_at IS NULL;
 
-DROP INDEX one_pending_attempt_per_task;
+DROP INDEX IF EXISTS one_pending_attempt_per_task;
 CREATE UNIQUE INDEX one_pending_attempt_per_task
   ON attempts(task_id)
   WHERE spawned_at IS NULL AND ended_at IS NULL;

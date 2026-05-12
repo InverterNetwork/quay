@@ -236,15 +236,19 @@ export class LocalGitAdapter implements GitPort {
       }
     }
 
-    const checkedOut = runIn(worktreePath, [
-      "gh",
-      "pr",
-      "checkout",
-      String(prNumber),
+    // Pure-git fetch + detach. Avoid `gh pr checkout`: it creates a local
+    // branch named after the PR's head ref, and the worktree is reused
+    // across SHAs for the same PR — a second review on a new SHA would
+    // hit "branch already exists" and strand the task.
+    const fetched = runIn(worktreePath, [
+      "git",
+      "fetch",
+      "origin",
+      `pull/${prNumber}/head`,
     ]);
-    if (checkedOut.exitCode !== 0) {
+    if (fetched.exitCode !== 0) {
       throw new Error(
-        `gh pr checkout ${prNumber} failed for ${repoId}: ${checkedOut.stderr.trim() || checkedOut.stdout.trim()}`,
+        `git fetch origin pull/${prNumber}/head failed for ${repoId}: ${fetched.stderr.trim() || fetched.stdout.trim()}`,
       );
     }
 

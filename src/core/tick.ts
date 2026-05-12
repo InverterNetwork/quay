@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
@@ -73,6 +74,10 @@ export interface TickOptions {
   maxConcurrentReviewers?: number;
   reviewerEnabled?: boolean;
   gateQuayOwnedDone?: boolean;
+  // gh login of the reviewer worker; threaded into fetchPostedReview so the
+  // ingest matches the right author when tick and worker authenticate as
+  // different identities. Defaults to whatever `gh api user` reports.
+  reviewerLogin?: string;
   agentInvocation?: string;
   maxAttemptDurationSeconds?: number;
   stalenessThresholdSeconds?: number;
@@ -620,7 +625,7 @@ function processRunningReviewAttempt(
   if (deps.tmux.isAlive(task.tmux_session)) return null;
 
   const exitInfo = readExitInfo(deps, task.tmux_session, task.worktree_path);
-  const blockerPath = `${task.worktree_path}/.quay-blocked.md`;
+  const blockerPath = join(task.worktree_path, ".quay-blocked.md");
   if (existsSync(blockerPath)) {
     let blocker = "";
     try {
@@ -655,6 +660,7 @@ function processRunningReviewAttempt(
     task.repo_id,
     task.pr_number,
     task.head_sha,
+    options.reviewerLogin,
   );
   if (posted === null) {
     return markReviewInfraFailure(
@@ -796,7 +802,7 @@ function processPrOpenTask(
           clock: deps.clock,
           github: deps.github,
           artifactStore: deps.artifactStore,
-          paths: { worktreesRoot: task.worktree_path },
+          tmux: deps.tmux,
         },
         {
           repoId: task.repo_id,
@@ -1152,6 +1158,13 @@ function finalizePostedReview(
     posted.decision === "APPROVED" ? "approved" : "changes_requested";
   const content = reviewArtifactContent(posted, task.head_sha);
   const now = deps.clock.nowISO();
+  // CHANGES_REQUESTED on a Quay-owned task hands the rest of the work off to
+  // scheduleNonBudgetRespawn (its own transaction). For every other case the
+  // attempt-end, counter-reset, artifact write, task transition, and event
+  // insert must all commit atomically: a crash between two transactions
+  // would otherwise strand the task in pr-review with no active reviewer.
+  const handOffToRespawn =
+    verdict === "changes_requested" && !isSyntheticTaskId(task.task_id);
 
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -1185,6 +1198,51 @@ function finalizePostedReview(
           WHERE task_id = ?`,
       )
       .run(now, task.task_id);
+
+    if (!handOffToRespawn) {
+      // Artifact write joins this transaction (the INSERT into `artifacts`
+      // participates in the open BEGIN); a ROLLBACK below also rolls back
+      // the artifact row. The file on disk is harmless orphan content with
+      // a hash-derived name — it would be re-written byte-identical on a
+      // retry of the same review.
+      const artifact = deps.artifactStore.writeArtifact({
+        taskId: task.task_id,
+        attemptId: task.attempt_id,
+        kind: "review_comments",
+        content,
+        extension: "json",
+      });
+      const toState =
+        verdict === "approved" ? "done" : "waiting_external_changes";
+      const eventType =
+        verdict === "approved" ? "review_approved" : "changes_requested";
+      deps.db
+        .query(
+          `UPDATE tasks
+              SET state = ?,
+                  tick_error = NULL,
+                  updated_at = ?
+            WHERE task_id = ? AND state = 'pr-review'
+              AND cancel_requested_at IS NULL`,
+        )
+        .run(toState, now, task.task_id);
+      deps.db
+        .query(
+          `INSERT INTO events (
+             task_id, attempt_id, event_type, from_state, to_state,
+             payload_artifact_id, occurred_at
+           ) VALUES (?, ?, ?, 'pr-review', ?, ?, ?)`,
+        )
+        .run(
+          task.task_id,
+          task.attempt_id,
+          eventType,
+          toState,
+          artifact.artifactId,
+          now,
+        );
+    }
+
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -1193,7 +1251,7 @@ function finalizePostedReview(
     throw err;
   }
 
-  if (verdict === "changes_requested" && !isSyntheticTaskId(task.task_id)) {
+  if (handOffToRespawn) {
     const cap = options.maxNonBudgetRespawns ?? DEFAULT_MAX_NON_BUDGET_RESPAWNS;
     const codePreambleId = loadLatestCodePreambleId(deps.db) ?? task.preamble_id;
     const result = scheduleNonBudgetRespawn(deps, {
@@ -1220,45 +1278,6 @@ function finalizePostedReview(
       return { task_id: task.task_id, action: "review_respawn_scheduled" };
     }
     return { task_id: task.task_id, action: "skipped_predicate" };
-  }
-
-  deps.db.exec("BEGIN IMMEDIATE");
-  try {
-    const artifact = deps.artifactStore.writeArtifact({
-      taskId: task.task_id,
-      attemptId: task.attempt_id,
-      kind: "review_comments",
-      content,
-      extension: "json",
-    });
-    const toState =
-      verdict === "approved" ? "done" : "waiting_external_changes";
-    const eventType =
-      verdict === "approved" ? "review_approved" : "changes_requested";
-    deps.db
-      .query(
-        `UPDATE tasks
-            SET state = ?,
-                tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ? AND state = 'pr-review'
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(toState, now, task.task_id);
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state,
-           payload_artifact_id, occurred_at
-         ) VALUES (?, ?, ?, 'pr-review', ?, ?, ?)`,
-      )
-      .run(task.task_id, task.attempt_id, eventType, toState, artifact.artifactId, now);
-    deps.db.exec("COMMIT");
-  } catch (err) {
-    try {
-      deps.db.exec("ROLLBACK");
-    } catch {}
-    throw err;
   }
 
   return {

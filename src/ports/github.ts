@@ -26,10 +26,14 @@ export interface GitHubPort {
   // `tick_error` for the task.
   prSnapshot(repoId: string, branch: string): PrSnapshot | null;
   prView(repoId: string, prNumber: number): PullRequestView | null;
+  // `expectedLogin` overrides the adapter's auto-probed identity when the
+  // reviewer worker posts under a different gh login than the tick process.
+  // When omitted the adapter falls back to a cached `gh api user --jq .login`.
   fetchPostedReview(
     repoId: string,
     prNumber: number,
     headSha: string,
+    expectedLogin?: string,
   ): PostedReview | null;
 }
 

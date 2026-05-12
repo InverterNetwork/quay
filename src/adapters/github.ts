@@ -40,6 +40,8 @@ export interface RunResult {
 }
 
 export class GitHubCliAdapter implements GitHubPort {
+  private cachedLogin: string | null = null;
+
   constructor(private readonly reposRoot: string) {}
 
   prExistsForBranch(repoId: string, branch: string): boolean {
@@ -182,8 +184,9 @@ export class GitHubCliAdapter implements GitHubPort {
     repoId: string,
     prNumber: number,
     headSha: string,
+    expectedLogin?: string,
   ): PostedReview | null {
-    const login = this.currentLogin(repoId);
+    const login = expectedLogin ?? this.currentLogin(repoId);
     const fields = ["reviews"].join(",");
     const result = this.run(repoId, [
       "gh",
@@ -646,6 +649,7 @@ export class GitHubCliAdapter implements GitHubPort {
   }
 
   private currentLogin(repoId: string): string {
+    if (this.cachedLogin !== null) return this.cachedLogin;
     const result = this.run(repoId, ["gh", "api", "user", "--jq", ".login"]);
     if (result.exitCode !== 0) {
       throw new Error(
@@ -654,6 +658,7 @@ export class GitHubCliAdapter implements GitHubPort {
     }
     const login = result.stdout.trim();
     if (login === "") throw new Error("gh api user returned an empty login");
+    this.cachedLogin = login;
     return login;
   }
 

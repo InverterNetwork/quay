@@ -220,6 +220,7 @@ agent_invocation = "claude < {prompt_file}"
 [reviewer]
 enabled = false
 gate_quay_owned_done = false
+# login = "quay-bot"  # gh login the reviewer worker posts under; defaults to `gh api user`
 
 # Linear/Slack adapters (see docs/user/linear-and-slack.md)
 [adapters.linear]

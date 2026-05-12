@@ -55,7 +55,11 @@ import {
   wantsHelp,
 } from "./help.ts";
 import type { CliIO } from "./io.ts";
-import { enterReview, type EnterReviewResult } from "../core/pr_review.ts";
+import {
+  enterReview,
+  EnterReviewError,
+  type EnterReviewResult,
+} from "../core/pr_review.ts";
 
 export interface CliPaths {
   reposRoot: string;
@@ -493,19 +497,18 @@ function handleReviewPr(
         clock: deps.clock,
         github: deps.github,
         artifactStore: deps.artifactStore,
+        tmux: deps.tmux,
         paths: { worktreesRoot: deps.paths.worktreesRoot },
       },
       input,
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("disabled")) {
-      return writeErrorWithExit(io, 2, "reviewer_disabled", message);
-    }
-    if (message.includes("not found") || message.includes("GitHub")) {
-      return writeErrorWithExit(io, 3, "pr_not_found", message, {
-        pr: prArg,
-      });
+    if (err instanceof EnterReviewError) {
+      if (err.kind === "reviewer_disabled") {
+        return writeErrorWithExit(io, 2, "reviewer_disabled", message);
+      }
+      return writeErrorWithExit(io, 3, "pr_not_found", message, { pr: prArg });
     }
     return writeErrorWithExit(io, 4, "quay_error", message);
   }
