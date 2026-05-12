@@ -96,6 +96,13 @@ export interface TickOptions {
   // ingest matches the right author when tick and worker authenticate as
   // different identities. Defaults to whatever `gh api user` reports.
   reviewerLogin?: string;
+  // Absolute path to a file (expected mode 0600) whose contents are
+  // exported as `GH_TOKEN` in the reviewer tmux pane's environment, so
+  // the reviewer can authenticate as a different GitHub identity than the
+  // worker that opened the PR (GitHub blocks self-review). Read fresh on
+  // every reviewer spawn so a token-refresher timer can rotate the file
+  // without bouncing tick. Worker spawns are unaffected.
+  reviewerGhTokenFile?: string;
   // Either `agentResolver` (production: looks up the registered agent
   // for a given (repo_id, role)) or `agentInvocation` (test shorthand:
   // same string for every attempt). When both are set, the resolver
@@ -2493,12 +2500,38 @@ function promoteAndSpawnReviewer(
   }
 
   const sessionName = `quay-review-${task.tmux_id}-${task.attempt_number}`;
+  // Preflight the reviewer-only gh token file (if configured). A
+  // missing/empty file is a hard spawn failure: silently falling back to
+  // the host gh auth would reintroduce the self-review block this knob
+  // exists to dodge. The file content is NOT passed to the spawn — only
+  // the path is, so the pane wrapper reads it inline via `$(cat ...)`
+  // and the secret never lands in argv (where another user on the host
+  // could read it via `ps`). The preflight read is just an existence /
+  // non-empty check; the value is discarded.
+  let envFiles: Array<{ name: string; path: string }> | undefined;
+  if (options.reviewerGhTokenFile !== undefined) {
+    try {
+      const token = readFileSync(options.reviewerGhTokenFile, "utf8").trim();
+      if (token.length === 0) {
+        throw new Error("file is empty");
+      }
+      envFiles = [{ name: "GH_TOKEN", path: options.reviewerGhTokenFile }];
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        task_id: task.task_id,
+        action: "spawn_substrate_failed",
+        error: `reviewer gh_token_file (${options.reviewerGhTokenFile}) unreadable: ${message}`,
+      };
+    }
+  }
   try {
     deps.tmux.spawn({
       sessionName,
       worktreePath: task.worktree_path,
       promptContent,
       agentInvocation,
+      ...(envFiles !== undefined ? { envFiles } : {}),
     });
   } catch (err) {
     return {

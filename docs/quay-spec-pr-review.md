@@ -543,6 +543,14 @@ The spec uses two config flags so the reviewer subsystem and the `done`-gating c
 [reviewer]
 enabled = false                # default. Whether the reviewer subsystem runs at all.
 gate_quay_owned_done = false   # default. Whether Quay-owned done requires an approved Quay review.
+# Optional: path to a file (mode 0600) whose contents tick exports as
+# GH_TOKEN in the reviewer tmux pane only. GitHub blocks self-review, so
+# when the worker and reviewer authenticate as the same App identity the
+# reviewer cannot approve worker-opened PRs. Pair with an external token
+# minter (e.g. hermes-agent) that refreshes the file. Read fresh on each
+# reviewer spawn; missing/empty file = `spawn_substrate_failed`. Unset =
+# reviewer inherits host gh auth (same identity as worker).
+gh_token_file = "/run/hermes/reviewer-gh-token"
 ```
 
 Schema addition (`src/cli/config.ts`):
@@ -551,6 +559,7 @@ Schema addition (`src/cli/config.ts`):
 const ReviewerConfigSchema = z.object({
   enabled: z.boolean().optional(),
   gate_quay_owned_done: z.boolean().optional(),
+  gh_token_file: z.string().min(1).optional(),
 }).strict();
 // add to top-level ConfigSchema:
 //   reviewer: ReviewerConfigSchema.optional(),

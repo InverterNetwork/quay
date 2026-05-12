@@ -70,6 +70,13 @@ export class TmuxAdapter implements TmuxPort {
       "{prompt_file}",
       shellQuote(promptFile),
     );
+    // Pane-local env loaders: for each requested env file, `$(cat <path>)`
+    // strips trailing newlines naturally, so a token file written as
+    // `printf "%s\n" "$tok" > $f` round-trips cleanly. We refuse to
+    // proceed with an empty value because exporting `GH_TOKEN=""` would
+    // turn into a confusing `gh: not authenticated` instead of a clear
+    // operator-facing error in the pane log.
+    const envFilePrefix = buildEnvFilePrefix(input.envFiles);
     // Wrap the worker so the shell writes its terminal `$?` to
     // `<worktree>/.quay-exit-code` before the pane goes away. POSIX `$?`
     // for a child terminated by signal N is 128+N, so the single integer
@@ -82,7 +89,7 @@ export class TmuxAdapter implements TmuxPort {
     // nested ones — matching the prior session-exit semantics that
     // `has-session` liveness depends on.
     const exitCodeFile = join(input.worktreePath, EXIT_CODE_FILE);
-    const wrapped = `${expanded}\nstatus=$?\nprintf '%d' "$status" > ${shellQuote(exitCodeFile)}\nexit "$status"`;
+    const wrapped = `${envFilePrefix}${expanded}\nstatus=$?\nprintf '%d' "$status" > ${shellQuote(exitCodeFile)}\nexit "$status"`;
     const tmuxCommand = `exec sh -c ${shellQuote(wrapped)}`;
 
     // Step 1: create session with a placeholder command that keeps the
@@ -95,6 +102,13 @@ export class TmuxAdapter implements TmuxPort {
     // its connecting client, so anything quay tick mints or refreshes at
     // runtime (GH_TOKEN, GITHUB_TOKEN, credential-helper sockets, etc.)
     // would otherwise be invisible to the agent — silent-exit territory.
+    //
+    // Per-spawn secrets are NOT injected via `-e KEY=VAL` here: tmux argv
+    // is observable on the host (`ps`) for the lifetime of the spawn, so
+    // any token value placed there could be read by an unrelated user
+    // before the spawn returns. `envFiles` instead embeds a `cat <path>`
+    // into the pane wrapper (built above), so only the path lands in
+    // argv — never the secret value.
     const result = Bun.spawnSync({
       cmd: [
         "tmux",
@@ -326,6 +340,38 @@ export class TmuxAdapter implements TmuxPort {
 // escaped with `'\''`, and reopened.
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+// Build a POSIX-shell prefix that reads each envFile inline and exports
+// it as the requested variable. Command substitution (`$(cat ...)`)
+// strips trailing newlines, so a `printf "%s\n" "$tok" > $f` round-trips
+// cleanly. The empty-value guard refuses to proceed with an empty export
+// because `gh: not authenticated` is a much less obvious failure mode
+// than a wrapper-emitted error in the pane log. Exit 75 (EX_TEMPFAIL)
+// signals "try again later" — the operator's token-refresher will write
+// a fresh file and the next reviewer attempt will succeed. Variable
+// names are validated to a conservative `[A-Z_][A-Z0-9_]*` set; a
+// caller passing a name that fails the check is a programmer error and
+// throwing here is more discoverable than silently producing a wrapper
+// that exports a malformed identifier.
+function buildEnvFilePrefix(
+  envFiles: Array<{ name: string; path: string }> | undefined,
+): string {
+  if (!envFiles || envFiles.length === 0) return "";
+  const lines: string[] = [];
+  for (const { name, path } of envFiles) {
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) {
+      throw new Error(
+        `tmux envFiles: name ${JSON.stringify(name)} is not a valid POSIX env var`,
+      );
+    }
+    const quotedPath = shellQuote(path);
+    lines.push(`export ${name}="$(cat ${quotedPath})"`);
+    lines.push(
+      `if [ -z "$${name}" ]; then echo "quay: env file ${quotedPath} is missing or empty" >&2; exit 75; fi`,
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 // Parses a tmux format substitution into a number. Returns null for the
