@@ -1,8 +1,8 @@
 # Quay Spec: Deployment Adapters (Linear + Slack)
 
-**Status:** Draft. Not locked. Third feature spec graduating from `docs/orchestrator-design-notes.md`. Companion to `docs/quay-spec-ticket-validation.md` and `docs/quay-spec-pr-review.md`.
+**Status:** Draft. Not locked. Third feature spec graduating from `docs/orchestrator-design-notes.md`. Companion to `docs/quay-spec-ticket-validation.md`. The prior PR-review companion spec has been superseded and moved to `docs/archive/quay-spec-pr-review.md`; a replacement spec is being drafted.
 
-**Implementation order.** This spec **MUST land first** of the in-flight feature specs. `docs/quay-spec-pr-review.md` declares a hard dependency on it (see the implementation-order note at the top of that doc). The PR-review spec's synthetic-task path needs the `ticketContext.fetch(...)` primitive defined here.
+**Implementation order.** This spec **MUST land first** of the in-flight feature specs. The (forthcoming) replacement PR-review spec inherits the hard dependency on this one: its synthetic-task path will need the `ticketContext.fetch(...)` primitive defined here. (The archived prior draft made the same dependency explicit; the replacement preserves it.)
 
 **Required reading:**
 - `docs/quay-spec.md` — substrate spec (locked v1). The `tasks.slack_thread_ref` column and the `waiting_human` / `slack_reply_ingested` flow this spec builds on are defined there.
@@ -23,7 +23,7 @@ Move ticket-system knowledge (Linear + Slack thread context retrieval) from the 
 That is the v1 contract of this spec. Two downstream features unlock as a consequence:
 
 - **Reliable Slack escalation linkage.** Today `slack_thread_ref` is best-effort orchestrator-side parsing; this spec makes it deterministic adapter-side, closing the silent-escalation-drop gap (`src/core/tick.ts:1019` — "no thread to post into; nothing to do").
-- **Synthetic-task PR-review enrichment.** Per `docs/quay-spec-pr-review.md` §8 Path A, the same `ticketContext.fetch(...)` primitive is what produces rich synthetic briefs and `task_tags` rows on adapter-enabled deployments. That work is gated on this spec landing first.
+- **Synthetic-task PR-review enrichment.** The replacement PR-review spec (TBD) will reuse the same `ticketContext.fetch(...)` primitive to produce rich synthetic briefs and `task_tags` rows on adapter-enabled deployments. That work is gated on this spec landing first. (See archived prior draft `docs/archive/quay-spec-pr-review.md` §8 Path A for the historical framing; the replacement spec preserves the dependency but may change other shape.)
 
 This spec is **opt-in by deployment config**. Deployments without Linear or Slack continue to operate exactly as they do today (Hermes-composed briefs passed via `--brief-file`); none of their code paths regress.
 
@@ -51,7 +51,7 @@ These are explicitly deferred:
 - **Linear webhook ingestion.** Hermes still polls; Quay does not subscribe to Linear webhooks. Polling is the simpler shape and matches existing Hermes behavior.
 - **Bidirectional Linear sync.** Quay does not write back to Linear (no status updates, no comments). Quay reads only.
 - **Slack thread mutation by Quay outside the existing `waiting_human` flow.** The new `fetchThreadContext` method is read-only; the existing `post` / `listReplies` for escalation is unchanged.
-- **`quay review-pr` synthetic-task adapter integration.** Defined in `docs/quay-spec-pr-review.md` §8 Path A; lands as part of *that* spec's implementation, after this spec is in place.
+- **`quay review-pr` synthetic-task adapter integration.** Lands as part of the (forthcoming) replacement PR-review spec, after this spec is in place. The archived prior draft is at `docs/archive/quay-spec-pr-review.md` §8 Path A.
 - **Validator promotion into Quay's library code.** The validator stays a standalone CLI (per `docs/quay-spec-ticket-validation.md`); `quay enqueue --linear-issue` invokes it internally as a child process, preserving its standalone usability for the cron-pickup path. (See §11 "Validator integration".)
 - **Adapter schema versioning.** v1 has one shape per adapter; if Linear's schema or Slack's API materially changes, the adapter is updated in place. No version pinning.
 - **Auth methods other than env-var-supplied tokens.** No OAuth, no per-user creds, no AWS Secrets Manager integration. Bot tokens via env vars only.
@@ -172,7 +172,7 @@ CREATE INDEX task_tags_by_tag ON task_tags(tag);
 
 Tags are **opaque strings** to Quay. Quay does not interpret, validate (beyond charset enforced by the ticket validator), or take action on tag values. One row per `tags:` entry from the `quay-config` block, deduped. Same shape as `external_ref` today.
 
-(Cross-ref: `docs/quay-spec-pr-review.md` references this table for `quay query-findings --tag` filtering and for findings clustering. The PR-review spec assumes this migration is already applied.)
+(Cross-ref: the archived prior PR-review draft at `docs/archive/quay-spec-pr-review.md` referenced this table for `quay query-findings --tag` filtering and findings clustering. The replacement PR-review spec is expected to preserve that usage.)
 
 ### `tasks.authors_json` (new column)
 
@@ -251,7 +251,7 @@ All errors propagate to the CLI with no DB writes (atomicity per §3).
 
 ### 6.1 Canonical brief format
 
-The brief is the worker's only window onto upstream context. Its structure is a **contract** — the default reviewer preamble (`docs/quay-reviewer-preamble-default.md` "Use the brief; fetch only what's missing") and the future PR-review synthetic-task path (`docs/quay-spec-pr-review.md` §8 Path A) both depend on stable section headings.
+The brief is the worker's only window onto upstream context. Its structure is a **contract** — the default reviewer preamble (`docs/quay-reviewer-preamble-default.md` "Use the brief; fetch only what's missing") and the future PR-review synthetic-task path (replacement spec TBD; archived prior draft at `docs/archive/quay-spec-pr-review.md` §8 Path A) both depend on stable section headings.
 
 Brief composition lives inside `fetchTicketContext` (`src/core/ticket_context.ts`) — the same function that assembles the rest of the `TicketContext`. There is no separate brief-composer file or class; the composition is a private helper inside `fetchTicketContext`.
 
@@ -754,7 +754,7 @@ The escalation lands in the right place because the linkage was deterministic, n
 This spec is a substrate change. Three downstream features unlock as direct consequences:
 
 1. **Hermes shrinks to a polling loop.** ~80% of Hermes's current responsibilities (Linear fetch, ticket assembly, Slack-link extraction, validator invocation, brief composition) move into Quay. Hermes becomes: poll Linear → call `quay enqueue --linear-issue` → log result. A handful of lines instead of a service.
-2. **PR-review synthetic-task path gains adapter-driven enrichment.** `docs/quay-spec-pr-review.md` §8 Path A becomes implementable: dispatcher parses identifiers from the PR, calls the same `ticketContext.fetch(...)` primitive, composes a rich synthetic brief, attaches the `quay-config` block's `tags:` as `task_tags` rows. Eliminates the "synthetic reviews are context-thin" limitation that Path B accepts as a fallback.
+2. **PR-review synthetic-task path gains adapter-driven enrichment.** The forthcoming replacement PR-review spec will become implementable: dispatcher parses identifiers from the PR, calls the same `ticketContext.fetch(...)` primitive, composes a rich synthetic brief, attaches the `quay-config` block's `tags:` as `task_tags` rows. Eliminates the "synthetic reviews are context-thin" limitation. (Archived prior framing: `docs/archive/quay-spec-pr-review.md` §8 Path A.)
 3. **Slack escalation @-mentions the right humans.** Today tick posts escalation questions into `slack_thread_ref` without addressing anyone in particular; the message reaches the thread but doesn't notify specific people. With the `authors[]` field carried through from the `quay-config` block, tick prepends `<@U...>` mentions for each author when posting an escalation — the original contributors get a Slack ping, dramatically reducing time-to-response. Implementation lands in tick's `processWaitingHumanTask` (`src/core/tick.ts:1015`) reading a new `authors` field on the task row (or persisting them as a JSON column populated by the adapter at enqueue time — implementation choice).
 
 Features 1 and 2 are *out of scope* for this spec — they're implemented under their own spec docs after this one lands. Feature 3 is small enough that it can land alongside this spec's implementation; capture it explicitly here so it's not forgotten.
@@ -795,7 +795,7 @@ Features 1 and 2 are *out of scope* for this spec — they're implemented under 
 
 - `docs/quay-spec.md` — substrate spec (locked v1). `tasks.slack_thread_ref`, `task_tags` (referenced from PR-review spec), `waiting_human` flow.
 - `docs/quay-spec-ticket-validation.md` — the validator this spec invokes.
-- `docs/quay-spec-pr-review.md` — downstream consumer of `ticketContext.fetch` (§8 Path A). Implementation gated on this spec landing first.
+- `docs/archive/quay-spec-pr-review.md` — archived prior PR-review draft (superseded). Replacement spec is being drafted; it inherits the downstream-consumer relationship with `ticketContext.fetch` and the "this spec lands first" sequencing.
 - `docs/orchestrator-design-notes.md` §1, §2 — broader rationale.
 - `src/adapters/slack.ts` — existing Slack adapter; this spec extends `SlackPort` with `fetchThreadContext`.
 - `src/ports/slack.ts` — port interface to extend.

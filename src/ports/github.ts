@@ -25,6 +25,16 @@ export interface GitHubPort {
   // the adapter throws — tick treats that as a transient failure and logs
   // `tick_error` for the task.
   prSnapshot(repoId: string, branch: string): PrSnapshot | null;
+  prView(repoId: string, prNumber: number): PullRequestView | null;
+  // `expectedLogin` overrides the adapter's auto-probed identity when the
+  // reviewer worker posts under a different gh login than the tick process.
+  // When omitted the adapter falls back to a cached `gh api user --jq .login`.
+  fetchPostedReview(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+    expectedLogin?: string,
+  ): PostedReview | null;
 }
 
 export type PrCheckState = "pass" | "fail" | "pending";
@@ -101,4 +111,20 @@ export interface PrSnapshot {
   mergeable: PrMergeableState;
   latestReview: PrLatestReview;
   checks: PrChecksReport;
+}
+
+export interface PullRequestView {
+  number: number;
+  title: string;
+  body: string;
+  url: string | null;
+  headRefName: string;
+  headSha: string;
+}
+
+export interface PostedReview {
+  reviewId: string;
+  decision: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED";
+  body: string;
+  comments: string;
 }

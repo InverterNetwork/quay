@@ -18,6 +18,12 @@ export interface GitPort {
     branch: string,
     baseRef: string,
   ): void;
+  checkoutPullRequest(
+    repoId: string,
+    worktreePath: string,
+    prNumber: number,
+    headSha: string,
+  ): void;
   worktreeDetach(worktreePath: string): void;
   worktreeRemove(worktreePath: string): void;
   branchDelete(repoId: string, branch: string): void;

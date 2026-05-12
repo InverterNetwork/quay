@@ -21,6 +21,7 @@ data_dir = "/var/lib/quay"
 repos_root = "/var/lib/quay/repos"
 worktree_root = "/var/lib/quay/worktrees"
 max_concurrent = 2
+max_concurrent_reviewers = 2
 retry_budget = 5
 agent_invocation = "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json"
 max_attempt_duration_seconds = 3600
@@ -40,6 +41,10 @@ api_key_env = "LINEAR_API_KEY"
 enabled = true
 bot_token_env = "SLACK_TOKEN"
 max_thread_messages = 200
+
+[reviewer]
+enabled = false
+gate_quay_owned_done = false
 ```
 
 ## Keys
@@ -50,6 +55,7 @@ max_thread_messages = 200
 | `repos_root` | `${data_dir}/repos` | Explicit paths must already exist. |
 | `worktree_root` | `${data_dir}/worktrees` | Quay creates the derived default. |
 | `max_concurrent` | `2` | Maximum running tasks promoted by tick. |
+| `max_concurrent_reviewers` | `2` | Maximum running reviewer workers. Independent of `max_concurrent`. |
 | `retry_budget` | `5` | Copied onto new tasks at enqueue time. |
 | `agent_invocation` | `claude … --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json` (see `Agent Invocation` below) | Shell command used inside tmux. The default writes a `usage` envelope to `.quay-usage.json` and a `tool_trace` debug log to `.quay-tool-trace.log`; both are captured as per-attempt artifacts. |
 | `max_attempt_duration_seconds` | `3600` | Live worker wall-clock kill threshold. |
@@ -60,6 +66,30 @@ max_thread_messages = 200
 | `max_non_budget_respawns` | `20` | Review/conflict respawns before `non_budget_loop`. |
 | `tick_lock_path` | `${data_dir}/tick.lock` | Supervisor lock path. |
 | `supervisor_lock_stale_seconds` | `30` | Stale lock grace window. |
+
+## Reviewer
+
+```toml
+[reviewer]
+enabled = true
+gate_quay_owned_done = false
+# login = "quay-bot"
+```
+
+`enabled` turns on the reviewer subsystem, including `quay review-pr` and the
+reviewer spawn pass in `quay tick`. `gate_quay_owned_done` changes Quay-owned
+PRs from the legacy `pr-open -> done` CI-green transition to `pr-open ->
+pr-review -> done`, where the final transition requires an approved Quay
+review. Synthetic PR reviews still work when the gate is false.
+
+`login` is the gh login tick matches posted reviews against when it ingests a
+finished reviewer attempt. Defaults to whatever `gh api user --jq .login`
+returns in the tick process. Set it explicitly when the reviewer worker
+authenticates as a different gh identity than tick (for example, when tick
+runs as the deployment service account and the worker posts under a dedicated
+bot account); leaving it unset in that setup will silently never match the
+posted review and park the task in `non_budget_loop` after the infra-failure
+retry budget runs out.
 
 ## Agent Invocation
 

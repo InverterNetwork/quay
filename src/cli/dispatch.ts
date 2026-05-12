@@ -55,6 +55,11 @@ import {
   wantsHelp,
 } from "./help.ts";
 import type { CliIO } from "./io.ts";
+import {
+  enterReview,
+  EnterReviewError,
+  type EnterReviewResult,
+} from "../core/pr_review.ts";
 
 export interface CliPaths {
   reposRoot: string;
@@ -146,6 +151,8 @@ export async function dispatch(
         return await handleTick(rest, deps, io);
       case "enqueue":
         return await handleEnqueue(rest, deps, io);
+      case "review-pr":
+        return handleReviewPr(rest, deps, io);
       case "repo":
         return handleRepo(rest, deps, io);
       case "tags":
@@ -183,6 +190,17 @@ function writeError(
 ): DispatchResult {
   io.stderr(`${JSON.stringify({ error: code, message, ...details })}\n`);
   return { exitCode: 1 };
+}
+
+function writeErrorWithExit(
+  io: CliIO,
+  exitCode: number,
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): DispatchResult {
+  io.stderr(`${JSON.stringify({ error: code, message, ...details })}\n`);
+  return { exitCode };
 }
 
 // Like `writeError`, but additionally renders the per-command usage block on
@@ -378,6 +396,7 @@ async function handleEnqueue(
     const ticketPath = readFlag(argv, "--ticket-snapshot-file");
     const externalRef = readFlag(argv, "--external-ref");
     const slackThreadRef = readFlag(argv, "--slack-thread-ref");
+    const tags = collectFlagValues(argv, "--tag");
     const briefRead = tryReadFile(briefPath);
     if (!briefRead.ok) return writeError(io, "usage_error", briefRead.message);
     input = { repo_id: repoId, brief: briefRead.value };
@@ -388,6 +407,7 @@ async function handleEnqueue(
     }
     if (externalRef !== null) input.external_ref = externalRef;
     if (slackThreadRef !== null) input.slack_thread_ref = slackThreadRef;
+    if (tags.length > 0) input.tags = tags;
   }
   const enqueueDeps: EnqueueDeps = {
     db: deps.db,
@@ -402,6 +422,96 @@ async function handleEnqueue(
     enqueueDeps.retryBudget = deps.retryBudget;
   }
   const result = enqueue(enqueueDeps, input);
+  io.stdout(`${JSON.stringify(result)}\n`);
+  return { exitCode: 0 };
+}
+
+function handleReviewPr(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  if (wantsHelp(argv)) return printHelp(io, ["review-pr"]);
+  const validation = validateFlags(argv, {
+    valued: ["--pr", "--head-sha", "--tag"],
+  });
+  if (!validation.ok) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      validation.message,
+      validation.details,
+    );
+  }
+  const prArg = readFlag(argv, "--pr");
+  if (prArg === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      "review-pr requires --pr <repo>:<num>",
+    );
+  }
+  const parsedPr = parsePrIdentifier(prArg);
+  if (parsedPr === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      `--pr must be <repo>:<num> (got ${prArg})`,
+      { pr: prArg },
+    );
+  }
+  const repoId = resolveRepoIdForPr(deps.db, parsedPr.repo);
+  if (repoId === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "repo_not_configured",
+      `repo "${parsedPr.repo}" is not configured`,
+      { repo: parsedPr.repo },
+    );
+  }
+  const headSha = readFlag(argv, "--head-sha");
+  let result: EnterReviewResult;
+  try {
+    const input: {
+      repoId: string;
+      prNumber: number;
+      headSha?: string;
+      tags: string[];
+      reviewerEnabled: boolean;
+      gateQuayOwnedDone: boolean;
+    } = {
+      repoId,
+      prNumber: parsedPr.prNumber,
+      tags: collectFlagValues(argv, "--tag"),
+      reviewerEnabled: deps.tickOptions?.reviewerEnabled === true,
+      gateQuayOwnedDone: deps.tickOptions?.gateQuayOwnedDone === true,
+    };
+    if (headSha !== null) input.headSha = headSha;
+    result = enterReview(
+      {
+        db: deps.db,
+        clock: deps.clock,
+        github: deps.github,
+        artifactStore: deps.artifactStore,
+        tmux: deps.tmux,
+        paths: { worktreesRoot: deps.paths.worktreesRoot },
+      },
+      input,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (err instanceof EnterReviewError) {
+      if (err.kind === "reviewer_disabled") {
+        return writeErrorWithExit(io, 2, "reviewer_disabled", message);
+      }
+      return writeErrorWithExit(io, 3, "pr_not_found", message, { pr: prArg });
+    }
+    return writeErrorWithExit(io, 4, "quay_error", message);
+  }
   io.stdout(`${JSON.stringify(result)}\n`);
   return { exitCode: 0 };
 }
@@ -1504,6 +1614,44 @@ function flagsToObject(
     if (v !== null) out[key] = v;
   }
   return out;
+}
+
+function parsePrIdentifier(
+  raw: string,
+): { repo: string; prNumber: number } | null {
+  const idx = raw.lastIndexOf(":");
+  if (idx <= 0 || idx === raw.length - 1) return null;
+  const repo = raw.slice(0, idx);
+  const n = Number.parseInt(raw.slice(idx + 1), 10);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return { repo, prNumber: n };
+}
+
+function resolveRepoIdForPr(db: DB, repoArg: string): string | null {
+  const rows = db
+    .query<{ repo_id: string; repo_url: string }, []>(
+      `SELECT repo_id, repo_url FROM repos WHERE archived_at IS NULL ORDER BY repo_id`,
+    )
+    .all();
+  for (const row of rows) {
+    if (row.repo_id === repoArg) return row.repo_id;
+    const slug = repoSlugFromUrl(row.repo_url);
+    if (slug === repoArg) return row.repo_id;
+  }
+  return null;
+}
+
+function repoSlugFromUrl(url: string): string {
+  const trimmed = url.replace(/\/+$/, "").replace(/\.git$/, "");
+  try {
+    const parsed = new URL(trimmed);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    return parts.slice(-2).join("/");
+  } catch {}
+  const scpLike = trimmed.match(/^[^:]+:(.+)$/);
+  const path = scpLike?.[1] ?? trimmed;
+  const parts = path.split("/").filter(Boolean);
+  return parts.slice(-2).join("/");
 }
 
 function tryReadFile(path: string): { ok: true; value: string } | { ok: false; message: string } {

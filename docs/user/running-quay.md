@@ -29,7 +29,9 @@ Each cycle:
 4. Polls `done` tasks for PR state, conflicts, and review feedback.
 5. Releases stale orchestrator claims.
 6. Posts and polls `waiting_human` Slack threads.
-7. Promotes `queued` tasks to `running` up to `max_concurrent`.
+7. Reaps and spawns `pr-review` reviewer attempts up to
+   `max_concurrent_reviewers` when `[reviewer].enabled = true`.
+8. Promotes `queued` tasks to `running` up to `max_concurrent`.
 
 Tasks that become `queued` during a tick are not promoted until a later tick.
 
@@ -70,8 +72,19 @@ For `pr-open`:
 - Closed unmerged PR: terminal `closed_unmerged`.
 - Merge conflict: schedules a non-budget `conflict` respawn.
 - CI pending: remains `pr-open`.
-- CI passed: transitions to `done`.
+- CI passed: transitions to `done`, unless the reviewer gate is enabled; then
+  tick schedules a `review_only` attempt and transitions to `pr-review`.
 - CI failed: schedules a budget-consuming `ci_fail` retry.
+
+For `pr-review`:
+
+- Reviewer approval: transitions to `done`.
+- Reviewer changes requested on a Quay-owned PR: schedules a non-budget
+  `review` respawn and returns to `queued`.
+- Reviewer changes requested on a synthetic PR: transitions to
+  `waiting_external_changes` until CI calls `quay review-pr` for a new SHA.
+- Reviewer infrastructure failures retry at the same SHA twice, then park in
+  `non_budget_loop`.
 
 For `done`:
 
