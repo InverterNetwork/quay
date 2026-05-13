@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { tick_once } from "../../src/core/tick.ts";
@@ -300,6 +300,156 @@ test("Quay-owned reviewer changes_requested schedules non-budget code respawn", 
     )
     .get(taskId);
   expect(latest).toEqual({ reason: "review", consumed_budget: 0 });
+});
+
+test("review after CHANGES_REQUESTED respawn gets reviewer-specific prompt", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-respawn-prompt");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-review-respawn-prompt",
+    state: "pr-open",
+  });
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+
+  const initialAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId: initialAttemptId,
+    kind: "brief",
+    content: "original ticket context",
+    extension: "md",
+  });
+
+  const reviewAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: "2026-01-01T00:05:00.000Z",
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'old-head',
+              ended_at = '2026-01-01T00:06:00.000Z',
+              review_verdict = 'changes_requested',
+              review_id = 'R_changes'
+        WHERE attempt_id = ?`,
+    )
+    .run(reviewAttemptId);
+  store.writeArtifact({
+    taskId,
+    attemptId: reviewAttemptId,
+    kind: "review_comments",
+    content: JSON.stringify({
+      review_id: "R_changes",
+      decision: "CHANGES_REQUESTED",
+      head_sha: "old-head",
+      body: "Blocking issue.",
+      comments: "Blocking issue in src/fix.ts.",
+    }),
+    extension: "json",
+  });
+
+  const respawnAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 3,
+    reason: "review",
+    consumedBudget: 0,
+    spawnedAt: "2026-01-01T00:07:00.000Z",
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET remote_sha_at_spawn = 'old-head',
+              remote_sha_at_exit = 'new-head',
+              ended_at = '2026-01-01T00:08:00.000Z',
+              exit_kind = 'pr_opened',
+              diff_summary = ?
+        WHERE attempt_id = ?`,
+    )
+    .run(
+      JSON.stringify({
+        files_changed: 1,
+        insertions: 4,
+        deletions: 1,
+        files: [{ path: "src/fix.ts", status: "M", ins: 4, del: 1 }],
+      }),
+      respawnAttemptId,
+    );
+  store.writeArtifact({
+    taskId,
+    attemptId: respawnAttemptId,
+    kind: "brief",
+    content:
+      "The pull request has new review feedback marked CHANGES_REQUESTED. Read the snapshotted comments, address each one, push the branch, and update the existing PR.",
+    extension: "md",
+  });
+
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+    prNumber: 11,
+    prUrl: "https://example.test/pr/11",
+    state: "open",
+    headSha: "new-head",
+    baseSha: "base-1",
+    mergeable: "mergeable",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: {
+      checkSha: "new-head",
+      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+    },
+  });
+  built.github.setPrView(repoId, 11, {
+    number: 11,
+    title: "Quay-owned respawn PR",
+    body: "",
+    url: "https://example.test/pr/11",
+    headRefName: `quay/${taskId}`,
+    headSha: "new-head",
+  });
+
+  const results = await tick_once(built.deps, {
+    reviewerEnabled: true,
+    gateQuayOwnedDone: true,
+  });
+
+  expect(results).toContainEqual({ task_id: taskId, action: "review_requested" });
+  const reviewerAttempt = h.db
+    .query<{ attempt_id: number }, [string]>(
+      `SELECT attempt_id FROM attempts
+        WHERE task_id = ? AND reason = 'review_only' AND head_sha = 'new-head'
+        ORDER BY attempt_id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  expect(reviewerAttempt).not.toBeNull();
+  const promptRow = h.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND attempt_id = ? AND kind = 'final_prompt'
+        ORDER BY artifact_id DESC LIMIT 1`,
+    )
+    .get(taskId, reviewerAttempt!.attempt_id);
+  expect(promptRow).not.toBeNull();
+  const prompt = readFileSync(promptRow!.file_path, "utf8");
+  expect(prompt).toContain("# Quay reviewer respawn: review");
+  expect(prompt).toContain("gh pr review 11");
+  expect(prompt).toContain("Blocking issue in src/fix.ts.");
+  expect(prompt).toContain("Files changed: 1");
+  expect(prompt).toContain("- M src/fix.ts (+4/-1)");
+  expect(prompt).toContain("original ticket context");
+  expect(prompt).not.toContain("address each one, push the branch");
 });
 
 test("reviewer infrastructure failures retry twice then park at same SHA", async () => {
