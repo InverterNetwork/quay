@@ -9,7 +9,7 @@
 // state handling: it returns enough to classify PR terminal state, merge
 // conflicts, review feedback, and CI status from a single GitHub-side view.
 // Real adapter composes this from `gh pr view --json ...` plus
-// `gh pr checks --json ...`.
+// plain-text `gh pr checks ...` output.
 export interface GitHubPort {
   prExistsForBranch(repoId: string, branch: string): boolean;
   prCheckStatus(repoId: string, branch: string): PrCheckStatus;

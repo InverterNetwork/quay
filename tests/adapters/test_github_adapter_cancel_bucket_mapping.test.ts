@@ -1,9 +1,8 @@
-// Regression: `gh pr checks --json bucket` reports cancelled checks with the
-// literal value "cancel" (its own bucket vocabulary) — not "cancelled" or
-// "canceled". The adapter previously only recognised the latter two and
-// silently fell through to `pending` for the first, leaving any task whose
-// CI was actually cancelled stuck as `ci_pending` forever instead of
-// scheduling the CI-fail retry.
+// Regression: gh's bucket vocabulary reports cancelled checks with the literal
+// value "cancel" — not "cancelled" or "canceled". The adapter previously only
+// recognised the latter two and silently fell through to `pending` for the
+// first, leaving any task whose CI was actually cancelled stuck as `ci_pending`
+// forever instead of scheduling the CI-fail retry.
 //
 // We pin the regression by feeding the bucket strings through `mapCheckRow`
 // (the row mapper that wraps `mapBucket`), then driving the result through

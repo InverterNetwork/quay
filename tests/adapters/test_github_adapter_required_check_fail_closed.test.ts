@@ -66,6 +66,41 @@ function makeBareDir(): { reposRoot: string; repoId: string } {
   return { reposRoot, repoId };
 }
 
+test("fetchChecks parses plain gh pr checks output without --json", () => {
+  installGhStub(`
+if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
+  if printf '%s\\n' "$*" | grep -q -- '--json'; then
+    echo 'unknown flag: --json' 1>&2
+    exit 1
+  fi
+  if printf '%s\\n' "$*" | grep -q -- '--required'; then
+    printf 'ci\\tpass\\t18s\\thttps://example.test/check\\n'
+    exit 0
+  fi
+  printf 'ci\\tpass\\t18s\\thttps://example.test/check\\n'
+  exit 0
+fi
+case "$*" in
+  *"view"*)
+    echo '{"state":"OPEN","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","reviewDecision":"NONE","latestReviews":[]}'
+    exit 0
+    ;;
+  *)
+    echo '[]'
+    exit 0
+    ;;
+esac
+`);
+  const { reposRoot, repoId } = makeBareDir();
+  const adapter = new GitHubCliAdapter(reposRoot);
+
+  const snap = adapter.prSnapshot(repoId, "quay/plain-checks");
+  expect(snap).not.toBeNull();
+  expect(snap!.checks.items).toEqual([
+    { name: "ci", workflow: null, bucket: "pass", required: true },
+  ]);
+});
+
 test("fetchRequiredCheckKeys throws on auth failure (gh exits 4 with 'authentication required')", () => {
   installGhStub(`
 case "$*" in

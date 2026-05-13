@@ -574,22 +574,22 @@ The "single chokepoint" referenced in §4 invariant 7 guarantees **SQL atomicity
 CI status is computed from the GitHub CLI / API per tick. Concrete data sources:
 
 - `gh pr view <num> --json headRefOid` → returns the PR's current head SHA (`headRefOid`). Quay records this and refuses to act on stale check data: if the SHA changes between fetch and decision, Quay logs `tick_error` and retries on the next tick.
-- `gh pr checks <num> --json name,state,bucket,workflow` → returns checks against the latest commit. Quay reads `bucket` for normalized state: `pass` / `fail` / `pending` / `skipping`.
-- `gh pr checks <num> --required --json name,state,bucket,workflow` → filtered to required checks only. This is how Quay determines required-check status without touching the branch protection API.
+- `gh pr checks <num>` → returns checks against the latest commit as structured plain text. Quay reads the status column for normalized state: `pass` / `fail` / `pending` / `skipping`.
+- `gh pr checks <num> --required` → filtered to required checks only. This is how Quay determines required-check status without touching the branch protection API while remaining compatible with gh versions that predate `pr checks --json`.
 
 Determination rules:
 
-- **If `repos.ci_workflow_name` is set:** Quay filters the `gh pr checks` JSON to entries where `workflow == ci_workflow_name`.
+- **If `repos.ci_workflow_name` is set:** Quay filters the `gh pr checks` rows to entries where `workflow == ci_workflow_name` when workflow metadata is available, falling back to `name == ci_workflow_name` for plain-text gh output.
   - **pass** = filtered set non-empty AND all `bucket = pass` (or `skipping`).
   - **fail** = filtered set contains any `bucket = fail`.
   - **pending** = filtered set contains any `bucket = pending` and no `fail`.
   - Filtered set empty → treated as **pending**; the named workflow may not have started yet.
-- **If `ci_workflow_name` is unset:** Quay uses `gh pr checks --required --json bucket`.
+- **If `ci_workflow_name` is unset:** Quay uses `gh pr checks --required`.
   - **pass** = required-checks set non-empty AND all `bucket ∈ {pass, skipping}`.
   - **fail** = any required check has `bucket = fail`.
   - **pending** = any required check has `bucket = pending` and none have `fail`.
   - **No required checks configured at all** (set is empty): treated as **pass**. Documented behavior — the project doesn't gate on CI.
-- **`gh` errors / unparseable JSON / SHA changed mid-fetch:** treated as **pending**; log `tick_error`; retry next tick. Does not consume budget (no spawn happens, no transition fires).
+- **`gh` errors / unparseable check output / SHA changed mid-fetch:** treated as **pending**; log `tick_error`; retry next tick. Does not consume budget (no spawn happens, no transition fires).
 
 `bucket = cancelled` is mapped: cancelled required checks count as **fail**; cancelled non-required checks are ignored.
 
@@ -1407,7 +1407,7 @@ Collisions across distinct `external_ref` values that slug to the same branch ar
 | **Recovery-path artifacts always have an attempt_id** | `blocker`, `slack_reply`, `malformed_signal`, `slack_escalation_post` are linked to a specific attempt and set `content_hash`. The partial unique index excludes NULL `attempt_id` values to avoid SQLite NULL-non-distinct duplicates. For `slack_escalation_post` the hash also incorporates `escalation_seq` so a recovery retry collides while a legitimate second escalation on the same attempt does not. |
 | **Slack reply cursor recovers actual bot-post ts via nonce** | Each `escalate-human` post embeds an opaque, per-escalation nonce in its body. Reply ingestion eagerly searches the thread for the bot message containing that nonce; on match, sets `slack_recovered_post_ts` and uses it as the canonical reply lower bound. This means a tick that posted but crashed before persisting the ts is recovered by the next tick's nonce search — no duplicate post. The `slack_pre_post_fence_ts` is retained as a fallback lower bound for the brief window between escalation and successful nonce recovery. |
 | **Single-owner Slack posting (tick-only writer)** | All Slack API calls — pre-post fence read, nonce-recovery search, post, reply poll — happen exclusively inside `quay tick` under the supervisor lockfile. The CLI command `escalate-human` only persists the artifact and transitions to `waiting_human`; it never calls Slack. `quay cancel` also acquires the supervisor lock before its finalizer, so it cannot run while a tick is mid-Slack-post on the same task. This eliminates the prior races where the CLI's post-and-record window could overlap with a tick's recovery re-post (producing duplicate posts) or a cancel could overlap with an in-flight tick's substrate work (producing inconsistent terminal state). Latency cost: posts land within one tick interval of `escalate-human` returning. |
-| **CI source: pinned `gh` commands** | `gh pr view --json headRefOid` for SHA; `gh pr checks --json bucket,workflow,name,state` (with `--required` when no `ci_workflow_name` is set). State derived from `bucket`. SHA-changed-mid-fetch → pending + retry. |
+| **CI source: pinned `gh` commands** | `gh pr view --json headRefOid` for SHA; plain-text `gh pr checks` rows, plus `--required` when no `ci_workflow_name` is set. State derived from the check status column. SHA-changed-mid-fetch → pending + retry. |
 | **Branch cleanup per terminal** | `merged`: local deleted, remote left to GitHub. `closed_unmerged`: both deleted. `cancelled`: local deleted; remote retained iff PR open (or always deleted with `--close-pr`). Parked states: no cleanup until cancel. |
 | **`advice_answered` not counted toward non-budget cap** | Human-input respawns are bounded by human availability and not a runaway-loop risk. The cap exists to safety-net stale GitHub signals; humans aren't a stale signal. |
 | **External-input slugification** | `external_ref` is normalized via **two separate derivations** (see §13). The branch slug applies per-component rules (no leading/trailing `./-` per component, no `.lock`-suffix per component, no `..`, ≤64 chars overall) and is **gated by a final `git check-ref-format` call** — pathological inputs that survive the rules fall back to `task-<task_id_short>`. The tmux identifier applies a stricter charset (`[A-Za-z0-9_-]` only, human part ≤38 chars) and **always appends `-<task_id_short>`**, guaranteeing per-task uniqueness even when two distinct `external_ref`s collapse to the same human-readable tmux slug while producing different branches. The two derivations do not need to match. Verbatim form preserved in SQL for queries. |
