@@ -70,6 +70,7 @@ interface TaskLookupRow {
   worktree_path: string;
   tmux_id: string;
   pr_number: number | null;
+  base_sha: string | null;
   review_infra_failures_consecutive: number;
   review_infra_failure_head_sha: string | null;
 }
@@ -144,7 +145,7 @@ export function enterReview(
   const preamble = loadPreambleBody(deps.db, preambleId);
   const brief = synthetic
     ? composeSyntheticBrief(pr)
-    : composeQuayOwnedReviewBrief(deps.db, task.task_id, pr, headSha);
+    : composeQuayOwnedReviewBrief(deps.db, task, pr, headSha);
 
   const supersededSessions: string[] = [];
   deps.db.exec("BEGIN IMMEDIATE");
@@ -398,6 +399,7 @@ function findTaskByPr(
     db
       .query<TaskLookupRow, [string, number]>(
         `SELECT task_id, state, branch_name, worktree_path, tmux_id, pr_number,
+                base_sha,
                 review_infra_failures_consecutive,
                 review_infra_failure_head_sha
            FROM tasks
@@ -422,6 +424,7 @@ function findTaskByBranch(
     db
       .query<TaskLookupRow, [string, string]>(
         `SELECT task_id, state, branch_name, worktree_path, tmux_id, pr_number,
+                base_sha,
                 review_infra_failures_consecutive,
                 review_infra_failure_head_sha
            FROM tasks
@@ -438,6 +441,7 @@ function findTaskById(db: DB, taskId: string): TaskLookupRow | null {
     db
       .query<TaskLookupRow, [string]>(
         `SELECT task_id, state, branch_name, worktree_path, tmux_id, pr_number,
+                base_sha,
                 review_infra_failures_consecutive,
                 review_infra_failure_head_sha
            FROM tasks
@@ -465,58 +469,66 @@ function nextAttemptNumberForTask(db: DB, taskId: string): number {
   return (row?.n ?? 0) + 1;
 }
 
-function loadMostRecentBrief(db: DB, taskId: string): string {
-  const row = db
-    .query<{ file_path: string }, [string]>(
-      `SELECT file_path FROM artifacts
-         WHERE task_id = ? AND kind = 'brief'
-         ORDER BY artifact_id DESC
-         LIMIT 1`,
-    )
-    .get(taskId);
-  if (!row) return `Review the pull request for task ${taskId}.`;
-  return readFileSync(row.file_path, "utf8");
-}
-
 function composeQuayOwnedReviewBrief(
   db: DB,
-  taskId: string,
+  task: TaskLookupRow,
   pr: PullRequestView,
   headSha: string,
 ): string {
-  const latestCodeAttempt = loadLatestCodeAttempt(db, taskId);
-  if (latestCodeAttempt?.reason !== "review") {
-    return loadMostRecentBrief(db, taskId);
-  }
-
-  return [
-    "# Quay reviewer respawn: review",
+  const latestCodeAttempt = loadLatestCodeAttempt(db, task.task_id);
+  const reviewRespawn = latestCodeAttempt?.reason === "review";
+  const lines = [
+    reviewRespawn ? "# Quay reviewer respawn: review" : "# Quay reviewer: review",
     "",
-    "A Quay worker has pushed a new commit after a prior CHANGES_REQUESTED review. Review the current PR head and post a new GitHub review verdict.",
+    reviewRespawn
+      ? "A Quay worker has pushed a new commit after a prior CHANGES_REQUESTED review. Review the current PR head and post a new GitHub review verdict."
+      : "A Quay worker has opened or updated this pull request. Review the current PR head and post a GitHub review verdict.",
     "",
     "## Review target",
     "",
     `PR: #${pr.number}${pr.url ? ` (${pr.url})` : ""}`,
     `Head branch: ${pr.headRefName}`,
     `Head SHA: ${headSha}`,
+  ];
+
+  if (task.base_sha !== null && task.base_sha.trim() !== "") {
+    lines.push(`Base SHA: ${task.base_sha}`);
+  }
+
+  lines.push(
     "",
     "## Required action",
     "",
     `Post exactly one review with \`gh pr review ${pr.number}\`. If the prior feedback is fully addressed, use \`--approve\`; if blocking issues remain, use \`--request-changes\`. Do not modify files, commit, or push.`,
-    "",
-    "## Prior CHANGES_REQUESTED review",
-    "",
-    loadLatestReviewComments(db, taskId),
-    "",
-    "## Worker respawn diff summary",
-    "",
-    formatDiffSummary(latestCodeAttempt),
+  );
+
+  if (reviewRespawn) {
+    lines.push(
+      "",
+      "## Prior CHANGES_REQUESTED review",
+      "",
+      loadLatestReviewComments(db, task.task_id),
+    );
+  }
+
+  if (latestCodeAttempt !== null) {
+    lines.push(
+      "",
+      reviewRespawn ? "## Worker respawn diff summary" : "## Latest worker diff summary",
+      "",
+      formatDiffSummary(latestCodeAttempt),
+    );
+  }
+
+  lines.push(
     "",
     "## Original task context",
     "",
-    loadMostRecentNonReviewBrief(db, taskId) ??
-      `Review the pull request for task ${taskId}.`,
-  ].join("\n");
+    loadReviewContextBrief(db, task.task_id) ??
+      `Review the pull request for task ${task.task_id}.`,
+  );
+
+  return lines.join("\n");
 }
 
 function loadLatestCodeAttempt(db: DB, taskId: string): LatestCodeAttemptRow | null {
@@ -534,7 +546,7 @@ function loadLatestCodeAttempt(db: DB, taskId: string): LatestCodeAttemptRow | n
   );
 }
 
-function loadMostRecentNonReviewBrief(db: DB, taskId: string): string | null {
+function loadReviewContextBrief(db: DB, taskId: string): string | null {
   const row = db
     .query<{ file_path: string }, [string]>(
       `SELECT ar.file_path
@@ -542,7 +554,16 @@ function loadMostRecentNonReviewBrief(db: DB, taskId: string): string | null {
          JOIN attempts at ON at.attempt_id = ar.attempt_id
         WHERE ar.task_id = ?
           AND ar.kind = 'brief'
-          AND at.reason NOT IN ('review', 'review_only')
+          AND at.reason NOT IN (
+            'review',
+            'review_only',
+            'conflict',
+            'ci_fail',
+            'crash',
+            'stale',
+            'wall_clock',
+            'malformed_signal'
+          )
         ORDER BY ar.artifact_id DESC
         LIMIT 1`,
     )
