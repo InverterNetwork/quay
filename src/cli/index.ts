@@ -38,6 +38,7 @@ import {
 import { resolveDataDir } from "./data_dir.ts";
 import { dispatch, type CliDeps } from "./dispatch.ts";
 import { createLazyRepoVocabLookup } from "./repo_vocab_lookup.ts";
+import { detectStartupEnvHazard } from "./startup_env.ts";
 import { handleValidateTicket } from "./validate_ticket.ts";
 import { createRepoService } from "../core/repos/service.ts";
 import { createTagService } from "../core/tags/service.ts";
@@ -98,6 +99,16 @@ async function main(): Promise<number> {
     process.stderr.write(
       `${JSON.stringify({ error: "internal_error", message: `chdir to / failed: ${message}` })}\n`,
     );
+  }
+  const startupEnvHazard = detectStartupEnvHazard({
+    env: process.env,
+    invocationCwd,
+  });
+  if (startupEnvHazard !== null) {
+    process.stderr.write(
+      `${JSON.stringify({ error: "startup_error", message: startupEnvHazard })}\n`,
+    );
+    return 2;
   }
   const { config } = loadConfig();
   const adaptersConfig = adaptersConfigFromConfig(config);
