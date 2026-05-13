@@ -1,16 +1,14 @@
 // Regression: `fetchChecks` and `fetchRequiredCheckKeys` used to short-
-// circuit to an empty check set whenever the *combined* stdout+stderr
-// contained "no checks" / "no check runs" / "no required checks". A
-// valid JSON checks array with a workflow or check name like
-// "No checks required" would therefore false-match — and with
-// `ci_workflow_name` unset, `classifyCi` treats an empty required set
-// as `pass`, so a failing required check could silently transition the
-// task to done.
+// circuit to an empty check set whenever command output contained
+// "no checks" / "no check runs" / "no required checks". A valid checks
+// row with a workflow or check name like "No checks required" would
+// therefore false-match — and with `ci_workflow_name` unset, `classifyCi`
+// treats an empty required set as `pass`, so a failing required check
+// could silently transition the task to done.
 //
-// The fix parses non-empty stdout as JSON FIRST. The "no checks"
-// matcher only fires against stderr (or against stdout when stdout
-// failed to parse as JSON). A successfully-parsed JSON array always
-// drives the outcome, regardless of any substring inside it.
+// The fix treats stdout as data output: parse JSON first, then plain
+// table rows. The "no checks" empty-set matcher only fires against
+// stderr, regardless of any matching substring inside stdout.
 
 import {
   chmodSync,
@@ -97,6 +95,39 @@ esac
   expect(snap!.checks.items[0]!.required).toBe(true);
   expect(snap!.checks.items[0]!.name).toBe("No checks required (legacy gate)");
   // classifyCi must return fail — without the fix this is silently pass.
+  expect(classifyCi(snap!, null)).toBe("fail");
+});
+
+test("a plain check row whose name contains 'no checks' is parsed before empty-set detection", () => {
+  installGhStub(`
+case "$*" in
+  *"checks"*"--required"*)
+    printf 'No checks required (legacy gate)\\tfail\\t18s\\thttps://example.test/check\\n'
+    exit 1
+    ;;
+  *"checks"*)
+    printf 'No checks required (legacy gate)\\tfail\\t18s\\thttps://example.test/check\\n'
+    exit 1
+    ;;
+  *"view"*)
+    echo '{"state":"OPEN","headRefOid":"abc","baseRefOid":"def","mergeable":"MERGEABLE","reviewDecision":"NONE","latestReviews":[]}'
+    exit 0
+    ;;
+  *)
+    echo '[]'
+    exit 0
+    ;;
+esac
+`);
+  const { reposRoot, repoId } = makeBareDir();
+  const adapter = new GitHubCliAdapter(reposRoot);
+
+  const snap = adapter.prSnapshot(repoId, "quay/branch");
+  expect(snap).not.toBeNull();
+  expect(snap!.checks.items).toHaveLength(1);
+  expect(snap!.checks.items[0]!.bucket).toBe("fail");
+  expect(snap!.checks.items[0]!.required).toBe(true);
+  expect(snap!.checks.items[0]!.name).toBe("No checks required (legacy gate)");
   expect(classifyCi(snap!, null)).toBe("fail");
 });
 

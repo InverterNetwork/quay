@@ -737,17 +737,11 @@ export class GitHubCliAdapter implements GitHubPort {
     }
 
     // No usable JSON array. The "no checks" empty-set signal must come from
-    // stderr — gh's stable channel for that message. We allow stdout matching
-    // too, but ONLY when stdout failed to parse as JSON above (so a non-empty
-    // JSON array is never bypassed). Generic 404s ("Not Found") are not in
-    // the matcher and fall through to the exit-code check.
+    // stderr — gh's stable channel for that message. Stdout is data output:
+    // it may be a plain row whose check name contains "no checks", so parse
+    // it as rows below and fail closed if it is unparseable.
     const stderrLower = result.stderr.toLowerCase();
-    const stdoutNoChecksHint =
-      stdoutTrim !== "" &&
-      noChecksPhraseIn(stdoutTrim.toLowerCase());
-    const isKnownNoChecks =
-      noChecksPhraseIn(stderrLower) || stdoutNoChecksHint;
-    if (isKnownNoChecks) return { checkSha: null, items: [] };
+    if (noChecksPhraseIn(stderrLower)) return { checkSha: null, items: [] };
     const isReadSuccess =
       result.exitCode === 0 || result.exitCode === 1 || result.exitCode === 8;
     if (!isReadSuccess) {
@@ -790,10 +784,10 @@ export class GitHubCliAdapter implements GitHubPort {
         `gh pr checks returned non-array JSON for ${branch}: ${stdoutTrim.slice(0, 200)}`,
       );
     }
-    // stdout non-empty but neither a valid JSON array, a known "no checks"
-    // text message, nor a parseable checks table — fail closed. `checkSha` is
-    // always null at this layer and is rewritten by `prSnapshot` from a
-    // `gh pr view --json headRefOid` bracket so the stale-SHA gate works.
+    // stdout non-empty but neither a valid JSON array nor a parseable checks
+    // table — fail closed. `checkSha` is always null at this layer and is
+    // rewritten by `prSnapshot` from a `gh pr view --json headRefOid` bracket
+    // so the stale-SHA gate works.
     throw new Error(
       `gh pr checks returned unparseable checks output for ${branch}: ${stdoutTrim.slice(0, 200)}`,
     );
@@ -852,15 +846,11 @@ export class GitHubCliAdapter implements GitHubPort {
     }
 
     // No usable JSON array. The "no required checks" empty-set signal
-    // must come from stderr (gh's stable channel for that message), or
-    // from a stdout body that failed JSON parsing — never from a
-    // matching substring inside a successfully-parsed array.
+    // must come from stderr (gh's stable channel for that message). Stdout
+    // is parsed as data below, so a plain required row with a matching
+    // substring in its name is not discarded.
     const stderrLower = result.stderr.toLowerCase();
-    const stdoutNoChecksHint =
-      stdoutTrim !== "" && noRequiredChecksPhraseIn(stdoutTrim.toLowerCase());
-    const isKnownNoChecks =
-      noRequiredChecksPhraseIn(stderrLower) || stdoutNoChecksHint;
-    if (isKnownNoChecks) return new Set<string>();
+    if (noRequiredChecksPhraseIn(stderrLower)) return new Set<string>();
     const isReadSuccess =
       result.exitCode === 0 || result.exitCode === 1 || result.exitCode === 8;
     if (!isReadSuccess) {
