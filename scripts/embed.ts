@@ -5,7 +5,7 @@
 // Embeds:
 //   - All migrations/*.sql files (sorted, name+sql pairs)
 //   - The shipped default config/ticket_schema.toml
-//   - Build version: package.json "version" + short git SHA
+//   - Build version: $QUAY_VERSION (release tags) or "dev" + short git SHA
 //
 // Run by `bun install` (via the `prepare` script) and `bun run build`.
 
@@ -18,7 +18,6 @@ const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MIGRATIONS_DIR = join(REPO_ROOT, "migrations");
 const SCHEMA_FILE = join(REPO_ROOT, "config", "ticket_schema.toml");
 const OUT_FILE = join(REPO_ROOT, "src", "build", "embedded.generated.ts");
-const PKG_FILE = join(REPO_ROOT, "package.json");
 
 function readMigrations(): Array<{ name: string; sql: string }> {
   const files = readdirSync(MIGRATIONS_DIR)
@@ -32,11 +31,6 @@ function readMigrations(): Array<{ name: string; sql: string }> {
 
 function readSchema(): string {
   return readFileSync(SCHEMA_FILE, "utf8");
-}
-
-function readPackageVersion(): string {
-  const pkg = JSON.parse(readFileSync(PKG_FILE, "utf8")) as { version?: string };
-  return pkg.version ?? "0.0.0";
 }
 
 function readGitSha(): string {
@@ -57,10 +51,18 @@ function readGitSha(): string {
   }
 }
 
-function buildVersion(): string {
-  const pkgVersion = readPackageVersion();
-  const sha = readGitSha();
-  return `${pkgVersion}+${sha}`;
+export function formatBuildVersion(
+  injectedVersion: string | undefined,
+  sha: string,
+): string {
+  const baseVersion = injectedVersion?.trim() || "dev";
+  return `${baseVersion}+${sha}`;
+}
+
+function buildVersion(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return formatBuildVersion(env.QUAY_VERSION, readGitSha());
 }
 
 function tsLiteral(s: string): string {
@@ -69,10 +71,10 @@ function tsLiteral(s: string): string {
   return JSON.stringify(s);
 }
 
-function render(): string {
+function render(env: Record<string, string | undefined> = process.env): string {
   const migrations = readMigrations();
   const schema = readSchema();
-  const version = buildVersion();
+  const version = buildVersion(env);
 
   const migrationLines = migrations
     .map(
@@ -101,4 +103,6 @@ function main(): void {
   writeFileSync(OUT_FILE, render(), "utf8");
 }
 
-main();
+if (import.meta.main) {
+  main();
+}
