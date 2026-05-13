@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit",
     "quay": "bun run src/cli/index.ts",
     "embed": "bun run scripts/embed.ts",
-    "build": "bun run scripts/embed.ts && bun build --compile src/cli/index.ts --outfile dist/quay",
+    "build": "bun run scripts/embed.ts && bun build --compile --no-compile-autoload-bunfig --no-compile-autoload-dotenv src/cli/index.ts --outfile dist/quay",
     "prepare": "bun run scripts/embed.ts"
   },
   "bin": {
