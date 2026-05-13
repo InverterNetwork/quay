@@ -87,6 +87,14 @@ interface InsertAttemptRow {
   attempt_id: number;
 }
 
+interface LatestCodeAttemptRow {
+  attempt_id: number;
+  reason: string;
+  remote_sha_at_spawn: string | null;
+  remote_sha_at_exit: string | null;
+  diff_summary: string | null;
+}
+
 export function enterReview(
   deps: EnterReviewDeps,
   input: EnterReviewInput,
@@ -134,7 +142,9 @@ export function enterReview(
   const tags = dedupeTags(input.tags ?? []);
   const preambleId = ensureReviewerPreambleId(deps.db, deps.clock);
   const preamble = loadPreambleBody(deps.db, preambleId);
-  const brief = synthetic ? composeSyntheticBrief(pr) : loadMostRecentBrief(deps.db, task.task_id);
+  const brief = synthetic
+    ? composeSyntheticBrief(pr)
+    : composeQuayOwnedReviewBrief(deps.db, task.task_id, pr, headSha);
 
   const supersededSessions: string[] = [];
   deps.db.exec("BEGIN IMMEDIATE");
@@ -466,6 +476,197 @@ function loadMostRecentBrief(db: DB, taskId: string): string {
     .get(taskId);
   if (!row) return `Review the pull request for task ${taskId}.`;
   return readFileSync(row.file_path, "utf8");
+}
+
+function composeQuayOwnedReviewBrief(
+  db: DB,
+  taskId: string,
+  pr: PullRequestView,
+  headSha: string,
+): string {
+  const latestCodeAttempt = loadLatestCodeAttempt(db, taskId);
+  if (latestCodeAttempt?.reason !== "review") {
+    return loadMostRecentBrief(db, taskId);
+  }
+
+  return [
+    "# Quay reviewer respawn: review",
+    "",
+    "A Quay worker has pushed a new commit after a prior CHANGES_REQUESTED review. Review the current PR head and post a new GitHub review verdict.",
+    "",
+    "## Review target",
+    "",
+    `PR: #${pr.number}${pr.url ? ` (${pr.url})` : ""}`,
+    `Head branch: ${pr.headRefName}`,
+    `Head SHA: ${headSha}`,
+    "",
+    "## Required action",
+    "",
+    `Post exactly one review with \`gh pr review ${pr.number}\`. If the prior feedback is fully addressed, use \`--approve\`; if blocking issues remain, use \`--request-changes\`. Do not modify files, commit, or push.`,
+    "",
+    "## Prior CHANGES_REQUESTED review",
+    "",
+    loadLatestReviewComments(db, taskId),
+    "",
+    "## Worker respawn diff summary",
+    "",
+    formatDiffSummary(latestCodeAttempt),
+    "",
+    "## Original task context",
+    "",
+    loadMostRecentNonReviewBrief(db, taskId) ??
+      `Review the pull request for task ${taskId}.`,
+  ].join("\n");
+}
+
+function loadLatestCodeAttempt(db: DB, taskId: string): LatestCodeAttemptRow | null {
+  return (
+    db
+      .query<LatestCodeAttemptRow, [string]>(
+        `SELECT attempt_id, reason, remote_sha_at_spawn, remote_sha_at_exit,
+                diff_summary
+           FROM attempts
+          WHERE task_id = ? AND reason <> 'review_only'
+          ORDER BY attempt_id DESC
+          LIMIT 1`,
+      )
+      .get(taskId) ?? null
+  );
+}
+
+function loadMostRecentNonReviewBrief(db: DB, taskId: string): string | null {
+  const row = db
+    .query<{ file_path: string }, [string]>(
+      `SELECT ar.file_path
+         FROM artifacts ar
+         JOIN attempts at ON at.attempt_id = ar.attempt_id
+        WHERE ar.task_id = ?
+          AND ar.kind = 'brief'
+          AND at.reason NOT IN ('review', 'review_only')
+        ORDER BY ar.artifact_id DESC
+        LIMIT 1`,
+    )
+    .get(taskId);
+  if (!row) return null;
+  try {
+    return readFileSync(row.file_path, "utf8");
+  } catch {
+    return "(Prior task brief artifact file was missing or unreadable.)";
+  }
+}
+
+function loadLatestReviewComments(db: DB, taskId: string): string {
+  const row = db
+    .query<{ file_path: string }, [string]>(
+      `SELECT file_path FROM artifacts
+         WHERE task_id = ? AND kind = 'review_comments'
+         ORDER BY artifact_id DESC
+         LIMIT 1`,
+    )
+    .get(taskId);
+  if (!row) return "(No prior review comments artifact was recorded.)";
+  let raw: string;
+  try {
+    raw = readFileSync(row.file_path, "utf8");
+  } catch {
+    return "(Prior review comments artifact file was missing or unreadable.)";
+  }
+  try {
+    const parsed = JSON.parse(raw) as {
+      review_id?: unknown;
+      decision?: unknown;
+      head_sha?: unknown;
+      body?: unknown;
+      comments?: unknown;
+    };
+    const lines = [
+      `Review ID: ${stringValue(parsed.review_id, "<unknown>")}`,
+      `Decision: ${stringValue(parsed.decision, "<unknown>")}`,
+    ];
+    const priorHead = stringValue(parsed.head_sha, "");
+    if (priorHead !== "") lines.push(`Reviewed head SHA: ${priorHead}`);
+    lines.push("", "Comments:", stringValue(parsed.comments, "(No comments captured.)"));
+    const body = stringValue(parsed.body, "");
+    if (body !== "" && body !== stringValue(parsed.comments, "")) {
+      lines.push("", "Review body:", body);
+    }
+    return lines.join("\n");
+  } catch {
+    return raw;
+  }
+}
+
+function formatDiffSummary(attempt: LatestCodeAttemptRow): string {
+  const lines = [
+    `Previous remote head: ${attempt.remote_sha_at_spawn ?? "<unknown>"}`,
+    `New remote head: ${attempt.remote_sha_at_exit ?? "<unknown>"}`,
+  ];
+  if (attempt.diff_summary === null) {
+    lines.push("", "(No diff summary was captured for the worker respawn.)");
+    return lines.join("\n");
+  }
+  try {
+    const summary = JSON.parse(attempt.diff_summary) as {
+      files_changed?: unknown;
+      insertions?: unknown;
+      deletions?: unknown;
+      files?: unknown;
+      truncated?: unknown;
+    };
+    lines.push(
+      "",
+      `Files changed: ${numberValue(summary.files_changed, "?")}`,
+      `Insertions: ${numberValue(summary.insertions, "?")}`,
+      `Deletions: ${numberValue(summary.deletions, "?")}`,
+    );
+    if (Array.isArray(summary.files) && summary.files.length > 0) {
+      lines.push("", "Files:");
+      for (const file of summary.files.slice(0, 20)) {
+        if (isDiffSummaryFile(file)) {
+          lines.push(
+            `- ${file.status} ${file.path} (+${file.ins ?? "?"}/-${file.del ?? "?"})`,
+          );
+        }
+      }
+      if (summary.files.length > 20 || summary.truncated === true) {
+        lines.push("- ...");
+      }
+    }
+    return lines.join("\n");
+  } catch {
+    lines.push("", attempt.diff_summary);
+    return lines.join("\n");
+  }
+}
+
+function stringValue(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() !== "" ? value : fallback;
+}
+
+function numberValue(value: unknown, fallback: string): string {
+  return typeof value === "number" ? String(value) : fallback;
+}
+
+function isDiffSummaryFile(value: unknown): value is {
+  path: string;
+  status: string;
+  ins: number | null;
+  del: number | null;
+} {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as {
+    path?: unknown;
+    status?: unknown;
+    ins?: unknown;
+    del?: unknown;
+  };
+  const nullableNumber = (v: unknown) => typeof v === "number" || v === null;
+  return (
+    typeof candidate.path === "string" &&
+    typeof candidate.status === "string" &&
+    nullableNumber(candidate.ins) &&
+    nullableNumber(candidate.del)
+  );
 }
 
 function composeSyntheticBrief(pr: PullRequestView): string {
