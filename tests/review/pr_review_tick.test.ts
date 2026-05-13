@@ -452,6 +452,178 @@ test("review after CHANGES_REQUESTED respawn gets reviewer-specific prompt", asy
   expect(prompt).not.toContain("address each one, push the branch");
 });
 
+test("review after conflict respawn does not reuse the worker conflict brief", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-conflict-review-prompt");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-conflict-review-prompt",
+    state: "pr-open",
+  });
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+
+  const initialAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId: initialAttemptId,
+    kind: "brief",
+    content: "original ticket context for conflict repair",
+    extension: "md",
+  });
+
+  const conflictAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "conflict",
+    consumedBudget: 0,
+    spawnedAt: "2026-01-01T00:05:00.000Z",
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET remote_sha_at_spawn = 'conflicted-head',
+              remote_sha_at_exit = 'conflict-fixed-head',
+              ended_at = '2026-01-01T00:06:00.000Z',
+              exit_kind = 'pr_opened',
+              diff_summary = ?
+        WHERE attempt_id = ?`,
+    )
+    .run(
+      JSON.stringify({
+        files_changed: 1,
+        insertions: 5,
+        deletions: 2,
+        files: [{ path: "src/conflict.ts", status: "M", ins: 5, del: 2 }],
+      }),
+      conflictAttemptId,
+    );
+  store.writeArtifact({
+    taskId,
+    attemptId: conflictAttemptId,
+    kind: "brief",
+    content: [
+      "# Quay non-budget respawn: conflict",
+      "",
+      "Pull the base, resolve the conflict, push the branch, and update the existing PR.",
+      "Do not post a GitHub review.",
+      "This is a worker fix attempt, not a reviewer attempt.",
+    ].join("\n"),
+    extension: "md",
+  });
+
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+    prNumber: 12,
+    prUrl: "https://example.test/pr/12",
+    state: "open",
+    headSha: "conflict-fixed-head",
+    baseSha: "base-c2",
+    mergeable: "mergeable",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: {
+      checkSha: "conflict-fixed-head",
+      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+    },
+  });
+  built.github.setPrView(repoId, 12, {
+    number: 12,
+    title: "Quay-owned conflict repair PR",
+    body: "",
+    url: "https://example.test/pr/12",
+    headRefName: `quay/${taskId}`,
+    headSha: "conflict-fixed-head",
+  });
+
+  const results = await tick_once(built.deps, {
+    reviewerEnabled: true,
+    gateQuayOwnedDone: true,
+  });
+
+  expect(results).toContainEqual({ task_id: taskId, action: "review_requested" });
+  const reviewerAttempt = h.db
+    .query<{ attempt_id: number }, [string]>(
+      `SELECT attempt_id FROM attempts
+        WHERE task_id = ? AND reason = 'review_only' AND head_sha = 'conflict-fixed-head'
+        ORDER BY attempt_id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  expect(reviewerAttempt).not.toBeNull();
+  const promptRow = h.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND attempt_id = ? AND kind = 'final_prompt'
+        ORDER BY artifact_id DESC LIMIT 1`,
+    )
+    .get(taskId, reviewerAttempt!.attempt_id);
+  expect(promptRow).not.toBeNull();
+  const prompt = readFileSync(promptRow!.file_path, "utf8");
+  expect(prompt).toContain("# Quay reviewer: review");
+  expect(prompt).toContain("gh pr review 12");
+  expect(prompt).toContain("Head SHA: conflict-fixed-head");
+  expect(prompt).toContain("Base SHA: base-c2");
+  expect(prompt).toContain("Files changed: 1");
+  expect(prompt).toContain("- M src/conflict.ts (+5/-2)");
+  expect(prompt).toContain("original ticket context for conflict repair");
+
+  const forbidden = [
+    "push the branch",
+    "update the existing PR",
+    "Do not post a GitHub review",
+    "This is a worker fix attempt",
+  ];
+  for (const phrase of forbidden) {
+    expect(prompt).not.toContain(phrase);
+  }
+
+  const spawnResults = await tick_once(built.deps, {
+    reviewerEnabled: true,
+    gateQuayOwnedDone: true,
+  });
+  expect(spawnResults).toContainEqual({ task_id: taskId, action: "spawned" });
+  const session = built.tmux.spawnCalls.at(-1)!.sessionName;
+  built.tmux.markDead(session);
+
+  const retryResults = await tick_once(built.deps, {
+    reviewerEnabled: true,
+    gateQuayOwnedDone: true,
+  });
+  expect(retryResults).toContainEqual({
+    task_id: taskId,
+    action: "review_retry_scheduled",
+  });
+  const retryAttempt = h.db
+    .query<{ attempt_id: number }, [string]>(
+      `SELECT attempt_id FROM attempts
+        WHERE task_id = ? AND reason = 'review_only' AND spawned_at IS NULL
+        ORDER BY attempt_id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  expect(retryAttempt).not.toBeNull();
+  const retryPromptRow = h.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND attempt_id = ? AND kind = 'final_prompt'
+        ORDER BY artifact_id DESC LIMIT 1`,
+    )
+    .get(taskId, retryAttempt!.attempt_id);
+  expect(retryPromptRow).not.toBeNull();
+  const retryPrompt = readFileSync(retryPromptRow!.file_path, "utf8");
+  expect(retryPrompt).toContain("gh pr review 12");
+  for (const phrase of forbidden) {
+    expect(retryPrompt).not.toContain(phrase);
+  }
+});
+
 test("reviewer infrastructure failures retry twice then park at same SHA", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
