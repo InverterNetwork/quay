@@ -1,6 +1,6 @@
 // Spec §5 / §12: tick must reject CI evaluation when the check rows it sees
 // were produced against a SHA that's no longer the PR head (force-push or
-// GitHub lag). `gh pr checks --json` doesn't carry a per-row SHA, so the
+// GitHub lag). `gh pr checks` doesn't carry a per-row SHA, so the
 // adapter brackets the checks read with two `gh pr view --json headRefOid`
 // reads; classifyCi compares the two.
 //
@@ -65,7 +65,7 @@ test("prSnapshot sets checkSha to the head SHA observed before fetching checks",
         latestReviews: [],
       }),
     ),
-    // 2. fetchChecks (gh pr checks --json bucket,workflow,name,state)
+    // 2. fetchChecks (test fixture emits JSON; production parses plain text)
     ok(JSON.stringify([])),
     // 3. fetchRequiredCheckKeys (gh pr checks --required ...)
     ok(JSON.stringify([])),

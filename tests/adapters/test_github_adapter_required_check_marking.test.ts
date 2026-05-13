@@ -99,6 +99,14 @@ test("classifyCi(no ci_workflow_name): required pending → pending", () => {
   expect(classifyCi(makeSnapshot(items), null)).toBe("pending");
 });
 
+test("classifyCi(named workflow): plain gh rows can match by check name", () => {
+  const items: PrCheck[] = [
+    baseCheck({ name: "ci", workflow: null, bucket: "pass", required: false }),
+    baseCheck({ name: "preview", workflow: null, bucket: "fail", required: false }),
+  ];
+  expect(classifyCi(makeSnapshot(items), "ci")).toBe("pass");
+});
+
 function makeSnapshot(items: PrCheck[]): PrSnapshot {
   return {
     state: "open",

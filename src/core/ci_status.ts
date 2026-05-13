@@ -21,7 +21,9 @@ export function classifyCi(
 
   if (ciWorkflowName !== null && ciWorkflowName.length > 0) {
     const filtered = snapshot.checks.items.filter(
-      (c) => c.workflow === ciWorkflowName,
+      (c) =>
+        c.workflow === ciWorkflowName ||
+        (c.workflow === null && c.name === ciWorkflowName),
     );
     return classifySet(filtered);
   }
