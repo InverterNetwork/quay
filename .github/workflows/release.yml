@@ -21,13 +21,21 @@ jobs:
       - run: bun test
       - run: bun run typecheck
       - name: Build binaries
+        env:
+          QUAY_VERSION: ${{ github.ref_name }}
         run: |
+          bun run scripts/embed.ts
           bun build --compile --target=bun-linux-x64    src/cli/index.ts --outfile dist/quay-linux-amd64
           bun build --compile --target=bun-linux-arm64  src/cli/index.ts --outfile dist/quay-linux-arm64
           bun build --compile --target=bun-darwin-x64   src/cli/index.ts --outfile dist/quay-darwin-amd64
           bun build --compile --target=bun-darwin-arm64 src/cli/index.ts --outfile dist/quay-darwin-arm64
       - name: Smoke test linux-amd64 binary
-        run: ./dist/quay-linux-amd64 --version
+        run: |
+          version="$(./dist/quay-linux-amd64 --version)"
+          case "$version" in
+            "${GITHUB_REF_NAME}+"*) ;;
+            *) echo "expected ${GITHUB_REF_NAME}+<sha>, got ${version}"; exit 1 ;;
+          esac
       - name: Generate checksums
         working-directory: dist
         run: sha256sum quay-* > SHA256SUMS

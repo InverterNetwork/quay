@@ -14,7 +14,9 @@ bun run build
 ```
 
 `bun run build` regenerates the embedded migrations, ticket schema, and version
-stamp before compiling `dist/quay`.
+stamp before compiling `dist/quay`. Local builds report `dev+<sha>`; release
+builds set `QUAY_VERSION` to the release tag so `quay --version` reports
+`<tag>+<sha>`.
 
 ## Run From Source
 
