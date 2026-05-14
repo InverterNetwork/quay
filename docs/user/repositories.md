@@ -28,8 +28,11 @@ Optional fields:
 - `--ci-workflow-name`
 - `--contribution-guide-path`
 
-`ci_workflow_name` is used when classifying PR checks. The other optional
-fields are stored metadata today.
+`ci_workflow_name` is deprecated as a CI gate and is retained for compatibility.
+The other optional fields are stored metadata today. Quay treats every reported
+failing or cancelled PR check as blocking, even when GitHub marks that check
+non-required or it belongs to a different workflow. An empty reported check set
+still preserves the no-CI pass behavior.
 
 ## Materialize The Bare Clone
 

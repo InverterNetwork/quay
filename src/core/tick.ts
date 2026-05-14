@@ -44,6 +44,7 @@ import {
   scheduleCleanSpawnRetry,
   scheduleDeterministicRetry,
   type BudgetRetryReason,
+  type RetryAttemptRef,
 } from "./retries.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
 
@@ -780,6 +781,10 @@ function processRunningReviewAttempt(
       options,
     );
   }
+  if (posted.decision === "APPROVED" && !isSyntheticTaskId(task.task_id)) {
+    const ciGate = guardApprovedReviewCi(deps, task, posted, exitInfo);
+    if (ciGate !== null) return ciGate;
+  }
   return finalizePostedReview(deps, task, posted, exitInfo, options);
 }
 
@@ -874,7 +879,7 @@ function processPrOpenTask(
     }
   }
 
-  // 3. CI status (named workflow vs required vs no-checks).
+  // 3. CI status (any reported failure blocks; empty check set preserves no-CI).
   const repo = loadRepoForTask(deps.db, task.task_id);
   const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
 
@@ -918,6 +923,12 @@ function processPrOpenTask(
           gateQuayOwnedDone: true,
         },
       );
+      if (
+        result.skipped_reason === "terminal_verdict_exists" &&
+        result.review_verdict === "approved"
+      ) {
+        return transitionCiPassed(deps, task, attempt);
+      }
       return {
         task_id: task.task_id,
         action: result.scheduled ? "review_requested" : "skipped_predicate",
@@ -925,7 +936,7 @@ function processPrOpenTask(
     }
     return transitionCiPassed(deps, task, attempt);
   }
-  return scheduleCiFailRetry(deps, task, attempt, snapshot);
+  return scheduleCiFailRetry(deps, task.task_id, attempt, snapshot, "pr-open");
 }
 
 function processDoneTask(
@@ -1195,50 +1206,74 @@ function transitionCiPassed(
 
 function scheduleCiFailRetry(
   deps: TickDeps,
-  task: PrOpenTaskRow,
-  attempt: CurrentAttemptRow,
+  taskId: string,
+  prevAttempt: RetryAttemptRef,
   snapshot: PrSnapshot,
+  fromState: "pr-open" | "pr-review",
+  priorBrief?: string,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
-  const failureExcerpt = composeCiFailureExcerpt(snapshot);
   deps.db.exec("BEGIN");
   try {
-    const excerpt = deps.artifactStore.writeArtifact({
-      taskId: task.task_id,
-      attemptId: attempt.attempt_id,
-      kind: "ci_failure_excerpt",
-      content: failureExcerpt,
-      extension: "txt",
-    });
-    scheduleDeterministicRetry(deps, {
-      taskId: task.task_id,
-      prevAttempt: attempt,
-      reason: "ci_fail",
-      diagnostics: failureExcerpt,
-      fromState: "pr-open",
-    });
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state,
-           payload_artifact_id, occurred_at
-         ) VALUES (?, ?, 'ci_failed', 'pr-open', (SELECT state FROM tasks WHERE task_id = ?), ?, ?)`,
-      )
-      .run(
-        task.task_id,
-        attempt.attempt_id,
-        task.task_id,
-        excerpt.artifactId,
-        now,
-      );
+    applyCiFailRetryInOpenTxn(
+      deps,
+      taskId,
+      prevAttempt,
+      snapshot,
+      fromState,
+      now,
+      priorBrief,
+    );
     deps.db.exec("COMMIT");
-    return { task_id: task.task_id, action: "ci_failed" };
+    return { task_id: taskId, action: "ci_failed" };
   } catch (err) {
     try {
       deps.db.exec("ROLLBACK");
     } catch {}
     throw err;
   }
+}
+
+function applyCiFailRetryInOpenTxn(
+  deps: TickDeps,
+  taskId: string,
+  prevAttempt: RetryAttemptRef,
+  snapshot: PrSnapshot,
+  fromState: "pr-open" | "pr-review",
+  now: string,
+  priorBrief?: string,
+): void {
+  const failureExcerpt = composeCiFailureExcerpt(snapshot);
+  const excerpt = deps.artifactStore.writeArtifact({
+    taskId,
+    attemptId: prevAttempt.attempt_id,
+    kind: "ci_failure_excerpt",
+    content: failureExcerpt,
+    extension: "txt",
+  });
+  scheduleDeterministicRetry(deps, {
+    taskId,
+    prevAttempt,
+    reason: "ci_fail",
+    diagnostics: failureExcerpt,
+    fromState,
+    priorBrief,
+  });
+  deps.db
+    .query(
+      `INSERT INTO events (
+         task_id, attempt_id, event_type, from_state, to_state,
+         payload_artifact_id, occurred_at
+       ) VALUES (?, ?, 'ci_failed', ?, (SELECT state FROM tasks WHERE task_id = ?), ?, ?)`,
+    )
+    .run(
+      taskId,
+      prevAttempt.attempt_id,
+      fromState,
+      taskId,
+      excerpt.artifactId,
+      now,
+    );
 }
 
 function composeCiFailureExcerpt(snapshot: PrSnapshot): string {
@@ -1322,6 +1357,375 @@ function scheduleReviewNonBudget(
     return { task_id: taskId, action: "review_respawn_scheduled" };
   }
   return { task_id: taskId, action: "skipped_predicate" };
+}
+
+function guardApprovedReviewCi(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  posted: PostedReview,
+  exitInfo: PaneExitInfo,
+): TickTaskResult | null {
+  const snapshot = deps.github.prSnapshot(task.repo_id, task.branch_name);
+  if (snapshot === null) {
+    finalizeApprovedReviewBackToPrOpen(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      "approved",
+    );
+    return recordTickError(
+      deps,
+      task.task_id,
+      new Error(
+        `PR snapshot unavailable for branch ${task.branch_name}; cannot finalize approved review`,
+      ),
+    );
+  }
+  persistPrMetadata(deps, task.task_id, snapshot);
+  if (snapshot.headSha !== task.head_sha) {
+    return handleStaleApprovedReview(deps, task, posted, exitInfo, snapshot);
+  }
+
+  const repo = loadRepoForTask(deps.db, task.task_id);
+  const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
+  if (ci === "stale") {
+    finalizeApprovedReviewBackToPrOpen(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      "approved",
+    );
+    return recordTickError(
+      deps,
+      task.task_id,
+      new Error(
+        `PR head SHA (${snapshot.headSha}) and check-run SHA (${snapshot.checks.checkSha}) disagree; cannot finalize approved review`,
+      ),
+    );
+  }
+  if (ci === "pending") {
+    finalizeApprovedReviewBackToPrOpen(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      "approved",
+    );
+    return { task_id: task.task_id, action: "ci_pending" };
+  }
+  if (ci === "fail") {
+    return finalizeApprovedReviewBlockedByCi(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      snapshot,
+    );
+  }
+  return null;
+}
+
+function handleStaleApprovedReview(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  posted: PostedReview,
+  exitInfo: PaneExitInfo,
+  snapshot: PrSnapshot,
+): TickTaskResult {
+  const repo = loadRepoForTask(deps.db, task.task_id);
+  const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
+  if (ci === "stale") {
+    finalizeApprovedReviewBackToPrOpen(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      "superseded",
+    );
+    return recordTickError(
+      deps,
+      task.task_id,
+      new Error(
+        `PR head SHA (${snapshot.headSha}) and check-run SHA (${snapshot.checks.checkSha}) disagree; cannot re-gate stale approved review`,
+      ),
+    );
+  }
+  if (ci === "pending") {
+    finalizeApprovedReviewBackToPrOpen(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      "superseded",
+    );
+    return { task_id: task.task_id, action: "ci_pending" };
+  }
+  if (ci === "fail") {
+    return finalizeStaleApprovedReviewBlockedByCi(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      snapshot,
+    );
+  }
+
+  finalizeApprovedReviewBackToPrOpen(
+    deps,
+    task,
+    posted,
+    exitInfo,
+    "superseded",
+  );
+  if (snapshot.prNumber === undefined || snapshot.prNumber === null) {
+    return recordTickError(
+      deps,
+      task.task_id,
+      new Error(
+        `PR snapshot for ${task.branch_name} did not include a PR number; cannot schedule a fresh review for ${snapshot.headSha}`,
+      ),
+    );
+  }
+  const result = enterReview(
+    {
+      db: deps.db,
+      clock: deps.clock,
+      github: deps.github,
+      artifactStore: deps.artifactStore,
+      tmux: deps.tmux,
+    },
+    {
+      repoId: task.repo_id,
+      prNumber: snapshot.prNumber,
+      headSha: snapshot.headSha,
+      reviewerEnabled: true,
+      gateQuayOwnedDone: true,
+    },
+  );
+  return {
+    task_id: task.task_id,
+    action: result.scheduled ? "review_requested" : "skipped_predicate",
+  };
+}
+
+function finalizeApprovedReviewBlockedByCi(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  posted: PostedReview,
+  exitInfo: PaneExitInfo,
+  snapshot: PrSnapshot,
+): TickTaskResult {
+  const now = deps.clock.nowISO();
+  const content = reviewArtifactContent(posted, task.head_sha);
+  const codePreambleId = loadLatestCodePreambleId(deps.db) ?? task.preamble_id;
+  const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
+
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    deps.db
+      .query(
+        `UPDATE attempts
+            SET ended_at = ?,
+                exit_kind = 'review_approved',
+                exit_code = ?,
+                exit_signal = ?,
+                review_verdict = 'approved',
+                review_id = ?
+          WHERE attempt_id = ? AND ended_at IS NULL`,
+      )
+      .run(
+        now,
+        exitInfo.exitCode,
+        exitInfo.exitSignal,
+        posted.reviewId,
+        task.attempt_id,
+      );
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET review_infra_failures_consecutive = 0,
+                review_infra_failure_head_sha = NULL,
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ?`,
+      )
+      .run(now, task.task_id);
+    deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: task.attempt_id,
+      kind: "review_comments",
+      content,
+      extension: "json",
+    });
+    applyCiFailRetryInOpenTxn(
+      deps,
+      task.task_id,
+      {
+        attempt_id: task.attempt_id,
+        attempt_number: task.attempt_number,
+        preamble_id: codePreambleId,
+      },
+      snapshot,
+      "pr-review",
+      now,
+      priorCodeBrief,
+    );
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+
+  return { task_id: task.task_id, action: "ci_failed" };
+}
+
+function finalizeStaleApprovedReviewBlockedByCi(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  posted: PostedReview,
+  exitInfo: PaneExitInfo,
+  snapshot: PrSnapshot,
+): TickTaskResult {
+  const now = deps.clock.nowISO();
+  const codePreambleId = loadLatestCodePreambleId(deps.db) ?? task.preamble_id;
+  const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
+
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    markReviewAttemptEndedInOpenTxn(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      "superseded",
+      now,
+    );
+    applyCiFailRetryInOpenTxn(
+      deps,
+      task.task_id,
+      {
+        attempt_id: task.attempt_id,
+        attempt_number: task.attempt_number,
+        preamble_id: codePreambleId,
+      },
+      snapshot,
+      "pr-review",
+      now,
+      priorCodeBrief,
+    );
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+
+  return { task_id: task.task_id, action: "ci_failed" };
+}
+
+function finalizeApprovedReviewBackToPrOpen(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  posted: PostedReview,
+  exitInfo: PaneExitInfo,
+  verdict: "approved" | "superseded",
+): void {
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    const artifactId = markReviewAttemptEndedInOpenTxn(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      verdict,
+      now,
+    );
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET state = 'pr-open',
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ? AND state = 'pr-review'
+            AND cancel_requested_at IS NULL`,
+      )
+      .run(now, task.task_id);
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state,
+           payload_artifact_id, occurred_at
+         ) VALUES (?, ?, ?, 'pr-review', 'pr-open', ?, ?)`,
+      )
+      .run(
+        task.task_id,
+        task.attempt_id,
+        verdict === "approved" ? "review_approved" : "review_superseded",
+        artifactId,
+        now,
+      );
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+}
+
+function markReviewAttemptEndedInOpenTxn(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  posted: PostedReview,
+  exitInfo: PaneExitInfo,
+  verdict: "approved" | "superseded",
+  now: string,
+): number {
+  const content = reviewArtifactContent(posted, task.head_sha);
+  deps.db
+    .query(
+      `UPDATE attempts
+          SET ended_at = ?,
+              exit_kind = ?,
+              exit_code = ?,
+              exit_signal = ?,
+              review_verdict = ?,
+              review_id = ?
+        WHERE attempt_id = ? AND ended_at IS NULL`,
+    )
+    .run(
+      now,
+      verdict === "approved" ? "review_approved" : "review_superseded",
+      exitInfo.exitCode,
+      exitInfo.exitSignal,
+      verdict,
+      posted.reviewId,
+      task.attempt_id,
+    );
+  deps.db
+    .query(
+      `UPDATE tasks
+          SET review_infra_failures_consecutive = 0,
+              review_infra_failure_head_sha = NULL,
+              tick_error = NULL,
+              updated_at = ?
+        WHERE task_id = ?`,
+    )
+    .run(now, task.task_id);
+  const artifact = deps.artifactStore.writeArtifact({
+    taskId: task.task_id,
+    attemptId: task.attempt_id,
+    kind: "review_comments",
+    content,
+    extension: "json",
+  });
+  return artifact.artifactId;
 }
 
 function finalizePostedReview(
@@ -1607,6 +2011,27 @@ function loadLatestCodePreambleId(db: DB): number | null {
     )
     .get();
   return row?.preamble_id ?? null;
+}
+
+function loadMostRecentNonReviewBrief(db: DB, taskId: string): string | undefined {
+  const row = db
+    .query<{ file_path: string }, [string]>(
+      `SELECT ar.file_path
+         FROM artifacts ar
+         JOIN attempts a ON a.attempt_id = ar.attempt_id
+        WHERE ar.task_id = ?
+          AND ar.kind = 'brief'
+          AND a.reason <> 'review_only'
+        ORDER BY ar.artifact_id DESC
+        LIMIT 1`,
+    )
+    .get(taskId);
+  if (!row) return undefined;
+  try {
+    return readFileSync(row.file_path, "utf8");
+  } catch {
+    return undefined;
+  }
 }
 
 function loadAttemptArtifactContent(

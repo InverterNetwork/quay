@@ -52,7 +52,7 @@ function ok(stdout: string): RunResult {
 
 test("prSnapshot sets checkSha to the head SHA observed before fetching checks", () => {
   // Stable head across both reads: snapshot.checkSha === snapshot.headSha;
-  // classifyCi runs normally (here, "pass" via the no-required-checks rule).
+  // classifyCi runs normally (here, "pass" via the no-reported-checks rule).
   const adapter = new StubbedGitHubAdapter([
     // 1. fetchPrView (gh pr view --json state,headRefOid,...)
     ok(
@@ -77,7 +77,7 @@ test("prSnapshot sets checkSha to the head SHA observed before fetching checks",
   expect(snap).not.toBeNull();
   expect(snap!.headSha).toBe("sha-stable");
   expect(snap!.checks.checkSha).toBe("sha-stable");
-  // Head/check SHAs match → classifyCi proceeds (no-required-checks → pass).
+  // Head/check SHAs match → classifyCi proceeds (no reported checks → pass).
   expect(classifyCi(snap!, null)).toBe("pass");
 });
 

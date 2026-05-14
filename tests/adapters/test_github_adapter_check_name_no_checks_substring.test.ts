@@ -2,9 +2,8 @@
 // circuit to an empty check set whenever command output contained
 // "no checks" / "no check runs" / "no required checks". A valid checks
 // row with a workflow or check name like "No checks required" would
-// therefore false-match — and with `ci_workflow_name` unset, `classifyCi`
-// treats an empty required set as `pass`, so a failing required check
-// could silently transition the task to done.
+// therefore false-match. `classifyCi` treats an empty reported check set as
+// `pass`, so a failing check could silently transition the task to done.
 //
 // The fix treats stdout as data output: parse JSON first, then plain
 // table rows. The "no checks" empty-set matcher only fires against

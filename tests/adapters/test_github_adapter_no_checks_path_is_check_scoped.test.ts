@@ -3,9 +3,8 @@
 // swallowed unrelated failures — most importantly GitHub's GraphQL 404
 // "Could not resolve to a PullRequest with the number ... Not Found" from
 // auth / wrong-repo / discovery problems — and routed them to an empty
-// check set. For repos without `ci_workflow_name`, an empty required set
-// classifies as `pass`, so a genuine API failure would silently transition
-// a PR to `done`.
+// check set. An empty reported check set classifies as `pass`, so a genuine
+// API failure would silently transition a PR to `done`.
 //
 // The new matcher restricts the no-checks path to check-scoped phrasings
 // ("no checks", "no check runs", "no required checks"). A bare GraphQL
@@ -124,6 +123,6 @@ esac
   const snap = adapter.prSnapshot(repoId, "quay/branch");
   expect(snap).not.toBeNull();
   expect(snap!.checks.items).toEqual([]);
-  // Spec §5: with no required checks, classifyCi resolves to pass.
+  // Spec §5: with no reported checks, classifyCi resolves to pass.
   expect(classifyCi(snap!, null)).toBe("pass");
 });
