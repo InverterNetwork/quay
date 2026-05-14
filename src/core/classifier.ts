@@ -18,6 +18,7 @@ import type { GitHubPort } from "../ports/github.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import { enqueueOrchestratorHandoff } from "./orchestrator_handoffs.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
 import {
@@ -318,25 +319,43 @@ function ingestBlocker(
             exitInfo.exitSignal,
             attempt.attempt_id,
           );
-        writeBlockerBudgetExhausted(deps, {
+        const budgetFailureArtifactId = writeBlockerBudgetExhausted(deps, {
           taskId: task.task_id,
           attempt,
           blockerContent: content,
         });
+        const blockerBytes = new TextEncoder().encode(content).byteLength;
         const eventData = JSON.stringify({
           exit_code: exitInfo.exitCode,
           exit_signal: exitInfo.exitSignal,
-          blocker_bytes: new TextEncoder().encode(content).byteLength,
+          blocker_bytes: blockerBytes,
           blocker_content_hash: contentHash,
         });
-        deps.db
-          .query(
+        const eventRow = deps.db
+          .query<
+            { event_id: number },
+            [string, number, number, string, string]
+          >(
             `INSERT INTO events (
                task_id, attempt_id, event_type,
                from_state, to_state, payload_artifact_id, occurred_at, event_data
-             ) VALUES (?, ?, 'blocker_ingested', 'running', 'awaiting-next-brief', ?, ?, ?)`,
+             ) VALUES (?, ?, 'blocker_ingested', 'running', 'awaiting-next-brief', ?, ?, ?)
+             RETURNING event_id`,
           )
-          .run(task.task_id, attempt.attempt_id, artifactId, now, eventData);
+          .get(task.task_id, attempt.attempt_id, artifactId, now, eventData);
+        if (!eventRow) throw new Error("blocker_ingested event insert returned no row");
+        enqueueOrchestratorHandoff(deps, {
+          taskId: task.task_id,
+          reason: "worker_blocker",
+          stateEventId: eventRow.event_id,
+          payload: {
+            attempt_id: attempt.attempt_id,
+            artifact_id: artifactId,
+            blocker_content_hash: contentHash,
+            blocker_bytes: blockerBytes,
+            budget_exhausted_artifact_id: budgetFailureArtifactId,
+          },
+        });
         deps.db.exec("COMMIT");
       }
     } catch (err) {

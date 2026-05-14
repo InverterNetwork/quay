@@ -91,6 +91,22 @@ const COMMANDS: Record<string, CommandSpec> = {
     summary:
       "Run the supervisor tick loop once and exit. Emits one JSON line per result.",
   },
+  handoff: {
+    path: "handoff",
+    synopsis: "quay handoff <subcommand> [options]",
+    summary: "Inspect durable orchestrator handoffs",
+    subcommands: ["handoff list"],
+  },
+  "handoff list": {
+    path: "handoff list",
+    synopsis: "quay handoff list [--status <s>] [--task <task_id>]",
+    summary:
+      "List orchestrator handoffs. Defaults to pending rows and outputs a JSON array.",
+    flags: [
+      { flag: "--status <s>", desc: "Filter by status: pending, claimed, completed, cancelled. Defaults to pending." },
+      { flag: "--task <task_id>", desc: "Filter by task_id." },
+    ],
+  },
   enqueue: {
     path: "enqueue",
     synopsis:
@@ -383,6 +399,7 @@ const COMMANDS: Record<string, CommandSpec> = {
 const TOP_LEVEL_ORDER: string[] = [
   "task",
   "tick",
+  "handoff",
   "enqueue",
   "review-pr",
   "repo",

@@ -31,6 +31,7 @@ import {
   LINEAR_STATE_CANCELED,
   LinearSyncQueue,
 } from "./linear_state_sync.ts";
+import { cancelOpenOrchestratorHandoffs } from "./orchestrator_handoffs.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
@@ -490,6 +491,7 @@ function commitTerminal(
         )
         .run(row.task_id, row.state, now);
     }
+    cancelOpenOrchestratorHandoffs(deps, row.task_id);
     deps.db.exec("COMMIT");
     return true;
   } catch (err) {

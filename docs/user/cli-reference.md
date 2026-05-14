@@ -145,6 +145,24 @@ quay tick
 
 No flags are currently accepted.
 
+## Handoffs
+
+```bash
+quay handoff list [--status <pending|claimed|completed|cancelled>] [--task <task_id>]
+```
+
+`handoff list` is the pull surface for orchestrator loops waiting to resume
+tasks in `awaiting-next-brief`. It reads the durable handoff queue populated for
+worker blockers, exhausted retry budgets, and ingested human replies. Without
+`--status`, it lists only `pending` handoffs. Use `--status claimed`,
+`--status completed`, or `--status cancelled` for recovery and forensics, and
+`--task` to narrow the result to one task.
+
+Output is a deterministic JSON array ordered by creation time and handoff ID.
+Each row includes `handoff_id`, `task_id`, `reason`, `state_event_id`,
+`idempotency_key`, `payload_json`, `status`, `claim_id`, `claimed_at`,
+`completed_at`, `created_at`, and `updated_at`.
+
 ## Tasks
 
 ```bash
