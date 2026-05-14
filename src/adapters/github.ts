@@ -66,18 +66,12 @@ export class GitHubCliAdapter implements GitHubPort {
 
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {
     // `prCheckStatus` is the convenience read that does not flow through the
-    // tick-side `classifyCi` (which combines `ci_workflow_name` + required-
-    // only filtering). To stay consistent with §5, restrict the decision
-    // here to required checks only — same rule as the spec's fallback when
-    // no `ci_workflow_name` is set. Callers that need named-workflow
-    // semantics use `prSnapshot` + `classifyCi`.
+    // tick-side `classifyCi`. Keep the same fail-closed semantics here:
+    // reported failures/cancellations block, reported pending checks wait,
+    // and an empty check set preserves the no-CI pass behavior.
     const checks = this.fetchChecks(repoId, branch);
-    const required = checks.items.filter((c) => c.required);
-    // Spec §5: "no required checks at all → pass" — repos with no required
-    // checks configured don't gate on CI, so an empty required set must
-    // resolve to pass rather than stranding callers in pending.
-    if (required.length === 0) return { state: "pass" };
-    const anyFail = required.some(
+    if (checks.items.length === 0) return { state: "pass" };
+    const anyFail = checks.items.some(
       (c) => c.bucket === "fail" || c.bucket === "cancelled",
     );
     if (anyFail) {
@@ -85,7 +79,7 @@ export class GitHubCliAdapter implements GitHubPort {
         ? { state: "fail", excerpt: checks.failureExcerpt }
         : { state: "fail" };
     }
-    const anyPending = required.some((c) => c.bucket === "pending");
+    const anyPending = checks.items.some((c) => c.bucket === "pending");
     if (anyPending) return { state: "pending" };
     return { state: "pass" };
   }
@@ -687,11 +681,9 @@ export class GitHubCliAdapter implements GitHubPort {
   }
 
   private fetchChecks(repoId: string, branch: string): PrChecksReport {
-    // Two passes: the unfiltered set drives the named-workflow rule (which
-    // looks at every check matching `ci_workflow_name`), and the
-    // `--required` filtered set tells us *which* of those checks count when
-    // `ci_workflow_name` is unset and the spec falls back to required-only
-    // status. Do not pass `--json` here: gh versions before 2.59 reject that
+    // Two passes: the unfiltered set drives the CI decision, and the
+    // `--required` filtered set annotates which rows GitHub marks required.
+    // Do not pass `--json` here: gh versions before 2.59 reject that
     // flag for `pr checks`, which makes every `pr-open` tick fail on older
     // operator hosts. Test fixtures may still emit JSON; production gh emits
     // a tabular plain-text shape that `parsePlainCheckRows` handles below.
@@ -751,7 +743,7 @@ export class GitHubCliAdapter implements GitHubPort {
     }
     // Empty stdout handling, by exit code:
     //   exit 0 (no checks at all) — legitimate empty-set; the §5 "no
-    //         required checks → pass" rule is what's intended here.
+    //         reported checks → pass" rule is what's intended here.
     //   exit 1 (at least one check failed) — anomalous empty body
     //         (rate limit / transient error mapped to exit 1). Fail closed.
     //   exit 8 (checks pending) — empty body means "checks pending but no
@@ -983,9 +975,8 @@ function mapCheckRow(row: unknown): PrCheck {
   const bucket = mapBucket(r.bucket);
   // `gh` does not expose a `required` boolean per check on every workflow;
   // when invoked without `--required` we get all checks and treat each as
-  // non-required by default. The `--required` filtering for the spec's
-  // "no ci_workflow_name" path is handled by tick reading the named
-  // workflow filter directly. This is consistent with the adapter contract.
+  // non-required by default. The second `--required` pass annotates matching
+  // rows after this mapper runs.
   return {
     name: String(r.name ?? ""),
     workflow:

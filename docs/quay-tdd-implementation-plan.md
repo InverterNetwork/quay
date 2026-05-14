@@ -624,8 +624,8 @@ Each slice should be planned and implemented in this format:
 
 | Test | Proves |
 |---|---|
-| `test_066_named_workflow_only_controls_ci_status` | When `ci_workflow_name` is set, only matching workflow checks control pass/fail/pending; unrelated workflow failures do not affect Quay's decision. |
-| `test_068_no_required_checks_means_pass` | When no `ci_workflow_name` is set and GitHub reports no required checks, Quay treats CI as pass and moves `pr-open` to `done`. |
+| `test_066_named_workflow_does_not_hide_other_failures` | `ci_workflow_name` is retained for compatibility but does not hide failures from other reported workflows. |
+| `test_068_no_reported_checks_means_pass` | When GitHub reports no check rows at all, Quay preserves the no-CI pass behavior and moves `pr-open` to `done`. |
 | `test_076_stale_check_sha_logs_tick_error_without_transition` | If PR head SHA and check-run SHA disagree, Quay logs `tick_error`, leaves state unchanged, and consumes no retry budget. |
 | `test_048_nonbudget_review_dedupe_does_not_respawn_same_review` | Sticky `CHANGES_REQUESTED` with the same already-acted review id does not schedule another review respawn. |
 | `test_052_non_budget_cap_parks_on_n_plus_one` | Review/conflict respawns increment the non-budget counter; the first N are allowed and the N+1 trigger parks in `non_budget_loop` without scheduling another attempt. |

@@ -6,8 +6,8 @@
   "max_iterations": 45,
   "attempt_timeout_seconds": 3600,
   "expected_tests": [
-    "test_066_named_workflow_only_controls_ci_status",
-    "test_068_no_required_checks_means_pass",
+    "test_066_named_workflow_does_not_hide_other_failures",
+    "test_068_no_reported_checks_means_pass",
     "test_076_stale_check_sha_logs_tick_error_without_transition",
     "test_048_nonbudget_review_dedupe_does_not_respawn_same_review",
     "test_052_non_budget_cap_parks_on_n_plus_one",

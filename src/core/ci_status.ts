@@ -1,5 +1,5 @@
 // CI status classifier (spec §5 "CI status rules"). Pure function over a
-// `PrSnapshot` plus the repo's `ci_workflow_name`.
+// `PrSnapshot`.
 //
 // Returns `"stale"` when the SHA the checks were run against doesn't match
 // the PR's current head SHA — caller logs `tick_error` and skips the
@@ -10,7 +10,7 @@ export type CiOutcome = "pass" | "fail" | "pending" | "stale";
 
 export function classifyCi(
   snapshot: PrSnapshot,
-  ciWorkflowName: string | null,
+  _ciWorkflowName: string | null,
 ): CiOutcome {
   if (
     snapshot.checks.checkSha !== null &&
@@ -19,33 +19,19 @@ export function classifyCi(
     return "stale";
   }
 
-  if (ciWorkflowName !== null && ciWorkflowName.length > 0) {
-    const filtered = snapshot.checks.items.filter(
-      (c) =>
-        c.workflow === ciWorkflowName ||
-        (c.workflow === null && c.name === ciWorkflowName),
-    );
-    return classifySet(filtered);
-  }
-
-  // ci_workflow_name unset: required-checks rule. The set of checks Quay
-  // considers is `--required` only. No required checks at all → pass.
-  const required = snapshot.checks.items.filter((c) => c.required);
-  if (required.length === 0) return "pass";
-  return classifySet(required);
+  // `ci_workflow_name` is retained in the repo schema for compatibility, but
+  // it is no longer authoritative for failure detection: any reported failing
+  // check blocks review/done, even when GitHub marks it non-required.
+  return classifySet(snapshot.checks.items);
 }
 
 function classifySet(items: PrCheck[]): CiOutcome {
-  if (items.length === 0) return "pending";
+  if (items.length === 0) return "pass";
   let hasFail = false;
   let hasPending = false;
   for (const c of items) {
-    if (c.bucket === "fail") {
+    if (c.bucket === "fail" || c.bucket === "cancelled") {
       hasFail = true;
-      continue;
-    }
-    if (c.bucket === "cancelled") {
-      if (c.required) hasFail = true;
       continue;
     }
     if (c.bucket === "pending") {

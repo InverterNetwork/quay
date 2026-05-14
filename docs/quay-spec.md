@@ -579,19 +579,16 @@ CI status is computed from the GitHub CLI / API per tick. Concrete data sources:
 
 Determination rules:
 
-- **If `repos.ci_workflow_name` is set:** Quay filters the `gh pr checks` rows to entries where `workflow == ci_workflow_name` when workflow metadata is available, falling back to `name == ci_workflow_name` for plain-text gh output.
-  - **pass** = filtered set non-empty AND all `bucket = pass` (or `skipping`).
-  - **fail** = filtered set contains any `bucket = fail`.
-  - **pending** = filtered set contains any `bucket = pending` and no `fail`.
-  - Filtered set empty → treated as **pending**; the named workflow may not have started yet.
-- **If `ci_workflow_name` is unset:** Quay uses `gh pr checks --required`.
-  - **pass** = required-checks set non-empty AND all `bucket ∈ {pass, skipping}`.
-  - **fail** = any required check has `bucket = fail`.
-  - **pending** = any required check has `bucket = pending` and none have `fail`.
-  - **No required checks configured at all** (set is empty): treated as **pass**. Documented behavior — the project doesn't gate on CI.
+- **All reported checks are authoritative for failure detection.** `repos.ci_workflow_name` is retained for compatibility but no longer filters the decision.
+  - **fail** = any reported check has `bucket = fail` or `bucket = cancelled`, including non-required checks.
+  - **pending** = any reported check has `bucket = pending` and none have `fail` / `cancelled`.
+  - **pass** = all reported checks have `bucket = pass` or `bucket = skipping`.
+  - **No reported checks at all** (empty `gh pr checks` rows): treated as **pass**. Documented no-CI behavior.
 - **`gh` errors / unparseable check output / SHA changed mid-fetch:** treated as **pending**; log `tick_error`; retry next tick. Does not consume budget (no spawn happens, no transition fires).
 
-`bucket = cancelled` is mapped: cancelled required checks count as **fail**; cancelled non-required checks are ignored.
+Reviewer approval uses the same current-head CI gate before `pr-review -> done`;
+an approved Quay-owned review cannot make the task durable `done` while the
+current head has failing checks.
 
 ### Branch cleanup rules per terminal
 
@@ -1400,14 +1397,14 @@ Collisions across distinct `external_ref` values that slug to the same branch ar
 | **Substrate spawn failures don't consume budget — only on the no-evidence path** | tmux create errors and DB write failures during spawn that produce *no worker evidence* (no signal file, no remote progress, no PR opened during this attempt) roll back the budget increment and re-queue. The recovery's evidence-first classifier (see "Spawn-failure recovery is evidence-first") detects when a worker actually started and made observable progress despite a substrate or DB hiccup, in which case the attempt is treated as the equivalent dead-worker outcome (`pr_opened` / `blocker_written` / `no_progress` / `crashed`) and budget is **not** rolled back — those are real attempts. After `max_spawn_failures` *consecutive* no-evidence failures, parked in `worktree_error`. The counter resets on any successful spawn or any evidence-found recovery. |
 | **Slack reply cursor** | Tick ingests Slack replies with `ts > lower_bound`, where `lower_bound = slack_recovered_post_ts` when set (the actual bot-post ts, recovered from Slack via the per-escalation nonce) and `slack_pre_post_fence_ts` as a fallback until recovery succeeds. Pre-existing thread chatter is excluded by the fence; chatter that lands between fence-read and bot-post visibility is excluded by the recovered ts. |
 | **Every attempt has one brief and one final_prompt artifact** | Whether composed by the orchestrator (`initial`, `blocker_resolved`, `advice_answered`) or by Quay (deterministic templates). Initial attempt is created at enqueue with `tmux_session = NULL`; tick fills it in on promotion. |
-| **CI status semantics** | Defined precisely in §5 "CI status rules": stale-SHA filtering, named-workflow vs. all-checks logic, no-checks-configured = pass, unparseable = pending. |
+| **CI status semantics** | Defined precisely in §5 "CI status rules": stale-SHA filtering, any reported failure blocks, no reported checks = pass, unparseable = pending. |
 | **Read commands return JSON** | Collections → JSON array. Single records → JSON object. NDJSON only for `quay tick`. No `--json` flag. |
 | **Idempotent PR contract** | The worker creates a PR only if none exists for its branch; otherwise it pushes updates to the existing PR. Tick uses per-attempt `remote_sha_at_spawn` vs. `remote_sha_at_exit` (the **remote** branch SHA, fetched fresh) to detect "no progress." It also snapshots `pr_existed_at_spawn` at promotion: if no PR existed at spawn but one exists at exit, the attempt counts as progress even when the remote SHA didn't change during *this* attempt (handles the case where attempt N pushed but crashed before `gh pr create`, and attempt N+1 only opens the PR). Local-only commits do not count as progress; the PR is only updated by a successful push. |
 | **Spawn-failure recovery is evidence-first** | If a task is in `running` with `spawned_at` set but `tmux_session = NULL`, that's a crash mid-spawn. Tick recovery is **NOT** an unconditional spawn-failed write — between substrate-step success and DB-step commit, the worker may have started, run, pushed, opened a PR, or written a blocker. Recovery (1) kills any orphan canonical-name tmux session, (2) collects the session log, (3) runs the same dead-worker evidence classifier as the normal `running` branch (blocker → `awaiting-next-brief`; PR with progress → `pr-open`; PR no progress → `crash` retry; no PR no signal → `spawn_failed` rollback). Budget is preserved on every evidence-found path; budget rollback applies only to the genuine no-evidence case. This guarantees that a real PR opened during the spawn-step-3-to-4 crash window is never killed and never causes false `no_progress` or budget-loss. |
 | **Recovery-path artifacts always have an attempt_id** | `blocker`, `slack_reply`, `malformed_signal`, `slack_escalation_post` are linked to a specific attempt and set `content_hash`. The partial unique index excludes NULL `attempt_id` values to avoid SQLite NULL-non-distinct duplicates. For `slack_escalation_post` the hash also incorporates `escalation_seq` so a recovery retry collides while a legitimate second escalation on the same attempt does not. |
 | **Slack reply cursor recovers actual bot-post ts via nonce** | Each `escalate-human` post embeds an opaque, per-escalation nonce in its body. Reply ingestion eagerly searches the thread for the bot message containing that nonce; on match, sets `slack_recovered_post_ts` and uses it as the canonical reply lower bound. This means a tick that posted but crashed before persisting the ts is recovered by the next tick's nonce search — no duplicate post. The `slack_pre_post_fence_ts` is retained as a fallback lower bound for the brief window between escalation and successful nonce recovery. |
 | **Single-owner Slack posting (tick-only writer)** | All Slack API calls — pre-post fence read, nonce-recovery search, post, reply poll — happen exclusively inside `quay tick` under the supervisor lockfile. The CLI command `escalate-human` only persists the artifact and transitions to `waiting_human`; it never calls Slack. `quay cancel` also acquires the supervisor lock before its finalizer, so it cannot run while a tick is mid-Slack-post on the same task. This eliminates the prior races where the CLI's post-and-record window could overlap with a tick's recovery re-post (producing duplicate posts) or a cancel could overlap with an in-flight tick's substrate work (producing inconsistent terminal state). Latency cost: posts land within one tick interval of `escalate-human` returning. |
-| **CI source: pinned `gh` commands** | `gh pr view --json headRefOid` for SHA; plain-text `gh pr checks` rows, plus `--required` when no `ci_workflow_name` is set. State derived from the check status column. SHA-changed-mid-fetch → pending + retry. |
+| **CI source: pinned `gh` commands** | `gh pr view --json headRefOid` for SHA; plain-text `gh pr checks` rows, plus `--required` only to annotate which rows GitHub marks required. State is derived from every reported check row. SHA-changed-mid-fetch → pending + retry. |
 | **Branch cleanup per terminal** | `merged`: local deleted, remote left to GitHub. `closed_unmerged`: both deleted. `cancelled`: local deleted; remote retained iff PR open (or always deleted with `--close-pr`). Parked states: no cleanup until cancel. |
 | **`advice_answered` not counted toward non-budget cap** | Human-input respawns are bounded by human availability and not a runaway-loop risk. The cap exists to safety-net stale GitHub signals; humans aren't a stale signal. |
 | **External-input slugification** | `external_ref` is normalized via **two separate derivations** (see §13). The branch slug applies per-component rules (no leading/trailing `./-` per component, no `.lock`-suffix per component, no `..`, ≤64 chars overall) and is **gated by a final `git check-ref-format` call** — pathological inputs that survive the rules fall back to `task-<task_id_short>`. The tmux identifier applies a stricter charset (`[A-Za-z0-9_-]` only, human part ≤38 chars) and **always appends `-<task_id_short>`**, guaranteeing per-task uniqueness even when two distinct `external_ref`s collapse to the same human-readable tmux slug while producing different branches. The two derivations do not need to match. Verbatim form preserved in SQL for queries. |
@@ -1568,9 +1565,9 @@ The v1 test suite must cover the following cases. Each is a state-machine integr
 
 ### CI status rules
 
-66. **`ci_workflow_name` set; only that workflow's run on head SHA counts.** Asserts: a passing run on a different workflow does not transition to `done`; a failing run on the named workflow triggers `ci_fail` retry.
-67. **`ci_workflow_name` unset; all required checks must pass.** Asserts: with one required check failed and one passed, status = fail.
-68. **No checks configured at all.** Asserts: status = pass; transitions to `done`.
+66. **`ci_workflow_name` set; unrelated failing workflows still block.** Asserts: a passing named workflow plus a failing different workflow triggers `ci_fail` retry.
+67. **`ci_workflow_name` unset; any reported failure blocks.** Asserts: with one non-required check failed and no required checks, status = fail.
+68. **No check rows reported at all.** Asserts: status = pass; transitions to `done`.
 69. **Stale check runs against earlier SHA ignored.** After force-push, old runs against the prior SHA do not affect status determination.
 
 ### Read-command JSON shape
@@ -1604,8 +1601,8 @@ The v1 test suite must cover the following cases. Each is a state-machine integr
 ### CI source-of-truth specifics
 
 76. **`gh pr view --json headRefOid` returns SHA X; `gh pr checks` returns runs against SHA Y.** Asserts: tick treats this as a stale read (SHA mismatch), logs `tick_error`, does not transition.
-77. **`ci_workflow_name` set, target workflow's run buckets are all `pass`, other workflows fail.** Asserts: status = pass; transition → `done`.
-78. **`ci_workflow_name` unset, all required checks bucket = `pass`, non-required check bucket = `fail`.** Asserts: status = pass; transition → `done`.
+77. **`ci_workflow_name` set, target workflow's run buckets are all `pass`, other workflows fail.** Asserts: status = fail; transition → `queued` via deterministic `ci_fail`.
+78. **`ci_workflow_name` unset, all required checks bucket = `pass`, non-required check bucket = `fail`.** Asserts: status = fail; transition → `queued` via deterministic `ci_fail`.
 
 ### Branch cleanup matrix
 

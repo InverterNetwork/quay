@@ -1,8 +1,5 @@
-// §5 "CI status rules" — when `repos.ci_workflow_name` is set, only checks
-// whose `workflow` matches that name participate in the pass/fail/pending
-// decision. Failures on unrelated workflows must NOT prevent the
-// `pr-open → done` transition (and a passing other workflow must NOT cover
-// for a failing named workflow on a separate test).
+// §5 "CI status rules" — `repos.ci_workflow_name` is retained only for
+// compatibility. It must not hide reported failures from other workflows.
 import { afterEach, expect, test } from "bun:test";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
@@ -29,7 +26,7 @@ function insertRepoWithWorkflow(
   return repoId;
 }
 
-test("test_066_named_workflow_only_controls_ci_status", async () => {
+test("test_066_named_workflow_does_not_hide_other_failures", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T08:00:00.000Z");
 
@@ -42,9 +39,8 @@ test("test_066_named_workflow_only_controls_ci_status", async () => {
   insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-29T07:30:00.000Z" });
 
   const built = buildTickDeps(h);
-  // Named workflow passes; an unrelated workflow fails. Spec requires the
-  // named workflow to be the sole authority — task should transition to
-  // `done`, NOT trigger a `ci_fail` retry.
+  // Named workflow passes; unrelated workflows fail. The failures must still
+  // trigger a `ci_fail` retry.
   built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
     state: "open",
     headSha: "sha-head",
@@ -65,17 +61,18 @@ test("test_066_named_workflow_only_controls_ci_status", async () => {
   });
 
   const results = await tick_once(built.deps);
-  expect(results).toEqual([{ task_id: taskId, action: "ci_passed" }]);
+  expect(results).toEqual([{ task_id: taskId, action: "ci_failed" }]);
 
   const task = h.db
     .query<{ state: string; attempts_consumed: number }, [string]>(
       `SELECT state, attempts_consumed FROM tasks WHERE task_id = ?`,
     )
     .get(taskId);
-  expect(task).toEqual({ state: "done", attempts_consumed: 0 });
+  expect(task).toEqual({ state: "queued", attempts_consumed: 0 });
+  h.db.query(`UPDATE tasks SET state = 'done' WHERE task_id = ?`).run(taskId);
 
-  // Symmetry: named workflow failing while another passes must produce
-  // `ci_fail`, not be masked by the passing unrelated workflow.
+  // Symmetry: named workflow failing while another passes also produces
+  // `ci_fail`.
   h.clock.set("2026-04-29T09:00:00.000Z");
   const repoId2 = insertRepoWithWorkflow(h.db, "repo-named-wf-fail", "ci.yml");
   const taskId2 = insertTask(h.db, {
@@ -104,8 +101,7 @@ test("test_066_named_workflow_only_controls_ci_status", async () => {
   });
 
   const results2 = await tick_once(built.deps);
-  // The first task is now in `done`; its done handler runs but produces
-  // nothing actionable (no merged/closed/conflict/review). So results only
-  // include the second task's CI fail.
+  // The first task is queued for its CI-failure retry; results only include
+  // the second task's CI fail.
   expect(results2).toEqual([{ task_id: taskId2, action: "ci_failed" }]);
 });

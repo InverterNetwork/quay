@@ -1,9 +1,6 @@
-// Regression: when `ci_workflow_name` is unset, the spec §5 CI rule falls
-// back to "all required checks must pass." That hinges on the GitHub
-// adapter actually marking each PrCheck's `required` flag from the second
-// `gh pr checks --required` call. If the adapter ever ships every check as
-// `required: false`, classifyCi sees "no required checks → pass" and a
-// failing required CI silently transitions the task to `done`.
+// Regression coverage for required-check marking. CI classification now
+// evaluates every reported check, but the adapter still records required
+// flags so cancelled required checks and diagnostics remain explicit.
 //
 // We test the pure helpers (`requiredKeyOf`, `markRequired`) plus the
 // downstream `classifyCi` so the regression is caught without needing a
@@ -57,7 +54,7 @@ test("markRequired flips `required: true` only on matching (workflow,name) pairs
   expect(items[1]!.required).toBe(false);
 });
 
-test("classifyCi(no ci_workflow_name): failing REQUIRED check produces fail", () => {
+test("classifyCi(no ci_workflow_name): any failing check produces fail", () => {
   // Regression asserting that an adapter that correctly populates `required`
   // routes a fail to fail (not pass). Synthesize the snapshot the adapter
   // would have produced for: one passing required check + one failing
@@ -71,16 +68,18 @@ test("classifyCi(no ci_workflow_name): failing REQUIRED check produces fail", ()
   expect(classifyCi(snapshot, null)).toBe("fail");
 });
 
-test("classifyCi(no ci_workflow_name): no required checks at all → pass (spec §5)", () => {
-  // Spec: "No required checks configured at all (set is empty): treated as
-  // pass." This is what the previous adapter accidentally triggered for
-  // every repo; the test pins it as the only legitimate path to that
-  // outcome.
+test("classifyCi(no ci_workflow_name): no reported checks at all → pass", () => {
+  // The no-CI path is now restricted to a genuinely empty check set.
+  const snapshot = makeSnapshot([]);
+  expect(classifyCi(snapshot, null)).toBe("pass");
+});
+
+test("classifyCi(no ci_workflow_name): non-required failure produces fail", () => {
   const items: PrCheck[] = [
     baseCheck({ name: "lint", workflow: "ci", bucket: "fail", required: false }),
   ];
   const snapshot = makeSnapshot(items);
-  expect(classifyCi(snapshot, null)).toBe("pass");
+  expect(classifyCi(snapshot, null)).toBe("fail");
 });
 
 test("classifyCi(no ci_workflow_name): all required pass → pass", () => {
@@ -91,7 +90,7 @@ test("classifyCi(no ci_workflow_name): all required pass → pass", () => {
   expect(classifyCi(makeSnapshot(items), null)).toBe("pass");
 });
 
-test("classifyCi(no ci_workflow_name): required pending → pending", () => {
+test("classifyCi(no ci_workflow_name): any pending check → pending", () => {
   const items: PrCheck[] = [
     baseCheck({ name: "lint", workflow: "ci", bucket: "pass", required: true }),
     baseCheck({ name: "test", workflow: "ci", bucket: "pending", required: true }),
@@ -99,12 +98,12 @@ test("classifyCi(no ci_workflow_name): required pending → pending", () => {
   expect(classifyCi(makeSnapshot(items), null)).toBe("pending");
 });
 
-test("classifyCi(named workflow): plain gh rows can match by check name", () => {
+test("classifyCi(named workflow): ci_workflow_name does not hide other failures", () => {
   const items: PrCheck[] = [
     baseCheck({ name: "ci", workflow: null, bucket: "pass", required: false }),
     baseCheck({ name: "preview", workflow: null, bucket: "fail", required: false }),
   ];
-  expect(classifyCi(makeSnapshot(items), "ci")).toBe("pass");
+  expect(classifyCi(makeSnapshot(items), "ci")).toBe("fail");
 });
 
 function makeSnapshot(items: PrCheck[]): PrSnapshot {

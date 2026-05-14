@@ -1,7 +1,7 @@
 // Regression: `gh pr checks --required` failures (auth, CLI version, API
 // outage, rate limit, malformed output) must NOT degrade to "no required
-// checks". If they did, classifyCi would see an empty required set and
-// silently approve a PR while required CI was actually failing.
+// checks". If they did, the adapter could hide a required-check failure from
+// the full reported check set and silently approve a PR while CI was red.
 //
 // Setup: shadow the real `gh` binary by putting a stub script on PATH ahead
 // of `/usr/local/bin/gh`. The stub branches on argv to simulate each
@@ -221,9 +221,9 @@ esac
 });
 
 test("fetchRequiredCheckKeys returns empty (no throw) when gh reports 'no required checks'", () => {
-  // The single legitimate "empty required set" path: gh exits non-zero with
-  // a stderr message that explicitly says no required checks. The spec §5
-  // rule "no required checks → pass" applies here, and only here.
+  // The legitimate "empty required set" path: gh exits non-zero with a stderr
+  // message that explicitly says no required checks. This only annotates the
+  // reported rows as non-required; CI pass/fail still comes from the full set.
   installGhStub(`
 case "$*" in
   *"--required"*)
@@ -247,7 +247,7 @@ esac
   const { reposRoot, repoId } = makeBareDir();
   const adapter = new GitHubCliAdapter(reposRoot);
   // Should not throw — and the snapshot's checks should carry required:false
-  // for every item, matching the "no required checks → pass" intent.
+  // for every item.
   const snap = adapter.prSnapshot(repoId, "quay/branch");
   expect(snap).not.toBeNull();
   expect(snap!.checks.items.every((c) => !c.required)).toBe(true);
@@ -256,8 +256,8 @@ esac
 test("fetchChecks throws on gh exit 8 with empty body (cannot distinguish pending from no-checks)", () => {
   // Regression: an exit-8 response with no JSON rows is gh saying "checks
   // are pending but none have reported yet". Returning {items: []} would
-  // let classifyCi's §5 fallback ("no required checks → pass") approve
-  // a task whose CI is still running. Must fail closed so tick retries.
+  // let classifyCi's §5 fallback ("no reported checks → pass") approve a
+  // task whose CI is still running. Must fail closed so tick retries.
   installGhStub(`
 case "$*" in
   *"checks"*"--required"*)
@@ -287,8 +287,8 @@ esac
 
 test("fetchRequiredCheckKeys throws on gh exit 8 with empty body", () => {
   // Same regression for the required-check pass: an empty body on exit 8
-  // would otherwise return an empty required set, which classifyCi reads
-  // as pass — silently approving a PR with pending CI.
+  // would otherwise drop required annotations for pending CI; fail closed
+  // rather than letting callers act on an ambiguous read.
   installGhStub(`
 case "$*" in
   *"checks"*"--required"*)

@@ -30,6 +30,7 @@ export interface ScheduleDeterministicRetryInput {
   reason: BudgetRetryReason;
   diagnostics: string;
   fromState?: string;
+  priorBrief?: string | undefined;
 }
 
 export interface ScheduleDeterministicRetryResult {
@@ -57,7 +58,7 @@ export function scheduleDeterministicRetry(
 ): ScheduleDeterministicRetryResult {
   const now = deps.clock.nowISO();
   const template = ensureRetryTemplate(deps.db, deps.clock, input.reason);
-  const priorBrief = loadMostRecentBrief(deps.db, input.taskId);
+  const priorBrief = input.priorBrief ?? loadMostRecentBrief(deps.db, input.taskId);
   const retryBrief = composeRetryBrief({
     reason: input.reason,
     templateBody: template.body,

@@ -1,9 +1,8 @@
 // Regression: `prCheckStatus` is the convenience read for callers that want
-// a single PR's required-only CI verdict without going through the tick-side
-// `classifyCi`. Spec §5 says "no required checks at all → pass" — repos with
-// no required-check configuration don't gate on CI. The adapter previously
-// returned `pending` for an empty required set, which would strand any
-// caller polling on `prCheckStatus` for those repos. Pin the §5 behavior.
+// a single PR's CI verdict without going through the tick-side `classifyCi`.
+// It must preserve no-CI pass behavior for an empty reported set, while still
+// treating any reported failure as blocking even when GitHub marks it
+// non-required.
 import { expect, test } from "bun:test";
 import {
   chmodSync,
@@ -55,8 +54,7 @@ function makeBareDir(): { reposRoot: string; repoId: string } {
 
 test("prCheckStatus returns pass when no required checks are configured", () => {
   // Two passing non-required checks in the unfiltered set, an empty
-  // `--required` array. The §5 fallback applies: the repo doesn't gate on
-  // CI, so prCheckStatus must report pass — not pending.
+  // `--required` array. Non-required passing rows do not block.
   installGhStub(`
 case "$*" in
   *"checks"*"--required"*)
@@ -83,11 +81,37 @@ esac
   expect(status.state).toBe("pass");
 });
 
+test("prCheckStatus returns fail on a non-required failing check", () => {
+  installGhStub(`
+case "$*" in
+  *"checks"*"--required"*)
+    echo '[]'
+    exit 0
+    ;;
+  *"checks"*)
+    echo '[{"bucket":"fail","workflow":"installer-smoke","name":"install","state":"FAILURE"}]'
+    exit 1
+    ;;
+  *"view"*)
+    echo '{"state":"OPEN","headRefOid":"abc","baseRefOid":"def","mergeable":"MERGEABLE","reviewDecision":"NONE","latestReviews":[]}'
+    exit 0
+    ;;
+  *)
+    echo '[]'
+    exit 0
+    ;;
+esac
+`);
+  const { reposRoot, repoId } = makeBareDir();
+  const adapter = new GitHubCliAdapter(reposRoot);
+  const status = adapter.prCheckStatus(repoId, "quay/branch");
+  expect(status.state).toBe("fail");
+});
+
 test("prCheckStatus returns pass on a repo with no checks at all", () => {
   // The "no checks reported on this PR" branch: gh emits an empty array on
   // the unfiltered call, and a "no checks" hint on the required call. With
-  // an empty unfiltered set the required filter is also empty — same §5
-  // fallback applies.
+  // an empty unfiltered set is the no-CI fallback.
   installGhStub(`
 case "$*" in
   *"checks"*"--required"*)

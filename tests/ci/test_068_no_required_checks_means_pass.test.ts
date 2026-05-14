@@ -1,6 +1,5 @@
-// §5 "CI status rules": when `ci_workflow_name` is unset and GitHub reports
-// no required checks at all, Quay treats CI as **pass** and transitions
-// `pr-open → done`. The project simply doesn't gate on CI in that mode.
+// §5 "CI status rules": when GitHub reports no check rows at all, Quay
+// preserves the no-CI behavior and transitions `pr-open → done`.
 import { afterEach, expect, test } from "bun:test";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
@@ -13,7 +12,7 @@ afterEach(() => {
   h = null;
 });
 
-test("test_068_no_required_checks_means_pass", async () => {
+test("test_068_no_reported_checks_means_pass", async () => {
   h = createHarness();
   h.clock.set("2026-04-29T10:00:00.000Z");
 
@@ -26,9 +25,7 @@ test("test_068_no_required_checks_means_pass", async () => {
   insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-29T09:30:00.000Z" });
 
   const built = buildTickDeps(h);
-  // No `ci_workflow_name` configured (default repo). No required checks at
-  // all (the items list contains only non-required checks, which are
-  // ignored under the required-checks rule). Spec: treat as pass.
+  // No rows at all: this is the only pass-through no-CI shape.
   built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
     state: "open",
     headSha: "abc1234",
@@ -37,9 +34,7 @@ test("test_068_no_required_checks_means_pass", async () => {
     latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
     checks: {
       checkSha: "abc1234",
-      items: [
-        { name: "preview", workflow: "preview.yml", bucket: "pending", required: false },
-      ],
+      items: [],
     },
   });
 
