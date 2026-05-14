@@ -17,6 +17,7 @@ test("test_schema_creates_required_tables", () => {
     "attempts",
     "artifacts",
     "events",
+    "orchestrator_handoffs",
   ];
   const rows = h.db
     .query<{ name: string }, []>(

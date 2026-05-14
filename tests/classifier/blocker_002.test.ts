@@ -100,6 +100,24 @@ test("test_002_worker_blocker_transitions_to_awaiting_next_brief", async () => {
     },
   ]);
 
+  const handoffs = h.db
+    .query<
+      { reason: string; status: string; state_event_id: number; payload_json: string | null },
+      [string]
+    >(
+      `SELECT reason, status, state_event_id, payload_json
+         FROM orchestrator_handoffs WHERE task_id = ?`,
+    )
+    .all(t.taskId);
+  expect(handoffs).toHaveLength(1);
+  expect(handoffs[0]!.reason).toBe("worker_blocker");
+  expect(handoffs[0]!.status).toBe("pending");
+  expect(JSON.parse(handoffs[0]!.payload_json!)).toMatchObject({
+    attempt_id: t.attemptId,
+    artifact_id: arts[0]!.artifact_id,
+    blocker_content_hash: arts[0]!.content_hash,
+  });
+
   // No retry attempt scheduled.
   const pending = h.db
     .query<{ n: number }, [string]>(
