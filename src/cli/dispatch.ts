@@ -44,6 +44,10 @@ import {
   type EscalateHumanDeps,
   type ServiceResult,
 } from "../core/claims.ts";
+import {
+  listOrchestratorHandoffs,
+  type OrchestratorHandoffStatus,
+} from "../core/orchestrator_handoffs.ts";
 import { tick_once, type TickDeps, type TickOptions } from "../core/tick.ts";
 import type { SupervisorLock } from "../core/supervisor_lock.ts";
 import { toCliError, serviceErrorToCli } from "./errors.ts";
@@ -157,6 +161,8 @@ export async function dispatch(
         return await handleTask(rest, deps, io);
       case "tick":
         return await handleTick(rest, deps, io);
+      case "handoff":
+        return handleHandoff(rest, deps, io);
       case "enqueue":
         return await handleEnqueue(rest, deps, io);
       case "review-pr":
@@ -225,6 +231,72 @@ function writeErrorWithUsage(
   const block = commandHelp(helpPath);
   if (block !== null) io.stderr(`\n${block}`);
   return { exitCode: 1 };
+}
+
+function handleHandoff(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  if (argv.length === 0) {
+    return writeErrorWithUsage(
+      io,
+      ["handoff"],
+      "usage_error",
+      "handoff subcommand required",
+    );
+  }
+  const [sub, ...rest] = argv;
+  if (isHelpToken(sub as string)) return printHelp(io, ["handoff"]);
+  switch (sub) {
+    case "list":
+      if (wantsHelp(rest)) return printHelp(io, ["handoff", "list"]);
+      return handleHandoffList(rest, deps, io);
+    default:
+      return writeErrorWithUsage(
+        io,
+        ["handoff"],
+        "usage_error",
+        `unknown handoff subcommand: ${sub}`,
+      );
+  }
+}
+
+function handleHandoffList(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--status", "--task"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const rawStatus = readFlag(argv, "--status") ?? "pending";
+  if (!isHandoffStatus(rawStatus)) {
+    return writeError(
+      io,
+      "usage_error",
+      `handoff list --status must be pending, claimed, completed, or cancelled (got ${rawStatus})`,
+      { status: rawStatus },
+    );
+  }
+  const filters: { status: OrchestratorHandoffStatus; taskId?: string } = {
+    status: rawStatus,
+  };
+  const taskId = readFlag(argv, "--task");
+  if (taskId !== null) filters.taskId = taskId;
+  const rows = listOrchestratorHandoffs(deps.db, filters);
+  io.stdout(`${JSON.stringify(rows)}\n`);
+  return { exitCode: 0 };
+}
+
+function isHandoffStatus(s: string): s is OrchestratorHandoffStatus {
+  return (
+    s === "pending" ||
+    s === "claimed" ||
+    s === "completed" ||
+    s === "cancelled"
+  );
 }
 
 async function handleTask(

@@ -118,6 +118,8 @@ test("test_013_final_attempt_blocker_sets_budget_exhausted", async () => {
   expect(task).toEqual({ state: "awaiting-next-brief", budget_exhausted: 1 });
   expect(pendingCount(t.taskId)).toBe(0);
   expect(artifactCount(t.taskId, "last_failure")).toBe(1);
+  expect(handoffReasons(t.taskId)).toContain("worker_blocker");
+  expect(handoffReasons(t.taskId)).toContain("budget_exhausted");
 });
 
 test("test_021_retry_budget_exhaustion_creates_last_failure", async () => {
@@ -154,6 +156,7 @@ test("test_021_retry_budget_exhaustion_creates_last_failure", async () => {
   expect(task).toEqual({ state: "awaiting-next-brief", budget_exhausted: 1 });
   expect(pendingCount(t.taskId)).toBe(0);
   expect(artifactCount(t.taskId, "last_failure")).toBe(1);
+  expect(handoffReasons(t.taskId)).toEqual(["budget_exhausted"]);
 });
 
 test("test_023_retry_brief_uses_most_recent_brief", async () => {
@@ -234,4 +237,16 @@ function artifactCount(taskId: string, kind: string): number {
       `SELECT COUNT(*) AS n FROM artifacts WHERE task_id = ? AND kind = ?`,
     )
     .get(taskId, kind)!.n;
+}
+
+function handoffReasons(taskId: string): string[] {
+  if (!h) throw new Error("missing harness");
+  return h.db
+    .query<{ reason: string }, [string]>(
+      `SELECT reason FROM orchestrator_handoffs
+        WHERE task_id = ?
+        ORDER BY handoff_id`,
+    )
+    .all(taskId)
+    .map((r) => r.reason);
 }

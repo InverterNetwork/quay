@@ -187,10 +187,18 @@ quay tags apply-deployment --from <path|->
 quay tags import --from <path> [--force]                   # bootstrap from TOML
 quay tags list --repo <repo_id>                            # merged vocab + enforced flag
 
+quay handoff list [--status <s>] [--task <id>] # durable awaiting-next-brief handoffs
+                                               # (JSON; default status is pending)
 quay task get <task_id> | task list        # read commands (deterministic JSON)
 quay submit-brief | escalate-human | cancel
 quay artifact get <task_id> <kind>         # raw bytes to stdout
 ```
+
+`quay handoff list` is the pull-based orchestrator handoff surface. It defaults
+to `--status pending`; accepted statuses are `pending`, `claimed`, `completed`,
+and `cancelled`. Rows are JSON objects with `handoff_id`, `task_id`, `reason`,
+`status`, claim metadata, timestamps, `state_event_id`, `idempotency_key`, and
+`payload_json`.
 
 `quay validate-ticket` skips the dispatcher's adapter wiring for fast
 spawns. It opens the Quay DB lazily — and only when a ticket payload's

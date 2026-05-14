@@ -23,6 +23,11 @@ import {
   LINEAR_STATE_IN_PROGRESS,
   LinearSyncQueue,
 } from "./linear_state_sync.ts";
+import {
+  cancelOpenOrchestratorHandoffs,
+  enqueueOrchestratorHandoff,
+  reopenClaimedOrchestratorHandoffs,
+} from "./orchestrator_handoffs.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact } from "./usage.ts";
 import {
@@ -235,6 +240,7 @@ interface DoneTaskRow {
 interface ClaimedTaskRow {
   task_id: string;
   claimed_at: string | null;
+  claim_id: string | null;
   claim_expirations_consecutive: number;
   cancel_requested_at: string | null;
 }
@@ -493,7 +499,8 @@ function readRunning(db: DB): RunningTaskRow[] {
 function readClaimed(db: DB): ClaimedTaskRow[] {
   return db
     .query<ClaimedTaskRow, []>(
-      `SELECT task_id, claimed_at, claim_expirations_consecutive, cancel_requested_at
+      `SELECT task_id, claimed_at, claim_id,
+              claim_expirations_consecutive, cancel_requested_at
          FROM tasks
         WHERE state = 'claimed-by-orchestrator'
         ORDER BY claimed_at, task_id`,
@@ -1741,6 +1748,7 @@ function processClaimedTask(
       )
       .run(task.task_id, targetState, now);
     if (parking) {
+      cancelOpenOrchestratorHandoffs(deps, task.task_id);
       deps.db
         .query(
           `INSERT INTO events (
@@ -1748,6 +1756,11 @@ function processClaimedTask(
            ) VALUES (?, 'orchestrator_loop_parked', 'claimed-by-orchestrator', 'orchestrator_loop', ?)`,
         )
         .run(task.task_id, now);
+    } else {
+      reopenClaimedOrchestratorHandoffs(deps, {
+        taskId: task.task_id,
+        claimId: task.claim_id,
+      });
     }
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -2062,14 +2075,26 @@ function ingestSlackReply(
       return;
     }
 
-    deps.db
-      .query(
+    const eventRow = deps.db
+      .query<{ event_id: number }, [string, number, number, string]>(
         `INSERT INTO events (
            task_id, attempt_id, event_type, from_state, to_state,
            payload_artifact_id, occurred_at
-         ) VALUES (?, ?, 'slack_reply_ingested', 'waiting_human', 'awaiting-next-brief', ?, ?)`,
+         ) VALUES (?, ?, 'slack_reply_ingested', 'waiting_human', 'awaiting-next-brief', ?, ?)
+         RETURNING event_id`,
       )
-      .run(task.task_id, attemptId, artifact.artifactId, now);
+      .get(task.task_id, attemptId, artifact.artifactId, now);
+    if (!eventRow) throw new Error("slack_reply_ingested event insert returned no row");
+    enqueueOrchestratorHandoff(deps, {
+      taskId: task.task_id,
+      reason: "human_reply_ingested",
+      stateEventId: eventRow.event_id,
+      payload: {
+        attempt_id: attemptId,
+        artifact_id: artifact.artifactId,
+        slack_reply_content_hash: replyContentHash,
+      },
+    });
 
     deps.db.exec("COMMIT");
   } catch (err) {

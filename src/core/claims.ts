@@ -26,6 +26,11 @@ import {
   LINEAR_STATE_WAITING,
   syncLinearState,
 } from "./linear_state_sync.ts";
+import {
+  claimPendingOrchestratorHandoffs,
+  completeClaimedOrchestratorHandoffs,
+  reopenClaimedOrchestratorHandoffs,
+} from "./orchestrator_handoffs.ts";
 import { loadPreambleBody } from "./preamble.ts";
 
 export type ClaimErrorCode =
@@ -193,6 +198,7 @@ export function claim_task(
          ) VALUES (?, 'claimed', 'awaiting-next-brief', 'claimed-by-orchestrator', ?)`,
       )
       .run(taskId, now);
+    claimPendingOrchestratorHandoffs(deps, { taskId, claimId });
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -301,6 +307,10 @@ export function release_claim(
          ) VALUES (?, 'claim_released', 'claimed-by-orchestrator', 'awaiting-next-brief', ?)`,
       )
       .run(input.taskId, now);
+    reopenClaimedOrchestratorHandoffs(deps, {
+      taskId: input.taskId,
+      claimId: input.claimId,
+    });
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -467,6 +477,10 @@ export async function submit_brief(
          ) VALUES (?, ?, 'brief_submitted', 'claimed-by-orchestrator', 'queued', ?)`,
       )
       .run(input.taskId, attemptId, now);
+    completeClaimedOrchestratorHandoffs(deps, {
+      taskId: input.taskId,
+      claimId: input.claimId,
+    });
 
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -625,6 +639,10 @@ export async function escalate_human(
          ) VALUES (?, ?, 'human_escalated', 'claimed-by-orchestrator', 'waiting_human', ?, ?)`,
       )
       .run(input.taskId, prior.attempt_id, artifact.artifactId, now);
+    completeClaimedOrchestratorHandoffs(deps, {
+      taskId: input.taskId,
+      claimId: input.claimId,
+    });
     deps.db.exec("COMMIT");
   } catch (err) {
     try {

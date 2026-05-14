@@ -48,6 +48,7 @@ test("quay --help prints command list to stdout, exit 0", async () => {
   for (const cmd of [
     "task",
     "tick",
+    "handoff",
     "enqueue",
     "repo",
     "cancel",

@@ -124,4 +124,18 @@ test("test_012_slack_reply_transitions_to_awaiting_next_brief", async () => {
     from_state: "waiting_human",
     to_state: "awaiting-next-brief",
   });
+
+  const handoff = h.db
+    .query<{ reason: string; status: string; payload_json: string | null }, [string]>(
+      `SELECT reason, status, payload_json
+         FROM orchestrator_handoffs WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(handoff).toMatchObject({
+    reason: "human_reply_ingested",
+    status: "pending",
+  });
+  const handoffPayload = JSON.parse(handoff!.payload_json!);
+  expect(typeof handoffPayload.artifact_id).toBe("number");
+  expect(handoffPayload.slack_reply_content_hash).toBe(replyArt!.content_hash);
 });

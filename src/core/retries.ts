@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
+import { enqueueOrchestratorHandoff } from "./orchestrator_handoffs.ts";
 import { loadPreambleBody } from "./preamble.ts";
 
 export type BudgetRetryReason =
@@ -89,20 +90,35 @@ export function scheduleDeterministicRetry(
           WHERE task_id = ? AND cancel_requested_at IS NULL`,
       )
       .run(now, input.taskId);
-    deps.db
-      .query(
+    const eventRow = deps.db
+      .query<
+        { event_id: number },
+        [string, number, string, number, string]
+      >(
         `INSERT INTO events (
            task_id, attempt_id, event_type, from_state, to_state,
            payload_artifact_id, occurred_at
-         ) VALUES (?, ?, 'budget_exhausted', ?, 'awaiting-next-brief', ?, ?)`,
+         ) VALUES (?, ?, 'budget_exhausted', ?, 'awaiting-next-brief', ?, ?)
+         RETURNING event_id`,
       )
-      .run(
+      .get(
         input.taskId,
         input.prevAttempt.attempt_id,
         input.fromState ?? "running",
         lastFailure.artifactId,
         now,
       );
+    if (!eventRow) throw new Error("budget_exhausted event insert returned no row");
+    enqueueOrchestratorHandoff(deps, {
+      taskId: input.taskId,
+      reason: "budget_exhausted",
+      stateEventId: eventRow.event_id,
+      payload: {
+        attempt_id: input.prevAttempt.attempt_id,
+        artifact_id: lastFailure.artifactId,
+        retry_reason: input.reason,
+      },
+    });
     return { scheduled: false, artifactId: lastFailure.artifactId };
   }
 
@@ -192,14 +208,26 @@ export function writeBlockerBudgetExhausted(
         WHERE task_id = ? AND cancel_requested_at IS NULL`,
     )
     .run(input.taskId);
-  deps.db
-    .query(
+  const eventRow = deps.db
+    .query<{ event_id: number }, [string, number, number, string]>(
       `INSERT INTO events (
          task_id, attempt_id, event_type, from_state, to_state,
          payload_artifact_id, occurred_at
-       ) VALUES (?, ?, 'budget_exhausted', 'running', 'awaiting-next-brief', ?, ?)`,
+       ) VALUES (?, ?, 'budget_exhausted', 'running', 'awaiting-next-brief', ?, ?)
+       RETURNING event_id`,
     )
-    .run(input.taskId, input.attempt.attempt_id, artifact.artifactId, deps.clock.nowISO());
+    .get(input.taskId, input.attempt.attempt_id, artifact.artifactId, deps.clock.nowISO());
+  if (!eventRow) throw new Error("budget_exhausted event insert returned no row");
+  enqueueOrchestratorHandoff(deps, {
+    taskId: input.taskId,
+    reason: "budget_exhausted",
+    stateEventId: eventRow.event_id,
+    payload: {
+      attempt_id: input.attempt.attempt_id,
+      artifact_id: artifact.artifactId,
+      retry_reason: "worker_blocker",
+    },
+  });
   return artifact.artifactId;
 }
 
