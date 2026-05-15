@@ -315,7 +315,7 @@ stateDiagram-v2
   cancelled --> [*]
 </pre>
 </div>
-<p class="legend">Parked (manual recovery via <code>quay cancel</code>): <code>worktree_error</code>, <code>orchestrator_loop</code>, <code>non_budget_loop</code>. <code>budget_exhausted</code> is a flag, not a state — set when entering <code>awaiting-next-brief</code> with <code>attempts_consumed &gt;= retry_budget</code>.</p>
+<p class="legend">Parked states retain worktrees/branches for inspection: <code>worktree_error</code>, <code>orchestrator_loop</code>, <code>non_budget_loop</code>. They normally recover via <code>quay cancel</code>, but tick can still auto-converge them to <code>merged</code> or <code>closed_unmerged</code> if the associated PR becomes terminal. <code>budget_exhausted</code> is a flag, not a state — set when entering <code>awaiting-next-brief</code> with <code>attempts_consumed &gt;= retry_budget</code>.</p>
 
 <h2 id="tick">5. Tick cycle</h2>
 <p>One pass of <code>quay tick</code>. The supervisor lockfile serializes all side-effecting work and blocks <code>quay cancel</code>.</p>
@@ -329,7 +329,9 @@ flowchart TD
   D --> E{cancel_requested_at<br/>set?}
   E -- yes --> F[run cancel_finalizer]
   F --> N[next task]
-  E -- no --> G{state}
+  E -- no --> PT{parked/orchestrator<br/>PR terminal?}
+  PT -- yes --> PF[terminal cleanup:<br/>merged / closed_unmerged<br/>clear claim + cancel handoffs]
+  PT -- no --> G{state}
   G -- queued --> Q[promote if capacity:<br/>fetch, snapshot remote SHA + PR-exists,<br/>SQL: spawned_at, attempts_consumed if budget,<br/>state=running, write spawned event<br/>then substrate spawn]
   G -- running --> R[dead-worker classifier<br/>or staleness/wall-clock kill]
   G -- pr_open --> P1[poll PR/checks/mergeable]
@@ -346,6 +348,7 @@ flowchart TD
   P2 --> N
   S --> N
   CLA --> N
+  PF --> N
   N --> D
   D --> Z[release lock]
   Z --> Y[stdout: NDJSON,<br/>one line per task touched]
