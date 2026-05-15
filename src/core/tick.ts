@@ -970,28 +970,42 @@ function processDoneTask(
     return finalizePrTerminal(deps, task, attempt, snapshot.state, "done");
   }
 
-  // 2. Merge conflict.
-  if (snapshot.mergeable === "conflicting") {
-    const observation = formatConflictObservation(snapshot);
-    if (task.last_conflict_observation !== observation) {
-      return scheduleConflictNonBudget(
-        deps,
-        task.task_id,
-        attempt,
-        snapshot,
-        observation,
-        "done",
-        options,
-      );
-    }
+  // 2. PR-side worker respawn triggers. Evaluate all actionable observations
+  // before scheduling so a conflict does not hide fresh review feedback.
+  const conflictObservation =
+    snapshot.mergeable === "conflicting"
+      ? formatConflictObservation(snapshot)
+      : null;
+  const hasFreshConflict =
+    conflictObservation !== null &&
+    task.last_conflict_observation !== conflictObservation;
+  const hasFreshReview = hasActionableReviewFeedback(task, snapshot);
+
+  if (hasFreshConflict && hasFreshReview) {
+    return scheduleConflictReviewNonBudget(
+      deps,
+      task.task_id,
+      attempt,
+      snapshot,
+      conflictObservation!,
+      "done",
+      options,
+    );
   }
 
-  // 3. Review feedback.
-  if (
-    snapshot.latestReview.decision === "CHANGES_REQUESTED" &&
-    snapshot.latestReview.latestReviewId !== null &&
-    task.last_review_id_acted_on !== snapshot.latestReview.latestReviewId
-  ) {
+  if (hasFreshConflict) {
+    return scheduleConflictNonBudget(
+      deps,
+      task.task_id,
+      attempt,
+      snapshot,
+      conflictObservation!,
+      "done",
+      options,
+    );
+  }
+
+  if (hasFreshReview) {
     return scheduleReviewNonBudget(
       deps,
       task.task_id,
@@ -1287,6 +1301,37 @@ function composeCiFailureExcerpt(snapshot: PrSnapshot): string {
   return ["CI failed:", ...fails.map((s) => `  - ${s}`)].join("\n");
 }
 
+function hasActionableReviewFeedback(
+  task: { last_review_id_acted_on: string | null },
+  snapshot: PrSnapshot,
+): boolean {
+  return (
+    snapshot.latestReview.decision === "CHANGES_REQUESTED" &&
+    snapshot.latestReview.latestReviewId !== null &&
+    task.last_review_id_acted_on !== snapshot.latestReview.latestReviewId
+  );
+}
+
+function conflictSliceContent(snapshot: PrSnapshot): string {
+  return JSON.stringify({
+    head_sha: snapshot.headSha,
+    base_sha: snapshot.baseSha,
+    mergeable: snapshot.mergeable,
+  });
+}
+
+function reviewCommentsContent(snapshot: PrSnapshot, reviewId: string): string {
+  return JSON.stringify({
+    review_id: reviewId,
+    decision: snapshot.latestReview.decision,
+    comments: snapshot.latestReview.comments,
+  });
+}
+
+function conflictDiagnostics(snapshot: PrSnapshot): string {
+  return `GitHub reports mergeable=${snapshot.mergeable} for head=${snapshot.headSha} base=${snapshot.baseSha ?? "<unknown>"}.`;
+}
+
 function scheduleConflictNonBudget(
   deps: TickDeps,
   taskId: string,
@@ -1297,22 +1342,78 @@ function scheduleConflictNonBudget(
   options: TickOptions,
 ): TickTaskResult {
   const cap = options.maxNonBudgetRespawns ?? DEFAULT_MAX_NON_BUDGET_RESPAWNS;
-  const sliceContent = JSON.stringify({
-    head_sha: snapshot.headSha,
-    base_sha: snapshot.baseSha,
-    mergeable: snapshot.mergeable,
-  });
   const result = scheduleNonBudgetRespawn(deps, {
     taskId,
     prevAttempt: attempt,
     reason: "conflict",
-    diagnostics: `GitHub reports mergeable=${snapshot.mergeable} for head=${snapshot.headSha} base=${snapshot.baseSha ?? "<unknown>"}.`,
+    diagnostics: conflictDiagnostics(snapshot),
     fromState,
     snapshotKind: "conflict_slice",
-    snapshotContent: sliceContent,
+    snapshotContent: conflictSliceContent(snapshot),
     snapshotExtension: "json",
     dedupeColumn: "last_conflict_observation",
     dedupeValue: observation,
+    maxNonBudgetRespawns: cap,
+  });
+  if (result.outcome === "parked") {
+    return { task_id: taskId, action: "non_budget_loop_parked" };
+  }
+  if (result.outcome === "scheduled") {
+    return { task_id: taskId, action: "conflict_respawn_scheduled" };
+  }
+  return { task_id: taskId, action: "skipped_predicate" };
+}
+
+function scheduleConflictReviewNonBudget(
+  deps: TickDeps,
+  taskId: string,
+  attempt: CurrentAttemptRow,
+  snapshot: PrSnapshot,
+  observation: string,
+  fromState: "done",
+  options: TickOptions,
+): TickTaskResult {
+  const cap = options.maxNonBudgetRespawns ?? DEFAULT_MAX_NON_BUDGET_RESPAWNS;
+  const reviewId = snapshot.latestReview.latestReviewId!;
+  const reviewComments =
+    snapshot.latestReview.comments.trim() === ""
+      ? "(No review comments captured.)"
+      : snapshot.latestReview.comments;
+  const result = scheduleNonBudgetRespawn(deps, {
+    taskId,
+    prevAttempt: attempt,
+    reason: "conflict",
+    diagnostics: [
+      conflictDiagnostics(snapshot),
+      `Reviewer marked CHANGES_REQUESTED in review ${reviewId}.`,
+      "",
+      "Required actions:",
+      "1. Resolve the merge conflict against the base branch.",
+      "2. Address the CHANGES_REQUESTED review comments.",
+      "3. Push the existing branch and update the existing PR.",
+      "",
+      "Review comments:",
+      reviewComments,
+    ].join("\n"),
+    fromState,
+    snapshotKind: "conflict_slice",
+    snapshotContent: conflictSliceContent(snapshot),
+    snapshotExtension: "json",
+    dedupeColumn: "last_conflict_observation",
+    dedupeValue: observation,
+    extraSnapshots: [
+      {
+        snapshotKind: "review_comments",
+        snapshotContent: reviewCommentsContent(snapshot, reviewId),
+        snapshotExtension: "json",
+      },
+    ],
+    extraDedupeUpdates: [
+      {
+        dedupeColumn: "last_review_id_acted_on",
+        dedupeValue: reviewId,
+      },
+    ],
     maxNonBudgetRespawns: cap,
   });
   if (result.outcome === "parked") {
@@ -1334,11 +1435,6 @@ function scheduleReviewNonBudget(
 ): TickTaskResult {
   const cap = options.maxNonBudgetRespawns ?? DEFAULT_MAX_NON_BUDGET_RESPAWNS;
   const reviewId = snapshot.latestReview.latestReviewId!;
-  const commentsContent = JSON.stringify({
-    review_id: reviewId,
-    decision: snapshot.latestReview.decision,
-    comments: snapshot.latestReview.comments,
-  });
   const result = scheduleNonBudgetRespawn(deps, {
     taskId,
     prevAttempt: attempt,
@@ -1346,7 +1442,7 @@ function scheduleReviewNonBudget(
     diagnostics: `Reviewer marked CHANGES_REQUESTED in review ${reviewId}.`,
     fromState,
     snapshotKind: "review_comments",
-    snapshotContent: commentsContent,
+    snapshotContent: reviewCommentsContent(snapshot, reviewId),
     snapshotExtension: "json",
     dedupeColumn: "last_review_id_acted_on",
     dedupeValue: reviewId,
