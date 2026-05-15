@@ -489,6 +489,10 @@ async function handleEnqueue(
     const ticketPath = readFlag(argv, "--ticket-snapshot-file");
     const externalRef = readFlag(argv, "--external-ref");
     const slackThreadRef = readFlag(argv, "--slack-thread-ref");
+    const workerAgent = readFlag(argv, "--worker-agent");
+    const workerModel = readFlag(argv, "--worker-model");
+    const reviewerAgent = readFlag(argv, "--reviewer-agent");
+    const reviewerModel = readFlag(argv, "--reviewer-model");
     const tags = collectFlagValues(argv, "--tag");
     const briefRead = tryReadFile(briefPath);
     if (!briefRead.ok) return writeError(io, "usage_error", briefRead.message);
@@ -500,6 +504,16 @@ async function handleEnqueue(
     }
     if (externalRef !== null) input.external_ref = externalRef;
     if (slackThreadRef !== null) input.slack_thread_ref = slackThreadRef;
+    const agentErr = validateTaskAgentOverrides(
+      { worker_agent: workerAgent, reviewer_agent: reviewerAgent },
+      deps.agentResolver,
+      io,
+    );
+    if (agentErr !== null) return agentErr;
+    if (workerAgent !== null) input.worker_agent = workerAgent;
+    if (workerModel !== null) input.worker_model = workerModel;
+    if (reviewerAgent !== null) input.reviewer_agent = reviewerAgent;
+    if (reviewerModel !== null) input.reviewer_model = reviewerModel;
     if (tags.length > 0) input.tags = tags;
   }
   const enqueueDeps: EnqueueDeps = {
@@ -510,6 +524,7 @@ async function handleEnqueue(
     commandRunner: deps.commandRunner,
     artifactStore: deps.artifactStore,
     paths: deps.paths,
+    agentResolver: deps.agentResolver,
   };
   if (deps.retryBudget !== undefined) {
     enqueueDeps.retryBudget = deps.retryBudget;
@@ -526,7 +541,7 @@ function handleReviewPr(
 ): DispatchResult {
   if (wantsHelp(argv)) return printHelp(io, ["review-pr"]);
   const validation = validateFlags(argv, {
-    valued: ["--pr", "--head-sha", "--tag"],
+    valued: ["--pr", "--head-sha", "--tag", "--reviewer-agent", "--reviewer-model"],
   });
   if (!validation.ok) {
     return writeErrorWithExit(
@@ -576,6 +591,8 @@ function handleReviewPr(
       tags: string[];
       reviewerEnabled: boolean;
       gateQuayOwnedDone: boolean;
+      reviewerAgent?: string;
+      reviewerModel?: string;
     } = {
       repoId,
       prNumber: parsedPr.prNumber,
@@ -584,6 +601,16 @@ function handleReviewPr(
       gateQuayOwnedDone: deps.tickOptions?.gateQuayOwnedDone === true,
     };
     if (headSha !== null) input.headSha = headSha;
+    const reviewerAgent = readFlag(argv, "--reviewer-agent");
+    const reviewerModel = readFlag(argv, "--reviewer-model");
+    const agentErr = validateTaskAgentOverrides(
+      { reviewer_agent: reviewerAgent },
+      deps.agentResolver,
+      io,
+    );
+    if (agentErr !== null) return agentErr;
+    if (reviewerAgent !== null) input.reviewerAgent = reviewerAgent;
+    if (reviewerModel !== null) input.reviewerModel = reviewerModel;
     result = enterReview(
       {
         db: deps.db,
@@ -592,6 +619,7 @@ function handleReviewPr(
         artifactStore: deps.artifactStore,
         tmux: deps.tmux,
         paths: { worktreesRoot: deps.paths.worktreesRoot },
+        agentResolver: deps.agentResolver,
       },
       input,
     );
@@ -634,6 +662,15 @@ async function handleEnqueueLinearIssueFlow(
   // is read from the ticket's validated `repo` field. An explicit --repo wins.
   const repoId = readFlag(argv, "--repo");
   const cliTags = collectFlagValues(argv, "--tag");
+  const agentErr = validateTaskAgentOverrides(
+    {
+      worker_agent: readFlag(argv, "--worker-agent"),
+      reviewer_agent: readFlag(argv, "--reviewer-agent"),
+    },
+    deps.agentResolver,
+    io,
+  );
+  if (agentErr !== null) return agentErr;
   if (
     deps.linear === undefined ||
     deps.validatorRunner === undefined ||
@@ -654,12 +691,21 @@ async function handleEnqueueLinearIssueFlow(
     commandRunner: deps.commandRunner,
     artifactStore: deps.artifactStore,
     paths: deps.paths,
+    agentResolver: deps.agentResolver,
   };
   if (deps.retryBudget !== undefined) {
     enqueueDeps.retryBudget = deps.retryBudget;
   }
   return handleEnqueueLinearIssue(
-    { repoId, identifier, cliTags },
+    {
+      repoId,
+      identifier,
+      cliTags,
+      workerAgent: readFlag(argv, "--worker-agent"),
+      workerModel: readFlag(argv, "--worker-model"),
+      reviewerAgent: readFlag(argv, "--reviewer-agent"),
+      reviewerModel: readFlag(argv, "--reviewer-model"),
+    },
     {
       enqueueDeps,
       linear: deps.linear,
@@ -748,6 +794,8 @@ const REPO_FLAGS: Array<{ flag: string; key: string }> = [
   { flag: "--contribution-guide-path", key: "contribution_guide_path" },
   { flag: "--agent-worker", key: "agent_worker" },
   { flag: "--agent-reviewer", key: "agent_reviewer" },
+  { flag: "--model-worker", key: "model_worker" },
+  { flag: "--model-reviewer", key: "model_reviewer" },
 ];
 
 // On `repo update`, an empty string for an agent override means "clear
@@ -758,7 +806,7 @@ function normalizeAgentClearing(
   patch: Record<string, string>,
 ): Record<string, string | null> {
   const out: Record<string, string | null> = { ...patch };
-  for (const key of ["agent_worker", "agent_reviewer"] as const) {
+  for (const key of ["agent_worker", "agent_reviewer", "model_worker", "model_reviewer"] as const) {
     if (out[key] === "") out[key] = null;
   }
   return out;
@@ -771,6 +819,26 @@ function validateAgentOverrides(
 ): DispatchResult | null {
   const registered = new Set(resolver.registeredAgents());
   for (const key of ["agent_worker", "agent_reviewer"] as const) {
+    const v = input[key];
+    if (typeof v === "string" && !registered.has(v)) {
+      return writeError(
+        io,
+        "usage_error",
+        `${key.replace("_", "-")}: agent "${v}" is not registered in [agents.invocations]; known: ${[...registered].sort().join(", ")}`,
+        { agent: v, registered: [...registered].sort() },
+      );
+    }
+  }
+  return null;
+}
+
+function validateTaskAgentOverrides(
+  input: { worker_agent?: string | null; reviewer_agent?: string | null },
+  resolver: AgentResolver,
+  io: CliIO,
+): DispatchResult | null {
+  const registered = new Set(resolver.registeredAgents());
+  for (const key of ["worker_agent", "reviewer_agent"] as const) {
     const v = input[key];
     if (typeof v === "string" && !registered.has(v)) {
       return writeError(

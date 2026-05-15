@@ -180,6 +180,8 @@ interface QueuedTaskRow {
   worktree_path: string;
   cancel_requested_at: string | null;
   external_ref: string | null;
+  worker_agent: string | null;
+  worker_model: string | null;
 }
 
 interface RunningTaskRow {
@@ -248,6 +250,8 @@ interface ReviewAttemptTaskRow {
   tmux_session: string | null;
   spawned_at: string | null;
   kill_intent: string | null;
+  reviewer_agent: string | null;
+  reviewer_model: string | null;
 }
 
 interface DoneTaskRow {
@@ -518,7 +522,7 @@ function readQueued(db: DB): QueuedTaskRow[] {
   return db
     .query<QueuedTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path,
-              cancel_requested_at, external_ref
+              cancel_requested_at, external_ref, worker_agent, worker_model
          FROM tasks
         WHERE state = 'queued'
         ORDER BY created_at, task_id`,
@@ -635,7 +639,8 @@ function readRunningReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
               a.attempt_id, a.attempt_number, a.preamble_id, a.head_sha,
-              a.tmux_session, a.spawned_at, a.kill_intent
+              a.tmux_session, a.spawned_at, a.kill_intent,
+              t.reviewer_agent, t.reviewer_model
          FROM attempts a
          JOIN tasks t ON t.task_id = a.task_id
         WHERE t.state = 'pr-review'
@@ -655,7 +660,8 @@ function readPendingReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
               a.attempt_id, a.attempt_number, a.preamble_id, a.head_sha,
-              a.tmux_session, a.spawned_at, a.kill_intent
+              a.tmux_session, a.spawned_at, a.kill_intent,
+              t.reviewer_agent, t.reviewer_model
          FROM attempts a
          JOIN tasks t ON t.task_id = a.task_id
         WHERE t.state = 'pr-review'
@@ -3136,10 +3142,14 @@ function promoteAndSpawn(
   agentResolver: AgentResolver,
   linearSyncs: LinearSyncQueue,
 ): TickTaskResult {
-  const { agent: agentName, invocation: agentInvocation } = agentResolver.resolve(
-    task.repo_id,
-    "worker",
-  );
+  const {
+    agent: agentName,
+    model: agentModel,
+    invocation: agentInvocation,
+  } = agentResolver.resolve(task.repo_id, "worker", {
+    agent: task.worker_agent,
+    model: task.worker_model,
+  });
   if (task.cancel_requested_at !== null) {
     return { task_id: task.task_id, action: "skipped_predicate" };
   }
@@ -3183,6 +3193,8 @@ function promoteAndSpawn(
     worktreePath: task.worktree_path,
     plannedSession: sessionName,
     agentIdentity,
+    agentName,
+    agentModel,
     consumedBudget: pending.consumed_budget,
     spawnedAt: now,
     remoteSha,
@@ -3228,10 +3240,10 @@ function promoteAndSpawn(
   deps.db
     .query(
       `UPDATE attempts
-          SET tmux_session = ?, agent_identity = ?, agent_name = ?
+          SET tmux_session = ?, agent_identity = ?, agent_name = ?, agent_model = ?
         WHERE attempt_id = ?`,
     )
-    .run(sessionName, agentIdentity, agentName, pending.attempt_id);
+    .run(sessionName, agentIdentity, agentName, agentModel, pending.attempt_id);
   deps.db
     .query(`UPDATE tasks SET spawn_failures_consecutive = 0 WHERE task_id = ?`)
     .run(task.task_id);
@@ -3301,10 +3313,14 @@ function promoteAndSpawnReviewer(
   agentResolver: AgentResolver,
   options: TickOptions,
 ): TickTaskResult {
-  const { agent: agentName, invocation: agentInvocation } = agentResolver.resolve(
-    task.repo_id,
-    "reviewer",
-  );
+  const {
+    agent: agentName,
+    model: agentModel,
+    invocation: agentInvocation,
+  } = agentResolver.resolve(task.repo_id, "reviewer", {
+    agent: task.reviewer_agent,
+    model: task.reviewer_model,
+  });
   if (task.cancel_requested_at !== null) {
     return { task_id: task.task_id, action: "skipped_predicate" };
   }
@@ -3405,10 +3421,10 @@ function promoteAndSpawnReviewer(
   deps.db
     .query(
       `UPDATE attempts
-          SET tmux_session = ?, agent_identity = ?, agent_name = ?
+          SET tmux_session = ?, agent_identity = ?, agent_name = ?, agent_model = ?
         WHERE attempt_id = ?`,
     )
-    .run(sessionName, agentIdentity, agentName, task.attempt_id);
+    .run(sessionName, agentIdentity, agentName, agentModel, task.attempt_id);
 
   return { task_id: task.task_id, action: "spawned" };
 }
@@ -3424,7 +3440,11 @@ function promoteAndSpawnReviewer(
 function resolveTickAgentResolver(options: TickOptions): AgentResolver {
   if (options.agentResolver !== undefined) return options.agentResolver;
   const invocation = options.agentInvocation ?? DEFAULT_CLAUDE_WORKER_INVOCATION;
-  const resolved: ResolvedAgent = { agent: DEFAULT_AGENT_NAME, invocation };
+  const resolved: ResolvedAgent = {
+    agent: DEFAULT_AGENT_NAME,
+    model: null,
+    invocation,
+  };
   return {
     resolve: (_repoId: string, _role: AgentRole) => resolved,
     registeredAgents: () => [DEFAULT_AGENT_NAME],
@@ -3477,6 +3497,8 @@ interface PromotionInput {
   // the event captures intent, the column captures observed reality.
   plannedSession: string;
   agentIdentity: string;
+  agentName: string;
+  agentModel: string | null;
   consumedBudget: number;
   spawnedAt: string;
   remoteSha: string | null;
@@ -3523,6 +3545,8 @@ function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
       worktree_path: p.worktreePath,
       branch_name: p.branchName,
       attempt_number: p.attemptNumber,
+      agent_name: p.agentName,
+      agent_model: p.agentModel,
       agent_identity: p.agentIdentity,
       remote_sha_at_spawn: p.remoteSha,
       pr_existed_at_spawn: p.prExisted === 1,

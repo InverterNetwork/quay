@@ -26,6 +26,7 @@ export const repoIdSchema = z
 const agentName = z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/, {
   message: "agent name must match [A-Za-z0-9._-]+",
 });
+const modelName = z.string().min(1).max(128);
 
 export const repoAddInputSchema = z
   .object({
@@ -39,6 +40,8 @@ export const repoAddInputSchema = z
     contribution_guide_path: nonEmptyString.optional(),
     agent_worker: agentName.optional(),
     agent_reviewer: agentName.optional(),
+    model_worker: modelName.optional(),
+    model_reviewer: modelName.optional(),
   })
   .strict();
 
@@ -55,6 +58,8 @@ export const repoUpdateInputSchema = z
     contribution_guide_path: nonEmptyString.nullable().optional(),
     agent_worker: agentName.nullable().optional(),
     agent_reviewer: agentName.nullable().optional(),
+    model_worker: modelName.nullable().optional(),
+    model_reviewer: modelName.nullable().optional(),
   })
   .strict();
 
@@ -77,6 +82,8 @@ export const repoImportInputSchema = z
     contribution_guide_path: nonEmptyString.nullable().optional(),
     agent_worker: agentName.nullable().optional(),
     agent_reviewer: agentName.nullable().optional(),
+    model_worker: modelName.nullable().optional(),
+    model_reviewer: modelName.nullable().optional(),
     archived_at: z.string().nullable().optional(),
     created_at: nonEmptyString.optional(),
   })
