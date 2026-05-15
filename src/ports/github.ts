@@ -41,6 +41,10 @@ export interface GitHubPort {
     headSha: string,
     expectedLogin?: string,
   ): PostedReview | null;
+  // Validate an explicit GH_TOKEN before handing its file path to a reviewer
+  // pane. Returns the authenticated login on success; throws on invalid,
+  // expired, or otherwise unusable credentials.
+  probeTokenLogin(repoId: string, token: string): string;
 }
 
 export type PrCheckState = "pass" | "fail" | "pending";

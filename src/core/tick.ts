@@ -8,7 +8,7 @@ import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PostedReview, PrSnapshot } from "../ports/github.ts";
 import type { LinearPort } from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
-import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
+import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 import { probeAgentIdentity } from "./agent_identity.ts";
 import {
   DEFAULT_AGENT_NAME,
@@ -3068,6 +3068,60 @@ function promoteAndSpawn(
   return { task_id: task.task_id, action: "spawned" };
 }
 
+type ReviewerGhTokenPreflightResult =
+  | { ok: true; envFiles?: TmuxSpawnInput["envFiles"] }
+  | { ok: false; error: string };
+
+function preflightReviewerGhTokenFile(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  options: TickOptions,
+): ReviewerGhTokenPreflightResult {
+  const tokenFile = options.reviewerGhTokenFile;
+  if (tokenFile === undefined) return { ok: true };
+
+  let token: string;
+  try {
+    token = readFileSync(tokenFile, "utf8").trim();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `reviewer gh_token_file (${tokenFile}) missing or unreadable: ${message}`,
+    };
+  }
+
+  if (token.length === 0) {
+    return {
+      ok: false,
+      error: `reviewer gh_token_file (${tokenFile}) is empty`,
+    };
+  }
+
+  try {
+    deps.github.probeTokenLogin(task.repo_id, token);
+  } catch (err) {
+    const message = redactSecret(
+      err instanceof Error ? err.message : String(err),
+      token,
+    );
+    return {
+      ok: false,
+      error: `reviewer gh_token_file (${tokenFile}) token is invalid or expired: ${message}`,
+    };
+  }
+
+  return {
+    ok: true,
+    envFiles: [{ name: "GH_TOKEN", path: tokenFile }],
+  };
+}
+
+function redactSecret(message: string, secret: string): string {
+  if (secret.length === 0) return message;
+  return message.split(secret).join("[redacted]");
+}
+
 function promoteAndSpawnReviewer(
   deps: TickDeps,
   task: ReviewAttemptTaskRow,
@@ -3089,6 +3143,15 @@ function promoteAndSpawnReviewer(
       EXIT_INFO_NONE,
       options,
     );
+  }
+
+  const tokenPreflight = preflightReviewerGhTokenFile(deps, task, options);
+  if (!tokenPreflight.ok) {
+    return {
+      task_id: task.task_id,
+      action: "spawn_substrate_failed",
+      error: tokenPreflight.error,
+    };
   }
 
   if (isSyntheticTaskId(task.task_id)) {
@@ -3146,38 +3209,15 @@ function promoteAndSpawnReviewer(
   }
 
   const sessionName = `quay-review-${task.tmux_id}-${task.attempt_number}`;
-  // Preflight the reviewer-only gh token file (if configured). A
-  // missing/empty file is a hard spawn failure: silently falling back to
-  // the host gh auth would reintroduce the self-review block this knob
-  // exists to dodge. The file content is NOT passed to the spawn — only
-  // the path is, so the pane wrapper reads it inline via `$(cat ...)`
-  // and the secret never lands in argv (where another user on the host
-  // could read it via `ps`). The preflight read is just an existence /
-  // non-empty check; the value is discarded.
-  let envFiles: Array<{ name: string; path: string }> | undefined;
-  if (options.reviewerGhTokenFile !== undefined) {
-    try {
-      const token = readFileSync(options.reviewerGhTokenFile, "utf8").trim();
-      if (token.length === 0) {
-        throw new Error("file is empty");
-      }
-      envFiles = [{ name: "GH_TOKEN", path: options.reviewerGhTokenFile }];
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        task_id: task.task_id,
-        action: "spawn_substrate_failed",
-        error: `reviewer gh_token_file (${options.reviewerGhTokenFile}) unreadable: ${message}`,
-      };
-    }
-  }
   try {
     deps.tmux.spawn({
       sessionName,
       worktreePath: task.worktree_path,
       promptContent,
       agentInvocation,
-      ...(envFiles !== undefined ? { envFiles } : {}),
+      ...(tokenPreflight.envFiles !== undefined
+        ? { envFiles: tokenPreflight.envFiles }
+        : {}),
     });
   } catch (err) {
     return {

@@ -799,6 +799,22 @@ export class GitHubCliAdapter implements GitHubPort {
     return login;
   }
 
+  probeTokenLogin(repoId: string, token: string): string {
+    const result = this.run(
+      repoId,
+      ["gh", "api", "user", "--jq", ".login"],
+      { ...process.env, GH_TOKEN: token },
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh api user failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    const login = result.stdout.trim();
+    if (login === "") throw new Error("gh api user returned an empty login");
+    return login;
+  }
+
   private fetchRequiredCheckKeys(repoId: string, branch: string): Set<string> {
     const result = this.run(repoId, [
       "gh",
@@ -886,7 +902,11 @@ export class GitHubCliAdapter implements GitHubPort {
   // up a real binary. Production callers reach `gh` exclusively through
   // this method, so a subclass override has full control over command
   // dispatch.
-  protected run(repoId: string, cmd: string[]): RunResult {
+  protected run(
+    repoId: string,
+    cmd: string[],
+    env: Record<string, string | undefined> = process.env,
+  ): RunResult {
     const cwd = this.bareDir(repoId);
     // Forward `process.env` explicitly. Bun's `spawnSync` snapshots PATH at
     // process startup unless a caller passes `env`, so without this line a
@@ -895,7 +915,7 @@ export class GitHubCliAdapter implements GitHubPort {
     const result = Bun.spawnSync({
       cmd,
       cwd,
-      env: process.env,
+      env,
       stdout: "pipe",
       stderr: "pipe",
     });
