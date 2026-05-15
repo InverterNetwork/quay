@@ -84,6 +84,69 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
   expect(out2.attempt_id).toBe(out.attempt_id);
 });
 
+test("review-pr records a pending request when CI is not green", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.github.setPrView("quay", 77, {
+    number: 77,
+    title: "Human PR",
+    body: "Please review",
+    url: "https://github.com/acc/quay/pull/77",
+    headRefName: "feature/human",
+    headSha: "sha-pending",
+  });
+  built.github.setPrSnapshotByNumber("quay", 77, {
+    prNumber: 77,
+    state: "open",
+    headSha: "sha-pending",
+    baseSha: "base-1",
+    mergeable: "mergeable",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: {
+      checkSha: "sha-pending",
+      items: [{ name: "build", workflow: null, bucket: "pending", required: true }],
+    },
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", "acc/quay:77"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  expect(out.scheduled).toBe(false);
+  expect(out.pending_ci).toBe(true);
+  expect(out.attempt_id).toBeNull();
+  const queued = h.db
+    .query<{ status: string }, [string]>(
+      `SELECT status FROM review_requests WHERE task_id = ? AND head_sha = 'sha-pending'`,
+    )
+    .get(out.task_id);
+  expect(queued?.status).toBe("pending_ci");
+});
+
 test("review-pr snapshots reviewer override flags for synthetic tasks", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
