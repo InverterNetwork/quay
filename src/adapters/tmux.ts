@@ -53,6 +53,7 @@ const MAX_LOG_BYTES = 4 * 1024 * 1024;
 
 export class TmuxAdapter implements TmuxPort {
   spawn(input: TmuxSpawnInput): void {
+    const tmuxEnv = buildSpawnEnv(input.env);
     // Spawn preflight: sweep direct children of the worktree whose names
     // start with `.quay-`. A leftover `.quay-blocked.md` from a previous
     // attempt would otherwise be ingested as the new attempt's blocker on
@@ -97,11 +98,12 @@ export class TmuxAdapter implements TmuxPort {
     // typing in a detached session) and produces no output, so it stays
     // quiet until we respawn the pane in step 3.
     //
-    // `env: process.env` is forwarded explicitly because Bun snapshots
-    // env at startup. tmux populates the new session's environment from
-    // its connecting client, so anything quay tick mints or refreshes at
-    // runtime (GH_TOKEN, GITHUB_TOKEN, credential-helper sockets, etc.)
-    // would otherwise be invisible to the agent — silent-exit territory.
+    // The current process env plus per-spawn overrides are forwarded
+    // explicitly because Bun snapshots env at startup. tmux populates the
+    // new session's environment from its connecting client, so anything
+    // quay tick mints or refreshes at runtime (GH_TOKEN, GITHUB_TOKEN,
+    // credential-helper sockets, etc.) would otherwise be invisible to the
+    // agent — silent-exit territory.
     //
     // Per-spawn secrets are NOT injected via `-e KEY=VAL` here: tmux argv
     // is observable on the host (`ps`) for the lifetime of the spawn, so
@@ -120,7 +122,7 @@ export class TmuxAdapter implements TmuxPort {
         input.worktreePath,
         "cat",
       ],
-      env: process.env,
+      env: tmuxEnv,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -152,7 +154,7 @@ export class TmuxAdapter implements TmuxPort {
         `${input.sessionName}:0.0`,
         pipeCommand,
       ],
-      env: process.env,
+      env: tmuxEnv,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -165,7 +167,7 @@ export class TmuxAdapter implements TmuxPort {
       try {
         Bun.spawnSync({
           cmd: ["tmux", "kill-session", "-t", `=${input.sessionName}`],
-          env: process.env,
+          env: tmuxEnv,
           stdout: "ignore",
           stderr: "ignore",
         });
@@ -191,7 +193,7 @@ export class TmuxAdapter implements TmuxPort {
         `${input.sessionName}:0.0`,
         tmuxCommand,
       ],
-      env: process.env,
+      env: tmuxEnv,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -200,7 +202,7 @@ export class TmuxAdapter implements TmuxPort {
       try {
         Bun.spawnSync({
           cmd: ["tmux", "kill-session", "-t", `=${input.sessionName}`],
-          env: process.env,
+          env: tmuxEnv,
           stdout: "ignore",
           stderr: "ignore",
         });
@@ -340,6 +342,26 @@ export class TmuxAdapter implements TmuxPort {
 // escaped with `'\''`, and reopened.
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildSpawnEnv(
+  overrides: Record<string, string | undefined> | undefined,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (overrides === undefined) return env;
+  for (const [name, value] of Object.entries(overrides)) {
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) {
+      throw new Error(
+        `tmux env: name ${JSON.stringify(name)} is not a valid POSIX env var`,
+      );
+    }
+    if (value === undefined) {
+      delete env[name];
+    } else {
+      env[name] = value;
+    }
+  }
+  return env;
 }
 
 // Build a POSIX-shell prefix that reads each envFile inline and exports

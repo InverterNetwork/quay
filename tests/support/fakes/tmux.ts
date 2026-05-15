@@ -10,6 +10,7 @@ export interface FakeTmuxSpawnCall {
   worktreePath: string;
   promptContent: string;
   agentInvocation: string;
+  env?: Record<string, string | undefined>;
   envFiles?: Array<{ name: string; path: string }>;
 }
 
