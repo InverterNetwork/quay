@@ -799,20 +799,21 @@ export class GitHubCliAdapter implements GitHubPort {
     return login;
   }
 
-  probeTokenLogin(repoId: string, token: string): string {
+  probeTokenAccess(repoId: string, token: string): void {
+    const path = "repos/{owner}/{repo}";
     const result = this.run(
       repoId,
-      ["gh", "api", "user", "--jq", ".login"],
+      ["gh", "api", path, "--jq", ".full_name"],
       { ...process.env, GH_TOKEN: token },
     );
     if (result.exitCode !== 0) {
       throw new Error(
-        `gh api user failed: ${result.stderr.trim() || result.stdout.trim()}`,
+        `gh api ${path} failed: ${result.stderr.trim() || result.stdout.trim()}`,
       );
     }
-    const login = result.stdout.trim();
-    if (login === "") throw new Error("gh api user returned an empty login");
-    return login;
+    if (result.stdout.trim() === "") {
+      throw new Error(`gh api ${path} returned an empty repository name`);
+    }
   }
 
   private fetchRequiredCheckKeys(repoId: string, branch: string): Set<string> {

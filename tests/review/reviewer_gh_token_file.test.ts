@@ -67,7 +67,7 @@ test("reviewer spawn passes only the token file path, never the token bytes", as
   });
 
   expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
-  expect(built.github.tokenLoginCalls).toEqual([{ repoId, token: tokenBytes }]);
+  expect(built.github.tokenAccessCalls).toEqual([{ repoId, token: tokenBytes }]);
   expect(built.tmux.spawnCalls).toHaveLength(1);
   const call = built.tmux.spawnCalls[0]!;
   expect(call.envFiles).toEqual([{ name: "GH_TOKEN", path: tokenPath }]);
@@ -151,7 +151,7 @@ test("reviewer spawn fails when gh_token_file is empty", async () => {
   expect(match?.action).toBe("spawn_substrate_failed");
   expect(match?.error).toMatch(/empty/i);
   expect(built.tmux.spawnCalls).toHaveLength(0);
-  expect(built.github.tokenLoginCalls).toHaveLength(0);
+  expect(built.github.tokenAccessCalls).toHaveLength(0);
   expect(reviewAttemptSpawnedAt(h, attemptId)).toBeNull();
 });
 
@@ -163,7 +163,7 @@ test("reviewer spawn validates non-empty gh_token_file credentials before promot
   mkdirSync(h.dataDir, { recursive: true });
   const tokenBytes = "ghs_STALE_TOKEN_MARKER_125";
   writeFileSync(tokenPath, `${tokenBytes}\n`);
-  built.github.setTokenLoginHandler(() => {
+  built.github.setTokenAccessHandler(() => {
     throw new Error(`HTTP 401: Bad credentials for ${tokenBytes}`);
   });
 
@@ -174,10 +174,10 @@ test("reviewer spawn validates non-empty gh_token_file credentials before promot
 
   const match = results.find((r) => r.task_id === taskId);
   expect(match?.action).toBe("spawn_substrate_failed");
-  expect(match?.error).toContain("token is invalid or expired");
+  expect(match?.error).toContain("token is invalid, expired");
   expect(match?.error).toContain("HTTP 401");
   expect(match?.error).not.toContain(tokenBytes);
-  expect(built.github.tokenLoginCalls).toEqual([{ repoId, token: tokenBytes }]);
+  expect(built.github.tokenAccessCalls).toEqual([{ repoId, token: tokenBytes }]);
   expect(built.tmux.spawnCalls).toHaveLength(0);
   expect(reviewAttemptSpawnedAt(h, attemptId)).toBeNull();
   expect(reviewInfraFailureEventCount(h, taskId)).toBe(0);

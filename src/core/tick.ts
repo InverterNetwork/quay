@@ -3099,7 +3099,7 @@ function preflightReviewerGhTokenFile(
   }
 
   try {
-    deps.github.probeTokenLogin(task.repo_id, token);
+    deps.github.probeTokenAccess(task.repo_id, token);
   } catch (err) {
     const message = redactSecret(
       err instanceof Error ? err.message : String(err),
@@ -3107,7 +3107,7 @@ function preflightReviewerGhTokenFile(
     );
     return {
       ok: false,
-      error: `reviewer gh_token_file (${tokenFile}) token is invalid or expired: ${message}`,
+      error: `reviewer gh_token_file (${tokenFile}) token is invalid, expired, or cannot access the repository: ${message}`,
     };
   }
 

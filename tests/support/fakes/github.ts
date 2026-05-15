@@ -18,9 +18,8 @@ export class FakeGitHub implements GitHubPort {
   readonly snapshotsByNumber = new Map<string, PrSnapshot | null>();
   readonly prViews = new Map<string, PullRequestView | null>();
   readonly postedReviews = new Map<string, PostedReview | null>();
-  readonly tokenLoginCalls: { repoId: string; token: string }[] = [];
-  private tokenLoginHandler: (repoId: string, token: string) => string = () =>
-    "fake-reviewer";
+  readonly tokenAccessCalls: { repoId: string; token: string }[] = [];
+  private tokenAccessHandler: (repoId: string, token: string) => void = () => {};
 
   prExistsForBranch(repoId: string, branch: string): boolean {
     this.calls.push({ repoId, branch });
@@ -103,13 +102,13 @@ export class FakeGitHub implements GitHubPort {
     this.postedReviews.set(`${repoId}\0${prNumber}\0${headSha}`, review);
   }
 
-  probeTokenLogin(repoId: string, token: string): string {
-    this.tokenLoginCalls.push({ repoId, token });
-    return this.tokenLoginHandler(repoId, token);
+  probeTokenAccess(repoId: string, token: string): void {
+    this.tokenAccessCalls.push({ repoId, token });
+    this.tokenAccessHandler(repoId, token);
   }
 
-  setTokenLoginHandler(handler: (repoId: string, token: string) => string): void {
-    this.tokenLoginHandler = handler;
+  setTokenAccessHandler(handler: (repoId: string, token: string) => void): void {
+    this.tokenAccessHandler = handler;
   }
 }
 

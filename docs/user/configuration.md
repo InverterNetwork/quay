@@ -114,11 +114,18 @@ exported as `GH_TOKEN`; the worker pane is unaffected and continues to use
 the host's default `gh` auth. The path lands in the pane wrapper script — the
 token bytes themselves never appear in any process argv, so `ps` on the host
 cannot leak them. Rotation is transparent: write the new token to the file
-and the next reviewer attempt picks it up. A missing or empty file is a hard
-spawn failure (`spawn_substrate_failed`), so silent fall-back to the host
-auth (and the resulting self-review block) is impossible. Pair this with an
-out-of-band token minter (e.g. an `hermes-agent` systemd timer that refreshes
-a GitHub App installation token).
+and the next reviewer attempt picks it up.
+
+When `gh_token_file` is configured, Quay validates the file before spawning
+the reviewer. A missing or empty file is a hard spawn failure
+(`spawn_substrate_failed`), so silent fall-back to the host auth (and the
+resulting self-review block) is impossible. A non-empty token is also probed
+against the target repository with `gh api repos/{owner}/{repo}` before the
+review attempt is promoted. Invalid, expired, or repo-inaccessible tokens fail
+as `spawn_substrate_failed` and stay out of the reviewer
+`review_infra_failed` retry accounting. Pair this with an out-of-band token
+minter (e.g. an `hermes-agent` systemd timer that refreshes a GitHub App
+installation token).
 
 ## Agent Invocation
 
