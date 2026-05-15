@@ -154,8 +154,9 @@ quay review-pr --pr <repo>:<num> \
 
 `review-pr` is the fire-and-forget enrollment/poke entry point for the Quay reviewer. The
 repo portion may be the configured `repo_id` or the owner/name derived from the
-registered repo URL. The command prints one JSON object with `scheduled` and
-`skipped_reason` so callers can distinguish new work from an idempotent no-op.
+registered repo URL. The command prints one JSON object with `scheduled`,
+`pending_ci`, and `skipped_reason` so callers can distinguish newly scheduled
+work, durable CI-gated enrollment, and idempotent no-ops.
 Reviewer overrides are snapshotted on synthetic review tasks. After a synthetic
 PR is enrolled once, tick polls it by PR number until merge/close and schedules
 new-head reviews itself; repeated CI/webhook calls remain safe latency helpers.

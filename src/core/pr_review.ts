@@ -184,75 +184,6 @@ export function enterReview(
       for (const tag of tags) insertTag.run(task.task_id, tag, now);
     }
 
-    const existingRequest = deps.db
-      .query<ReviewRequestRow, [string, string]>(
-        `SELECT request_id
-           FROM review_requests
-          WHERE task_id = ?
-            AND head_sha = ?
-          LIMIT 1`,
-      )
-      .get(task.task_id, headSha);
-    if (!existingRequest) {
-      const inserted = deps.db
-        .query<ReviewRequestRow, [string, string, number, string, string, string, string | null, string | null, string | null, string | null, string]>(
-          `INSERT INTO review_requests (
-             task_id, repo_id, pr_number, head_sha, source, status,
-             tags_json, reviewer_agent, reviewer_model, requested_by,
-             created_at, updated_at
-           ) VALUES (?, ?, ?, ?, 'review-pr', ?, ?, ?, ?, ?, ?, ?)
-           RETURNING request_id`,
-        )
-        .get(
-          task.task_id,
-          input.repoId,
-          input.prNumber,
-          headSha,
-          shouldScheduleNow ? "scheduled" : "pending_ci",
-          tags.length > 0 ? JSON.stringify(tags) : null,
-          input.reviewerAgent ?? null,
-          input.reviewerModel ?? null,
-          null,
-          now,
-          now,
-        );
-      if (!inserted) throw new Error("review request insert returned no row");
-      deps.db
-        .query(
-          `UPDATE review_requests
-              SET status = 'superseded',
-                  superseded_by_request_id = ?,
-                  updated_at = ?
-            WHERE task_id = ?
-              AND request_id <> ?
-              AND head_sha <> ?
-              AND status = 'pending_ci'`,
-        )
-        .run(inserted.request_id, now, task.task_id, inserted.request_id, headSha);
-    } else {
-      deps.db
-        .query(
-          `UPDATE review_requests
-              SET updated_at = ?
-            WHERE request_id = ?`,
-        )
-        .run(now, existingRequest.request_id);
-    }
-
-    if (!shouldScheduleNow) {
-      deps.db.exec("COMMIT");
-      killSupersededWorkers(deps.tmux, supersededSessions);
-      return {
-        task_id: task.task_id,
-        attempt_id: null,
-        state: readTaskState(deps.db, task.task_id) ?? task.state,
-        review_verdict: null,
-        scheduled: false,
-        pending_ci: true,
-        skipped_reason: null,
-      };
-    }
-
     const toSupersede = deps.db
       .query<SupersededAttemptRow, [string, string]>(
         `SELECT tmux_session
@@ -330,6 +261,90 @@ export function enterReview(
         scheduled: false,
         pending_ci: false,
         skipped_reason: "terminal_verdict_exists",
+      };
+    }
+
+    const existingRequest = deps.db
+      .query<ReviewRequestRow, [string, string]>(
+        `SELECT request_id
+           FROM review_requests
+          WHERE task_id = ?
+            AND head_sha = ?
+          LIMIT 1`,
+      )
+      .get(task.task_id, headSha);
+    if (!existingRequest) {
+      const inserted = deps.db
+        .query<
+          ReviewRequestRow,
+          [
+            string,
+            string,
+            number,
+            string,
+            string,
+            string | null,
+            string | null,
+            string | null,
+            string | null,
+            string,
+            string,
+          ]
+        >(
+          `INSERT INTO review_requests (
+             task_id, repo_id, pr_number, head_sha, source, status,
+             tags_json, reviewer_agent, reviewer_model, requested_by,
+             created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'review-pr', ?, ?, ?, ?, ?, ?, ?)
+           RETURNING request_id`,
+        )
+        .get(
+          task.task_id,
+          input.repoId,
+          input.prNumber,
+          headSha,
+          "pending_ci",
+          tags.length > 0 ? JSON.stringify(tags) : null,
+          input.reviewerAgent ?? null,
+          input.reviewerModel ?? null,
+          null,
+          now,
+          now,
+        );
+      if (!inserted) throw new Error("review request insert returned no row");
+      deps.db
+        .query(
+          `UPDATE review_requests
+              SET status = 'superseded',
+                  superseded_by_request_id = ?,
+                  updated_at = ?
+            WHERE task_id = ?
+              AND request_id <> ?
+              AND head_sha <> ?
+              AND status = 'pending_ci'`,
+        )
+        .run(inserted.request_id, now, task.task_id, inserted.request_id, headSha);
+    } else {
+      deps.db
+        .query(
+          `UPDATE review_requests
+              SET updated_at = ?
+            WHERE request_id = ?`,
+        )
+        .run(now, existingRequest.request_id);
+    }
+
+    if (!shouldScheduleNow) {
+      deps.db.exec("COMMIT");
+      killSupersededWorkers(deps.tmux, supersededSessions);
+      return {
+        task_id: task.task_id,
+        attempt_id: null,
+        state: readTaskState(deps.db, task.task_id) ?? task.state,
+        review_verdict: null,
+        scheduled: false,
+        pending_ci: true,
+        skipped_reason: null,
       };
     }
 

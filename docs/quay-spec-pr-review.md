@@ -638,13 +638,14 @@ The entry point's dedup is the only idempotency guarantee:
 stdout, one JSON object:
 
 ```json
-{"task_id":"<id>","attempt_id":123,"state":"pr-review","review_verdict":null,"scheduled":true,"skipped_reason":null}
+{"task_id":"<id>","attempt_id":123,"state":"pr-review","review_verdict":null,"scheduled":true,"pending_ci":false,"skipped_reason":null}
 ```
 
-- `attempt_id` is the scheduled-or-already-existing review-only attempt at the requested SHA, or `null` when no attempt is created because the Quay-owned gate is disabled.
+- `attempt_id` is the scheduled-or-already-existing review-only attempt at the requested SHA, or `null` when no attempt is created because the request is waiting on CI or the Quay-owned gate is disabled.
 - `state` is the task's state after the call (`pr-review`, or unchanged if the call is a no-op).
 - `review_verdict` is the attempt's `attempts.review_verdict`, or `null` when no attempt exists yet or the reviewer has not run.
 - `scheduled` is `true` only when this invocation inserted a new review attempt.
+- `pending_ci` is `true` when the invocation recorded a durable review request but did not schedule a reviewer because checks are pending, stale, or failing. Tick owns scheduling that request once CI is green.
 - `skipped_reason` is `null` for scheduled work, `"active_attempt_exists"` for active dedup, `"terminal_verdict_exists"` when this SHA already has a real verdict, or `"quay_owned_gate_disabled"` when the PR resolved to a Quay-owned task and `gate_quay_owned_done = false`.
 
 Exit codes:
@@ -656,7 +657,7 @@ Exit codes:
 | 3 | GitHub-side error (`pr_not_found`, `github_unreachable`). |
 | 4 | Quay-side error (DB unreachable, unexpected state). |
 
-CI workflows treat exit 0 as "Quay accepted this trigger"; `scheduled` and `skipped_reason` say whether a review worker was actually scheduled. Exit non-zero means "Quay couldn't accept this trigger; investigate." There is no exit code for "review filed" — that information lives on GitHub, not in this CLI.
+CI workflows treat exit 0 as "Quay accepted this trigger"; `scheduled`, `pending_ci`, and `skipped_reason` say whether a review worker was scheduled, durably queued behind CI, or skipped as an idempotent no-op. Exit non-zero means "Quay couldn't accept this trigger; investigate." There is no exit code for "review filed" — that information lives on GitHub, not in this CLI.
 
 ## 8. References, dependencies, and forward compatibility
 
