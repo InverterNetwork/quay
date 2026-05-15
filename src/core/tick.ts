@@ -1521,7 +1521,6 @@ function finalizeApprovedReviewBlockedByCi(
 ): TickTaskResult {
   const now = deps.clock.nowISO();
   const content = reviewArtifactContent(posted, task.head_sha);
-  const codePreambleId = loadLatestCodePreambleId(deps.db) ?? task.preamble_id;
   const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
 
   deps.db.exec("BEGIN IMMEDIATE");
@@ -1567,7 +1566,7 @@ function finalizeApprovedReviewBlockedByCi(
       {
         attempt_id: task.attempt_id,
         attempt_number: task.attempt_number,
-        preamble_id: codePreambleId,
+        preamble_id: task.preamble_id,
       },
       snapshot,
       "pr-review",
@@ -1593,7 +1592,6 @@ function finalizeStaleApprovedReviewBlockedByCi(
   snapshot: PrSnapshot,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
-  const codePreambleId = loadLatestCodePreambleId(deps.db) ?? task.preamble_id;
   const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
 
   deps.db.exec("BEGIN IMMEDIATE");
@@ -1612,7 +1610,7 @@ function finalizeStaleApprovedReviewBlockedByCi(
       {
         attempt_id: task.attempt_id,
         attempt_number: task.attempt_number,
-        preamble_id: codePreambleId,
+        preamble_id: task.preamble_id,
       },
       snapshot,
       "pr-review",
@@ -1836,13 +1834,11 @@ function finalizePostedReview(
 
   if (handOffToRespawn) {
     const cap = options.maxNonBudgetRespawns ?? DEFAULT_MAX_NON_BUDGET_RESPAWNS;
-    const codePreambleId = loadLatestCodePreambleId(deps.db) ?? task.preamble_id;
     const result = scheduleNonBudgetRespawn(deps, {
       taskId: task.task_id,
       prevAttempt: {
         attempt_id: task.attempt_id,
         attempt_number: task.attempt_number,
-        preamble_id: codePreambleId,
       },
       reason: "review",
       diagnostics: `Quay reviewer marked CHANGES_REQUESTED in review ${posted.reviewId}.`,
@@ -2001,18 +1997,6 @@ function reviewArtifactContent(posted: PostedReview, headSha: string): string {
     body: posted.body,
     comments: posted.comments,
   });
-}
-
-function loadLatestCodePreambleId(db: DB): number | null {
-  const row = db
-    .query<{ preamble_id: number }, []>(
-      `SELECT preamble_id FROM preambles
-        WHERE kind = 'code'
-        ORDER BY preamble_id DESC
-        LIMIT 1`,
-    )
-    .get();
-  return row?.preamble_id ?? null;
 }
 
 function loadMostRecentNonReviewBrief(db: DB, taskId: string): string | undefined {

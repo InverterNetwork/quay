@@ -6,7 +6,7 @@ import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitHubPort, PullRequestView } from "../ports/github.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
-import { ensureReviewerPreambleId, loadPreambleBody } from "./preamble.ts";
+import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 
 export const SYNTHETIC_PR_REVIEW_PREFIX = "pr-review-";
 
@@ -141,7 +141,11 @@ export function enterReview(
     existing ?? createSyntheticTask(deps, input.repoId, input.prNumber, pr, now);
   const synthetic = isSyntheticTaskId(task.task_id);
   const tags = dedupeTags(input.tags ?? []);
-  const preambleId = ensureReviewerPreambleId(deps.db, deps.clock);
+  const preambleId = ensurePreambleIdForAttemptReason(
+    deps.db,
+    deps.clock,
+    "review_only",
+  );
   const preamble = loadPreambleBody(deps.db, preambleId);
   const brief = synthetic
     ? composeSyntheticBrief(pr)

@@ -214,6 +214,10 @@ export const DEFAULT_REVIEWER_PREAMBLE_BODY = [
 
 export type PreambleKind = "code" | "review";
 
+export function preambleKindForAttemptReason(reason: string): PreambleKind {
+  return reason === "review_only" ? "review" : "code";
+}
+
 export function ensurePreambleId(
   db: DB,
   clock: Clock,
@@ -237,8 +241,16 @@ export function ensurePreambleId(
   return inserted.preamble_id;
 }
 
+export function ensurePreambleIdForAttemptReason(
+  db: DB,
+  clock: Clock,
+  reason: string,
+): number {
+  return ensurePreambleId(db, clock, preambleKindForAttemptReason(reason));
+}
+
 export function ensureReviewerPreambleId(db: DB, clock: Clock): number {
-  return ensurePreambleId(db, clock, "review");
+  return ensurePreambleIdForAttemptReason(db, clock, "review_only");
 }
 
 export function loadPreambleBody(db: DB, preambleId: number): string {

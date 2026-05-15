@@ -22,7 +22,7 @@ import { readFileSync } from "node:fs";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
-import { loadPreambleBody } from "./preamble.ts";
+import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 
 export type NonBudgetReason = "review" | "conflict";
 
@@ -35,7 +35,6 @@ export interface NonBudgetRetryDeps {
 export interface NonBudgetAttemptRef {
   attempt_id: number;
   attempt_number: number;
-  preamble_id: number;
 }
 
 export interface NonBudgetInput {
@@ -145,6 +144,11 @@ export function scheduleNonBudgetRespawn(
 
     // Schedule a new attempt with consumed_budget = 0.
     const template = ensureNonBudgetTemplate(deps.db, deps.clock, input.reason);
+    const preambleId = ensurePreambleIdForAttemptReason(
+      deps.db,
+      deps.clock,
+      input.reason,
+    );
     const priorBrief = loadMostRecentBrief(deps.db, input.taskId);
     const retryBrief = composeNonBudgetBrief({
       reason: input.reason,
@@ -166,7 +170,7 @@ export function scheduleNonBudgetRespawn(
       .get(
         input.taskId,
         input.prevAttempt.attempt_number + 1,
-        input.prevAttempt.preamble_id,
+        preambleId,
         template.template_id,
         input.reason,
       );
@@ -179,7 +183,7 @@ export function scheduleNonBudgetRespawn(
       content: retryBrief,
       extension: "md",
     });
-    const preamble = loadPreambleBody(deps.db, input.prevAttempt.preamble_id);
+    const preamble = loadPreambleBody(deps.db, preambleId);
     deps.artifactStore.writeArtifact({
       taskId: input.taskId,
       attemptId: attempt.attempt_id,
@@ -276,9 +280,13 @@ function ensureNonBudgetTemplate(
 function loadMostRecentBrief(db: DB, taskId: string): string {
   const row = db
     .query<{ file_path: string }, [string]>(
-      `SELECT file_path FROM artifacts
-        WHERE task_id = ? AND kind = 'brief'
-        ORDER BY artifact_id DESC
+      `SELECT ar.file_path
+         FROM artifacts ar
+         JOIN attempts a ON a.attempt_id = ar.attempt_id
+        WHERE ar.task_id = ?
+          AND ar.kind = 'brief'
+          AND a.reason <> 'review_only'
+        ORDER BY ar.artifact_id DESC
         LIMIT 1`,
     )
     .get(taskId);
