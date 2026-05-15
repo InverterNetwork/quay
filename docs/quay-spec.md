@@ -206,7 +206,7 @@ Each task is processed in its own try/except. A failing per-task check logs the 
 - Where the pseudocode below says **"schedule non-budget respawn: reason = X"** (only for `review` and `conflict`), the canonical semantics are **increment-then-compare-then-decide**, in a single SQL transaction. `max_non_budget_respawns` is the **count of allowed respawns**: with cap = N, the Nth respawn schedules; the (N+1)th parks.
   1. Increment `tasks.non_budget_respawns_consumed` by 1.
   2. If the **post-increment** value is **greater than** `max_non_budget_respawns`: do **not** schedule a new attempt — transition to `non_budget_loop` (parked) and write `non_budget_loop_parked` event. Do not persist a `last_failure` artifact (the trigger is external state, not a failure to retry). Note: the increment is still committed; the counter records the rejected attempt for forensics and prevents a tie/race from re-trying.
-  3. Else (post-increment ≤ cap): schedule a new attempt row (`spawned_at = NULL`, `consumed_budget = 0`) with the given reason; record the dedupe key (`last_review_id_acted_on` / `last_conflict_observation`); transition to `queued`. Tick later promotes the row without touching `attempts_consumed`.
+  3. Else (post-increment ≤ cap): schedule a new attempt row (`spawned_at = NULL`, `consumed_budget = 0`) with the given reason; record the dedupe key(s) (`last_review_id_acted_on` / `last_conflict_observation`); transition to `queued`. Tick later promotes the row without touching `attempts_consumed`. If the `done` poll observes a fresh merge conflict and fresh `CHANGES_REQUESTED` review together, this is still one non-budget respawn: write both trigger artifacts, compose one combined worker brief, and record both dedupe keys in the same successful transaction.
   - This rule is identical for `pr-open` and `done` — every site that uses non-budget respawns goes through the same routine.
   - Worked example with `max_non_budget_respawns = 20`: respawns #1 through #20 each pass step 3 (post-increment values 1..20, all ≤ 20). Respawn #21 fails step 2 (post-increment 21 > 20) and parks. Total respawns scheduled before parking: exactly 20.
 - `quay submit-brief --reason blocker_resolved` errors if `budget_exhausted = true` (orchestrator must use `escalate-human` or `cancel`). `submit-brief --reason advice_answered` is allowed even when `budget_exhausted = true` (it doesn't consume).
@@ -399,11 +399,21 @@ for each task in active states:
       pr = gh pr view
       check state: merged → cleanup, transition → merged
                    closed → cleanup, transition → closed_unmerged
-      check mergeable: CONFLICTING and (head_sha:base_sha) != last_conflict_observation
-                       → snapshot conflict slice;
+      collect actionable PR-side observations before scheduling:
+        conflict = mergeable: CONFLICTING and (head_sha:base_sha) != last_conflict_observation
+        review = CHANGES_REQUESTED and latest_review_id != last_review_id_acted_on
+      if conflict and review
+                    → snapshot conflict slice and review comments;
+                      schedule one non-budget respawn: reason = conflict
+                      (combined brief tells the worker to resolve the conflict,
+                       address the review comments, push the existing branch,
+                       and update the existing PR; canonical rule applies;
+                       record both last_conflict_observation and
+                       last_review_id_acted_on in the same txn)
+      else if conflict → snapshot conflict slice;
                          schedule non-budget respawn: reason = conflict
                          (canonical rule applies; record last_conflict_observation in the same txn)
-      check review: CHANGES_REQUESTED and latest_review_id != last_review_id_acted_on
+      else if review
                     → snapshot comments;
                       schedule non-budget respawn: reason = review
                       (canonical rule applies; record last_review_id_acted_on in the same txn)
@@ -659,6 +669,7 @@ The preamble is stored in SQL in a `preambles` table. A change is a new row, app
 | **Human-required** | Orchestrator decides the blocker needs a human (calls Quay to record the question and transition to `waiting_human`) | Orchestrator posts/waits in Slack, records the answer through `record-human-reply`, then submits the next brief via `submit-brief --reason advice_answered`. | Does NOT consume |
 | **Review feedback** | `gh pr view` reports `reviewDecision = CHANGES_REQUESTED` | Template + review comments + most-recent brief. **Quay-side, deterministic.** | Does NOT consume |
 | **Merge conflict** | `gh pr view` reports `mergeable: CONFLICTING` (in `pr-open` or `done`) | Template + conflict slice (mergeable status, conflicting files) + most-recent brief. **Quay-side, deterministic.** | Does NOT consume |
+| **Combined conflict + review feedback** | The `done` poll sees both a fresh merge conflict and a fresh `CHANGES_REQUESTED` review | One conflict-priority respawn brief that includes conflict diagnostics and the review comments. Writes both `conflict_slice` and `review_comments`, records both dedupe keys, and increments `non_budget_respawns_consumed` once. **Quay-side, deterministic.** | Does NOT consume |
 | **Budget pause** | (Reserved.) Daily or per-task cap engine. Not exercised in v1. | Unchanged from what would compose anyway. | Orthogonal |
 
 ### Common mechanics
@@ -670,6 +681,7 @@ The preamble is stored in SQL in a `preambles` table. A change is a new row, app
 - **Non-budget respawn dedup.** Review feedback and merge conflict respawns don't consume budget, but they must not loop on the same observation. Quay records what it last acted on per task:
   - `last_review_id_acted_on` — the most recent review id Quay respawned against. Tick only triggers a `review` respawn if `gh pr view` reports a *newer* review id. Stale CHANGES_REQUESTED on a SHA Quay already addressed does not re-trigger.
   - `last_conflict_observation` — encodes the `(head_sha, base_sha)` pair Quay last respawned against. Tick only triggers a `conflict` respawn if either has advanced. Polling the same conflict over and over does not re-trigger.
+  - If both observations are fresh in the same `done` poll, Quay schedules a single conflict-priority respawn and records both dedupe keys together. A later tick on the same conflict/review pair must not schedule a second review-only or conflict-only respawn.
   - `advice_answered` is orchestrator-owned: each recorded human answer leads to one follow-up brief submission under the same claim.
 - **Non-budget safety cap.** A separate counter `non_budget_respawns_consumed` (default cap `max_non_budget_respawns = 20`) catches cases the dedupe keys miss. If exceeded, task transitions to `non_budget_loop` (parked, manual recovery via `quay cancel`).
 - **Retry budget rules:**
@@ -1414,7 +1426,8 @@ The v1 test suite must cover the following cases. Each is a state-machine integr
 7. **CI passes, PR sits, human closes without merge.** Transition through `done` → `closed_unmerged`.
 8. **Reviewer marks `CHANGES_REQUESTED`.** Asserts: review comments artifact, re-queue with deterministic review brief, budget **not** consumed.
 9. **Merge conflict appears in `done`.** Asserts: conflict slice artifact, re-queue with deterministic conflict brief, budget **not** consumed.
-10. **Force-push to PR branch mid-task.** Tick picks up the new SHA's CI run cleanly without confusion.
+10. **Merge conflict and fresh `CHANGES_REQUESTED` both appear in `done`.** Asserts: one non-budget conflict-priority respawn, both trigger artifacts, combined worker brief, both dedupe markers updated, counter incremented once, budget **not** consumed.
+11. **Force-push to PR branch mid-task.** Tick picks up the new SHA's CI run cleanly without confusion.
 
 ### Escalation
 
@@ -1511,7 +1524,8 @@ The v1 test suite must cover the following cases. Each is a state-machine integr
 49. **New review filed after a review respawn.** Asserts: new `latest_review_id` triggers a fresh review respawn; `last_review_id_acted_on` updated; `non_budget_respawns_consumed` incremented.
 50. **Same conflict polled repeatedly without push.** Asserts: tick does NOT re-respawn (`last_conflict_observation` matches `head_sha:base_sha`).
 51. **Conflict re-respawned after a force-push that didn't resolve it.** Asserts: new head_sha → new observation → fresh respawn.
-52. **Non-budget safety cap (off-by-one boundary).** Set `max_non_budget_respawns = 3`. Synthetically trigger 4 distinct review or conflict events (each with a fresh dedupe key). Asserts: respawns #1, #2, #3 are scheduled normally and `non_budget_respawns_consumed` ticks 1→2→3; on event #4, the increment to 4 exceeds the cap and the task transitions to `non_budget_loop`; `non_budget_loop_parked` event logged; counter is recorded as 4 (post-increment, for forensics); tick stops cycling. Confirms the rule "cap N allows N respawns, parks on the (N+1)th."
+51a. **Same combined conflict/review pair polled after the combined respawn.** Asserts: tick does NOT schedule a second respawn because both `last_conflict_observation` and `last_review_id_acted_on` were recorded by the combined trigger.
+52. **Non-budget safety cap (off-by-one boundary).** Set `max_non_budget_respawns = 3`. Synthetically trigger 4 distinct review or conflict events (each with a fresh dedupe key). Asserts: respawns #1, #2, #3 are scheduled normally and `non_budget_respawns_consumed` ticks 1→2→3; on event #4, the increment to 4 exceeds the cap and the task transitions to `non_budget_loop`; `non_budget_loop_parked` event logged; counter is recorded as 4 (post-increment, for forensics); tick stops cycling. A combined conflict/review trigger counts as one event. Confirms the rule "cap N allows N respawns, parks on the (N+1)th."
 
 ### `pr-open` PR state polling
 
