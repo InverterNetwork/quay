@@ -1150,6 +1150,14 @@ function finalizePrTerminal(
   fromState: PrTerminalFromState,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
+  const activeReviewers =
+    fromState === "pr-review"
+      ? loadActiveReviewersForTask(deps.db, task.task_id)
+      : [];
+
+  if (activeReviewers.length > 0) {
+    collectReviewAttemptArtifactsForRows(deps, task, activeReviewers);
+  }
 
   // Step 1: branch + worktree cleanup per the §5 cleanup matrix.
   applyTerminalCleanup(deps, task, terminal);
@@ -1182,15 +1190,6 @@ function finalizePrTerminal(
       // and collect their tmux sessions for a post-commit kill. Mirrors
       // enterReview's supersede-on-new-SHA pattern. reapAbandonedReviewers
       // closes the crash window between this COMMIT and the kill loop.
-      const activeReviewers = deps.db
-        .query<{ tmux_session: string | null }, [string]>(
-          `SELECT tmux_session
-             FROM attempts
-            WHERE task_id = ?
-              AND reason = 'review_only'
-              AND ended_at IS NULL`,
-        )
-        .all(task.task_id);
       for (const row of activeReviewers) {
         if (row.tmux_session !== null) {
           reviewerSessionsToKill.push(row.tmux_session);
@@ -1247,6 +1246,47 @@ function finalizePrTerminal(
     task_id: task.task_id,
     action: terminal === "merged" ? "pr_merged" : "pr_closed_unmerged",
   };
+}
+
+interface ActiveReviewerAttemptRow {
+  attempt_id: number;
+  tmux_session: string | null;
+}
+
+function loadActiveReviewersForTask(
+  db: DB,
+  taskId: string,
+): ActiveReviewerAttemptRow[] {
+  return db
+    .query<ActiveReviewerAttemptRow, [string]>(
+      `SELECT attempt_id, tmux_session
+         FROM attempts
+        WHERE task_id = ?
+          AND reason = 'review_only'
+          AND ended_at IS NULL`,
+    )
+    .all(taskId);
+}
+
+function collectReviewAttemptArtifactsForRows(
+  deps: TickDeps,
+  task: PrTerminalRow,
+  attempts: ActiveReviewerAttemptRow[],
+): void {
+  for (const attempt of attempts) {
+    collectUsageArtifact(
+      deps,
+      task.task_id,
+      attempt.attempt_id,
+      task.worktree_path,
+    );
+    collectToolTraceArtifact(
+      deps,
+      task.task_id,
+      attempt.attempt_id,
+      task.worktree_path,
+    );
+  }
 }
 
 function applyTerminalCleanup(
@@ -1708,6 +1748,7 @@ function finalizeApprovedReviewBlockedByCi(
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
 ): TickTaskResult {
+  collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   const content = reviewArtifactContent(posted, task.head_sha);
   const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
@@ -1780,6 +1821,7 @@ function finalizeStaleApprovedReviewBlockedByCi(
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
 ): TickTaskResult {
+  collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
 
@@ -1824,6 +1866,7 @@ function finalizeApprovedReviewBackToPrOpen(
   exitInfo: PaneExitInfo,
   verdict: "approved" | "superseded",
 ): void {
+  collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -1924,6 +1967,7 @@ function finalizePostedReview(
   exitInfo: PaneExitInfo,
   options: TickOptions,
 ): TickTaskResult {
+  collectReviewAttemptArtifacts(deps, task);
   const verdict =
     posted.decision === "APPROVED" ? "approved" : "changes_requested";
   const content = reviewArtifactContent(posted, task.head_sha);
@@ -2062,6 +2106,7 @@ function markReviewInfraFailure(
   exitInfo: PaneExitInfo,
   options: TickOptions,
 ): TickTaskResult {
+  collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   const sameSha = task.review_infra_failure_head_sha === task.head_sha;
   const failures = sameSha ? task.review_infra_failures_consecutive + 1 : 1;
@@ -2176,6 +2221,19 @@ function markReviewInfraFailure(
     task_id: task.task_id,
     action: parking ? "non_budget_loop_parked" : "review_retry_scheduled",
   };
+}
+
+function collectReviewAttemptArtifacts(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+): void {
+  collectUsageArtifact(deps, task.task_id, task.attempt_id, task.worktree_path);
+  collectToolTraceArtifact(
+    deps,
+    task.task_id,
+    task.attempt_id,
+    task.worktree_path,
+  );
 }
 
 function reviewArtifactContent(posted: PostedReview, headSha: string): string {

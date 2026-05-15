@@ -5,7 +5,7 @@
 // processPrOpenTask / processDoneTask: poll prSnapshot once per task tick
 // before touching review attempts.
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tick_once } from "../../src/core/tick.ts";
 import { syntheticTaskId } from "../../src/core/pr_review.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
@@ -26,6 +26,14 @@ test("pr-review task with externally-merged PR transitions to merged and reaps r
   const taskId = "task-review-merged";
   const worktreePath = `${h.dataDir}/worktrees/review-merged`;
   mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(
+    `${worktreePath}/.quay-usage.json`,
+    JSON.stringify({ model: "claude-test", usage: { input_tokens: 13 } }),
+  );
+  writeFileSync(
+    `${worktreePath}/.quay-tool-trace.log`,
+    "terminal reviewer trace\n",
+  );
   h.db
     .query(
       `INSERT INTO tasks (
@@ -109,6 +117,22 @@ test("pr-review task with externally-merged PR transitions to merged and reaps r
   // Worktree + local branch cleaned up; remote left to GitHub on merge.
   expect(existsSync(worktreePath)).toBe(false);
   expect(built.git.localBranches.get(repoId)?.has(`quay/${taskId}`)).toBeFalsy();
+
+  // Usage + tool trace are captured before terminal cleanup removes the
+  // reviewer worktree.
+  const observabilityArtifacts = h.db
+    .query<{ kind: string; n: number }, [string, number]>(
+      `SELECT kind, COUNT(*) AS n FROM artifacts
+        WHERE task_id = ? AND attempt_id = ?
+          AND kind IN ('usage', 'tool_trace')
+        GROUP BY kind
+        ORDER BY kind`,
+    )
+    .all(taskId, attemptId);
+  expect(observabilityArtifacts).toEqual([
+    { kind: "tool_trace", n: 1 },
+    { kind: "usage", n: 1 },
+  ]);
 
   // Event recorded with from_state = pr-review.
   const evt = h.db
