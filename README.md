@@ -172,7 +172,7 @@ quay enqueue --repo <id> --brief-file <p>  # legacy enqueue (operator-composed b
 quay enqueue --linear-issue <ENG-1234>     # Linear-adapter enqueue (target repo
                                            # comes from the ticket's `repo:` field;
                                            # `--repo <id>` is an optional override)
-quay review-pr --pr <owner/repo>:<num>     # CI entry point for synthetic/Quay PR review
+quay review-pr --pr <owner/repo>:<num>     # enroll/poke synthetic/Quay PR review
 quay validate-ticket [--ticket-json <p|->] [--schema-file <p>] [--quiet]
                                            # standalone validator: JSON in, JSON out
 

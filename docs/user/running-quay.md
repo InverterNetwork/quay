@@ -83,7 +83,9 @@ For `pr-review`:
 - Reviewer changes requested on a Quay-owned PR: schedules a non-budget
   `review` respawn and returns to `queued`.
 - Reviewer changes requested on a synthetic PR: transitions to
-  `waiting_external_changes` until CI calls `quay review-pr` for a new SHA.
+  `waiting_external_changes`; tick keeps polling the PR by number and schedules
+  a fresh `review_only` attempt when the PR head SHA changes. CI/webhook/manual
+  `quay review-pr` calls are safe idempotent pokes, not required re-entry.
 - Reviewer infrastructure failures retry at the same SHA twice, then park in
   `non_budget_loop`.
 
@@ -91,6 +93,8 @@ For `done`:
 
 - Merged PR: terminal `merged`.
 - Closed unmerged PR: terminal `closed_unmerged`.
+- Synthetic PR with a new head SHA: returns to `pr-review` with one fresh
+  `review_only` attempt.
 - Merge conflict: schedules a non-budget `conflict` respawn.
 - Latest review decision `CHANGES_REQUESTED`: schedules a non-budget
   `review` respawn.

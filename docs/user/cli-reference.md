@@ -152,11 +152,13 @@ quay review-pr --pr <repo>:<num> \
   [--tag <tag>]...
 ```
 
-`review-pr` is the fire-and-forget CI entry point for the Quay reviewer. The
+`review-pr` is the fire-and-forget enrollment/poke entry point for the Quay reviewer. The
 repo portion may be the configured `repo_id` or the owner/name derived from the
 registered repo URL. The command prints one JSON object with `scheduled` and
 `skipped_reason` so callers can distinguish new work from an idempotent no-op.
-Reviewer overrides are snapshotted on synthetic review tasks.
+Reviewer overrides are snapshotted on synthetic review tasks. After a synthetic
+PR is enrolled once, tick polls it by PR number until merge/close and schedules
+new-head reviews itself; repeated CI/webhook calls remain safe latency helpers.
 
 ## Tick
 

@@ -218,6 +218,7 @@ type PrTerminalFromState =
   | "pr-review"
   | "awaiting-next-brief"
   | "claimed-by-orchestrator"
+  | "waiting_external_changes"
   | "waiting_human"
   | "non_budget_loop"
   | "worktree_error"
@@ -259,9 +260,25 @@ interface DoneTaskRow {
   repo_id: string;
   branch_name: string;
   worktree_path: string;
+  pr_number: number | null;
   cancel_requested_at: string | null;
   last_review_id_acted_on: string | null;
   last_conflict_observation: string | null;
+}
+
+type SyntheticReviewLifecycleState =
+  | "pr-review"
+  | "done"
+  | "waiting_external_changes";
+
+interface SyntheticReviewLifecycleTaskRow {
+  task_id: string;
+  repo_id: string;
+  state: SyntheticReviewLifecycleState;
+  branch_name: string;
+  worktree_path: string;
+  pr_number: number | null;
+  cancel_requested_at: string | null;
 }
 
 interface ClaimedTaskRow {
@@ -336,11 +353,19 @@ export async function tick_once(
     const runningSnapshot = readRunning(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
+    const syntheticReviewLifecycleSnapshot = readSyntheticReviewLifecycle(
+      deps.db,
+    ).filter((t) => !cancelledIds.has(t.task_id));
+    const syntheticReviewLifecycleIds = new Set(
+      syntheticReviewLifecycleSnapshot.map((t) => t.task_id),
+    );
     const prOpenSnapshot = readPrOpen(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
     const doneSnapshot = readDone(deps.db).filter(
-      (t) => !cancelledIds.has(t.task_id),
+      (t) =>
+        !cancelledIds.has(t.task_id) &&
+        !syntheticReviewLifecycleIds.has(t.task_id),
     );
     const parkedPrTerminalSnapshot = readParkedPrTerminal(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
@@ -383,6 +408,25 @@ export async function tick_once(
       try {
         const result = processDoneTask(deps, task, options);
         if (result !== null) results.push(result);
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
+    const syntheticReviewAttemptSkipIds = new Set<string>();
+    for (const task of syntheticReviewLifecycleSnapshot) {
+      try {
+        const result = processSyntheticReviewLifecycle(deps, task, options);
+        if (result !== null) {
+          results.push(result);
+          if (
+            result.action === "pr_merged" ||
+            result.action === "pr_closed_unmerged" ||
+            result.action === "review_requested"
+          ) {
+            syntheticReviewAttemptSkipIds.add(task.task_id);
+          }
+        }
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
       }
@@ -435,7 +479,9 @@ export async function tick_once(
       // pr-review must short-circuit to the terminal state instead of
       // respawning a reviewer pane onto an already-closed PR.
       const prReviewSnapshot = readPrReview(deps.db).filter(
-        (t) => !cancelledIds.has(t.task_id),
+        (t) =>
+          !cancelledIds.has(t.task_id) &&
+          !syntheticReviewLifecycleIds.has(t.task_id),
       );
       const terminalReviewIds = new Set<string>();
       for (const task of prReviewSnapshot) {
@@ -451,6 +497,7 @@ export async function tick_once(
       }
 
       for (const task of runningReviewSnapshot) {
+        if (syntheticReviewAttemptSkipIds.has(task.task_id)) continue;
         if (terminalReviewIds.has(task.task_id)) continue;
         try {
           const result = processRunningReviewAttempt(deps, task, options);
@@ -464,6 +511,7 @@ export async function tick_once(
         options.maxConcurrentReviewers ?? DEFAULT_MAX_CONCURRENT_REVIEWERS;
       let reviewerRunningCount = countRunningReviewers(deps.db);
       for (const task of pendingReviewSnapshot) {
+        if (syntheticReviewAttemptSkipIds.has(task.task_id)) continue;
         if (terminalReviewIds.has(task.task_id)) continue;
         if (reviewerRunningCount >= reviewCap) {
           results.push({ task_id: task.task_id, action: "skipped_capacity" });
@@ -591,10 +639,25 @@ function readDone(db: DB): DoneTaskRow[] {
   return db
     .query<DoneTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
-              cancel_requested_at, last_review_id_acted_on,
+              pr_number, cancel_requested_at, last_review_id_acted_on,
               last_conflict_observation
          FROM tasks
         WHERE state = 'done'
+        ORDER BY created_at, task_id`,
+    )
+    .all();
+}
+
+function readSyntheticReviewLifecycle(
+  db: DB,
+): SyntheticReviewLifecycleTaskRow[] {
+  return db
+    .query<SyntheticReviewLifecycleTaskRow, []>(
+      `SELECT task_id, repo_id, state, branch_name, worktree_path,
+              pr_number, cancel_requested_at
+         FROM tasks
+        WHERE task_id LIKE 'pr-review-%'
+          AND state IN ('pr-review', 'done', 'waiting_external_changes')
         ORDER BY created_at, task_id`,
     )
     .all();
@@ -1082,6 +1145,61 @@ function processDoneTask(
 
   clearTickError(deps, task.task_id);
   return null;
+}
+
+function processSyntheticReviewLifecycle(
+  deps: TickDeps,
+  task: SyntheticReviewLifecycleTaskRow,
+  options: TickOptions,
+): TickTaskResult | null {
+  if (task.cancel_requested_at !== null) return null;
+  if (task.pr_number === null) {
+    return recordTickError(
+      deps,
+      task.task_id,
+      new Error("synthetic review task has no pr_number"),
+    );
+  }
+
+  const attempt = loadLatestAttempt(deps.db, task.task_id);
+  if (!attempt) return null;
+
+  const snapshot = deps.github.prSnapshotByNumber(task.repo_id, task.pr_number);
+  if (snapshot === null) return null;
+  persistPrMetadata(deps, task.task_id, snapshot);
+
+  if (snapshot.state === "merged" || snapshot.state === "closed_unmerged") {
+    return finalizePrTerminal(deps, task, attempt, snapshot.state, task.state);
+  }
+
+  if (options.reviewerEnabled !== true) {
+    clearTickError(deps, task.task_id);
+    return null;
+  }
+
+  const result = enterReview(
+    {
+      db: deps.db,
+      clock: deps.clock,
+      github: deps.github,
+      artifactStore: deps.artifactStore,
+      tmux: deps.tmux,
+    },
+    {
+      repoId: task.repo_id,
+      prNumber: task.pr_number,
+      headSha: snapshot.headSha,
+      reviewerEnabled: true,
+      gateQuayOwnedDone: true,
+    },
+  );
+
+  if (!result.scheduled) {
+    clearTickError(deps, task.task_id);
+    return null;
+  }
+
+  return { task_id: task.task_id, action: "review_requested" };
 }
 
 interface PrTerminalRow {
