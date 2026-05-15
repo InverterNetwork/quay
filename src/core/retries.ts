@@ -3,7 +3,7 @@ import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import { enqueueOrchestratorHandoff } from "./orchestrator_handoffs.ts";
-import { loadPreambleBody } from "./preamble.ts";
+import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 
 export type BudgetRetryReason =
   | "ci_fail"
@@ -58,7 +58,12 @@ export function scheduleDeterministicRetry(
 ): ScheduleDeterministicRetryResult {
   const now = deps.clock.nowISO();
   const template = ensureRetryTemplate(deps.db, deps.clock, input.reason);
-  const priorBrief = input.priorBrief ?? loadMostRecentBrief(deps.db, input.taskId);
+  const preambleId = ensurePreambleIdForAttemptReason(
+    deps.db,
+    deps.clock,
+    input.reason,
+  );
+  const priorBrief = input.priorBrief ?? loadMostRecentWorkerBrief(deps.db, input.taskId);
   const retryBrief = composeRetryBrief({
     reason: input.reason,
     templateBody: template.body,
@@ -133,7 +138,7 @@ export function scheduleDeterministicRetry(
     .get(
       input.taskId,
       input.prevAttempt.attempt_number + 1,
-      input.prevAttempt.preamble_id,
+      preambleId,
       template.template_id,
       input.reason,
     );
@@ -146,7 +151,7 @@ export function scheduleDeterministicRetry(
     content: retryBrief,
     extension: "md",
   });
-  const preamble = loadPreambleBody(deps.db, input.prevAttempt.preamble_id);
+  const preamble = loadPreambleBody(deps.db, preambleId);
   deps.artifactStore.writeArtifact({
     taskId: input.taskId,
     attemptId: attempt.attempt_id,
@@ -182,7 +187,7 @@ export function writeBlockerBudgetExhausted(
     .get(input.taskId);
   if (!task || task.attempts_consumed < task.retry_budget) return null;
 
-  const priorBrief = loadMostRecentBrief(deps.db, input.taskId);
+  const priorBrief = loadMostRecentWorkerBrief(deps.db, input.taskId);
   const body = [
     "# Retry budget exhausted",
     "",
@@ -243,7 +248,14 @@ export function scheduleCleanSpawnRetry(
     };
   },
 ): number {
-  const priorBrief = loadMostRecentBrief(deps.db, input.taskId);
+  const priorBrief = input.prevAttempt.reason === "review_only"
+    ? loadMostRecentBrief(deps.db, input.taskId)
+    : loadMostRecentWorkerBrief(deps.db, input.taskId);
+  const preambleId = ensurePreambleIdForAttemptReason(
+    deps.db,
+    deps.clock,
+    input.prevAttempt.reason,
+  );
   const attempt = deps.db
     .query<{ attempt_id: number }, [string, number, number, number | null, string, number]>(
       `INSERT INTO attempts (
@@ -254,7 +266,7 @@ export function scheduleCleanSpawnRetry(
     .get(
       input.taskId,
       input.prevAttempt.attempt_number + 1,
-      input.prevAttempt.preamble_id,
+      preambleId,
       input.prevAttempt.template_id,
       input.prevAttempt.reason,
       input.prevAttempt.consumed_budget,
@@ -268,7 +280,7 @@ export function scheduleCleanSpawnRetry(
     content: priorBrief,
     extension: "md",
   });
-  const preamble = loadPreambleBody(deps.db, input.prevAttempt.preamble_id);
+  const preamble = loadPreambleBody(deps.db, preambleId);
   deps.artifactStore.writeArtifact({
     taskId: input.taskId,
     attemptId: attempt.attempt_id,
@@ -320,6 +332,27 @@ function loadMostRecentBrief(db: DB, taskId: string): string {
       `SELECT file_path FROM artifacts
         WHERE task_id = ? AND kind = 'brief'
         ORDER BY artifact_id DESC
+        LIMIT 1`,
+    )
+    .get(taskId);
+  if (!row) return "(No prior brief artifact was recorded.)";
+  try {
+    return readFileSync(row.file_path, "utf8");
+  } catch {
+    return "(Prior brief artifact file was missing or unreadable.)";
+  }
+}
+
+function loadMostRecentWorkerBrief(db: DB, taskId: string): string {
+  const row = db
+    .query<{ file_path: string }, [string]>(
+      `SELECT ar.file_path
+         FROM artifacts ar
+         JOIN attempts a ON a.attempt_id = ar.attempt_id
+        WHERE ar.task_id = ?
+          AND ar.kind = 'brief'
+          AND a.reason <> 'review_only'
+        ORDER BY ar.artifact_id DESC
         LIMIT 1`,
     )
     .get(taskId);

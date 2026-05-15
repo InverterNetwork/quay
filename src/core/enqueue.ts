@@ -13,7 +13,7 @@ import {
   taskIdShort,
 } from "./branch_slug.ts";
 import { QuayError } from "./errors.ts";
-import { ensurePreambleId, loadPreambleBody } from "./preamble.ts";
+import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 
 export const DEFAULT_RETRY_BUDGET = 5;
 
@@ -188,7 +188,11 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     }
 
     // Step 6: SQL transaction + artifact writes.
-    const preambleId = ensurePreambleId(deps.db, deps.clock);
+    const preambleId = ensurePreambleIdForAttemptReason(
+      deps.db,
+      deps.clock,
+      "initial",
+    );
     const preambleBody = loadPreambleBody(deps.db, preambleId);
     const finalPrompt = `${preambleBody}\n\n${input.brief}`;
     const now = deps.clock.nowISO();

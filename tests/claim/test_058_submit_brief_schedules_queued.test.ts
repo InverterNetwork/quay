@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { claim_task, submit_brief } from "../../src/core/claims.ts";
+import { ensurePreambleIdForAttemptReason } from "../../src/core/preamble.ts";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
@@ -147,3 +148,93 @@ test("test_058_submit_brief_advice_answered_does_not_consume_budget", async () =
     .get(taskId);
   expect(pending).toEqual({ reason: "advice_answered", consumed_budget: 0 });
 });
+
+for (const reason of ["blocker_resolved", "advice_answered"] as const) {
+  test(`submit_brief ${reason} after latest review_only uses worker preamble`, async () => {
+    h = createHarness();
+    h.clock.set("2026-05-15T09:00:00.000Z");
+    const repoId = insertRepo(h.db, `repo-${reason}`);
+    const taskId = insertTask(h.db, {
+      taskId: `task-${reason}`,
+      repoId,
+      state: "awaiting-next-brief",
+    });
+    const codePreambleId = ensurePreambleIdForAttemptReason(
+      h.db,
+      h.clock,
+      "initial",
+    );
+    const reviewPreambleId = ensurePreambleIdForAttemptReason(
+      h.db,
+      h.clock,
+      "review_only",
+    );
+    insertAttempt(h.db, {
+      taskId,
+      attemptNumber: 1,
+      preambleId: codePreambleId,
+      reason: "initial",
+      consumedBudget: 1,
+      spawnedAt: "2026-05-15T07:00:00.000Z",
+    });
+    insertAttempt(h.db, {
+      taskId,
+      attemptNumber: 2,
+      preambleId: reviewPreambleId,
+      reason: "review_only",
+      consumedBudget: 0,
+      spawnedAt: "2026-05-15T07:30:00.000Z",
+    });
+
+    const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
+    if (!claim.ok) throw new Error("expected claim");
+    const store = createArtifactStore({
+      db: h.db,
+      artifactRoot: h.artifactRoot,
+      clock: h.clock,
+    });
+
+    const submission = await submit_brief(
+      { db: h.db, clock: h.clock, artifactStore: store },
+      {
+        taskId,
+        claimId: claim.value.claim_id,
+        brief: `follow-up worker brief for ${reason}`,
+        reason,
+      },
+    );
+    if (!submission.ok) throw new Error("expected submit to succeed");
+
+    const pending = h.db
+      .query<
+        { reason: string; preamble_id: number; consumed_budget: number },
+        [number]
+      >(
+        `SELECT reason, preamble_id, consumed_budget
+           FROM attempts WHERE attempt_id = ?`,
+      )
+      .get(submission.value.attempt_id);
+    expect(pending!.reason).toBe(reason);
+    expect(pending!.consumed_budget).toBe(reason === "blocker_resolved" ? 1 : 0);
+    const kind = h.db
+      .query<{ kind: string }, [number]>(
+        `SELECT kind FROM preambles WHERE preamble_id = ?`,
+      )
+      .get(pending!.preamble_id);
+    expect(kind!.kind).toBe("code");
+
+    const finalRow = h.db
+      .query<{ file_path: string }, [string, number]>(
+        `SELECT file_path FROM artifacts
+           WHERE task_id = ? AND attempt_id = ? AND kind = 'final_prompt'`,
+      )
+      .get(taskId, submission.value.attempt_id);
+    const finalPrompt = readFileSync(finalRow!.file_path, "utf8");
+    expect(finalPrompt.startsWith("Quay protocol preamble")).toBe(true);
+    expect(finalPrompt).not.toContain("You are running as a Quay reviewer worker");
+    expect(finalPrompt).not.toContain("Do not modify code");
+    expect(finalPrompt).not.toContain("Do not push");
+    expect(finalPrompt).not.toContain("You do not push");
+    expect(finalPrompt).toContain(`follow-up worker brief for ${reason}`);
+  });
+}

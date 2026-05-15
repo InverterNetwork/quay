@@ -3,7 +3,9 @@
 // the conflict slice, schedules a `conflict` attempt with
 // `consumed_budget = 0`, and records the new observation. Budget preserved.
 import { afterEach, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { tick_once } from "../../src/core/tick.ts";
+import { ensurePreambleIdForAttemptReason } from "../../src/core/preamble.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
@@ -120,4 +122,214 @@ test("test_conflict_schedules_non_budget_respawn", async () => {
     .get(taskId);
   expect(event?.from_state).toBe("pr-open");
   expect(event?.to_state).toBe("queued");
+});
+
+test("conflict respawn after latest review_only uses worker preamble and worker brief", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-15T08:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-conflict-after-review");
+  const taskId = insertTask(h.db, {
+    taskId: "task-conflict-after-review",
+    repoId,
+    state: "done",
+  });
+  const codePreambleId = ensurePreambleIdForAttemptReason(
+    h.db,
+    h.clock,
+    "initial",
+  );
+  const reviewPreambleId = ensurePreambleIdForAttemptReason(
+    h.db,
+    h.clock,
+    "review_only",
+  );
+  const workerAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    preambleId: codePreambleId,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-05-15T07:00:00.000Z",
+  });
+  const reviewAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    preambleId: reviewPreambleId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: "2026-05-15T07:30:00.000Z",
+  });
+  h.db
+    .query(`UPDATE tasks SET attempts_consumed = 1 WHERE task_id = ?`)
+    .run(taskId);
+
+  const built = buildTickDeps(h);
+  built.artifactStore.writeArtifact({
+    taskId,
+    attemptId: workerAttemptId,
+    kind: "brief",
+    content: "worker implementation brief",
+    extension: "md",
+  });
+  built.artifactStore.writeArtifact({
+    taskId,
+    attemptId: reviewAttemptId,
+    kind: "brief",
+    content: "review-only latest brief",
+    extension: "md",
+  });
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+    state: "open",
+    headSha: "head-conflict-review",
+    baseSha: "base-conflict-review",
+    mergeable: "conflicting",
+    latestReview: { decision: "APPROVED", latestReviewId: "review-ok", comments: "" },
+    checks: { checkSha: "head-conflict-review", items: [] },
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([
+    { task_id: taskId, action: "conflict_respawn_scheduled" },
+  ]);
+
+  const pending = h.db
+    .query<
+      { attempt_id: number; preamble_id: number; reason: string },
+      [string]
+    >(
+      `SELECT attempt_id, preamble_id, reason
+         FROM attempts
+        WHERE task_id = ? AND spawned_at IS NULL`,
+    )
+    .get(taskId);
+  expect(pending!.reason).toBe("conflict");
+  const kind = h.db
+    .query<{ kind: string }, [number]>(
+      `SELECT kind FROM preambles WHERE preamble_id = ?`,
+    )
+    .get(pending!.preamble_id);
+  expect(kind!.kind).toBe("code");
+
+  const finalPromptRow = h.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND attempt_id = ? AND kind = 'final_prompt'`,
+    )
+    .get(taskId, pending!.attempt_id);
+  const finalPrompt = readFileSync(finalPromptRow!.file_path, "utf8");
+  expect(finalPrompt.startsWith("Quay protocol preamble")).toBe(true);
+  expect(finalPrompt).not.toContain("You are running as a Quay reviewer worker");
+  expect(finalPrompt).not.toContain("Do not modify code");
+  expect(finalPrompt).not.toContain("Do not push");
+  expect(finalPrompt).not.toContain("You do not push");
+  expect(finalPrompt).toContain("worker implementation brief");
+  expect(finalPrompt).not.toContain("review-only latest brief");
+});
+
+test("changes-requested respawn from done after latest review_only uses worker preamble", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-15T08:30:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-review-after-review");
+  const taskId = insertTask(h.db, {
+    taskId: "task-review-after-review",
+    repoId,
+    state: "done",
+  });
+  const codePreambleId = ensurePreambleIdForAttemptReason(
+    h.db,
+    h.clock,
+    "initial",
+  );
+  const reviewPreambleId = ensurePreambleIdForAttemptReason(
+    h.db,
+    h.clock,
+    "review_only",
+  );
+  const workerAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    preambleId: codePreambleId,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-05-15T07:00:00.000Z",
+  });
+  const reviewAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    preambleId: reviewPreambleId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: "2026-05-15T07:30:00.000Z",
+  });
+  h.db
+    .query(`UPDATE tasks SET attempts_consumed = 1 WHERE task_id = ?`)
+    .run(taskId);
+
+  const built = buildTickDeps(h);
+  built.artifactStore.writeArtifact({
+    taskId,
+    attemptId: workerAttemptId,
+    kind: "brief",
+    content: "worker implementation brief for review follow-up",
+    extension: "md",
+  });
+  built.artifactStore.writeArtifact({
+    taskId,
+    attemptId: reviewAttemptId,
+    kind: "brief",
+    content: "review-only latest brief should be skipped",
+    extension: "md",
+  });
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+    state: "open",
+    headSha: "head-review-follow-up",
+    baseSha: "base-review-follow-up",
+    mergeable: "mergeable",
+    latestReview: {
+      decision: "CHANGES_REQUESTED",
+      latestReviewId: "review-needs-work",
+      comments: "please fix this",
+    },
+    checks: { checkSha: "head-review-follow-up", items: [] },
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([
+    { task_id: taskId, action: "review_respawn_scheduled" },
+  ]);
+
+  const pending = h.db
+    .query<
+      { attempt_id: number; preamble_id: number; reason: string },
+      [string]
+    >(
+      `SELECT attempt_id, preamble_id, reason
+         FROM attempts
+        WHERE task_id = ? AND spawned_at IS NULL`,
+    )
+    .get(taskId);
+  expect(pending!.reason).toBe("review");
+  const kind = h.db
+    .query<{ kind: string }, [number]>(
+      `SELECT kind FROM preambles WHERE preamble_id = ?`,
+    )
+    .get(pending!.preamble_id);
+  expect(kind!.kind).toBe("code");
+
+  const finalPromptRow = h.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND attempt_id = ? AND kind = 'final_prompt'`,
+    )
+    .get(taskId, pending!.attempt_id);
+  const finalPrompt = readFileSync(finalPromptRow!.file_path, "utf8");
+  expect(finalPrompt.startsWith("Quay protocol preamble")).toBe(true);
+  expect(finalPrompt).not.toContain("You are running as a Quay reviewer worker");
+  expect(finalPrompt).not.toContain("Do not modify code");
+  expect(finalPrompt).not.toContain("Do not push");
+  expect(finalPrompt).not.toContain("You do not push");
+  expect(finalPrompt).toContain("worker implementation brief for review follow-up");
+  expect(finalPrompt).not.toContain("review-only latest brief should be skipped");
 });
