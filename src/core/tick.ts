@@ -210,6 +210,27 @@ interface PrReviewTaskRow {
   cancel_requested_at: string | null;
 }
 
+type PrTerminalFromState =
+  | "pr-open"
+  | "done"
+  | "pr-review"
+  | "awaiting-next-brief"
+  | "claimed-by-orchestrator"
+  | "waiting_human"
+  | "non_budget_loop"
+  | "worktree_error"
+  | "orchestrator_loop";
+
+interface ParkedPrTerminalTaskRow {
+  task_id: string;
+  repo_id: string;
+  state: PrTerminalFromState;
+  branch_name: string;
+  worktree_path: string;
+  pr_number: number | null;
+  cancel_requested_at: string | null;
+}
+
 interface ReviewAttemptTaskRow {
   task_id: string;
   repo_id: string;
@@ -317,6 +338,9 @@ export async function tick_once(
     const doneSnapshot = readDone(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
+    const parkedPrTerminalSnapshot = readParkedPrTerminal(deps.db).filter(
+      (t) => !cancelledIds.has(t.task_id),
+    );
     const claimedSnapshot = readClaimed(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
@@ -360,7 +384,21 @@ export async function tick_once(
       }
     }
 
+    const terminalParkedIds = new Set<string>();
+    for (const task of parkedPrTerminalSnapshot) {
+      try {
+        const result = processParkedPrTerminal(deps, task);
+        if (result !== null) {
+          results.push(result);
+          terminalParkedIds.add(task.task_id);
+        }
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
     for (const task of claimedSnapshot) {
+      if (terminalParkedIds.has(task.task_id)) continue;
       try {
         const result = processClaimedTask(deps, task, options);
         if (result !== null) results.push(result);
@@ -370,6 +408,7 @@ export async function tick_once(
     }
 
     for (const task of waitingHumanSnapshot) {
+      if (terminalParkedIds.has(task.task_id)) continue;
       try {
         const taskResults = await processWaitingHumanTask(deps, task, linearSyncs);
         for (const r of taskResults) results.push(r);
@@ -564,6 +603,25 @@ function readPrReview(db: DB): PrReviewTaskRow[] {
               pr_number, cancel_requested_at
          FROM tasks
         WHERE state = 'pr-review'
+        ORDER BY created_at, task_id`,
+    )
+    .all();
+}
+
+function readParkedPrTerminal(db: DB): ParkedPrTerminalTaskRow[] {
+  return db
+    .query<ParkedPrTerminalTaskRow, []>(
+      `SELECT task_id, repo_id, state, branch_name, worktree_path,
+              pr_number, cancel_requested_at
+         FROM tasks
+        WHERE state IN (
+          'awaiting-next-brief',
+          'claimed-by-orchestrator',
+          'waiting_human',
+          'non_budget_loop',
+          'worktree_error',
+          'orchestrator_loop'
+        )
         ORDER BY created_at, task_id`,
     )
     .all();
@@ -1041,12 +1099,41 @@ function processPrReviewTerminal(
   return finalizePrTerminal(deps, task, attempt, snapshot.state, "pr-review");
 }
 
+function processParkedPrTerminal(
+  deps: TickDeps,
+  task: ParkedPrTerminalTaskRow,
+): TickTaskResult | null {
+  if (task.cancel_requested_at !== null) return null;
+  const attempt = loadLatestAttempt(deps.db, task.task_id);
+  if (!attempt) return null;
+
+  const snapshot = loadParkedPrSnapshot(deps, task);
+  if (snapshot === null) return null;
+  if (snapshot.state !== "merged" && snapshot.state !== "closed_unmerged") {
+    return null;
+  }
+
+  persistPrMetadata(deps, task.task_id, snapshot);
+  return finalizePrTerminal(deps, task, attempt, snapshot.state, task.state);
+}
+
+function loadParkedPrSnapshot(
+  deps: TickDeps,
+  task: Pick<ParkedPrTerminalTaskRow, "repo_id" | "branch_name" | "pr_number">,
+): PrSnapshot | null {
+  if (task.pr_number !== null) {
+    const byNumber = deps.github.prSnapshotByNumber(task.repo_id, task.pr_number);
+    if (byNumber !== null) return byNumber;
+  }
+  return deps.github.prSnapshot(task.repo_id, task.branch_name);
+}
+
 function finalizePrTerminal(
   deps: TickDeps,
   task: PrTerminalRow,
   attempt: CurrentAttemptRow,
   terminal: "merged" | "closed_unmerged",
-  fromState: "pr-open" | "done" | "pr-review",
+  fromState: PrTerminalFromState,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
 
@@ -1060,7 +1147,12 @@ function finalizePrTerminal(
     const upd = deps.db
       .query(
         `UPDATE tasks
-            SET state = ?, tick_error = NULL, updated_at = ?
+            SET state = ?,
+                claim_id = NULL,
+                claimed_at = NULL,
+                claim_expirations_consecutive = 0,
+                tick_error = NULL,
+                updated_at = ?
           WHERE task_id = ? AND state = ?
             AND cancel_requested_at IS NULL`,
       )
@@ -1122,6 +1214,7 @@ function finalizePrTerminal(
          ) VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(task.task_id, attempt.attempt_id, eventType, fromState, terminal, now);
+    cancelOpenOrchestratorHandoffs(deps, task.task_id);
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
