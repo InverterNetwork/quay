@@ -58,12 +58,10 @@ const ReviewerConfigSchema = z
     // used; set this when tick and worker authenticate as different gh
     // identities so the ingest doesn't silently drop the posted review.
     login: z.string().min(1).optional(),
-    // Path to a file whose contents are exported as `GH_TOKEN` in the
-    // reviewer tmux pane's environment. GitHub refuses self-review, so the
-    // reviewer must authenticate as a different identity than the worker
-    // that opened the PR. The file is expected to be mode 0600 and written
-    // by an out-of-band token minter (e.g. hermes-agent's App-installation
-    // timer). When unset the reviewer inherits the host's default gh auth.
+    // Migration fallback path whose contents are exported as `GH_TOKEN` in
+    // the reviewer tmux pane when QUAY_REVIEWER_GH_TOKEN is unset. GitHub
+    // refuses self-review, so reviewers must authenticate as a different
+    // identity than the worker that opened the PR.
     gh_token_file: z.string().min(1).optional(),
   })
   .strict();

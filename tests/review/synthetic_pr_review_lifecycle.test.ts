@@ -1,6 +1,10 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { afterEach, expect, test } from "bun:test";
-import { tick_once } from "../../src/core/tick.ts";
+import {
+  REVIEWER_GH_TOKEN_ENV,
+  tick_once,
+  type TickOptions,
+} from "../../src/core/tick.ts";
 import { syntheticTaskId } from "../../src/core/pr_review.ts";
 import type { PrSnapshot } from "../../src/ports/github.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
@@ -13,6 +17,15 @@ afterEach(() => {
   h = null;
 });
 
+const REVIEWER_ENV: NodeJS.ProcessEnv = {
+  GH_TOKEN: "ghs_worker_runtime_test",
+  [REVIEWER_GH_TOKEN_ENV]: "ghs_reviewer_runtime_test",
+};
+
+function reviewerTickOptions(extra: TickOptions = {}): TickOptions {
+  return { reviewerEnabled: true, env: REVIEWER_ENV, ...extra };
+}
+
 test("approved synthetic review keeps tracking and schedules one review for a new PR head", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
@@ -24,7 +37,7 @@ test("approved synthetic review keeps tracking and schedules one review for a ne
   });
   setOpenPr(built, repoId, 130, "new-head");
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toEqual([{ task_id: seeded.taskId, action: "review_requested" }]);
   expect(taskState(seeded.taskId)).toEqual({
@@ -33,7 +46,7 @@ test("approved synthetic review keeps tracking and schedules one review for a ne
   });
   expect(reviewAttemptCount(seeded.taskId, "new-head")).toBe(1);
 
-  const second = await tick_once(built.deps, { reviewerEnabled: true });
+  const second = await tick_once(built.deps, reviewerTickOptions());
 
   expect(second).toEqual([{ task_id: seeded.taskId, action: "spawned" }]);
   expect(reviewAttemptCount(seeded.taskId, "new-head")).toBe(1);
@@ -50,7 +63,7 @@ test("changes-requested synthetic review waits for an external commit and never 
   });
   setOpenPr(built, repoId, 131, "fixed-head");
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toEqual([{ task_id: seeded.taskId, action: "review_requested" }]);
   expect(taskState(seeded.taskId)).toEqual({
@@ -72,7 +85,7 @@ test("same-head synthetic terminal review is a tick no-op", async () => {
   });
   setOpenPr(built, repoId, 132, "same-head");
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toEqual([]);
   expect(taskState(seeded.taskId)).toEqual({
@@ -94,7 +107,7 @@ test("active synthetic review is superseded when tick observes a new PR head", a
   built.tmux.liveSessions.add(seeded.sessionName!);
   setOpenPr(built, repoId, 133, "fresh-head");
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toEqual([{ task_id: seeded.taskId, action: "review_requested" }]);
   const stale = h.db
@@ -131,7 +144,7 @@ test("completed synthetic review task transitions terminal by PR number", async 
     snapshot("closed_unmerged", 134, "closed-head"),
   );
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toEqual([
     { task_id: seeded.taskId, action: "pr_closed_unmerged" },

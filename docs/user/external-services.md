@@ -215,7 +215,7 @@ max_thread_messages = 200
 Confirm the same environment is visible to Quay:
 
 ```bash
-for v in LINEAR_API_KEY SLACK_TOKEN GH_TOKEN GITHUB_TOKEN; do
+for v in LINEAR_API_KEY SLACK_TOKEN GH_TOKEN GITHUB_TOKEN QUAY_REVIEWER_GH_TOKEN; do
   if [ -n "${!v:-}" ]; then echo "$v is set"; fi
 done
 quay task list
@@ -231,6 +231,8 @@ interactive shell. Make sure the scheduled `quay tick` process has:
 - `LINEAR_API_KEY` or your configured Linear token env var.
 - `SLACK_TOKEN` or your configured Slack token env var.
 - `GH_TOKEN`, `GITHUB_TOKEN`, or stored `gh` credentials.
+- `QUAY_REVIEWER_GH_TOKEN` when reviewer workers run under a separate GitHub
+  App identity; `reviewer.gh_token_file` remains a migration fallback.
 - SSH agent/socket or HTTPS credentials for git push.
 
 Prefer an explicit wrapper script for scheduled ticks:
@@ -243,7 +245,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 export QUAY_DATA_DIR="/var/lib/quay"
 export LINEAR_API_KEY="..."
 export SLACK_TOKEN="..."
-export GH_TOKEN="..."
+export GH_TOKEN="<worker-runtime-app-token>"
+export QUAY_REVIEWER_GH_TOKEN="<reviewer-app-token>"
 
 exec /usr/local/bin/quay tick
 ```

@@ -44,7 +44,8 @@ max_thread_messages = 200
 [reviewer]
 enabled = false
 gate_quay_owned_done = false
-# gh_token_file = "/run/hermes/reviewer-gh-token"
+# Preferred reviewer token source: QUAY_REVIEWER_GH_TOKEN in tick env.
+# gh_token_file = "/run/hermes/reviewer-gh-token" # fallback during migration
 
 [agents]
 worker = "claude"
@@ -86,7 +87,7 @@ reviewer = "claude --permission-mode bypassPermissions --output-format json < {p
 enabled = true
 gate_quay_owned_done = false
 # login = "quay-bot"
-# gh_token_file = "/run/hermes/reviewer-gh-token"
+# gh_token_file = "/run/hermes/reviewer-gh-token" # fallback during migration
 ```
 
 `enabled` turns on the reviewer subsystem, including `quay review-pr` and the
@@ -116,27 +117,32 @@ by the GitHub API (`user.type` of `Bot` for App authors, `User` for regular
 accounts) — not just the login string. This means a same-named regular user
 *cannot* satisfy a gate configured against `app/<slug>`, and vice versa.
 
-`gh_token_file` makes the reviewer tmux pane authenticate to GitHub as a
-different identity than the worker that opened the PR. GitHub refuses
-self-review, so a deployment where worker and reviewer share the same `gh`
-auth cannot approve quay-opened PRs. When set, the file (expected mode `0600`,
-contents read fresh on every reviewer spawn) is `cat`'d inside the pane and
-exported as `GH_TOKEN`; the worker pane is unaffected and continues to use
-the host's default `gh` auth. The path lands in the pane wrapper script — the
-token bytes themselves never appear in any process argv, so `ps` on the host
-cannot leak them. Rotation is transparent: write the new token to the file
-and the next reviewer attempt picks it up.
+Reviewer panes must authenticate to GitHub as a different identity than the
+worker that opened the PR. GitHub refuses self-review, so Quay fails reviewer
+spawns before promotion unless it has a reviewer-specific token source.
 
-When `gh_token_file` is configured, Quay validates the file before spawning
-the reviewer. A missing or empty file is a hard spawn failure
-(`spawn_substrate_failed`), so silent fall-back to the host auth (and the
-resulting self-review block) is impossible. A non-empty token is also probed
-against the target repository with `gh api repos/{owner}/{repo}` before the
-review attempt is promoted. Invalid, expired, or repo-inaccessible tokens fail
-as `spawn_substrate_failed` and stay out of the reviewer
-`review_infra_failed` retry accounting. Pair this with an out-of-band token
-minter (e.g. an `hermes-agent` systemd timer that refreshes a GitHub App
-installation token).
+Preferred deployment shape:
+
+```bash
+export GH_TOKEN="<worker-runtime-app-token>"
+export QUAY_REVIEWER_GH_TOKEN="<reviewer-app-token>"
+exec quay tick
+```
+
+Worker panes keep using `GH_TOKEN`. Reviewer panes receive
+`QUAY_REVIEWER_GH_TOKEN` as their pane-local `GH_TOKEN`, and Quay removes the
+source variable from the pane environment before launching the agent. The
+reviewer token is probed against the target repository before the review
+attempt is promoted. Invalid, expired, empty, missing, or repo-inaccessible
+tokens fail as `spawn_substrate_failed` and stay out of the reviewer
+`review_infra_failed` retry accounting.
+
+`gh_token_file` is a migration fallback used only when
+`QUAY_REVIEWER_GH_TOKEN` is unset. The file is expected mode `0600`, read fresh
+on every reviewer spawn, `cat`'d inside the pane, and exported as `GH_TOKEN`.
+The path lands in the pane wrapper script, but token bytes themselves never
+appear in any process argv. Rotation is transparent: write the new token to the
+file and the next reviewer attempt picks it up.
 
 ## Agent Invocation
 
@@ -211,6 +217,7 @@ path fails with `repos_root_missing`. This catches typos before enqueueing work.
 | `QUAY_CONFIG_FILE` | Direct config file path. |
 | `LINEAR_API_KEY` | Default Linear bot token env var. |
 | `SLACK_TOKEN` | Default Slack bot token env var. |
+| `QUAY_REVIEWER_GH_TOKEN` | Reviewer-specific GitHub token exported as `GH_TOKEN` only for reviewer panes. |
 | `QUAY_LINEAR_TIMEOUT_MS` | Linear adapter HTTP timeout. |
 | `QUAY_SLACK_TIMEOUT_MS` | Slack adapter HTTP timeout. |
 | `QUAY_INTEGRATION_TESTS=1` | Enables network-backed adapter integration tests. |

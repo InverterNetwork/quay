@@ -546,13 +546,14 @@ The spec uses two config flags so the reviewer subsystem and the `done`-gating c
 [reviewer]
 enabled = false                # default. Whether the reviewer subsystem runs at all.
 gate_quay_owned_done = false   # default. Whether Quay-owned done requires an approved Quay review.
-# Optional: path to a file (mode 0600) whose contents tick exports as
-# GH_TOKEN in the reviewer tmux pane only. GitHub blocks self-review, so
-# when the worker and reviewer authenticate as the same App identity the
-# reviewer cannot approve worker-opened PRs. Pair with an external token
-# minter (e.g. hermes-agent) that refreshes the file. Read fresh on each
-# reviewer spawn; missing/empty file = `spawn_substrate_failed`. Unset =
-# reviewer inherits host gh auth (same identity as worker).
+# Preferred reviewer token source is the tick process environment:
+# QUAY_REVIEWER_GH_TOKEN=<reviewer-app-token>. Quay validates it and exports
+# it as GH_TOKEN only for reviewer panes; worker panes keep using the normal
+# GH_TOKEN worker/runtime auth. GitHub blocks self-review, so missing reviewer
+# auth is a hard `spawn_substrate_failed` before the review attempt is promoted.
+#
+# Migration fallback: path to a file (mode 0600) whose contents tick exports
+# as GH_TOKEN in the reviewer tmux pane when QUAY_REVIEWER_GH_TOKEN is unset.
 gh_token_file = "/run/hermes/reviewer-gh-token"
 ```
 

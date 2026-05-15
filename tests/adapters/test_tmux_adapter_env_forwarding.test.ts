@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { TmuxAdapter } from "../../src/adapters/tmux.ts";
+import { REVIEWER_GH_TOKEN_ENV } from "../../src/core/tick.ts";
 
 const tmuxAvailable = (() => {
   const have =
@@ -181,4 +182,42 @@ t("envFiles wrapper fails loudly when the file is empty at pane-start", async ()
   expect(log).not.toBeNull();
   expect(log!).toContain("is missing or empty");
   expect(log!).not.toContain("should not run");
+});
+
+t("env overrides replace GH_TOKEN and remove reviewer source env", async () => {
+  process.env.GH_TOKEN = "ghs_worker_from_parent";
+  process.env.GITHUB_TOKEN = "ghs_worker_github_from_parent";
+  process.env[REVIEWER_GH_TOKEN_ENV] = "ghs_reviewer_source_parent";
+  cleanups.push(() => {
+    delete process.env.GH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env[REVIEWER_GH_TOKEN_ENV];
+  });
+
+  const adapter = new TmuxAdapter();
+  const worktreePath = tempWorktree();
+  const sessionName = uniqueSession("env-override");
+  const logPath = join(worktreePath, ".quay-session.log");
+
+  adapter.spawn({
+    sessionName,
+    worktreePath,
+    promptContent: "ignored",
+    agentInvocation: `printf "GH=[%s] GITHUB=[%s] SRC=[%s]\\n" "$GH_TOKEN" "$GITHUB_TOKEN" "$${REVIEWER_GH_TOKEN_ENV}"; sleep 1`,
+    env: {
+      GH_TOKEN: "ghs_reviewer_for_pane",
+      GITHUB_TOKEN: undefined,
+      [REVIEWER_GH_TOKEN_ENV]: undefined,
+    },
+  });
+
+  const wrote = await waitFor(
+    () => existsSync(logPath) && statSync(logPath).size > 0,
+    3000,
+  );
+  expect(wrote).toBe(true);
+
+  const log = adapter.collectLog(sessionName, worktreePath);
+  expect(log).not.toBeNull();
+  expect(log!).toContain("GH=[ghs_reviewer_for_pane] GITHUB=[] SRC=[]");
 });
