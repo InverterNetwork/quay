@@ -168,6 +168,53 @@ test("review-pr snapshots reviewer override flags for synthetic tasks", async ()
   });
 });
 
+test("review-pr rejects an empty reviewer model override", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.github.setPrView("quay", 49, {
+    number: 49,
+    title: "Human PR",
+    body: "Please review",
+    url: "https://github.com/acc/quay/pull/49",
+    headRefName: "feature/human",
+    headSha: "feed49",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", "acc/quay:49", "--reviewer-model="],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(JSON.parse(io.err()).error).toBe("usage_error");
+  expect(io.err()).toContain("reviewer-model must not be empty");
+  const attempts = h.db
+    .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM attempts`)
+    .get();
+  expect(attempts?.n).toBe(0);
+});
+
 test("review-pr supersedes an in-flight attempt on a new SHA and reaps its tmux session", async () => {
   h = createHarness();
   const built = buildCliDeps(h);

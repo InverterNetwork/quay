@@ -504,8 +504,13 @@ async function handleEnqueue(
     }
     if (externalRef !== null) input.external_ref = externalRef;
     if (slackThreadRef !== null) input.slack_thread_ref = slackThreadRef;
-    const agentErr = validateTaskAgentOverrides(
-      { worker_agent: workerAgent, reviewer_agent: reviewerAgent },
+    const agentErr = validateTaskSelectionOverrides(
+      {
+        worker_agent: workerAgent,
+        worker_model: workerModel,
+        reviewer_agent: reviewerAgent,
+        reviewer_model: reviewerModel,
+      },
       deps.agentResolver,
       io,
     );
@@ -603,8 +608,8 @@ function handleReviewPr(
     if (headSha !== null) input.headSha = headSha;
     const reviewerAgent = readFlag(argv, "--reviewer-agent");
     const reviewerModel = readFlag(argv, "--reviewer-model");
-    const agentErr = validateTaskAgentOverrides(
-      { reviewer_agent: reviewerAgent },
+    const agentErr = validateTaskSelectionOverrides(
+      { reviewer_agent: reviewerAgent, reviewer_model: reviewerModel },
       deps.agentResolver,
       io,
     );
@@ -662,10 +667,12 @@ async function handleEnqueueLinearIssueFlow(
   // is read from the ticket's validated `repo` field. An explicit --repo wins.
   const repoId = readFlag(argv, "--repo");
   const cliTags = collectFlagValues(argv, "--tag");
-  const agentErr = validateTaskAgentOverrides(
+  const agentErr = validateTaskSelectionOverrides(
     {
       worker_agent: readFlag(argv, "--worker-agent"),
+      worker_model: readFlag(argv, "--worker-model"),
       reviewer_agent: readFlag(argv, "--reviewer-agent"),
+      reviewer_model: readFlag(argv, "--reviewer-model"),
     },
     deps.agentResolver,
     io,
@@ -832,8 +839,13 @@ function validateAgentOverrides(
   return null;
 }
 
-function validateTaskAgentOverrides(
-  input: { worker_agent?: string | null; reviewer_agent?: string | null },
+function validateTaskSelectionOverrides(
+  input: {
+    worker_agent?: string | null;
+    worker_model?: string | null;
+    reviewer_agent?: string | null;
+    reviewer_model?: string | null;
+  },
   resolver: AgentResolver,
   io: CliIO,
 ): DispatchResult | null {
@@ -846,6 +858,17 @@ function validateTaskAgentOverrides(
         "usage_error",
         `${key.replace("_", "-")}: agent "${v}" is not registered in [agents.invocations]; known: ${[...registered].sort().join(", ")}`,
         { agent: v, registered: [...registered].sort() },
+      );
+    }
+  }
+  for (const key of ["worker_model", "reviewer_model"] as const) {
+    const v = input[key];
+    if (v !== undefined && v !== null && v.trim() === "") {
+      return writeError(
+        io,
+        "usage_error",
+        `${key.replace("_", "-")} must not be empty`,
+        { flag: `--${key.replace("_", "-")}` },
       );
     }
   }
