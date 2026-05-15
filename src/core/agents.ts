@@ -31,6 +31,7 @@ export interface ResolvedAgent {
   // attempt row so observability can distinguish runtimes without
   // string-matching the invocation.
   agent: string;
+  model: string | null;
   invocation: string;
 }
 
@@ -44,11 +45,16 @@ export interface AgentResolverDeps {
 // the in-memory dispatcher) can still drive resolution.
 export interface AgentSelection {
   defaults: Record<AgentRole, string>;
+  defaultModels?: Record<AgentRole, string | null>;
   invocations: Record<string, { worker?: string; reviewer?: string }>;
 }
 
 export interface AgentResolver {
-  resolve(repoId: string, role: AgentRole): ResolvedAgent;
+  resolve(
+    repoId: string,
+    role: AgentRole,
+    snapshot?: AgentRoleSnapshot,
+  ): ResolvedAgent;
   // List of registered agent names — used by CLI flag validation so
   // operators get a clear error when they pass `--agent-worker typo`.
   registeredAgents(): string[];
@@ -57,6 +63,13 @@ export interface AgentResolver {
 interface RepoOverrideRow {
   agent_worker: string | null;
   agent_reviewer: string | null;
+  model_worker: string | null;
+  model_reviewer: string | null;
+}
+
+export interface AgentRoleSnapshot {
+  agent: string | null;
+  model: string | null;
 }
 
 export function buildAgentSelection(config: QuayConfig): AgentSelection {
@@ -95,7 +108,11 @@ export function buildAgentSelection(config: QuayConfig): AgentSelection {
     worker: config.agents?.worker ?? DEFAULT_AGENT_NAME,
     reviewer: config.agents?.reviewer ?? DEFAULT_AGENT_NAME,
   };
-  return { defaults, invocations };
+  const defaultModels: Record<AgentRole, string | null> = {
+    worker: config.agents?.worker_model ?? null,
+    reviewer: config.agents?.reviewer_model ?? null,
+  };
+  return { defaults, defaultModels, invocations };
 }
 
 // Catches operator typos at boot rather than at first-spawn time. A
@@ -130,17 +147,27 @@ export function createAgentResolver(deps: AgentResolverDeps): AgentResolver {
     return (
       deps.db
         .query<RepoOverrideRow, [string]>(
-          `SELECT agent_worker, agent_reviewer FROM repos WHERE repo_id = ?`,
+          `SELECT agent_worker, agent_reviewer, model_worker, model_reviewer
+             FROM repos
+            WHERE repo_id = ?`,
         )
         .get(repoId) ?? null
     );
   }
 
-  function resolve(repoId: string, role: AgentRole): ResolvedAgent {
+  function resolve(
+    repoId: string,
+    role: AgentRole,
+    snapshot?: AgentRoleSnapshot,
+  ): ResolvedAgent {
     const override = lookupOverride(repoId);
     const overrideName =
       role === "worker" ? override?.agent_worker : override?.agent_reviewer;
-    const agentName = overrideName ?? selection.defaults[role];
+    const overrideModel =
+      role === "worker" ? override?.model_worker : override?.model_reviewer;
+    const agentName = snapshot?.agent ?? overrideName ?? selection.defaults[role];
+    const model =
+      snapshot?.model ?? overrideModel ?? selection.defaultModels?.[role] ?? null;
     const entry = selection.invocations[agentName];
     if (entry === undefined) {
       // The CLI rejects unknown agent names on `repo add` / `repo
@@ -159,11 +186,28 @@ export function createAgentResolver(deps: AgentResolverDeps): AgentResolver {
         `agent "${agentName}" has no ${role} invocation registered`,
       );
     }
-    return { agent: agentName, invocation };
+    return {
+      agent: agentName,
+      model,
+      invocation: applyAgentModel(agentName, invocation, model),
+    };
   }
 
   return {
     resolve,
     registeredAgents: () => Object.keys(selection.invocations).sort(),
   };
+}
+
+function applyAgentModel(agent: string, invocation: string, model: string | null): string {
+  if (model === null) return invocation;
+  if (agent === "codex") return `${invocation} --model ${shellQuote(model)}`;
+  if (agent === "claude") return `${invocation} --model ${shellQuote(model)}`;
+  throw new Error(
+    `agent "${agent}" does not support configured model "${model}"`,
+  );
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }

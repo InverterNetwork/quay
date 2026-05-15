@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
+import { createAgentResolver } from "../../src/core/agents.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
 import { insertRepo, insertTask } from "../support/fixtures.ts";
@@ -81,6 +82,137 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
   expect(out2.scheduled).toBe(false);
   expect(out2.skipped_reason).toBe("active_attempt_exists");
   expect(out2.attempt_id).toBe(out.attempt_id);
+});
+
+test("review-pr snapshots reviewer override flags for synthetic tasks", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  built.deps.agentResolver = createAgentResolver({
+    db: h.db,
+    config: {
+      agents: {
+        reviewer: "claude",
+        reviewer_model: "global-review-model",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+  });
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.github.setPrView("quay", 48, {
+    number: 48,
+    title: "Human PR",
+    body: "Please review",
+    url: "https://github.com/acc/quay/pull/48",
+    headRefName: "feature/human",
+    headSha: "def456",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "review-pr",
+      "--pr",
+      "acc/quay:48",
+      "--reviewer-agent",
+      "codex",
+      "--reviewer-model",
+      "gpt-5.5",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  const task = h.db
+    .query<
+      {
+        reviewer_agent: string | null;
+        reviewer_model: string | null;
+        worker_agent: string | null;
+        worker_model: string | null;
+      },
+      [string]
+    >(
+      `SELECT reviewer_agent, reviewer_model, worker_agent, worker_model
+         FROM tasks
+        WHERE task_id = ?`,
+    )
+    .get(out.task_id);
+  expect(task).toEqual({
+    reviewer_agent: "codex",
+    reviewer_model: "gpt-5.5",
+    worker_agent: "claude",
+    worker_model: null,
+  });
+});
+
+test("review-pr rejects an empty reviewer model override", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.github.setPrView("quay", 49, {
+    number: 49,
+    title: "Human PR",
+    body: "Please review",
+    url: "https://github.com/acc/quay/pull/49",
+    headRefName: "feature/human",
+    headSha: "feed49",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", "acc/quay:49", "--reviewer-model="],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(JSON.parse(io.err()).error).toBe("usage_error");
+  expect(io.err()).toContain("reviewer-model must not be empty");
+  const attempts = h.db
+    .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM attempts`)
+    .get();
+  expect(attempts?.n).toBe(0);
 });
 
 test("review-pr supersedes an in-flight attempt on a new SHA and reaps its tmux session", async () => {

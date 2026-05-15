@@ -12,6 +12,7 @@ import {
   computeTmuxId,
   taskIdShort,
 } from "./branch_slug.ts";
+import type { AgentResolver } from "./agents.ts";
 import { QuayError } from "./errors.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 
@@ -32,6 +33,7 @@ export interface EnqueueDeps {
   artifactStore: ArtifactStore;
   paths: EnqueuePaths;
   retryBudget?: number;
+  agentResolver?: AgentResolver;
 }
 
 export const enqueueInputSchema = z
@@ -47,6 +49,10 @@ export const enqueueInputSchema = z
     tags: z.array(z.string()).optional(),
     // Spec §5: JSON-serialized TicketAuthor[]; nullable on the legacy path.
     authors_json: z.string().nullable().optional(),
+    worker_agent: z.string().min(1).nullable().optional(),
+    worker_model: z.string().min(1).nullable().optional(),
+    reviewer_agent: z.string().min(1).nullable().optional(),
+    reviewer_model: z.string().min(1).nullable().optional(),
   })
   .strict();
 
@@ -67,6 +73,13 @@ interface RepoRow {
   base_branch: string;
   install_cmd: string;
   archived_at: string | null;
+}
+
+interface TaskAgentSnapshot {
+  worker_agent: string | null;
+  worker_model: string | null;
+  reviewer_agent: string | null;
+  reviewer_model: string | null;
 }
 
 export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
@@ -91,6 +104,12 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const tmuxId = computeTmuxId(input.external_ref, shortId);
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
   const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
+  const agentSnapshot = resolveTaskAgentSnapshot(deps, repo.repo_id, {
+    worker_agent: input.worker_agent ?? null,
+    worker_model: input.worker_model ?? null,
+    reviewer_agent: input.reviewer_agent ?? null,
+    reviewer_model: input.reviewer_model ?? null,
+  });
 
   // Track substrate side effects so rollback knows what to undo.
   let worktreeCreated = false;
@@ -204,8 +223,10 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         .query(
           `INSERT INTO tasks (
              task_id, repo_id, external_ref, state, branch_name, tmux_id, worktree_path,
-             retry_budget, slack_thread_ref, authors_json, created_at, updated_at
-           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`,
+             retry_budget, slack_thread_ref, authors_json,
+             worker_agent, worker_model, reviewer_agent, reviewer_model,
+             created_at, updated_at
+           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
@@ -217,6 +238,10 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           retryBudget,
           input.slack_thread_ref ?? null,
           input.authors_json ?? null,
+          agentSnapshot.worker_agent,
+          agentSnapshot.worker_model,
+          agentSnapshot.reviewer_agent,
+          agentSnapshot.reviewer_model,
           now,
           now,
         );
@@ -297,6 +322,28 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     rollback();
     throw err;
   }
+}
+
+function resolveTaskAgentSnapshot(
+  deps: EnqueueDeps,
+  repoId: string,
+  overrides: TaskAgentSnapshot,
+): TaskAgentSnapshot {
+  if (deps.agentResolver === undefined) return overrides;
+  const worker = deps.agentResolver.resolve(repoId, "worker", {
+    agent: overrides.worker_agent,
+    model: overrides.worker_model,
+  });
+  const reviewer = deps.agentResolver.resolve(repoId, "reviewer", {
+    agent: overrides.reviewer_agent,
+    model: overrides.reviewer_model,
+  });
+  return {
+    worker_agent: worker.agent,
+    worker_model: worker.model,
+    reviewer_agent: reviewer.agent,
+    reviewer_model: reviewer.model,
+  };
 }
 
 function parseInput(raw: unknown): EnqueueInput {

@@ -89,6 +89,8 @@ const AgentsConfigSchema = z
   .object({
     worker: z.string().min(1).optional(),
     reviewer: z.string().min(1).optional(),
+    worker_model: z.string().min(1).optional(),
+    reviewer_model: z.string().min(1).optional(),
     invocations: z.record(z.string().min(1), AgentInvocationSchema).optional(),
   })
   .strict();
