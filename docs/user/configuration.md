@@ -173,8 +173,8 @@ reviewer = "claude"
 reviewer_model = "claude-opus-4-1"
 
 [agents.invocations.codex]
-worker = "codex exec {prompt_file}"
-reviewer = "codex exec {prompt_file}"
+worker = "codex exec --json --dangerously-bypass-approvals-and-sandbox < {prompt_file} > .quay-tool-trace.log"
+reviewer = "codex exec --json --dangerously-bypass-approvals-and-sandbox < {prompt_file} > .quay-tool-trace.log"
 
 [agents.invocations.claude]
 worker = "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json"
@@ -190,10 +190,13 @@ per-attempt artifacts:
   json`. Captured as the `usage` artifact (`quay artifact get <task_id> usage`).
 - `.quay-tool-trace.log` — the debug stream from `--debug --debug-file`.
   Captured as the `tool_trace` artifact (`quay artifact get <task_id> tool_trace`).
+  When the file contains Codex `--json` JSONL events, Quay also synthesizes a
+  normalized `usage` artifact from any model/token totals in that stream.
 
 If you replace the default with a different agent runtime, write the same two
 filenames (or omit the redirects to skip those captures). Quay reads the files
-by name, not by runtime.
+by name, not by runtime. A valid `.quay-usage.json` remains authoritative; the
+Codex JSONL normalizer only runs when that direct usage envelope is absent.
 
 ## Repos Root Behavior
 

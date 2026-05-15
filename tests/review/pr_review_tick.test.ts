@@ -127,13 +127,23 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
   const taskId = "pr-review-repo-review-done-7";
   const worktreePath = `${h.dataDir}/worktrees/review-7`;
   mkdirSync(worktreePath, { recursive: true });
-  writeFileSync(
-    join(worktreePath, ".quay-usage.json"),
-    JSON.stringify({ model: "claude-test", usage: { input_tokens: 11 } }),
-  );
+  const reviewerTrace = [
+    JSON.stringify({ type: "session_configured", model: "gpt-5.5-codex" }),
+    JSON.stringify({
+      type: "token_count",
+      info: {
+        total_token_usage: {
+          input_tokens: 21,
+          output_tokens: 13,
+          reasoning_output_tokens: 5,
+          total_tokens: 34,
+        },
+      },
+    }),
+  ].join("\n");
   writeFileSync(
     join(worktreePath, ".quay-tool-trace.log"),
-    "reviewer tool trace\n",
+    `${reviewerTrace}\n`,
   );
   h.db
     .query(
@@ -200,6 +210,20 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     { kind: "tool_trace", n: 1 },
     { kind: "usage", n: 1 },
   ]);
+  const usage = h.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND attempt_id = ? AND kind = 'usage'`,
+    )
+    .get(taskId, attemptId);
+  expect(JSON.parse(readFileSync(usage!.file_path, "utf8"))).toEqual({
+    source: "codex_jsonl",
+    model: "gpt-5.5-codex",
+    input_tokens: 21,
+    output_tokens: 13,
+    reasoning_tokens: 5,
+    total_tokens: 34,
+  });
 });
 
 test("dead synthetic reviewer changes_requested waits for external changes", async () => {

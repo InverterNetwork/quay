@@ -3,8 +3,8 @@
 // runtime executed an attempt (e.g. preamble v2 vs v1 on the *same* model).
 //
 // v1 captures runtime + version by probing the binary's `--version`. The
-// model id is left as `unknown` until a JSON usage envelope (planned in a
-// follow-up) provides it directly. The probe is best-effort: any failure
+// model id is left as `unknown`; normalized usage artifacts carry model
+// details separately when an agent reports them. The probe is best-effort: any failure
 // (binary missing, non-zero exit, hang, parse error) collapses to
 // `<binary>/unknown/unknown` so the column is never NULL after a successful
 // spawn — which is what makes "is the spawn observability wired?" a

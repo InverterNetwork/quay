@@ -1,7 +1,8 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
+import { collectToolTraceArtifact } from "../../src/core/tool_trace.ts";
 import { collectUsageArtifact } from "../../src/core/usage.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import {
@@ -46,6 +47,18 @@ function deps() {
   };
 }
 
+function usageArtifact(taskId: string, attemptId: number): unknown {
+  const row = h!.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path
+         FROM artifacts WHERE task_id = ? AND attempt_id = ? AND kind = 'usage'
+        ORDER BY artifact_id DESC LIMIT 1`,
+    )
+    .get(taskId, attemptId);
+  expect(row).not.toBeNull();
+  return JSON.parse(readFileSync(row!.file_path, "utf8"));
+}
+
 test("writes a usage artifact when .quay-usage.json contains valid JSON", () => {
   h = createHarness();
   h.clock.set("2026-05-10T13:00:00.000Z");
@@ -73,6 +86,129 @@ test("writes a usage artifact when .quay-usage.json contains valid JSON", () => 
     .all(taskId, attemptId);
   expect(rows).toHaveLength(1);
   expect(rows[0]!.content_hash).not.toBeNull();
+});
+
+test("normalizes Codex JSONL usage from .quay-tool-trace.log", () => {
+  h = createHarness();
+  h.clock.set("2026-05-10T13:02:00.000Z");
+  const { taskId, attemptId } = setupAttempt();
+
+  const trace = [
+    JSON.stringify({ type: "session_configured", model: "gpt-5.5-codex" }),
+    JSON.stringify({
+      type: "token_count",
+      info: {
+        total_token_usage: {
+          input_tokens: 123,
+          cached_input_tokens: 45,
+          output_tokens: 67,
+          reasoning_output_tokens: 8,
+          total_tokens: 190,
+        },
+        last_token_usage: {
+          input_tokens: 3,
+          output_tokens: 4,
+          total_tokens: 7,
+        },
+      },
+    }),
+  ].join("\n");
+  writeFileSync(join(h.dataDir, ".quay-tool-trace.log"), `${trace}\n`);
+
+  collectUsageArtifact(deps(), taskId, attemptId, h.dataDir);
+
+  expect(usageArtifact(taskId, attemptId)).toEqual({
+    source: "codex_jsonl",
+    model: "gpt-5.5-codex",
+    input_tokens: 123,
+    output_tokens: 67,
+    cache_read_tokens: 45,
+    reasoning_tokens: 8,
+    total_tokens: 190,
+  });
+});
+
+test("skips Codex JSONL that has no usage data", () => {
+  h = createHarness();
+  const { taskId, attemptId } = setupAttempt();
+  writeFileSync(
+    join(h.dataDir, ".quay-tool-trace.log"),
+    `${JSON.stringify({ type: "session_configured", model: "gpt-5.5-codex" })}\n`,
+  );
+
+  collectUsageArtifact(deps(), taskId, attemptId, h.dataDir);
+
+  const count = h.db
+    .query<{ n: number }, [string, number]>(
+      `SELECT COUNT(*) AS n FROM artifacts
+         WHERE task_id = ? AND attempt_id = ? AND kind = 'usage'`,
+    )
+    .get(taskId, attemptId);
+  expect(count!.n).toBe(0);
+});
+
+test("skips malformed Codex JSONL without blocking capture", () => {
+  h = createHarness();
+  const { taskId, attemptId } = setupAttempt();
+  writeFileSync(
+    join(h.dataDir, ".quay-tool-trace.log"),
+    [
+      JSON.stringify({ type: "session_configured", model: "gpt-5.5-codex" }),
+      '{"type":"token_count","info":{"total_token_usage":{"input_tokens":1}',
+    ].join("\n"),
+  );
+
+  collectUsageArtifact(deps(), taskId, attemptId, h.dataDir);
+
+  const count = h.db
+    .query<{ n: number }, [string, number]>(
+      `SELECT COUNT(*) AS n FROM artifacts
+         WHERE task_id = ? AND attempt_id = ? AND kind = 'usage'`,
+    )
+    .get(taskId, attemptId);
+  expect(count!.n).toBe(0);
+});
+
+test("Codex usage normalization preserves the raw tool_trace artifact", () => {
+  h = createHarness();
+  h.clock.set("2026-05-10T13:03:00.000Z");
+  const { taskId, attemptId } = setupAttempt();
+  const trace = [
+    JSON.stringify({
+      type: "response.completed",
+      response: {
+        model: "gpt-5.5",
+        usage: {
+          input_tokens: 10,
+          input_tokens_details: { cached_tokens: 4 },
+          output_tokens: 5,
+          output_tokens_details: { reasoning_tokens: 2 },
+        },
+      },
+    }),
+  ].join("\n");
+  writeFileSync(join(h.dataDir, ".quay-tool-trace.log"), `${trace}\n`);
+
+  collectUsageArtifact(deps(), taskId, attemptId, h.dataDir);
+  collectToolTraceArtifact(deps(), taskId, attemptId, h.dataDir);
+
+  expect(usageArtifact(taskId, attemptId)).toEqual({
+    source: "codex_jsonl",
+    model: "gpt-5.5",
+    input_tokens: 10,
+    output_tokens: 5,
+    cache_read_tokens: 4,
+    reasoning_tokens: 2,
+    total_tokens: 15,
+  });
+  const traceRow = h.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND attempt_id = ? AND kind = 'tool_trace'`,
+    )
+    .get(taskId, attemptId);
+  expect(traceRow).not.toBeNull();
+  expect(readFileSync(traceRow!.file_path, "utf8")).toBe(`${trace}\n`);
 });
 
 test("re-reading the same envelope is idempotent (no duplicate artifact)", () => {

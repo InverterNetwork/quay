@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { tick_once } from "../../src/core/tick.ts";
@@ -62,6 +62,71 @@ test("dead-worker classifier ingests .quay-usage.json on any terminal path", asy
     )
     .all(t.taskId, t.attemptId);
   expect(rows).toHaveLength(1);
+});
+
+test("dead Codex worker normalizes usage from JSONL tool_trace", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-10T13:30:30.000Z");
+
+  const repoId = insertRepo(h.db, "repo-codex-usage-e2e");
+  const worktreesRoot = join(h.dataDir, "worktrees");
+  const t = insertRunningTask(h.db, {
+    taskId: "task-codex-usage-e2e",
+    repoId,
+    worktreesRoot,
+    remoteShaAtSpawn: null,
+    prExistedAtSpawn: 0,
+  });
+
+  const trace = [
+    JSON.stringify({ type: "session_configured", model: "gpt-5.5-codex" }),
+    JSON.stringify({
+      type: "token_count",
+      info: {
+        total_token_usage: {
+          input_tokens: 12,
+          output_tokens: 8,
+          cached_input_tokens: 3,
+          reasoning_output_tokens: 2,
+          total_tokens: 20,
+        },
+      },
+    }),
+  ].join("\n");
+  writeFileSync(join(t.worktreePath, ".quay-tool-trace.log"), `${trace}\n`);
+
+  const built = buildTickDeps(h);
+  built.tmux.markDead(t.sessionName!);
+  built.git.setRemoteHeadSha(repoId, t.branchName, null);
+  built.github.setPrExists(repoId, t.branchName, false);
+
+  await tick_once(built.deps);
+
+  const usage = h.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path FROM artifacts
+         WHERE task_id = ? AND attempt_id = ? AND kind = 'usage'`,
+    )
+    .get(t.taskId, t.attemptId);
+  expect(usage).not.toBeNull();
+  expect(JSON.parse(readFileSync(usage!.file_path, "utf8"))).toEqual({
+    source: "codex_jsonl",
+    model: "gpt-5.5-codex",
+    input_tokens: 12,
+    output_tokens: 8,
+    cache_read_tokens: 3,
+    reasoning_tokens: 2,
+    total_tokens: 20,
+  });
+
+  const toolTrace = h.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path FROM artifacts
+         WHERE task_id = ? AND attempt_id = ? AND kind = 'tool_trace'`,
+    )
+    .get(t.taskId, t.attemptId);
+  expect(toolTrace).not.toBeNull();
+  expect(readFileSync(toolTrace!.file_path, "utf8")).toBe(`${trace}\n`);
 });
 
 test("no usage artifact when the worker did not write .quay-usage.json", async () => {
