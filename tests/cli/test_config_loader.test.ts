@@ -154,6 +154,8 @@ test("accepts an [agents] block with per-role defaults and per-agent invocations
     `[agents]
 worker = "claude"
 reviewer = "codex"
+worker_model = "claude-opus-4-1"
+reviewer_model = "gpt-5.5"
 
 [agents.invocations.claude]
 worker = "claude --w < {prompt_file}"
@@ -167,6 +169,8 @@ reviewer = "codex exec --review < {prompt_file}"
   const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
   expect(result.config.agents?.worker).toBe("claude");
   expect(result.config.agents?.reviewer).toBe("codex");
+  expect(result.config.agents?.worker_model).toBe("claude-opus-4-1");
+  expect(result.config.agents?.reviewer_model).toBe("gpt-5.5");
   expect(result.config.agents?.invocations?.claude?.worker).toBe(
     "claude --w < {prompt_file}",
   );

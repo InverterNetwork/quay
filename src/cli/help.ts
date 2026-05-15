@@ -110,7 +110,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   enqueue: {
     path: "enqueue",
     synopsis:
-      "quay enqueue --repo <id> --brief-file <path> [--ticket-snapshot-file <p>] [--external-ref <r>] [--slack-thread-ref <r>] [--tag <name>]...",
+      "quay enqueue --repo <id> --brief-file <path> [--ticket-snapshot-file <p>] [--external-ref <r>] [--slack-thread-ref <r>] [--worker-agent <a>] [--worker-model <m>] [--reviewer-agent <a>] [--reviewer-model <m>] [--tag <name>]...",
     summary: "Enqueue a new task from a brief file (or a Linear issue).",
     details:
       "Pass --linear-issue <id> instead of --brief-file to derive the task from a Linear ticket via the configured adapter.",
@@ -120,19 +120,25 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--ticket-snapshot-file <p>", desc: "Optional ticket-snapshot file." },
       { flag: "--external-ref <ref>", desc: "Optional ticket reference (e.g., ITRY-900)." },
       { flag: "--slack-thread-ref <ref>", desc: "Optional Slack thread reference." },
+      { flag: "--worker-agent <a>", desc: "Override the worker agent for this task." },
+      { flag: "--worker-model <m>", desc: "Override the worker model for this task." },
+      { flag: "--reviewer-agent <a>", desc: "Override the reviewer agent for this task." },
+      { flag: "--reviewer-model <m>", desc: "Override the reviewer model for this task." },
       { flag: "--linear-issue <id>", desc: "Adapter-driven flow; mutually exclusive with --brief-file/--external-ref/--slack-thread-ref." },
       { flag: "--tag <name>", desc: "Repeatable. Attach a task tag." },
     ],
   },
   "review-pr": {
     path: "review-pr",
-    synopsis: "quay review-pr --pr <repo>:<num> [--head-sha <sha>] [--tag <name>]...",
+    synopsis: "quay review-pr --pr <repo>:<num> [--head-sha <sha>] [--reviewer-agent <a>] [--reviewer-model <m>] [--tag <name>]...",
     summary: "Schedule a Quay reviewer for a GitHub PR.",
     details:
       "Fire-and-forget entry point for CI. The command returns after scheduling or idempotently skipping the review attempt.",
     flags: [
       { flag: "--pr <repo>:<num>", desc: "Pull request identifier, e.g. owner/repo:47." },
       { flag: "--head-sha <sha>", desc: "Optional dedup SHA. Defaults to gh pr view headRefOid." },
+      { flag: "--reviewer-agent <a>", desc: "Override the reviewer agent for a synthetic review task." },
+      { flag: "--reviewer-model <m>", desc: "Override the reviewer model for a synthetic review task." },
       { flag: "--tag <name>", desc: "Repeatable. Attach tags to synthetic review tasks." },
     ],
   },
@@ -175,6 +181,8 @@ const COMMANDS: Record<string, CommandSpec> = {
         flag: "--agent-reviewer <name>",
         desc: "Optional. Pin reviewer attempts to an agent registered under [agents.invocations]. Defaults to [agents].reviewer.",
       },
+      { flag: "--model-worker <m>", desc: "Optional. Worker model default for this repo." },
+      { flag: "--model-reviewer <m>", desc: "Optional. Reviewer model default for this repo." },
       { flag: "--input <json>", desc: "Alternative: pass the full row as JSON." },
     ],
   },
@@ -192,6 +200,8 @@ const COMMANDS: Record<string, CommandSpec> = {
         flag: "--agent-reviewer <name>",
         desc: "Pin reviewer attempts to a registered agent. Pass '' to clear and fall back to the deployment default.",
       },
+      { flag: "--model-worker <m>", desc: "Set worker model default. Pass '' to clear." },
+      { flag: "--model-reviewer <m>", desc: "Set reviewer model default. Pass '' to clear." },
       { flag: "--input <json>", desc: "Alternative: pass the patch as JSON." },
     ],
   },

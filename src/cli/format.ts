@@ -11,6 +11,10 @@ export interface TaskListRow {
   attempts_consumed: number;
   retry_budget: number;
   budget_exhausted: boolean;
+  worker_agent: string | null;
+  worker_model: string | null;
+  reviewer_agent: string | null;
+  reviewer_model: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -24,6 +28,8 @@ export interface TaskGetCurrentAttempt {
   ended_at: string | null;
   exit_kind: string | null;
   kill_intent: string | null;
+  agent_name: string | null;
+  agent_model: string | null;
 }
 
 export interface TaskGetEvent {
@@ -48,6 +54,7 @@ export interface TaskGetPayload extends TaskListRow {
 const TASK_LIST_COLUMNS = `
   task_id, repo_id, state, external_ref, branch_name,
   attempts_consumed, retry_budget, budget_exhausted,
+  worker_agent, worker_model, reviewer_agent, reviewer_model,
   created_at, updated_at
 `;
 
@@ -60,6 +67,10 @@ interface TaskListRawRow {
   attempts_consumed: number;
   retry_budget: number;
   budget_exhausted: number;
+  worker_agent: string | null;
+  worker_model: string | null;
+  reviewer_agent: string | null;
+  reviewer_model: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -74,6 +85,10 @@ function rowToList(r: TaskListRawRow): TaskListRow {
     attempts_consumed: r.attempts_consumed,
     retry_budget: r.retry_budget,
     budget_exhausted: r.budget_exhausted === 1,
+    worker_agent: r.worker_agent,
+    worker_model: r.worker_model,
+    reviewer_agent: r.reviewer_agent,
+    reviewer_model: r.reviewer_model,
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -137,7 +152,8 @@ export function getTask(db: DB, taskId: string): TaskGetPayload | null {
   const attempt = db
     .query<TaskGetCurrentAttempt, [string]>(
       `SELECT attempt_id, attempt_number, reason, consumed_budget,
-              spawned_at, ended_at, exit_kind, kill_intent
+              spawned_at, ended_at, exit_kind, kill_intent,
+              agent_name, agent_model
          FROM attempts
         WHERE task_id = ?
         ORDER BY attempt_number DESC, attempt_id DESC

@@ -26,7 +26,7 @@ The review loop is conceptually the same for both task kinds (review → approve
 
 - Two new top-level task states: `pr-review` (reviewer running or queued for this PR) and `waiting_external_changes` (synthetic-only; post-CHANGES_REQUESTED wait for the external author to push).
 - Entry into `pr-review` is gated on PR open + CI green for Quay-owned tasks; synthetic tasks are created directly in `pr-review` by the entry point and skip `queued` / `pr-open` (those represent Quay-authoring stages synthetic tasks don't have).
-- Single idempotent entry point — internal function — that moves a task into `pr-review` and schedules a review-only attempt at the current head SHA. Two callers: tick (for Quay-owned tasks, when the precondition is met) and the new `quay review-pr` CLI (for synthetic tasks, called by CI). Active attempts dedup on `(task_id, head_sha)`: repeat calls at the same SHA are no-ops when a review is already active or already reached a real verdict; errored attempts may be retried at the same SHA by the bounded infra-failure retry path.
+- Single idempotent entry point — internal function — that moves a task into `pr-review` and schedules a review-only attempt at the current head SHA. Callers: tick for Quay-owned tasks when the precondition is met; tick for enrolled synthetic tasks when PR-number polling observes a new head SHA; and `quay review-pr` as the CI/webhook/manual enrollment and latency-helper poke. Active attempts dedup on `(task_id, head_sha)`: repeat calls at the same SHA are no-ops when a review is already active or already reached a real verdict; errored attempts may be retried at the same SHA by the bounded infra-failure retry path.
 - New attempt reason `review_only`. New columns: `attempts.head_sha` (dedup), `attempts.review_verdict` (state-transition driver), `attempts.review_id` (GitHub review id for traceability).
 - Reviewer-as-Quay-worker, single per-PR worker (N=1). Spawned by tick like any other worker; reviewer preamble stored in the existing `preambles` SQL table (new `kind = 'review'` row), seeded from a TS constant whose prose mirrors `docs/quay-reviewer-preamble-default.md`.
 - **Separate reviewer concurrency cap.** New top-level config key `max_concurrent_reviewers` (default 2). Independent of the existing `max_concurrent` (code-worker cap). Code-worker `countRunning()` stays unchanged; reviewer spawn-pass uses its own count over `review_only` attempts with `spawned_at IS NOT NULL AND ended_at IS NULL`.
@@ -35,10 +35,10 @@ The review loop is conceptually the same for both task kinds (review → approve
   - `[reviewer].gate_quay_owned_done` — whether Quay-owned tasks require an approved Quay review to reach `done`. Default false. Off → pre-existing `pr-open → done` path on CI green remains. On → only `pr-review → done` (via approval) advances Quay-owned tasks.
 - CHANGES_REQUESTED handling:
   - **Quay-owned**: write `review_comments` artifact and transition `pr-review → queued`, reusing the existing `non_budget_respawn` logic in `src/core/non_budget_respawn.ts:191`. Tick spawns a code worker from `queued` via the existing path. Counts toward `non_budget_respawns_consumed`.
-  - **Synthetic**: write `review_comments` artifact and transition `pr-review → waiting_external_changes`. No code worker to spawn; the task sits until CI calls `quay review-pr` with a new SHA. Then `waiting_external_changes → pr-review` with a fresh attempt.
+  - **Synthetic**: write `review_comments` artifact and transition `pr-review → waiting_external_changes`. No code worker to spawn; tick keeps polling the enrolled synthetic task by `pr_number` until the PR is merged/closed or a new head SHA appears. A new SHA triggers `waiting_external_changes → pr-review` with a fresh attempt. CI/webhook/manual `quay review-pr` calls remain safe idempotent pokes, not the required owner of the lifecycle.
 - Supersession on new SHA: if a `review_only` attempt is pending or running at SHA A and `enterReview` arrives at SHA B (≠ A), the SHA A attempt is cancelled (`ended_at` set, `review_verdict = 'superseded'`). The migration also tightens `one_pending_attempt_per_task` to ignore ended pending attempts, so superseded pending rows do not block new attempts. This guarantees "one active reviewer per PR at any time."
 - Synthetic-task identity: deterministic `task_id = "pr-review-" + slug(repo_id) + "-" + pr_number`, one synthetic task per human PR forever.
-- `quay review-pr --pr <repo>:<num>` as the single CI-callable entry point. Fire-and-forget.
+- `quay review-pr --pr <repo>:<num>` as the external-callable enrollment/poke entry point. Fire-and-forget.
 - `--tag` flag on `quay enqueue` and `quay review-pr` populating the existing `task_tags` table (already in `migrations/0002_deployment_adapters.sql:12`).
 - Cron cadence config (recommended 30 s for review-running deployments).
 - Storage of the posted review as a `review_comments` artifact (already a kind today). Plus `attempts.review_id` for the GitHub review id and `attempts.head_sha` for the SHA reviewed. That's enough state to drive the state machine; richer structured storage (a `review_findings` table) is **out of v1 scope** — see below.
@@ -86,11 +86,11 @@ sequenceDiagram
     else changes_requested Quay-owned
         Note over Tick: call existing non_budget_respawn. State moves to queued. Tick spawns code worker. CI green re-enters via entry point
     else changes_requested synthetic
-        Note over Tick: state moves to waiting_external_changes. Wait for external push. CI fires quay review-pr to re-enter
+        Note over Tick: state moves to waiting_external_changes. Tick polls PR by number; a new head SHA re-enters review. CI/webhook review-pr calls are optional pokes
     end
 ```
 
-The dispatch decision is **internal to the entry point**: it looks up `(repo_id, pr_number)` against `tasks`, and either uses the matching row (Quay-owned) or creates a synthetic task. CI doesn't need to know which path it's on; tick doesn't need to call out to CI. Both go through the same door.
+The dispatch decision is **internal to the entry point**: it looks up `(repo_id, pr_number)` against `tasks`, and either uses the matching row (Quay-owned) or creates a synthetic task. CI doesn't need to know which path it's on; tick doesn't need to call out to CI. After a synthetic task is enrolled once, tick owns PR-number polling until merge/close; later CI/webhook/manual `review-pr` calls are just idempotent latency helpers. Both tick and external callers still go through the same deduped door.
 
 ## 4. State machine
 
@@ -111,8 +111,9 @@ stateDiagram-v2
     pr_review --> done: reviewer posts approved review (NEW)
     pr_review --> queued: Quay-owned, reviewer posts changes-requested (NEW; via existing non_budget_respawn path)
     pr_review --> waiting_external_changes: synthetic, reviewer posts changes-requested (NEW)
-    waiting_external_changes --> pr_review: synthetic, new SHA arrives via CI (NEW)
-    done --> [*]
+    waiting_external_changes --> pr_review: synthetic, tick observes new SHA by PR number (NEW)
+    done --> pr_review: synthetic, tick observes new SHA by PR number (NEW)
+    done --> [*]: PR merged/closed cleanup
 
     note right of pr_review
       A review_only attempt is queued or running
@@ -126,9 +127,10 @@ stateDiagram-v2
       Synthetic only. Task is parked because
       Quay has no worker to spawn for a
       human-authored PR — the external author
-      must push. CI fires quay review-pr on
-      the next push; entry point schedules a
-      new attempt at the new SHA.
+      must push. Tick polls by pr_number and
+      schedules a new attempt when the PR head
+      SHA changes. External review-pr calls
+      may poke the same path but are optional.
     end note
 ```
 
@@ -140,10 +142,11 @@ The pre-existing `pr-open → done` transition stays in place for deployments wh
 
 ### Entry into `pr-review`
 
-A single idempotent function (`enterReview(task_id, head_sha)`) is the only way a task enters `pr-review`. Two callers:
+A single idempotent function (`enterReview(task_id, head_sha)`) is the only way a task enters `pr-review`. Callers:
 
 1. **Tick** — for Quay-owned tasks. Trigger: `[reviewer].gate_quay_owned_done = true` and `[reviewer].enabled = true`, task is in `pr-open`, CI is green at the current head SHA, no terminal `review_only` attempt exists for `(task_id, head_sha)`.
-2. **`quay review-pr --pr <repo>:<num>`** (called by CI) — for any PR. Only requires `[reviewer].enabled = true`; works regardless of `gate_quay_owned_done`. Safe to call redundantly. If the PR resolves to a Quay-owned task while `gate_quay_owned_done = false`, the CLI returns a no-op result and leaves the legacy `pr-open → done` path untouched; synthetic PRs still schedule reviews.
+2. **Tick** — for enrolled synthetic tasks. Trigger: `[reviewer].enabled = true`, task id is synthetic, state is `pr-review`, `done`, or `waiting_external_changes`, and PR-number polling observes an open PR whose head SHA lacks an active or terminal real review verdict. Tick also uses the same PR-number poll to terminal-clean merged/closed synthetic PRs.
+3. **`quay review-pr --pr <repo>:<num>`** — for any PR. This is the CI/webhook/manual enrollment and poke surface. Only requires `[reviewer].enabled = true`; works regardless of `gate_quay_owned_done`. Safe to call redundantly. If the PR resolves to a Quay-owned task while `gate_quay_owned_done = false`, the CLI returns a no-op result and leaves the legacy `pr-open → done` path untouched; synthetic PRs still schedule reviews when needed, but an already-enrolled synthetic PR no longer depends on repeated external calls for re-review.
 
 `enterReview` semantics:
 
@@ -156,7 +159,7 @@ A single idempotent function (`enterReview(task_id, head_sha)`) is the only way 
    - If an **active** `review_only` attempt exists at this SHA → return its id, do nothing.
    - If a terminal `review_only` attempt at this SHA has `review_verdict IN ('approved', 'changes_requested')` → return its id, do nothing. A real verdict has already been recorded for this SHA.
    - If only terminal `errored` or `superseded` attempts exist at this SHA → a retry may insert a fresh `review_only` attempt, subject to the infra-failure cap (§4).
-   - Else → transition the task to `pr-review` (from `pr-open` for Quay-owned, from `waiting_external_changes` for synthetic — synthetic tasks created in step 1.3 are already there). Insert a `review_only` attempt with `head_sha` populated and `spawned_at IS NULL`.
+   - Else → transition the task to `pr-review` (from `pr-open` for Quay-owned, from `done` or `waiting_external_changes` for synthetic — synthetic tasks created in step 1.3 are already there). Insert a `review_only` attempt with `head_sha` populated and `spawned_at IS NULL`.
 4. Return the `attempt_id`.
 
 **Edge case explicitly not handled in v1:** a fork PR whose `headRefName` happens to collide with an existing Quay task's `branch_name` on the same repo would be mis-classified. Worst case is one wrong-respawn cycle parking in `non_budget_loop`; a `isCrossRepository` check on the `gh pr view` response is the trivial fix if it ever shows up.
@@ -192,7 +195,7 @@ Rollout: land the migration with both flags false; enable synthetic review by fl
 
 ### GitHub review-request state is not consulted
 
-The trigger for a fresh review attempt is purely a new head SHA at the entry point. GitHub's "Re-request review" button is not consulted. A Quay-owned worker pushing a new commit needs to do nothing on GitHub's side; tick observes the new SHA and re-enters review. A synthetic PR receiving a force-push triggers fresh review via the next CI `quay review-pr` call (CI runs on `pull_request: synchronize`).
+The trigger for a fresh review attempt is purely a new head SHA observed by tick or passed to the entry point. GitHub's "Re-request review" button is not consulted. A Quay-owned worker pushing a new commit needs to do nothing on GitHub's side; tick observes the new SHA and re-enters review. A synthetic PR receiving a force-push also needs no external re-entry after enrollment: tick polls the PR by `pr_number`, observes the new head SHA, and schedules exactly one new `review_only` attempt unless that SHA already has an active or real terminal verdict. CI/webhook/manual `quay review-pr` calls on `pull_request: synchronize` remain useful to reduce latency and to enroll tasks that do not exist yet, but they are not required for lifecycle ownership.
 
 ### Human reviews coexist with the Quay reviewer
 
@@ -211,11 +214,11 @@ Synthetic tasks observe only the Quay reviewer signal in v1 — the existing hum
 
 ### Synthetic-task identity and reopen
 
-Synthetic `task_id = "pr-review-" + slug(repo_id) + "-" + pr_number`. One synthetic task per human PR, forever. New SHAs become new `attempts` rows on the same task. (Carried forward from the archive §4 "Synthetic task identity"; the only change is that synthetic tasks now flow through the same top-level states as Quay-owned ones, with `done` as the unified terminal once approval lands.)
+Synthetic `task_id = "pr-review-" + slug(repo_id) + "-" + pr_number`. One synthetic task per human PR, forever. New SHAs become new `attempts` rows on the same task. (Carried forward from the archive §4 "Synthetic task identity"; the key lifecycle change is that `done` is an approved-but-still-tracked state until the PR is merged or closed, not a state that stops synthetic PR-number polling.)
 
 ### Force-pushes mid-review
 
-If a PR is force-pushed while a review attempt is `running`, the worker's worktree no longer matches the new head SHA. Per the reviewer preamble, the worker writes `.quay-blocked.md` and exits without posting. Tick treats this as a reviewer infrastructure failure (above). The next entry-point call at the new SHA flows through dedup normally, supersedes any active attempt at the old SHA, and resets the infra-failure counter to the new SHA if a retry is needed there.
+If a PR is force-pushed while a review attempt is `running`, the worker's worktree no longer matches the new head SHA. Per the reviewer preamble, the worker writes `.quay-blocked.md` and exits without posting. Tick treats this as a reviewer infrastructure failure (above). Tick's synthetic lifecycle poll or an external entry-point poke at the new SHA flows through dedup normally, supersedes any active attempt at the old SHA, and resets the infra-failure counter to the new SHA if a retry is needed there.
 
 ## 5. Schema delta
 
@@ -571,7 +574,7 @@ Behavior matrix:
 | `enabled` | `gate_quay_owned_done` | Effect |
 |---|---|---|
 | false | (any) | Reviewer subsystem off. `quay review-pr` returns an error. Reviewer-spawn pass is a no-op. Tick doesn't call the entry point. Pre-existing `pr-open → done` path unchanged. |
-| true | false | Synthetic review works (CI fires `quay review-pr` → reviewer worker spawns → posts review). Quay-owned tasks still reach `done` via the legacy `pr-open → done` path on CI green. Reviewer never affects Quay-owned merges. |
+| true | false | Synthetic review works after enrollment (`quay review-pr` creates/pokes the synthetic task; tick then polls by PR number until merge/close and schedules new-head reviews). Quay-owned tasks still reach `done` via the legacy `pr-open → done` path on CI green. Reviewer never affects Quay-owned merges. |
 | true | true | Synthetic review works (same as above). For Quay-owned tasks, tick calls the entry point on `pr-open` + CI green; only `pr-review → done` on approval reaches `done`. |
 
 Rollout sequence:
@@ -617,9 +620,9 @@ quay review-pr --pr <repo>:<num> [--head-sha <sha>]
 3. Call `enterReview(repo_id, pr_number, head_sha)`. The function handles task-id resolution (existing Quay-task vs. new synthetic), active-attempt dedup, same-SHA retry eligibility, and Quay-owned no-op behavior when `gate_quay_owned_done = false`.
 4. Print one JSON object to stdout (see §7.4) and exit 0.
 
-**Fire-and-forget.** The CLI returns immediately after `enterReview` returns. It does not wait for the reviewer worker to spawn, run, or post. When work is scheduled, CI sees the review on GitHub when the worker posts it; there is no `--wait` flag in v1 (see §2 out-of-scope).
+**Fire-and-forget enrollment/poke.** The CLI returns immediately after `enterReview` returns. It does not wait for the reviewer worker to spawn, run, or post. When work is scheduled, CI sees the review on GitHub when the worker posts it; there is no `--wait` flag in v1 (see §2 out-of-scope). For synthetic PRs, one successful call enrolls the task; tick owns polling after that.
 
-**Safe to call redundantly.** A CI workflow that fires on every `pull_request: synchronize` event calls `quay review-pr` regardless of whether the task is Quay-owned or synthetic. The entry point's lookup-then-dedup makes the call a no-op if tick has already moved the task, if an active review-only attempt for `(task_id, head_sha)` exists, or if that SHA already has a real terminal verdict.
+**Safe to call redundantly.** A CI workflow that fires on every `pull_request: synchronize` event can still call `quay review-pr` regardless of whether the task is Quay-owned or synthetic. The entry point's lookup-then-dedup makes the call a no-op if tick has already moved the task, if an active review-only attempt for `(task_id, head_sha)` exists, or if that SHA already has a real terminal verdict. These calls are latency helpers and enrollment fallbacks, not the lifecycle driver for already-enrolled synthetic PRs.
 
 ### 7.3 Idempotency boundary
 

@@ -52,7 +52,11 @@ quay repo add \
   --install-cmd <cmd> \
   [--test-cmd <cmd>] \
   [--ci-workflow-name <name>] \
-  [--contribution-guide-path <path>]
+  [--contribution-guide-path <path>] \
+  [--agent-worker <name>] \
+  [--agent-reviewer <name>] \
+  [--model-worker <model>] \
+  [--model-reviewer <model>]
 
 quay repo update <repo_id> [flags]
 quay repo update --id <repo_id> [flags]
@@ -68,7 +72,10 @@ quay repo apply-tags <repo_id> --from <path>
 ```
 
 `repo add` and `repo update` also accept `--input <json>` for structured
-automation.
+automation. Agent/model flags set per-repo worker and reviewer defaults.
+Use `repo update --agent-worker ""`, `--agent-reviewer ""`,
+`--model-worker ""`, or `--model-reviewer ""` to clear an override and fall
+back to deployment defaults.
 
 `repo list` and `repo export` default to returning every row, archived
 included, so operators debugging "where did my repo go?" still see
@@ -111,6 +118,10 @@ quay enqueue \
   [--ticket-snapshot-file <path>] \
   [--external-ref <ref>] \
   [--slack-thread-ref <channel:ts>] \
+  [--worker-agent <name>] \
+  [--worker-model <model>] \
+  [--reviewer-agent <name>] \
+  [--reviewer-model <model>] \
   [--tag <tag>]...
 ```
 
@@ -120,22 +131,34 @@ Linear:
 quay enqueue \
   --repo <repo_id> \
   --linear-issue <identifier> \
+  [--worker-agent <name>] \
+  [--worker-model <model>] \
+  [--reviewer-agent <name>] \
+  [--reviewer-model <model>] \
   [--tag <tag>]...
 ```
 
-`--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,
-and `--slack-thread-ref`.
+Task-level agent/model overrides are snapshotted onto the queued task and take
+precedence over repo and deployment role defaults. `--linear-issue` is mutually
+exclusive with `--brief-file`, `--external-ref`, and `--slack-thread-ref`.
 
 ## PR Review
 
 ```bash
-quay review-pr --pr <repo>:<num> [--head-sha <sha>] [--tag <tag>]...
+quay review-pr --pr <repo>:<num> \
+  [--head-sha <sha>] \
+  [--reviewer-agent <name>] \
+  [--reviewer-model <model>] \
+  [--tag <tag>]...
 ```
 
-`review-pr` is the fire-and-forget CI entry point for the Quay reviewer. The
+`review-pr` is the fire-and-forget enrollment/poke entry point for the Quay reviewer. The
 repo portion may be the configured `repo_id` or the owner/name derived from the
 registered repo URL. The command prints one JSON object with `scheduled` and
 `skipped_reason` so callers can distinguish new work from an idempotent no-op.
+Reviewer overrides are snapshotted on synthetic review tasks. After a synthetic
+PR is enrolled once, tick polls it by PR number until merge/close and schedules
+new-head reviews itself; repeated CI/webhook calls remain safe latency helpers.
 
 ## Tick
 

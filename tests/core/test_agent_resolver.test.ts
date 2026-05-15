@@ -87,6 +87,61 @@ test("resolver uses repo override over deployment default for worker only", () =
   expect(reviewer.invocation).toBe("claude --reviewer");
 });
 
+test("resolver applies task snapshot over repo and global role defaults", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-snapshot");
+  h.db
+    .query(`UPDATE repos SET agent_worker = ?, model_worker = ? WHERE repo_id = ?`)
+    .run("claude", "repo-model", "repo-snapshot");
+
+  const resolver = createAgentResolver({
+    db: h.db,
+    config: {
+      agents: {
+        worker: "codex",
+        worker_model: "global-model",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+  });
+
+  const resolved = resolver.resolve("repo-snapshot", "worker", {
+    agent: "codex",
+    model: "task-model",
+  });
+  expect(resolved.agent).toBe("codex");
+  expect(resolved.model).toBe("task-model");
+  expect(resolved.invocation).toBe("codex exec --model 'task-model'");
+});
+
+test("resolver uses repo model over global model when task snapshot is empty", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-model-default");
+  h.db
+    .query(`UPDATE repos SET model_reviewer = ? WHERE repo_id = ?`)
+    .run("repo-reviewer-model", "repo-model-default");
+
+  const resolver = createAgentResolver({
+    db: h.db,
+    config: {
+      agents: {
+        reviewer_model: "global-reviewer-model",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+        },
+      },
+    },
+  });
+
+  const resolved = resolver.resolve("repo-model-default", "reviewer");
+  expect(resolved.agent).toBe("claude");
+  expect(resolved.model).toBe("repo-reviewer-model");
+  expect(resolved.invocation).toBe("claude --r --model 'repo-reviewer-model'");
+});
+
 test("resolver mix-and-match: claude worker with codex reviewer", () => {
   h = createHarness();
   insertRepo(h.db, "repo-mixed");

@@ -6,6 +6,7 @@ import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitHubPort, PullRequestView } from "../ports/github.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
+import type { AgentResolver } from "./agents.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 
 export const SYNTHETIC_PR_REVIEW_PREFIX = "pr-review-";
@@ -43,6 +44,7 @@ export interface EnterReviewDeps {
   // path). The Quay-owned gating path never reaches createSyntheticTask, so
   // callers on that path may omit `paths`.
   paths?: { worktreesRoot: string };
+  agentResolver?: AgentResolver;
 }
 
 export interface EnterReviewInput {
@@ -52,6 +54,8 @@ export interface EnterReviewInput {
   tags?: string[];
   reviewerEnabled: boolean;
   gateQuayOwnedDone: boolean;
+  reviewerAgent?: string;
+  reviewerModel?: string;
 }
 
 export interface EnterReviewResult {
@@ -138,7 +142,10 @@ export function enterReview(
 
   const now = deps.clock.nowISO();
   const task =
-    existing ?? createSyntheticTask(deps, input.repoId, input.prNumber, pr, now);
+    existing ?? createSyntheticTask(deps, input.repoId, input.prNumber, pr, now, {
+      reviewerAgent: input.reviewerAgent ?? null,
+      reviewerModel: input.reviewerModel ?? null,
+    });
   const synthetic = isSyntheticTaskId(task.task_id);
   const tags = dedupeTags(input.tags ?? []);
   const preambleId = ensurePreambleIdForAttemptReason(
@@ -343,6 +350,7 @@ function createSyntheticTask(
   prNumber: number,
   pr: PullRequestView,
   now: string,
+  overrides: { reviewerAgent: string | null; reviewerModel: string | null },
 ): TaskLookupRow {
   const taskId = syntheticTaskId(repoId, prNumber);
   const existingById = findTaskById(deps.db, taskId);
@@ -363,6 +371,18 @@ function createSyntheticTask(
     slugRepoId(repoId),
     String(prNumber),
   );
+  const workerResolved = deps.agentResolver?.resolve(repoId, "worker") ?? null;
+  const reviewerResolved =
+    deps.agentResolver?.resolve(repoId, "reviewer", {
+      agent: overrides.reviewerAgent,
+      model: overrides.reviewerModel,
+    }) ?? null;
+  const snapshot = {
+    worker_agent: workerResolved?.agent ?? null,
+    worker_model: workerResolved?.model ?? null,
+    reviewer_agent: reviewerResolved?.agent ?? overrides.reviewerAgent,
+    reviewer_model: reviewerResolved?.model ?? overrides.reviewerModel,
+  };
   // INSERT OR IGNORE + re-fetch makes concurrent enterReview calls converge on
   // the same row instead of one of them failing on the task_id primary key.
   deps.db
@@ -370,8 +390,9 @@ function createSyntheticTask(
       `INSERT OR IGNORE INTO tasks (
          task_id, repo_id, external_ref, state, branch_name, tmux_id,
          worktree_path, pr_number, pr_url, head_sha, retry_budget,
+         worker_agent, worker_model, reviewer_agent, reviewer_model,
          created_at, updated_at
-       ) VALUES (?, ?, NULL, 'pr-review', ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+       ) VALUES (?, ?, NULL, 'pr-review', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       taskId,
@@ -382,6 +403,10 @@ function createSyntheticTask(
       prNumber,
       pr.url,
       pr.headSha,
+      snapshot.worker_agent,
+      snapshot.worker_model,
+      snapshot.reviewer_agent,
+      snapshot.reviewer_model,
       now,
       now,
     );

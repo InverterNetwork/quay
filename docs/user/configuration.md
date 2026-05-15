@@ -23,7 +23,6 @@ worktree_root = "/var/lib/quay/worktrees"
 max_concurrent = 2
 max_concurrent_reviewers = 2
 retry_budget = 5
-agent_invocation = "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json"
 max_attempt_duration_seconds = 3600
 staleness_threshold_seconds = 600
 max_spawn_failures = 3
@@ -47,6 +46,16 @@ enabled = false
 gate_quay_owned_done = false
 # Preferred reviewer token source: QUAY_REVIEWER_GH_TOKEN in tick env.
 # gh_token_file = "/run/hermes/reviewer-gh-token" # fallback during migration
+
+[agents]
+worker = "claude"
+reviewer = "claude"
+# worker_model = "claude-opus-4-1"
+# reviewer_model = "claude-opus-4-1"
+
+[agents.invocations.claude]
+worker = "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json"
+reviewer = "claude --permission-mode bypassPermissions --output-format json < {prompt_file} > .quay-usage.json"
 ```
 
 ## Keys
@@ -59,7 +68,9 @@ gate_quay_owned_done = false
 | `max_concurrent` | `2` | Maximum running tasks promoted by tick. |
 | `max_concurrent_reviewers` | `2` | Maximum running reviewer workers. Independent of `max_concurrent`. |
 | `retry_budget` | `5` | Copied onto new tasks at enqueue time. |
-| `agent_invocation` | `claude … --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json` (see `Agent Invocation` below) | Shell command used inside tmux. The default writes a `usage` envelope to `.quay-usage.json` and a `tool_trace` debug log to `.quay-tool-trace.log`; both are captured as per-attempt artifacts. |
+| `agent_invocation` | unset | Legacy shorthand for `[agents.invocations.claude].worker` and `.reviewer`. Prefer `[agents]` for new deployments. |
+| `[agents].worker` / `[agents].reviewer` | `claude` | Global role defaults. Each value names an entry under `[agents.invocations]`. |
+| `[agents].worker_model` / `[agents].reviewer_model` | unset | Optional global role model defaults. Quay injects these as `--model <value>` for supported runtimes (`claude`, `codex`). |
 | `max_attempt_duration_seconds` | `3600` | Live worker wall-clock kill threshold. |
 | `staleness_threshold_seconds` | `600` | Live worker no-fresh-log kill threshold. |
 | `max_spawn_failures` | `3` | Repeated spawn failures before `worktree_error`. |
@@ -135,15 +146,45 @@ file and the next reviewer attempt picks it up.
 
 ## Agent Invocation
 
-Quay writes the final prompt to `<worktree>/.quay-prompt.md` before spawning the
-worker. If your command uses `{prompt_file}`, Quay replaces it with a
+Quay resolves agent/model selection in this order:
+
+```text
+task override > repo role default > global role default
+```
+
+Task overrides come from `quay enqueue --worker-agent`, `--worker-model`,
+`--reviewer-agent`, and `--reviewer-model`. Synthetic review tasks scheduled by
+`quay review-pr` support `--reviewer-agent` and `--reviewer-model`. Repo role
+defaults are set with `quay repo add/update --agent-worker`,
+`--agent-reviewer`, `--model-worker`, and `--model-reviewer`.
+
+Quay snapshots the resolved worker and reviewer agent/model on the task row at
+enqueue or synthetic review scheduling time. Later config changes do not alter
+already-queued tasks. Successful spawns record the resolved `agent_name` and
+`agent_model` on the attempt row.
+
+Quay writes the final prompt to `<worktree>/.quay-prompt.md` before spawning an
+agent. If your command uses `{prompt_file}`, Quay replaces it with a
 shell-quoted prompt path.
 
 Examples:
 
 ```toml
 agent_invocation = "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json"
-agent_invocation = "my-agent run --prompt {prompt_file}"
+
+[agents]
+worker = "codex"
+worker_model = "gpt-5.5"
+reviewer = "claude"
+reviewer_model = "claude-opus-4-1"
+
+[agents.invocations.codex]
+worker = "codex exec {prompt_file}"
+reviewer = "codex exec {prompt_file}"
+
+[agents.invocations.claude]
+worker = "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json"
+reviewer = "claude --permission-mode bypassPermissions --output-format json < {prompt_file} > .quay-usage.json"
 ```
 
 The command runs inside the task worktree.

@@ -140,6 +140,14 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
   const taskId = "pr-review-repo-review-done-7";
   const worktreePath = `${h.dataDir}/worktrees/review-7`;
   mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(
+    join(worktreePath, ".quay-usage.json"),
+    JSON.stringify({ model: "claude-test", usage: { input_tokens: 11 } }),
+  );
+  writeFileSync(
+    join(worktreePath, ".quay-tool-trace.log"),
+    "reviewer tool trace\n",
+  );
   h.db
     .query(
       `INSERT INTO tasks (
@@ -192,6 +200,19 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     )
     .get(taskId);
   expect(artifact?.n).toBe(1);
+  const observabilityArtifacts = h.db
+    .query<{ kind: string; n: number }, [string, number]>(
+      `SELECT kind, COUNT(*) AS n FROM artifacts
+        WHERE task_id = ? AND attempt_id = ?
+          AND kind IN ('usage', 'tool_trace')
+        GROUP BY kind
+        ORDER BY kind`,
+    )
+    .all(taskId, attemptId);
+  expect(observabilityArtifacts).toEqual([
+    { kind: "tool_trace", n: 1 },
+    { kind: "usage", n: 1 },
+  ]);
 });
 
 test("dead synthetic reviewer changes_requested waits for external changes", async () => {
@@ -644,6 +665,14 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
   const taskId = "pr-review-repo-review-fail-9";
   const worktreePath = `${h.dataDir}/worktrees/review-9`;
   mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(
+    join(worktreePath, ".quay-usage.json"),
+    JSON.stringify({ model: "claude-test", usage: { output_tokens: 7 } }),
+  );
+  writeFileSync(
+    join(worktreePath, ".quay-tool-trace.log"),
+    "reviewer failure trace\n",
+  );
   h.db
     .query(
       `INSERT INTO tasks (
@@ -712,6 +741,19 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
     )
     .get(taskId);
   expect(pending?.n).toBe(0);
+  const observabilityArtifacts = h.db
+    .query<{ kind: string; n: number }, [string, number]>(
+      `SELECT kind, COUNT(*) AS n FROM artifacts
+        WHERE task_id = ? AND attempt_id = ?
+          AND kind IN ('usage', 'tool_trace')
+        GROUP BY kind
+        ORDER BY kind`,
+    )
+    .all(taskId, attemptId);
+  expect(observabilityArtifacts).toEqual([
+    { kind: "tool_trace", n: 1 },
+    { kind: "usage", n: 1 },
+  ]);
 });
 
 test("dead reviewer leaving .quay-blocked.md retries once and records a single review_blocker artifact", async () => {

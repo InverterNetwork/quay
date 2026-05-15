@@ -182,6 +182,8 @@ interface QueuedTaskRow {
   worktree_path: string;
   cancel_requested_at: string | null;
   external_ref: string | null;
+  worker_agent: string | null;
+  worker_model: string | null;
 }
 
 interface RunningTaskRow {
@@ -218,6 +220,7 @@ type PrTerminalFromState =
   | "pr-review"
   | "awaiting-next-brief"
   | "claimed-by-orchestrator"
+  | "waiting_external_changes"
   | "waiting_human"
   | "non_budget_loop"
   | "worktree_error"
@@ -250,6 +253,8 @@ interface ReviewAttemptTaskRow {
   tmux_session: string | null;
   spawned_at: string | null;
   kill_intent: string | null;
+  reviewer_agent: string | null;
+  reviewer_model: string | null;
 }
 
 interface DoneTaskRow {
@@ -257,9 +262,25 @@ interface DoneTaskRow {
   repo_id: string;
   branch_name: string;
   worktree_path: string;
+  pr_number: number | null;
   cancel_requested_at: string | null;
   last_review_id_acted_on: string | null;
   last_conflict_observation: string | null;
+}
+
+type SyntheticReviewLifecycleState =
+  | "pr-review"
+  | "done"
+  | "waiting_external_changes";
+
+interface SyntheticReviewLifecycleTaskRow {
+  task_id: string;
+  repo_id: string;
+  state: SyntheticReviewLifecycleState;
+  branch_name: string;
+  worktree_path: string;
+  pr_number: number | null;
+  cancel_requested_at: string | null;
 }
 
 interface ClaimedTaskRow {
@@ -334,11 +355,19 @@ export async function tick_once(
     const runningSnapshot = readRunning(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
+    const syntheticReviewLifecycleSnapshot = readSyntheticReviewLifecycle(
+      deps.db,
+    ).filter((t) => !cancelledIds.has(t.task_id));
+    const syntheticReviewLifecycleIds = new Set(
+      syntheticReviewLifecycleSnapshot.map((t) => t.task_id),
+    );
     const prOpenSnapshot = readPrOpen(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
     const doneSnapshot = readDone(deps.db).filter(
-      (t) => !cancelledIds.has(t.task_id),
+      (t) =>
+        !cancelledIds.has(t.task_id) &&
+        !syntheticReviewLifecycleIds.has(t.task_id),
     );
     const parkedPrTerminalSnapshot = readParkedPrTerminal(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
@@ -381,6 +410,25 @@ export async function tick_once(
       try {
         const result = processDoneTask(deps, task, options);
         if (result !== null) results.push(result);
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
+    const syntheticReviewAttemptSkipIds = new Set<string>();
+    for (const task of syntheticReviewLifecycleSnapshot) {
+      try {
+        const result = processSyntheticReviewLifecycle(deps, task, options);
+        if (result !== null) {
+          results.push(result);
+          if (
+            result.action === "pr_merged" ||
+            result.action === "pr_closed_unmerged" ||
+            result.action === "review_requested"
+          ) {
+            syntheticReviewAttemptSkipIds.add(task.task_id);
+          }
+        }
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
       }
@@ -433,7 +481,9 @@ export async function tick_once(
       // pr-review must short-circuit to the terminal state instead of
       // respawning a reviewer pane onto an already-closed PR.
       const prReviewSnapshot = readPrReview(deps.db).filter(
-        (t) => !cancelledIds.has(t.task_id),
+        (t) =>
+          !cancelledIds.has(t.task_id) &&
+          !syntheticReviewLifecycleIds.has(t.task_id),
       );
       const terminalReviewIds = new Set<string>();
       for (const task of prReviewSnapshot) {
@@ -449,6 +499,7 @@ export async function tick_once(
       }
 
       for (const task of runningReviewSnapshot) {
+        if (syntheticReviewAttemptSkipIds.has(task.task_id)) continue;
         if (terminalReviewIds.has(task.task_id)) continue;
         try {
           const result = processRunningReviewAttempt(deps, task, options);
@@ -462,6 +513,7 @@ export async function tick_once(
         options.maxConcurrentReviewers ?? DEFAULT_MAX_CONCURRENT_REVIEWERS;
       let reviewerRunningCount = countRunningReviewers(deps.db);
       for (const task of pendingReviewSnapshot) {
+        if (syntheticReviewAttemptSkipIds.has(task.task_id)) continue;
         if (terminalReviewIds.has(task.task_id)) continue;
         if (reviewerRunningCount >= reviewCap) {
           results.push({ task_id: task.task_id, action: "skipped_capacity" });
@@ -522,7 +574,7 @@ function readQueued(db: DB): QueuedTaskRow[] {
   return db
     .query<QueuedTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path,
-              cancel_requested_at, external_ref
+              cancel_requested_at, external_ref, worker_agent, worker_model
          FROM tasks
         WHERE state = 'queued'
         ORDER BY created_at, task_id`,
@@ -591,10 +643,25 @@ function readDone(db: DB): DoneTaskRow[] {
   return db
     .query<DoneTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
-              cancel_requested_at, last_review_id_acted_on,
+              pr_number, cancel_requested_at, last_review_id_acted_on,
               last_conflict_observation
          FROM tasks
         WHERE state = 'done'
+        ORDER BY created_at, task_id`,
+    )
+    .all();
+}
+
+function readSyntheticReviewLifecycle(
+  db: DB,
+): SyntheticReviewLifecycleTaskRow[] {
+  return db
+    .query<SyntheticReviewLifecycleTaskRow, []>(
+      `SELECT task_id, repo_id, state, branch_name, worktree_path,
+              pr_number, cancel_requested_at
+         FROM tasks
+        WHERE task_id LIKE 'pr-review-%'
+          AND state IN ('pr-review', 'done', 'waiting_external_changes')
         ORDER BY created_at, task_id`,
     )
     .all();
@@ -639,7 +706,8 @@ function readRunningReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
               a.attempt_id, a.attempt_number, a.preamble_id, a.head_sha,
-              a.tmux_session, a.spawned_at, a.kill_intent
+              a.tmux_session, a.spawned_at, a.kill_intent,
+              t.reviewer_agent, t.reviewer_model
          FROM attempts a
          JOIN tasks t ON t.task_id = a.task_id
         WHERE t.state = 'pr-review'
@@ -659,7 +727,8 @@ function readPendingReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
               a.attempt_id, a.attempt_number, a.preamble_id, a.head_sha,
-              a.tmux_session, a.spawned_at, a.kill_intent
+              a.tmux_session, a.spawned_at, a.kill_intent,
+              t.reviewer_agent, t.reviewer_model
          FROM attempts a
          JOIN tasks t ON t.task_id = a.task_id
         WHERE t.state = 'pr-review'
@@ -1082,6 +1151,61 @@ function processDoneTask(
   return null;
 }
 
+function processSyntheticReviewLifecycle(
+  deps: TickDeps,
+  task: SyntheticReviewLifecycleTaskRow,
+  options: TickOptions,
+): TickTaskResult | null {
+  if (task.cancel_requested_at !== null) return null;
+  if (task.pr_number === null) {
+    return recordTickError(
+      deps,
+      task.task_id,
+      new Error("synthetic review task has no pr_number"),
+    );
+  }
+
+  const attempt = loadLatestAttempt(deps.db, task.task_id);
+  if (!attempt) return null;
+
+  const snapshot = deps.github.prSnapshotByNumber(task.repo_id, task.pr_number);
+  if (snapshot === null) return null;
+  persistPrMetadata(deps, task.task_id, snapshot);
+
+  if (snapshot.state === "merged" || snapshot.state === "closed_unmerged") {
+    return finalizePrTerminal(deps, task, attempt, snapshot.state, task.state);
+  }
+
+  if (options.reviewerEnabled !== true) {
+    clearTickError(deps, task.task_id);
+    return null;
+  }
+
+  const result = enterReview(
+    {
+      db: deps.db,
+      clock: deps.clock,
+      github: deps.github,
+      artifactStore: deps.artifactStore,
+      tmux: deps.tmux,
+    },
+    {
+      repoId: task.repo_id,
+      prNumber: task.pr_number,
+      headSha: snapshot.headSha,
+      reviewerEnabled: true,
+      gateQuayOwnedDone: true,
+    },
+  );
+
+  if (!result.scheduled) {
+    clearTickError(deps, task.task_id);
+    return null;
+  }
+
+  return { task_id: task.task_id, action: "review_requested" };
+}
+
 interface PrTerminalRow {
   task_id: string;
   repo_id: string;
@@ -1154,6 +1278,14 @@ function finalizePrTerminal(
   fromState: PrTerminalFromState,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
+  const activeReviewers =
+    fromState === "pr-review"
+      ? loadActiveReviewersForTask(deps.db, task.task_id)
+      : [];
+
+  if (activeReviewers.length > 0) {
+    collectReviewAttemptArtifactsForRows(deps, task, activeReviewers);
+  }
 
   // Step 1: branch + worktree cleanup per the §5 cleanup matrix.
   applyTerminalCleanup(deps, task, terminal);
@@ -1186,15 +1318,6 @@ function finalizePrTerminal(
       // and collect their tmux sessions for a post-commit kill. Mirrors
       // enterReview's supersede-on-new-SHA pattern. reapAbandonedReviewers
       // closes the crash window between this COMMIT and the kill loop.
-      const activeReviewers = deps.db
-        .query<{ tmux_session: string | null }, [string]>(
-          `SELECT tmux_session
-             FROM attempts
-            WHERE task_id = ?
-              AND reason = 'review_only'
-              AND ended_at IS NULL`,
-        )
-        .all(task.task_id);
       for (const row of activeReviewers) {
         if (row.tmux_session !== null) {
           reviewerSessionsToKill.push(row.tmux_session);
@@ -1251,6 +1374,47 @@ function finalizePrTerminal(
     task_id: task.task_id,
     action: terminal === "merged" ? "pr_merged" : "pr_closed_unmerged",
   };
+}
+
+interface ActiveReviewerAttemptRow {
+  attempt_id: number;
+  tmux_session: string | null;
+}
+
+function loadActiveReviewersForTask(
+  db: DB,
+  taskId: string,
+): ActiveReviewerAttemptRow[] {
+  return db
+    .query<ActiveReviewerAttemptRow, [string]>(
+      `SELECT attempt_id, tmux_session
+         FROM attempts
+        WHERE task_id = ?
+          AND reason = 'review_only'
+          AND ended_at IS NULL`,
+    )
+    .all(taskId);
+}
+
+function collectReviewAttemptArtifactsForRows(
+  deps: TickDeps,
+  task: PrTerminalRow,
+  attempts: ActiveReviewerAttemptRow[],
+): void {
+  for (const attempt of attempts) {
+    collectUsageArtifact(
+      deps,
+      task.task_id,
+      attempt.attempt_id,
+      task.worktree_path,
+    );
+    collectToolTraceArtifact(
+      deps,
+      task.task_id,
+      attempt.attempt_id,
+      task.worktree_path,
+    );
+  }
 }
 
 function applyTerminalCleanup(
@@ -1712,6 +1876,7 @@ function finalizeApprovedReviewBlockedByCi(
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
 ): TickTaskResult {
+  collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   const content = reviewArtifactContent(posted, task.head_sha);
   const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
@@ -1784,6 +1949,7 @@ function finalizeStaleApprovedReviewBlockedByCi(
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
 ): TickTaskResult {
+  collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
 
@@ -1828,6 +1994,7 @@ function finalizeApprovedReviewBackToPrOpen(
   exitInfo: PaneExitInfo,
   verdict: "approved" | "superseded",
 ): void {
+  collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -1928,6 +2095,7 @@ function finalizePostedReview(
   exitInfo: PaneExitInfo,
   options: TickOptions,
 ): TickTaskResult {
+  collectReviewAttemptArtifacts(deps, task);
   const verdict =
     posted.decision === "APPROVED" ? "approved" : "changes_requested";
   const content = reviewArtifactContent(posted, task.head_sha);
@@ -2066,6 +2234,7 @@ function markReviewInfraFailure(
   exitInfo: PaneExitInfo,
   options: TickOptions,
 ): TickTaskResult {
+  collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   const sameSha = task.review_infra_failure_head_sha === task.head_sha;
   const failures = sameSha ? task.review_infra_failures_consecutive + 1 : 1;
@@ -2180,6 +2349,19 @@ function markReviewInfraFailure(
     task_id: task.task_id,
     action: parking ? "non_budget_loop_parked" : "review_retry_scheduled",
   };
+}
+
+function collectReviewAttemptArtifacts(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+): void {
+  collectUsageArtifact(deps, task.task_id, task.attempt_id, task.worktree_path);
+  collectToolTraceArtifact(
+    deps,
+    task.task_id,
+    task.attempt_id,
+    task.worktree_path,
+  );
 }
 
 function reviewArtifactContent(posted: PostedReview, headSha: string): string {
@@ -3141,10 +3323,14 @@ function promoteAndSpawn(
   linearSyncs: LinearSyncQueue,
   options: TickOptions,
 ): TickTaskResult {
-  const { agent: agentName, invocation: agentInvocation } = agentResolver.resolve(
-    task.repo_id,
-    "worker",
-  );
+  const {
+    agent: agentName,
+    model: agentModel,
+    invocation: agentInvocation,
+  } = agentResolver.resolve(task.repo_id, "worker", {
+    agent: task.worker_agent,
+    model: task.worker_model,
+  });
   if (task.cancel_requested_at !== null) {
     return { task_id: task.task_id, action: "skipped_predicate" };
   }
@@ -3189,6 +3375,8 @@ function promoteAndSpawn(
     worktreePath: task.worktree_path,
     plannedSession: sessionName,
     agentIdentity,
+    agentName,
+    agentModel,
     consumedBudget: pending.consumed_budget,
     spawnedAt: now,
     remoteSha,
@@ -3236,10 +3424,10 @@ function promoteAndSpawn(
   deps.db
     .query(
       `UPDATE attempts
-          SET tmux_session = ?, agent_identity = ?, agent_name = ?
+          SET tmux_session = ?, agent_identity = ?, agent_name = ?, agent_model = ?
         WHERE attempt_id = ?`,
     )
-    .run(sessionName, agentIdentity, agentName, pending.attempt_id);
+    .run(sessionName, agentIdentity, agentName, agentModel, pending.attempt_id);
   deps.db
     .query(`UPDATE tasks SET spawn_failures_consecutive = 0 WHERE task_id = ?`)
     .run(task.task_id);
@@ -3381,10 +3569,14 @@ function promoteAndSpawnReviewer(
   agentResolver: AgentResolver,
   options: TickOptions,
 ): TickTaskResult {
-  const { agent: agentName, invocation: agentInvocation } = agentResolver.resolve(
-    task.repo_id,
-    "reviewer",
-  );
+  const {
+    agent: agentName,
+    model: agentModel,
+    invocation: agentInvocation,
+  } = agentResolver.resolve(task.repo_id, "reviewer", {
+    agent: task.reviewer_agent,
+    model: task.reviewer_model,
+  });
   if (task.cancel_requested_at !== null) {
     return { task_id: task.task_id, action: "skipped_predicate" };
   }
@@ -3495,10 +3687,10 @@ function promoteAndSpawnReviewer(
   deps.db
     .query(
       `UPDATE attempts
-          SET tmux_session = ?, agent_identity = ?, agent_name = ?
+          SET tmux_session = ?, agent_identity = ?, agent_name = ?, agent_model = ?
         WHERE attempt_id = ?`,
     )
-    .run(sessionName, agentIdentity, agentName, task.attempt_id);
+    .run(sessionName, agentIdentity, agentName, agentModel, task.attempt_id);
 
   return { task_id: task.task_id, action: "spawned" };
 }
@@ -3514,7 +3706,11 @@ function promoteAndSpawnReviewer(
 function resolveTickAgentResolver(options: TickOptions): AgentResolver {
   if (options.agentResolver !== undefined) return options.agentResolver;
   const invocation = options.agentInvocation ?? DEFAULT_CLAUDE_WORKER_INVOCATION;
-  const resolved: ResolvedAgent = { agent: DEFAULT_AGENT_NAME, invocation };
+  const resolved: ResolvedAgent = {
+    agent: DEFAULT_AGENT_NAME,
+    model: null,
+    invocation,
+  };
   return {
     resolve: (_repoId: string, _role: AgentRole) => resolved,
     registeredAgents: () => [DEFAULT_AGENT_NAME],
@@ -3567,6 +3763,8 @@ interface PromotionInput {
   // the event captures intent, the column captures observed reality.
   plannedSession: string;
   agentIdentity: string;
+  agentName: string;
+  agentModel: string | null;
   consumedBudget: number;
   spawnedAt: string;
   remoteSha: string | null;
@@ -3614,6 +3812,8 @@ function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
       worktree_path: p.worktreePath,
       branch_name: p.branchName,
       attempt_number: p.attemptNumber,
+      agent_name: p.agentName,
+      agent_model: p.agentModel,
       agent_identity: p.agentIdentity,
       github_token_source: p.githubTokenSource,
       remote_sha_at_spawn: p.remoteSha,

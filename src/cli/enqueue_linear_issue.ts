@@ -24,6 +24,10 @@ export interface EnqueueLinearIssueArgs {
   repoId: string | null;
   identifier: string;
   cliTags: string[];
+  workerAgent: string | null;
+  workerModel: string | null;
+  reviewerAgent: string | null;
+  reviewerModel: string | null;
 }
 
 export interface EnqueueLinearIssueDeps {
@@ -150,6 +154,10 @@ export async function handleEnqueueLinearIssue(
       slack_thread_ref: ctx.slack_thread_ref,
       tags: mergedTags,
       authors_json: authorsJson,
+      worker_agent: args.workerAgent,
+      worker_model: args.workerModel,
+      reviewer_agent: args.reviewerAgent,
+      reviewer_model: args.reviewerModel,
     });
   } catch (err) {
     // Idempotency under concurrent invocation (spec §3): if two pollers race
