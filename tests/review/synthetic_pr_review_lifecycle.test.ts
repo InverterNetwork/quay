@@ -5,7 +5,7 @@ import {
   tick_once,
   type TickOptions,
 } from "../../src/core/tick.ts";
-import { syntheticTaskId } from "../../src/core/pr_review.ts";
+import { enterReview, syntheticTaskId } from "../../src/core/pr_review.ts";
 import type { PrSnapshot } from "../../src/ports/github.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertAttempt, insertRepo } from "../support/fixtures.ts";
@@ -155,6 +155,47 @@ test("completed synthetic review task transitions terminal by PR number", async 
   expect(built.git.remoteBranches.get(repoId)?.has(seeded.branchName)).toBe(false);
 });
 
+test("pending synthetic review request is scheduled by tick after CI turns green", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-synth-pending-queue");
+  setOpenPr(built, repoId, 135, "queue-head");
+  built.github.setPrSnapshotByNumber(
+    repoId,
+    135,
+    snapshot("open", 135, "queue-head", [
+      { name: "build", workflow: null, bucket: "pending", required: true },
+    ]),
+  );
+
+  const queued = enterReview(
+    {
+      db: built.deps.db,
+      clock: built.deps.clock,
+      github: built.deps.github,
+      artifactStore: built.deps.artifactStore,
+      tmux: built.deps.tmux,
+      paths: { worktreesRoot: h.dataDir + "/worktrees" },
+    },
+    {
+      repoId,
+      prNumber: 135,
+      reviewerEnabled: true,
+      gateQuayOwnedDone: true,
+    },
+  );
+  expect(queued.pending_ci).toBe(true);
+
+  built.github.setPrSnapshotByNumber(
+    repoId,
+    135,
+    snapshot("open", 135, "queue-head"),
+  );
+  const results = await tick_once(built.deps, reviewerTickOptions());
+  expect(results).toContainEqual({ task_id: queued.task_id, action: "review_requested" });
+  expect(reviewAttemptCount(queued.task_id, "queue-head")).toBe(1);
+});
+
 function seedSyntheticReviewTask(
   repoId: string,
   prNumber: number,
@@ -260,6 +301,9 @@ function snapshot(
   state: PrSnapshot["state"],
   prNumber: number,
   headSha: string,
+  items: PrSnapshot["checks"]["items"] = [
+    { name: "build", workflow: null, bucket: "pass", required: true },
+  ],
 ): PrSnapshot {
   return {
     prNumber,
@@ -271,7 +315,7 @@ function snapshot(
     latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
     checks: {
       checkSha: headSha,
-      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+      items,
     },
   };
 }

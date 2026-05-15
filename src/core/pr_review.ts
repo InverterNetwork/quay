@@ -7,6 +7,7 @@ import type { Clock } from "../ports/clock.ts";
 import type { GitHubPort, PullRequestView } from "../ports/github.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
 import type { AgentResolver } from "./agents.ts";
+import { classifyCi } from "./ci_status.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 
 export const SYNTHETIC_PR_REVIEW_PREFIX = "pr-review-";
@@ -64,6 +65,7 @@ export interface EnterReviewResult {
   state: string;
   review_verdict: ReviewVerdict | null;
   scheduled: boolean;
+  pending_ci: boolean;
   skipped_reason: EnterReviewSkippedReason | null;
 }
 
@@ -90,6 +92,10 @@ interface SupersededAttemptRow {
 
 interface InsertAttemptRow {
   attempt_id: number;
+}
+
+interface ReviewRequestRow {
+  request_id: number;
 }
 
 interface LatestCodeAttemptRow {
@@ -136,6 +142,7 @@ export function enterReview(
       state: existing.state,
       review_verdict: null,
       scheduled: false,
+      pending_ci: false,
       skipped_reason: "quay_owned_gate_disabled",
     };
   }
@@ -159,6 +166,15 @@ export function enterReview(
     : composeQuayOwnedReviewBrief(deps.db, task, pr, headSha);
 
   const supersededSessions: string[] = [];
+  const ci = classifyCi(deps.github.prSnapshotByNumber(input.repoId, input.prNumber) ?? {
+    state: "open",
+    headSha,
+    baseSha: null,
+    mergeable: "unknown",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: { checkSha: null, items: [] },
+  }, null);
+  const shouldScheduleNow = ci === "pass";
   deps.db.exec("BEGIN IMMEDIATE");
   try {
     if (tags.length > 0) {
@@ -217,6 +233,7 @@ export function enterReview(
         state: readTaskState(deps.db, task.task_id) ?? task.state,
         review_verdict: active.review_verdict,
         scheduled: false,
+        pending_ci: false,
         skipped_reason: "active_attempt_exists",
       };
     }
@@ -242,7 +259,92 @@ export function enterReview(
         state: readTaskState(deps.db, task.task_id) ?? task.state,
         review_verdict: terminalVerdict.review_verdict,
         scheduled: false,
+        pending_ci: false,
         skipped_reason: "terminal_verdict_exists",
+      };
+    }
+
+    const existingRequest = deps.db
+      .query<ReviewRequestRow, [string, string]>(
+        `SELECT request_id
+           FROM review_requests
+          WHERE task_id = ?
+            AND head_sha = ?
+          LIMIT 1`,
+      )
+      .get(task.task_id, headSha);
+    if (!existingRequest) {
+      const inserted = deps.db
+        .query<
+          ReviewRequestRow,
+          [
+            string,
+            string,
+            number,
+            string,
+            string,
+            string | null,
+            string | null,
+            string | null,
+            string | null,
+            string,
+            string,
+          ]
+        >(
+          `INSERT INTO review_requests (
+             task_id, repo_id, pr_number, head_sha, source, status,
+             tags_json, reviewer_agent, reviewer_model, requested_by,
+             created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'review-pr', ?, ?, ?, ?, ?, ?, ?)
+           RETURNING request_id`,
+        )
+        .get(
+          task.task_id,
+          input.repoId,
+          input.prNumber,
+          headSha,
+          "pending_ci",
+          tags.length > 0 ? JSON.stringify(tags) : null,
+          input.reviewerAgent ?? null,
+          input.reviewerModel ?? null,
+          null,
+          now,
+          now,
+        );
+      if (!inserted) throw new Error("review request insert returned no row");
+      deps.db
+        .query(
+          `UPDATE review_requests
+              SET status = 'superseded',
+                  superseded_by_request_id = ?,
+                  updated_at = ?
+            WHERE task_id = ?
+              AND request_id <> ?
+              AND head_sha <> ?
+              AND status = 'pending_ci'`,
+        )
+        .run(inserted.request_id, now, task.task_id, inserted.request_id, headSha);
+    } else {
+      deps.db
+        .query(
+          `UPDATE review_requests
+              SET updated_at = ?
+            WHERE request_id = ?`,
+        )
+        .run(now, existingRequest.request_id);
+    }
+
+    if (!shouldScheduleNow) {
+      deps.db.exec("COMMIT");
+      killSupersededWorkers(deps.tmux, supersededSessions);
+      return {
+        task_id: task.task_id,
+        attempt_id: null,
+        state: readTaskState(deps.db, task.task_id) ?? task.state,
+        review_verdict: null,
+        scheduled: false,
+        pending_ci: true,
+        skipped_reason: null,
       };
     }
 
@@ -296,6 +398,17 @@ export function enterReview(
          ) VALUES (?, ?, 'review_requested', ?, 'pr-review', ?)`,
       )
       .run(task.task_id, attempt.attempt_id, task.state, now);
+    deps.db
+      .query(
+        `UPDATE review_requests
+            SET status = 'scheduled',
+                scheduled_attempt_id = ?,
+                updated_at = ?
+          WHERE task_id = ?
+            AND head_sha = ?
+            AND status IN ('pending_ci', 'scheduled')`,
+      )
+      .run(attempt.attempt_id, now, task.task_id, headSha);
 
     deps.db.exec("COMMIT");
     killSupersededWorkers(deps.tmux, supersededSessions);
@@ -305,6 +418,7 @@ export function enterReview(
       state: "pr-review",
       review_verdict: null,
       scheduled: true,
+      pending_ci: false,
       skipped_reason: null,
     };
   } catch (err) {

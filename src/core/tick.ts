@@ -298,6 +298,13 @@ interface PendingAttemptRow {
   preamble_id: number;
 }
 
+interface PendingReviewRequestRow {
+  request_id: number;
+  task_id: string;
+  repo_id: string;
+  pr_number: number;
+}
+
 interface CurrentAttemptRow {
   attempt_id: number;
   attempt_number: number;
@@ -329,6 +336,17 @@ export async function tick_once(
   // observes a clean exit.
   const attempt = await deps.supervisorLock.tryRun(async () => {
     const results: TickTaskResult[] = [];
+
+    if (options.reviewerEnabled === true) {
+      for (const req of readPendingReviewRequests(deps.db)) {
+        try {
+          const result = processPendingReviewRequest(deps, req);
+          if (result !== null) results.push(result);
+        } catch (err) {
+          results.push(recordTickError(deps, req.task_id, err));
+        }
+      }
+    }
 
     // Top-of-loop cancel check (spec §5 + §14). Cancel intent is durable on
     // the task row, so honor it from every non-terminal state — running,
@@ -553,6 +571,62 @@ export async function tick_once(
   // tick_once returns so tests observe the writebacks deterministically.
   await linearSyncs.drain();
   return attempt.acquired ? attempt.value : [];
+}
+
+function readPendingReviewRequests(db: DB): PendingReviewRequestRow[] {
+  return db
+    .query<PendingReviewRequestRow, []>(
+      `SELECT rr.request_id, rr.task_id, rr.repo_id, rr.pr_number
+         FROM review_requests rr
+         JOIN tasks t ON t.task_id = rr.task_id
+        WHERE rr.status = 'pending_ci'
+          AND t.cancel_requested_at IS NULL
+          AND t.state NOT IN ('merged', 'closed_unmerged', 'cancelled')
+        ORDER BY rr.created_at ASC, rr.request_id ASC`,
+    )
+    .all();
+}
+
+function processPendingReviewRequest(
+  deps: TickDeps,
+  req: PendingReviewRequestRow,
+): TickTaskResult | null {
+  const snapshot = deps.github.prSnapshotByNumber(req.repo_id, req.pr_number);
+  if (snapshot === null) return null;
+  if (snapshot.state === "merged" || snapshot.state === "closed_unmerged") {
+    deps.db
+      .query(
+        `UPDATE review_requests
+            SET status = 'discarded_terminal',
+                terminal_state = ?,
+                updated_at = ?
+          WHERE request_id = ?
+            AND status = 'pending_ci'`,
+      )
+      .run(snapshot.state, deps.clock.nowISO(), req.request_id);
+    return null;
+  }
+
+  const result = enterReview(
+    {
+      db: deps.db,
+      clock: deps.clock,
+      github: deps.github,
+      artifactStore: deps.artifactStore,
+      tmux: deps.tmux,
+    },
+    {
+      repoId: req.repo_id,
+      prNumber: req.pr_number,
+      headSha: snapshot.headSha,
+      reviewerEnabled: true,
+      gateQuayOwnedDone: true,
+    },
+  );
+  if (result.scheduled) {
+    return { task_id: req.task_id, action: "review_requested" };
+  }
+  return null;
 }
 
 interface CancelTargetRow {
