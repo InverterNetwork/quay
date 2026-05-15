@@ -22,7 +22,7 @@ import { readFileSync } from "node:fs";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
-import { loadPreambleBody } from "./preamble.ts";
+import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 
 export type NonBudgetReason = "review" | "conflict";
 
@@ -35,7 +35,6 @@ export interface NonBudgetRetryDeps {
 export interface NonBudgetAttemptRef {
   attempt_id: number;
   attempt_number: number;
-  preamble_id: number;
 }
 
 export interface NonBudgetInput {
@@ -53,7 +52,20 @@ export interface NonBudgetInput {
   // Dedupe key column + value to record on the task in the same transaction.
   dedupeColumn: "last_review_id_acted_on" | "last_conflict_observation";
   dedupeValue: string;
+  extraSnapshots?: NonBudgetSnapshot[];
+  extraDedupeUpdates?: NonBudgetDedupeUpdate[];
   maxNonBudgetRespawns: number;
+}
+
+export interface NonBudgetSnapshot {
+  snapshotKind: "review_comments" | "conflict_slice";
+  snapshotContent: string;
+  snapshotExtension: "json" | "txt";
+}
+
+export interface NonBudgetDedupeUpdate {
+  dedupeColumn: "last_review_id_acted_on" | "last_conflict_observation";
+  dedupeValue: string;
 }
 
 export type NonBudgetOutcome = "scheduled" | "parked" | "skipped";
@@ -79,13 +91,24 @@ export function scheduleNonBudgetRespawn(
   // Snapshot artifact first so the trigger context is preserved even if the
   // task is parked. The artifact is bound to the *previous* attempt because
   // it was the one that produced the GitHub-side state we're observing.
-  const snapshot = deps.artifactStore.writeArtifact({
-    taskId: input.taskId,
-    attemptId: input.prevAttempt.attempt_id,
-    kind: input.snapshotKind,
-    content: input.snapshotContent,
-    extension: input.snapshotExtension,
-  });
+  const snapshots = [
+    {
+      snapshotKind: input.snapshotKind,
+      snapshotContent: input.snapshotContent,
+      snapshotExtension: input.snapshotExtension,
+    },
+    ...(input.extraSnapshots ?? []),
+  ];
+  const writtenSnapshots = snapshots.map((snapshot) =>
+    deps.artifactStore.writeArtifact({
+      taskId: input.taskId,
+      attemptId: input.prevAttempt.attempt_id,
+      kind: snapshot.snapshotKind,
+      content: snapshot.snapshotContent,
+      extension: snapshot.snapshotExtension,
+    }),
+  );
+  const primarySnapshot = writtenSnapshots[0]!;
 
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN IMMEDIATE");
@@ -103,7 +126,7 @@ export function scheduleNonBudgetRespawn(
     if (!incremented) {
       // cancel slipped in between read and write, or row missing.
       deps.db.exec("ROLLBACK");
-      return { outcome: "skipped", artifactId: snapshot.artifactId };
+      return { outcome: "skipped", artifactId: primarySnapshot.artifactId };
     }
     const postCount = incremented.post_count;
 
@@ -132,19 +155,24 @@ export function scheduleNonBudgetRespawn(
           input.taskId,
           input.prevAttempt.attempt_id,
           input.fromState,
-          snapshot.artifactId,
+          primarySnapshot.artifactId,
           now,
         );
       deps.db.exec("COMMIT");
       return {
         outcome: "parked",
-        artifactId: snapshot.artifactId,
+        artifactId: primarySnapshot.artifactId,
         postCount,
       };
     }
 
     // Schedule a new attempt with consumed_budget = 0.
     const template = ensureNonBudgetTemplate(deps.db, deps.clock, input.reason);
+    const preambleId = ensurePreambleIdForAttemptReason(
+      deps.db,
+      deps.clock,
+      input.reason,
+    );
     const priorBrief = loadMostRecentBrief(deps.db, input.taskId);
     const retryBrief = composeNonBudgetBrief({
       reason: input.reason,
@@ -166,7 +194,7 @@ export function scheduleNonBudgetRespawn(
       .get(
         input.taskId,
         input.prevAttempt.attempt_number + 1,
-        input.prevAttempt.preamble_id,
+        preambleId,
         template.template_id,
         input.reason,
       );
@@ -179,7 +207,7 @@ export function scheduleNonBudgetRespawn(
       content: retryBrief,
       extension: "md",
     });
-    const preamble = loadPreambleBody(deps.db, input.prevAttempt.preamble_id);
+    const preamble = loadPreambleBody(deps.db, preambleId);
     deps.artifactStore.writeArtifact({
       taskId: input.taskId,
       attemptId: attempt.attempt_id,
@@ -188,29 +216,10 @@ export function scheduleNonBudgetRespawn(
       extension: "md",
     });
 
-    if (input.dedupeColumn === "last_review_id_acted_on") {
-      deps.db
-        .query(
-          `UPDATE tasks
-              SET state = 'queued',
-                  last_review_id_acted_on = ?,
-                  tick_error = NULL,
-                  updated_at = ?
-            WHERE task_id = ? AND cancel_requested_at IS NULL`,
-        )
-        .run(input.dedupeValue, now, input.taskId);
-    } else {
-      deps.db
-        .query(
-          `UPDATE tasks
-              SET state = 'queued',
-                  last_conflict_observation = ?,
-                  tick_error = NULL,
-                  updated_at = ?
-            WHERE task_id = ? AND cancel_requested_at IS NULL`,
-        )
-        .run(input.dedupeValue, now, input.taskId);
-    }
+    applyDedupeUpdates(deps.db, input.taskId, now, [
+      { dedupeColumn: input.dedupeColumn, dedupeValue: input.dedupeValue },
+      ...(input.extraDedupeUpdates ?? []),
+    ]);
 
     const eventType =
       input.reason === "review" ? "changes_requested" : "conflict";
@@ -226,14 +235,14 @@ export function scheduleNonBudgetRespawn(
         attempt.attempt_id,
         eventType,
         input.fromState,
-        snapshot.artifactId,
+        primarySnapshot.artifactId,
         now,
       );
 
     deps.db.exec("COMMIT");
     return {
       outcome: "scheduled",
-      artifactId: snapshot.artifactId,
+      artifactId: primarySnapshot.artifactId,
       nextAttemptId: attempt.attempt_id,
       postCount,
     };
@@ -243,6 +252,69 @@ export function scheduleNonBudgetRespawn(
     } catch {}
     throw err;
   }
+}
+
+function applyDedupeUpdates(
+  db: DB,
+  taskId: string,
+  now: string,
+  updates: NonBudgetDedupeUpdate[],
+): void {
+  const reviewId = latestDedupeValue(updates, "last_review_id_acted_on");
+  const conflictObservation = latestDedupeValue(
+    updates,
+    "last_conflict_observation",
+  );
+
+  if (reviewId !== undefined && conflictObservation !== undefined) {
+    db.query(
+      `UPDATE tasks
+          SET state = 'queued',
+              last_review_id_acted_on = ?,
+              last_conflict_observation = ?,
+              tick_error = NULL,
+              updated_at = ?
+        WHERE task_id = ? AND cancel_requested_at IS NULL`,
+    ).run(reviewId, conflictObservation, now, taskId);
+    return;
+  }
+
+  if (reviewId !== undefined) {
+    db.query(
+      `UPDATE tasks
+          SET state = 'queued',
+              last_review_id_acted_on = ?,
+              tick_error = NULL,
+              updated_at = ?
+        WHERE task_id = ? AND cancel_requested_at IS NULL`,
+    ).run(reviewId, now, taskId);
+    return;
+  }
+
+  if (conflictObservation !== undefined) {
+    db.query(
+      `UPDATE tasks
+          SET state = 'queued',
+              last_conflict_observation = ?,
+              tick_error = NULL,
+              updated_at = ?
+        WHERE task_id = ? AND cancel_requested_at IS NULL`,
+    ).run(conflictObservation, now, taskId);
+    return;
+  }
+
+  throw new Error("non-budget respawn requires at least one dedupe update");
+}
+
+function latestDedupeValue(
+  updates: NonBudgetDedupeUpdate[],
+  column: NonBudgetDedupeUpdate["dedupeColumn"],
+): string | undefined {
+  for (let i = updates.length - 1; i >= 0; i--) {
+    const update = updates[i]!;
+    if (update.dedupeColumn === column) return update.dedupeValue;
+  }
+  return undefined;
 }
 
 function ensureNonBudgetTemplate(
@@ -276,9 +348,13 @@ function ensureNonBudgetTemplate(
 function loadMostRecentBrief(db: DB, taskId: string): string {
   const row = db
     .query<{ file_path: string }, [string]>(
-      `SELECT file_path FROM artifacts
-        WHERE task_id = ? AND kind = 'brief'
-        ORDER BY artifact_id DESC
+      `SELECT ar.file_path
+         FROM artifacts ar
+         JOIN attempts a ON a.attempt_id = ar.attempt_id
+        WHERE ar.task_id = ?
+          AND ar.kind = 'brief'
+          AND a.reason <> 'review_only'
+        ORDER BY ar.artifact_id DESC
         LIMIT 1`,
     )
     .get(taskId);

@@ -8,7 +8,7 @@ import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PostedReview, PrSnapshot } from "../ports/github.ts";
 import type { LinearPort } from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
-import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
+import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 import { probeAgentIdentity } from "./agent_identity.ts";
 import {
   DEFAULT_AGENT_NAME,
@@ -210,6 +210,27 @@ interface PrReviewTaskRow {
   cancel_requested_at: string | null;
 }
 
+type PrTerminalFromState =
+  | "pr-open"
+  | "done"
+  | "pr-review"
+  | "awaiting-next-brief"
+  | "claimed-by-orchestrator"
+  | "waiting_human"
+  | "non_budget_loop"
+  | "worktree_error"
+  | "orchestrator_loop";
+
+interface ParkedPrTerminalTaskRow {
+  task_id: string;
+  repo_id: string;
+  state: PrTerminalFromState;
+  branch_name: string;
+  worktree_path: string;
+  pr_number: number | null;
+  cancel_requested_at: string | null;
+}
+
 interface ReviewAttemptTaskRow {
   task_id: string;
   repo_id: string;
@@ -317,6 +338,9 @@ export async function tick_once(
     const doneSnapshot = readDone(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
+    const parkedPrTerminalSnapshot = readParkedPrTerminal(deps.db).filter(
+      (t) => !cancelledIds.has(t.task_id),
+    );
     const claimedSnapshot = readClaimed(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
@@ -360,7 +384,21 @@ export async function tick_once(
       }
     }
 
+    const terminalParkedIds = new Set<string>();
+    for (const task of parkedPrTerminalSnapshot) {
+      try {
+        const result = processParkedPrTerminal(deps, task);
+        if (result !== null) {
+          results.push(result);
+          terminalParkedIds.add(task.task_id);
+        }
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
     for (const task of claimedSnapshot) {
+      if (terminalParkedIds.has(task.task_id)) continue;
       try {
         const result = processClaimedTask(deps, task, options);
         if (result !== null) results.push(result);
@@ -370,6 +408,7 @@ export async function tick_once(
     }
 
     for (const task of waitingHumanSnapshot) {
+      if (terminalParkedIds.has(task.task_id)) continue;
       try {
         const taskResults = await processWaitingHumanTask(deps, task, linearSyncs);
         for (const r of taskResults) results.push(r);
@@ -564,6 +603,25 @@ function readPrReview(db: DB): PrReviewTaskRow[] {
               pr_number, cancel_requested_at
          FROM tasks
         WHERE state = 'pr-review'
+        ORDER BY created_at, task_id`,
+    )
+    .all();
+}
+
+function readParkedPrTerminal(db: DB): ParkedPrTerminalTaskRow[] {
+  return db
+    .query<ParkedPrTerminalTaskRow, []>(
+      `SELECT task_id, repo_id, state, branch_name, worktree_path,
+              pr_number, cancel_requested_at
+         FROM tasks
+        WHERE state IN (
+          'awaiting-next-brief',
+          'claimed-by-orchestrator',
+          'waiting_human',
+          'non_budget_loop',
+          'worktree_error',
+          'orchestrator_loop'
+        )
         ORDER BY created_at, task_id`,
     )
     .all();
@@ -970,28 +1028,42 @@ function processDoneTask(
     return finalizePrTerminal(deps, task, attempt, snapshot.state, "done");
   }
 
-  // 2. Merge conflict.
-  if (snapshot.mergeable === "conflicting") {
-    const observation = formatConflictObservation(snapshot);
-    if (task.last_conflict_observation !== observation) {
-      return scheduleConflictNonBudget(
-        deps,
-        task.task_id,
-        attempt,
-        snapshot,
-        observation,
-        "done",
-        options,
-      );
-    }
+  // 2. PR-side worker respawn triggers. Evaluate all actionable observations
+  // before scheduling so a conflict does not hide fresh review feedback.
+  const conflictObservation =
+    snapshot.mergeable === "conflicting"
+      ? formatConflictObservation(snapshot)
+      : null;
+  const hasFreshConflict =
+    conflictObservation !== null &&
+    task.last_conflict_observation !== conflictObservation;
+  const hasFreshReview = hasActionableReviewFeedback(task, snapshot);
+
+  if (hasFreshConflict && hasFreshReview) {
+    return scheduleConflictReviewNonBudget(
+      deps,
+      task.task_id,
+      attempt,
+      snapshot,
+      conflictObservation!,
+      "done",
+      options,
+    );
   }
 
-  // 3. Review feedback.
-  if (
-    snapshot.latestReview.decision === "CHANGES_REQUESTED" &&
-    snapshot.latestReview.latestReviewId !== null &&
-    task.last_review_id_acted_on !== snapshot.latestReview.latestReviewId
-  ) {
+  if (hasFreshConflict) {
+    return scheduleConflictNonBudget(
+      deps,
+      task.task_id,
+      attempt,
+      snapshot,
+      conflictObservation!,
+      "done",
+      options,
+    );
+  }
+
+  if (hasFreshReview) {
     return scheduleReviewNonBudget(
       deps,
       task.task_id,
@@ -1041,12 +1113,41 @@ function processPrReviewTerminal(
   return finalizePrTerminal(deps, task, attempt, snapshot.state, "pr-review");
 }
 
+function processParkedPrTerminal(
+  deps: TickDeps,
+  task: ParkedPrTerminalTaskRow,
+): TickTaskResult | null {
+  if (task.cancel_requested_at !== null) return null;
+  const attempt = loadLatestAttempt(deps.db, task.task_id);
+  if (!attempt) return null;
+
+  const snapshot = loadParkedPrSnapshot(deps, task);
+  if (snapshot === null) return null;
+  if (snapshot.state !== "merged" && snapshot.state !== "closed_unmerged") {
+    return null;
+  }
+
+  persistPrMetadata(deps, task.task_id, snapshot);
+  return finalizePrTerminal(deps, task, attempt, snapshot.state, task.state);
+}
+
+function loadParkedPrSnapshot(
+  deps: TickDeps,
+  task: Pick<ParkedPrTerminalTaskRow, "repo_id" | "branch_name" | "pr_number">,
+): PrSnapshot | null {
+  if (task.pr_number !== null) {
+    const byNumber = deps.github.prSnapshotByNumber(task.repo_id, task.pr_number);
+    if (byNumber !== null) return byNumber;
+  }
+  return deps.github.prSnapshot(task.repo_id, task.branch_name);
+}
+
 function finalizePrTerminal(
   deps: TickDeps,
   task: PrTerminalRow,
   attempt: CurrentAttemptRow,
   terminal: "merged" | "closed_unmerged",
-  fromState: "pr-open" | "done" | "pr-review",
+  fromState: PrTerminalFromState,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
 
@@ -1060,7 +1161,12 @@ function finalizePrTerminal(
     const upd = deps.db
       .query(
         `UPDATE tasks
-            SET state = ?, tick_error = NULL, updated_at = ?
+            SET state = ?,
+                claim_id = NULL,
+                claimed_at = NULL,
+                claim_expirations_consecutive = 0,
+                tick_error = NULL,
+                updated_at = ?
           WHERE task_id = ? AND state = ?
             AND cancel_requested_at IS NULL`,
       )
@@ -1122,6 +1228,7 @@ function finalizePrTerminal(
          ) VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(task.task_id, attempt.attempt_id, eventType, fromState, terminal, now);
+    cancelOpenOrchestratorHandoffs(deps, task.task_id);
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -1287,6 +1394,37 @@ function composeCiFailureExcerpt(snapshot: PrSnapshot): string {
   return ["CI failed:", ...fails.map((s) => `  - ${s}`)].join("\n");
 }
 
+function hasActionableReviewFeedback(
+  task: { last_review_id_acted_on: string | null },
+  snapshot: PrSnapshot,
+): boolean {
+  return (
+    snapshot.latestReview.decision === "CHANGES_REQUESTED" &&
+    snapshot.latestReview.latestReviewId !== null &&
+    task.last_review_id_acted_on !== snapshot.latestReview.latestReviewId
+  );
+}
+
+function conflictSliceContent(snapshot: PrSnapshot): string {
+  return JSON.stringify({
+    head_sha: snapshot.headSha,
+    base_sha: snapshot.baseSha,
+    mergeable: snapshot.mergeable,
+  });
+}
+
+function reviewCommentsContent(snapshot: PrSnapshot, reviewId: string): string {
+  return JSON.stringify({
+    review_id: reviewId,
+    decision: snapshot.latestReview.decision,
+    comments: snapshot.latestReview.comments,
+  });
+}
+
+function conflictDiagnostics(snapshot: PrSnapshot): string {
+  return `GitHub reports mergeable=${snapshot.mergeable} for head=${snapshot.headSha} base=${snapshot.baseSha ?? "<unknown>"}.`;
+}
+
 function scheduleConflictNonBudget(
   deps: TickDeps,
   taskId: string,
@@ -1297,22 +1435,78 @@ function scheduleConflictNonBudget(
   options: TickOptions,
 ): TickTaskResult {
   const cap = options.maxNonBudgetRespawns ?? DEFAULT_MAX_NON_BUDGET_RESPAWNS;
-  const sliceContent = JSON.stringify({
-    head_sha: snapshot.headSha,
-    base_sha: snapshot.baseSha,
-    mergeable: snapshot.mergeable,
-  });
   const result = scheduleNonBudgetRespawn(deps, {
     taskId,
     prevAttempt: attempt,
     reason: "conflict",
-    diagnostics: `GitHub reports mergeable=${snapshot.mergeable} for head=${snapshot.headSha} base=${snapshot.baseSha ?? "<unknown>"}.`,
+    diagnostics: conflictDiagnostics(snapshot),
     fromState,
     snapshotKind: "conflict_slice",
-    snapshotContent: sliceContent,
+    snapshotContent: conflictSliceContent(snapshot),
     snapshotExtension: "json",
     dedupeColumn: "last_conflict_observation",
     dedupeValue: observation,
+    maxNonBudgetRespawns: cap,
+  });
+  if (result.outcome === "parked") {
+    return { task_id: taskId, action: "non_budget_loop_parked" };
+  }
+  if (result.outcome === "scheduled") {
+    return { task_id: taskId, action: "conflict_respawn_scheduled" };
+  }
+  return { task_id: taskId, action: "skipped_predicate" };
+}
+
+function scheduleConflictReviewNonBudget(
+  deps: TickDeps,
+  taskId: string,
+  attempt: CurrentAttemptRow,
+  snapshot: PrSnapshot,
+  observation: string,
+  fromState: "done",
+  options: TickOptions,
+): TickTaskResult {
+  const cap = options.maxNonBudgetRespawns ?? DEFAULT_MAX_NON_BUDGET_RESPAWNS;
+  const reviewId = snapshot.latestReview.latestReviewId!;
+  const reviewComments =
+    snapshot.latestReview.comments.trim() === ""
+      ? "(No review comments captured.)"
+      : snapshot.latestReview.comments;
+  const result = scheduleNonBudgetRespawn(deps, {
+    taskId,
+    prevAttempt: attempt,
+    reason: "conflict",
+    diagnostics: [
+      conflictDiagnostics(snapshot),
+      `Reviewer marked CHANGES_REQUESTED in review ${reviewId}.`,
+      "",
+      "Required actions:",
+      "1. Resolve the merge conflict against the base branch.",
+      "2. Address the CHANGES_REQUESTED review comments.",
+      "3. Push the existing branch and update the existing PR.",
+      "",
+      "Review comments:",
+      reviewComments,
+    ].join("\n"),
+    fromState,
+    snapshotKind: "conflict_slice",
+    snapshotContent: conflictSliceContent(snapshot),
+    snapshotExtension: "json",
+    dedupeColumn: "last_conflict_observation",
+    dedupeValue: observation,
+    extraSnapshots: [
+      {
+        snapshotKind: "review_comments",
+        snapshotContent: reviewCommentsContent(snapshot, reviewId),
+        snapshotExtension: "json",
+      },
+    ],
+    extraDedupeUpdates: [
+      {
+        dedupeColumn: "last_review_id_acted_on",
+        dedupeValue: reviewId,
+      },
+    ],
     maxNonBudgetRespawns: cap,
   });
   if (result.outcome === "parked") {
@@ -1334,11 +1528,6 @@ function scheduleReviewNonBudget(
 ): TickTaskResult {
   const cap = options.maxNonBudgetRespawns ?? DEFAULT_MAX_NON_BUDGET_RESPAWNS;
   const reviewId = snapshot.latestReview.latestReviewId!;
-  const commentsContent = JSON.stringify({
-    review_id: reviewId,
-    decision: snapshot.latestReview.decision,
-    comments: snapshot.latestReview.comments,
-  });
   const result = scheduleNonBudgetRespawn(deps, {
     taskId,
     prevAttempt: attempt,
@@ -1346,7 +1535,7 @@ function scheduleReviewNonBudget(
     diagnostics: `Reviewer marked CHANGES_REQUESTED in review ${reviewId}.`,
     fromState,
     snapshotKind: "review_comments",
-    snapshotContent: commentsContent,
+    snapshotContent: reviewCommentsContent(snapshot, reviewId),
     snapshotExtension: "json",
     dedupeColumn: "last_review_id_acted_on",
     dedupeValue: reviewId,
@@ -1521,7 +1710,6 @@ function finalizeApprovedReviewBlockedByCi(
 ): TickTaskResult {
   const now = deps.clock.nowISO();
   const content = reviewArtifactContent(posted, task.head_sha);
-  const codePreambleId = loadLatestCodePreambleId(deps.db) ?? task.preamble_id;
   const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
 
   deps.db.exec("BEGIN IMMEDIATE");
@@ -1567,7 +1755,7 @@ function finalizeApprovedReviewBlockedByCi(
       {
         attempt_id: task.attempt_id,
         attempt_number: task.attempt_number,
-        preamble_id: codePreambleId,
+        preamble_id: task.preamble_id,
       },
       snapshot,
       "pr-review",
@@ -1593,7 +1781,6 @@ function finalizeStaleApprovedReviewBlockedByCi(
   snapshot: PrSnapshot,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
-  const codePreambleId = loadLatestCodePreambleId(deps.db) ?? task.preamble_id;
   const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
 
   deps.db.exec("BEGIN IMMEDIATE");
@@ -1612,7 +1799,7 @@ function finalizeStaleApprovedReviewBlockedByCi(
       {
         attempt_id: task.attempt_id,
         attempt_number: task.attempt_number,
-        preamble_id: codePreambleId,
+        preamble_id: task.preamble_id,
       },
       snapshot,
       "pr-review",
@@ -1836,13 +2023,11 @@ function finalizePostedReview(
 
   if (handOffToRespawn) {
     const cap = options.maxNonBudgetRespawns ?? DEFAULT_MAX_NON_BUDGET_RESPAWNS;
-    const codePreambleId = loadLatestCodePreambleId(deps.db) ?? task.preamble_id;
     const result = scheduleNonBudgetRespawn(deps, {
       taskId: task.task_id,
       prevAttempt: {
         attempt_id: task.attempt_id,
         attempt_number: task.attempt_number,
-        preamble_id: codePreambleId,
       },
       reason: "review",
       diagnostics: `Quay reviewer marked CHANGES_REQUESTED in review ${posted.reviewId}.`,
@@ -2001,18 +2186,6 @@ function reviewArtifactContent(posted: PostedReview, headSha: string): string {
     body: posted.body,
     comments: posted.comments,
   });
-}
-
-function loadLatestCodePreambleId(db: DB): number | null {
-  const row = db
-    .query<{ preamble_id: number }, []>(
-      `SELECT preamble_id FROM preambles
-        WHERE kind = 'code'
-        ORDER BY preamble_id DESC
-        LIMIT 1`,
-    )
-    .get();
-  return row?.preamble_id ?? null;
 }
 
 function loadMostRecentNonReviewBrief(db: DB, taskId: string): string | undefined {
@@ -3068,6 +3241,60 @@ function promoteAndSpawn(
   return { task_id: task.task_id, action: "spawned" };
 }
 
+type ReviewerGhTokenPreflightResult =
+  | { ok: true; envFiles?: TmuxSpawnInput["envFiles"] }
+  | { ok: false; error: string };
+
+function preflightReviewerGhTokenFile(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  options: TickOptions,
+): ReviewerGhTokenPreflightResult {
+  const tokenFile = options.reviewerGhTokenFile;
+  if (tokenFile === undefined) return { ok: true };
+
+  let token: string;
+  try {
+    token = readFileSync(tokenFile, "utf8").trim();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `reviewer gh_token_file (${tokenFile}) missing or unreadable: ${message}`,
+    };
+  }
+
+  if (token.length === 0) {
+    return {
+      ok: false,
+      error: `reviewer gh_token_file (${tokenFile}) is empty`,
+    };
+  }
+
+  try {
+    deps.github.probeTokenAccess(task.repo_id, token);
+  } catch (err) {
+    const message = redactSecret(
+      err instanceof Error ? err.message : String(err),
+      token,
+    );
+    return {
+      ok: false,
+      error: `reviewer gh_token_file (${tokenFile}) token is invalid, expired, or cannot access the repository: ${message}`,
+    };
+  }
+
+  return {
+    ok: true,
+    envFiles: [{ name: "GH_TOKEN", path: tokenFile }],
+  };
+}
+
+function redactSecret(message: string, secret: string): string {
+  if (secret.length === 0) return message;
+  return message.split(secret).join("[redacted]");
+}
+
 function promoteAndSpawnReviewer(
   deps: TickDeps,
   task: ReviewAttemptTaskRow,
@@ -3089,6 +3316,15 @@ function promoteAndSpawnReviewer(
       EXIT_INFO_NONE,
       options,
     );
+  }
+
+  const tokenPreflight = preflightReviewerGhTokenFile(deps, task, options);
+  if (!tokenPreflight.ok) {
+    return {
+      task_id: task.task_id,
+      action: "spawn_substrate_failed",
+      error: tokenPreflight.error,
+    };
   }
 
   if (isSyntheticTaskId(task.task_id)) {
@@ -3146,38 +3382,15 @@ function promoteAndSpawnReviewer(
   }
 
   const sessionName = `quay-review-${task.tmux_id}-${task.attempt_number}`;
-  // Preflight the reviewer-only gh token file (if configured). A
-  // missing/empty file is a hard spawn failure: silently falling back to
-  // the host gh auth would reintroduce the self-review block this knob
-  // exists to dodge. The file content is NOT passed to the spawn — only
-  // the path is, so the pane wrapper reads it inline via `$(cat ...)`
-  // and the secret never lands in argv (where another user on the host
-  // could read it via `ps`). The preflight read is just an existence /
-  // non-empty check; the value is discarded.
-  let envFiles: Array<{ name: string; path: string }> | undefined;
-  if (options.reviewerGhTokenFile !== undefined) {
-    try {
-      const token = readFileSync(options.reviewerGhTokenFile, "utf8").trim();
-      if (token.length === 0) {
-        throw new Error("file is empty");
-      }
-      envFiles = [{ name: "GH_TOKEN", path: options.reviewerGhTokenFile }];
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        task_id: task.task_id,
-        action: "spawn_substrate_failed",
-        error: `reviewer gh_token_file (${options.reviewerGhTokenFile}) unreadable: ${message}`,
-      };
-    }
-  }
   try {
     deps.tmux.spawn({
       sessionName,
       worktreePath: task.worktree_path,
       promptContent,
       agentInvocation,
-      ...(envFiles !== undefined ? { envFiles } : {}),
+      ...(tokenPreflight.envFiles !== undefined
+        ? { envFiles: tokenPreflight.envFiles }
+        : {}),
     });
   } catch (err) {
     return {

@@ -176,6 +176,9 @@ quay task release-claim <task_id> --claim-id <claim_id>
 `task claim` only succeeds for `awaiting-next-brief` tasks.
 `task get` includes `slack_thread_ref`, which is the enqueue-time Slack
 `channel:thread_ts` route an orchestrator should prefer for human questions.
+It also includes `authors`, parsed from the ticket's `quay-config.authors`
+block as `{name, slack_id}` objects. Legacy or malformed rows return
+`authors: []`.
 
 ## Submit Brief
 

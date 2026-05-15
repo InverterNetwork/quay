@@ -116,12 +116,12 @@ An **artifact** is data that one actor hands to another, or observes from anothe
   malformed_signal/review/conflict) transitions the task to `queued`. Tick promotes `queued → running`
   as the single spawn point. Capacity caps and budget consumption both live there.
 
-  claim age > claim_timeout × max_claim_expirations  →  orchestrator_loop (parked, manual)
-  non_budget_respawns_consumed > cap (post-increment) →  non_budget_loop   (parked, manual)
-  spawn_failures_consecutive >= cap                  →  worktree_error    (parked, manual)
+  claim age > claim_timeout × max_claim_expirations  →  orchestrator_loop (parked; manual unless PR terminal)
+  non_budget_respawns_consumed > cap (post-increment) →  non_budget_loop   (parked; manual unless PR terminal)
+  spawn_failures_consecutive >= cap                  →  worktree_error    (parked; manual unless PR terminal)
 
 Terminal:    merged, closed_unmerged, cancelled
-Parked:      worktree_error, orchestrator_loop, non_budget_loop  (manual recovery via quay cancel)
+Parked:      worktree_error, orchestrator_loop, non_budget_loop  (retained for inspection; may still auto-converge if an associated PR is terminal)
 Flag:        budget_exhausted (set on awaiting-next-brief; orchestrator reads via pull)
 ```
 
@@ -133,12 +133,12 @@ Flag:        budget_exhausted (set on awaiting-next-brief; orchestrator reads vi
 | `running` | Worker session active. | Yes (or recently) | Liveness, staleness, dead-with-PR, dead-with-signal, crash detection. |
 | `pr-open` | PR opened by worker; awaiting CI. | No (worker exits after PR) | Poll PR state (merged / closed transitions to terminal); poll `mergeable`; poll CI. |
 | `done` | CI passed; awaiting human review/merge. **Not terminal.** | No | Poll PR state, review decision, `mergeable`. |
-| `awaiting-next-brief` | Blocker ingested, human reply ingested, or retry budget exhausted; awaiting orchestrator pickup. | No | Inert; orchestrator pulls + claims. Tick auto-releases stale claims (see `claimed-by-orchestrator`). |
-| `claimed-by-orchestrator` | Orchestrator has claimed the task and is composing a brief or deciding to escalate. | No | Tick auto-releases the claim back to `awaiting-next-brief` if the claim age exceeds `claim_timeout_seconds`. After `max_claim_expirations` consecutive expirations, transitions to `orchestrator_loop`. |
-| `orchestrator_loop` | Orchestrator has crash-looped on this task (`max_claim_expirations` consecutive `claim_expired` events). Parked. | No | None. Manual recovery via `quay cancel`. |
-| `waiting_human` | Orchestrator-owned human question is awaiting an answer. | No | New flow is inert to tick; orchestrator records the reply and submits the next brief. Claimless legacy rows with a Slack thread may still use tick's old Slack post/reply path; claimless rows without a thread are requeued to `awaiting-next-brief`. |
-| `worktree_error` | Filesystem or git error encountered; parked. | N/A | None. Manual recovery via `quay cancel`. |
-| `non_budget_loop` | Post-increment `non_budget_respawns_consumed > max_non_budget_respawns`; parked. (With cap=20: scheduled 20 respawns, then parked on the 21st trigger.) | N/A | None. Manual recovery via `quay cancel`. |
+| `awaiting-next-brief` | Blocker ingested, human reply ingested, or retry budget exhausted; awaiting orchestrator pickup. | No | Terminal PR sweep first: if the associated PR is merged or closed, cleanup and transition terminal. Otherwise inert; orchestrator pulls + claims. |
+| `claimed-by-orchestrator` | Orchestrator has claimed the task and is composing a brief or deciding to escalate. | No | Terminal PR sweep first. Otherwise tick auto-releases the claim back to `awaiting-next-brief` if the claim age exceeds `claim_timeout_seconds`. After `max_claim_expirations` consecutive expirations, transitions to `orchestrator_loop`. |
+| `orchestrator_loop` | Orchestrator has crash-looped on this task (`max_claim_expirations` consecutive `claim_expired` events). Parked. | No | Terminal PR sweep. If no terminal PR is observed, manual recovery via `quay cancel`. |
+| `waiting_human` | Orchestrator-owned human question is awaiting an answer. | No | Terminal PR sweep first. Otherwise the new flow is inert to tick; orchestrator records the reply and submits the next brief. Claimless legacy rows with a Slack thread may still use tick's old Slack post/reply path; claimless rows without a thread are requeued to `awaiting-next-brief`. |
+| `worktree_error` | Filesystem or git error encountered; parked. | N/A | Terminal PR sweep. If no terminal PR is observed, manual recovery via `quay cancel`. |
+| `non_budget_loop` | Post-increment `non_budget_respawns_consumed > max_non_budget_respawns`; parked. (With cap=20: scheduled 20 respawns, then parked on the 21st trigger.) | N/A | Terminal PR sweep. If no terminal PR is observed, manual recovery via `quay cancel`. |
 | `budget_exhausted` (flag, not state) | Set on a task in `awaiting-next-brief` when retry budget hits cap. | N/A | None. Orchestrator sees the flag on pull, decides to escalate-human or cancel. |
 | `merged` | **Terminal.** PR merged. | No | None. Cleanup per §5 "Branch cleanup rules per terminal". |
 | `closed_unmerged` | **Terminal.** PR closed without merge. | No | None. Cleanup per §5 "Branch cleanup rules per terminal". |
@@ -206,7 +206,7 @@ Each task is processed in its own try/except. A failing per-task check logs the 
 - Where the pseudocode below says **"schedule non-budget respawn: reason = X"** (only for `review` and `conflict`), the canonical semantics are **increment-then-compare-then-decide**, in a single SQL transaction. `max_non_budget_respawns` is the **count of allowed respawns**: with cap = N, the Nth respawn schedules; the (N+1)th parks.
   1. Increment `tasks.non_budget_respawns_consumed` by 1.
   2. If the **post-increment** value is **greater than** `max_non_budget_respawns`: do **not** schedule a new attempt — transition to `non_budget_loop` (parked) and write `non_budget_loop_parked` event. Do not persist a `last_failure` artifact (the trigger is external state, not a failure to retry). Note: the increment is still committed; the counter records the rejected attempt for forensics and prevents a tie/race from re-trying.
-  3. Else (post-increment ≤ cap): schedule a new attempt row (`spawned_at = NULL`, `consumed_budget = 0`) with the given reason; record the dedupe key (`last_review_id_acted_on` / `last_conflict_observation`); transition to `queued`. Tick later promotes the row without touching `attempts_consumed`.
+  3. Else (post-increment ≤ cap): schedule a new attempt row (`spawned_at = NULL`, `consumed_budget = 0`) with the given reason; record the dedupe key(s) (`last_review_id_acted_on` / `last_conflict_observation`); transition to `queued`. Tick later promotes the row without touching `attempts_consumed`. If the `done` poll observes a fresh merge conflict and fresh `CHANGES_REQUESTED` review together, this is still one non-budget respawn: write both trigger artifacts, compose one combined worker brief, and record both dedupe keys in the same successful transaction.
   - This rule is identical for `pr-open` and `done` — every site that uses non-budget respawns goes through the same routine.
   - Worked example with `max_non_budget_respawns = 20`: respawns #1 through #20 each pass step 3 (post-increment values 1..20, all ≤ 20). Respawn #21 fails step 2 (post-increment 21 > 20) and parks. Total respawns scheduled before parking: exactly 20.
 - `quay submit-brief --reason blocker_resolved` errors if `budget_exhausted = true` (orchestrator must use `escalate-human` or `cancel`). `submit-brief --reason advice_answered` is allowed even when `budget_exhausted = true` (it doesn't consume).
@@ -220,6 +220,34 @@ for each task in active states:
   if task.cancel_requested_at IS NOT NULL AND task.state != 'cancelled':
     run cancel_finalizer(task)   # idempotent; converges to cancelled
     continue to next task
+
+  # Parked/orchestrator terminal PR sweep. These states are otherwise owned by
+  # the orchestrator or parked for inspection, but external GitHub decisions
+  # still win: a PR merged or closed while the task is parked must converge
+  # without waiting for manual cleanup. Probe by pr_number when available,
+  # otherwise by branch_name. A missing/non-terminal PR is a no-op and the
+  # normal state handler below still runs.
+  if task.state IN (
+    awaiting-next-brief,
+    claimed-by-orchestrator,
+    waiting_human,
+    worktree_error,
+    orchestrator_loop,
+    non_budget_loop
+  ):
+    pr = gh pr view task.pr_number if present else gh pr view task.branch_name
+    if pr.state == merged:
+      cleanup per merged terminal rules
+      clear claim_id / claimed_at
+      cancel any pending or claimed orchestrator handoffs
+      transition → merged
+      continue to next task
+    if pr.state == closed_unmerged:
+      cleanup per closed_unmerged terminal rules
+      clear claim_id / claimed_at
+      cancel any pending or claimed orchestrator handoffs
+      transition → closed_unmerged
+      continue to next task
 
   switch task.state:
 
@@ -399,21 +427,33 @@ for each task in active states:
       pr = gh pr view
       check state: merged → cleanup, transition → merged
                    closed → cleanup, transition → closed_unmerged
-      check mergeable: CONFLICTING and (head_sha:base_sha) != last_conflict_observation
-                       → snapshot conflict slice;
+      collect actionable PR-side observations before scheduling:
+        conflict = mergeable: CONFLICTING and (head_sha:base_sha) != last_conflict_observation
+        review = CHANGES_REQUESTED and latest_review_id != last_review_id_acted_on
+      if conflict and review
+                    → snapshot conflict slice and review comments;
+                      schedule one non-budget respawn: reason = conflict
+                      (combined brief tells the worker to resolve the conflict,
+                       address the review comments, push the existing branch,
+                       and update the existing PR; canonical rule applies;
+                       record both last_conflict_observation and
+                       last_review_id_acted_on in the same txn)
+      else if conflict → snapshot conflict slice;
                          schedule non-budget respawn: reason = conflict
                          (canonical rule applies; record last_conflict_observation in the same txn)
-      check review: CHANGES_REQUESTED and latest_review_id != last_review_id_acted_on
+      else if review
                     → snapshot comments;
                       schedule non-budget respawn: reason = review
                       (canonical rule applies; record last_review_id_acted_on in the same txn)
       else: skip
 
     case awaiting-next-brief:
-      # no polling; orchestrator pulls and claims via quay task claim
+      # Terminal PR sweep already ran above. Otherwise no polling;
+      # orchestrator pulls and claims via quay task claim.
       skip
 
     case claimed-by-orchestrator:
+      # Terminal PR sweep already ran above.
       if claim_age > claim_timeout_seconds:
         # Auto-release in one SQL transaction: clear claim_id (fencing out the stale claimant),
         # clear claimed_at, increment claim_expirations_consecutive, write claim_expired event,
@@ -430,7 +470,9 @@ for each task in active states:
         skip
 
     case waiting_human:
-      # New flow: rows with claim_id are orchestrator-owned and inert to tick.
+      # Terminal PR sweep already ran above.
+      # New flow: rows with claim_id are orchestrator-owned and inert to
+      # tick's Slack/reply handling after the terminal PR sweep.
       # Legacy claimless rows may still use the old Slack post/reply path.
       if task.claim_id IS NOT NULL:
         skip
@@ -463,7 +505,12 @@ for each task in active states:
       first matching reply → ingest as artifact (content_hash set); transition → awaiting-next-brief
       no matching reply → skip
 
-    case worktree_error / orchestrator_loop / non_budget_loop / merged / closed_unmerged / cancelled:
+    case worktree_error / orchestrator_loop / non_budget_loop:
+      # Terminal PR sweep already ran above. If no terminal PR was observed,
+      # remain parked for inspection or manual `quay cancel`.
+      skip
+
+    case merged / closed_unmerged / cancelled:
       skip
 ```
 
@@ -542,7 +589,7 @@ The "single chokepoint" referenced in §4 invariant 7 guarantees **SQL atomicity
 
   Because human waits can legitimately exceed the normal claim timeout, tick does not auto-release claim-held `waiting_human` rows. Operational recovery is explicit: monitor claimed handoffs and `waiting_human` tasks, and if the owning orchestrator is known dead, use the handoff's `claim_id` with `quay task release-claim` to reopen the handoff for another orchestrator.
 
-  Tick only handles legacy claimless `waiting_human` rows. If such a row has `slack_thread_ref`, tick may use the old Slack post/reply recovery loop. If it has no thread, tick requeues it to `awaiting-next-brief` with a durable `manual_resume` handoff so the orchestrator can apply deployment-owned fallback routing.
+  After the terminal PR sweep, tick only handles legacy claimless `waiting_human` rows. If such a row has `slack_thread_ref`, tick may use the old Slack post/reply recovery loop. If it has no thread, tick requeues it to `awaiting-next-brief` with a durable `manual_resume` handoff so the orchestrator can apply deployment-owned fallback routing.
 
 - **GitHub API reads (CI status, PR state, review decision, mergeable):** read-only, safe to retry. On failure, log `tick_error` and skip that task this cycle.
 
@@ -582,7 +629,7 @@ current head has failing checks.
 | `cancelled` (default) | Delete. | **Retain IF a PR is currently open** for the branch (preserves the human's option to take over the work). Otherwise delete. | Remove. |
 | `cancelled --close-pr` | Delete. | Delete. The operator explicitly asked to close everything. | Remove. |
 | `cancelled --keep-worktree` | Same as `cancelled` for branches. | Same as `cancelled`. | **Retain** for inspection. |
-| `worktree_error` / `orchestrator_loop` / `non_budget_loop` | None. Parked for human inspection. | None. | Retain. |
+| `worktree_error` / `orchestrator_loop` / `non_budget_loop` | None while parked. If tick later observes an associated PR as `merged` or `closed_unmerged`, the corresponding terminal row above applies. | None while parked. Terminal PR convergence applies the `merged` / `closed_unmerged` row. | Retain while parked; terminal PR convergence removes it. |
 
 When human cancels via `quay cancel` and one of the parked states applies, the cancel command applies the `cancelled` rules above (overriding the parked retention).
 
@@ -659,6 +706,7 @@ The preamble is stored in SQL in a `preambles` table. A change is a new row, app
 | **Human-required** | Orchestrator decides the blocker needs a human (calls Quay to record the question and transition to `waiting_human`) | Orchestrator posts/waits in Slack, records the answer through `record-human-reply`, then submits the next brief via `submit-brief --reason advice_answered`. | Does NOT consume |
 | **Review feedback** | `gh pr view` reports `reviewDecision = CHANGES_REQUESTED` | Template + review comments + most-recent brief. **Quay-side, deterministic.** | Does NOT consume |
 | **Merge conflict** | `gh pr view` reports `mergeable: CONFLICTING` (in `pr-open` or `done`) | Template + conflict slice (mergeable status, conflicting files) + most-recent brief. **Quay-side, deterministic.** | Does NOT consume |
+| **Combined conflict + review feedback** | The `done` poll sees both a fresh merge conflict and a fresh `CHANGES_REQUESTED` review | One conflict-priority respawn brief that includes conflict diagnostics and the review comments. Writes both `conflict_slice` and `review_comments`, records both dedupe keys, and increments `non_budget_respawns_consumed` once. **Quay-side, deterministic.** | Does NOT consume |
 | **Budget pause** | (Reserved.) Daily or per-task cap engine. Not exercised in v1. | Unchanged from what would compose anyway. | Orthogonal |
 
 ### Common mechanics
@@ -670,8 +718,9 @@ The preamble is stored in SQL in a `preambles` table. A change is a new row, app
 - **Non-budget respawn dedup.** Review feedback and merge conflict respawns don't consume budget, but they must not loop on the same observation. Quay records what it last acted on per task:
   - `last_review_id_acted_on` — the most recent review id Quay respawned against. Tick only triggers a `review` respawn if `gh pr view` reports a *newer* review id. Stale CHANGES_REQUESTED on a SHA Quay already addressed does not re-trigger.
   - `last_conflict_observation` — encodes the `(head_sha, base_sha)` pair Quay last respawned against. Tick only triggers a `conflict` respawn if either has advanced. Polling the same conflict over and over does not re-trigger.
+  - If both observations are fresh in the same `done` poll, Quay schedules a single conflict-priority respawn and records both dedupe keys together. A later tick on the same conflict/review pair must not schedule a second review-only or conflict-only respawn.
   - `advice_answered` is orchestrator-owned: each recorded human answer leads to one follow-up brief submission under the same claim.
-- **Non-budget safety cap.** A separate counter `non_budget_respawns_consumed` (default cap `max_non_budget_respawns = 20`) catches cases the dedupe keys miss. If exceeded, task transitions to `non_budget_loop` (parked, manual recovery via `quay cancel`).
+- **Non-budget safety cap.** A separate counter `non_budget_respawns_consumed` (default cap `max_non_budget_respawns = 20`) catches cases the dedupe keys miss. If exceeded, task transitions to `non_budget_loop` (parked for manual recovery via `quay cancel` unless the associated PR later reaches `merged` or `closed_unmerged`, in which case tick terminal-cleanup converges it automatically).
 - **Retry budget rules:**
   - Consumed by deterministic failures (CI fail, crash, staleness, wall-clock) and worker-written blockers handed back to the orchestrator.
   - Not consumed by review feedback, merge conflicts, or human-required escalation.
@@ -929,6 +978,7 @@ The schema sketch above is the canonical column list. The constraints below are 
   - Dead-worker classifier transitions (`running → pr-open`, `running → queued` for retry, `running → awaiting-next-brief` for blocker, etc.).
   - `pr-open` PR-state transitions (`pr-open → merged`, `pr-open → closed_unmerged`, `pr-open → done`).
   - `done` PR-state transitions (`done → merged`, `done → closed_unmerged`).
+  - Parked/orchestrator terminal PR sweep transitions (`awaiting-next-brief`, `claimed-by-orchestrator`, `waiting_human`, `worktree_error`, `orchestrator_loop`, `non_budget_loop` → `merged` / `closed_unmerged`), including claim clearing and handoff cancellation.
   - Non-budget respawn scheduling (`pr-open` / `done` → `queued` for review/conflict).
   - Claim auto-release (`claimed-by-orchestrator → awaiting-next-brief` on timeout).
   - `waiting_human` reply ingestion (`waiting_human → awaiting-next-brief`).
@@ -1386,7 +1436,7 @@ Collisions across distinct `external_ref` values that slug to the same branch ar
 | **Human advice is orchestrator-owned** | `escalate-human` records the question and preserves the claim; `record-human-reply` records the answer and returns the task to `claimed-by-orchestrator`; `submit-brief --reason advice_answered` schedules the next worker and completes the original handoff. Tick does not need workspace-specific Slack routing policy for the new flow. |
 | **Legacy Slack recovery is isolated** | Claimless `waiting_human` rows with a thread can still use the old tick-owned nonce/fence/reply path. Claimless rows without a thread are requeued to `awaiting-next-brief` so they are not stranded. |
 | **CI source: pinned `gh` commands** | `gh pr view --json headRefOid` for SHA; plain-text `gh pr checks` rows, plus `--required` only to annotate which rows GitHub marks required. State is derived from every reported check row. SHA-changed-mid-fetch → pending + retry. |
-| **Branch cleanup per terminal** | `merged`: local deleted, remote left to GitHub. `closed_unmerged`: both deleted. `cancelled`: local deleted; remote retained iff PR open (or always deleted with `--close-pr`). Parked states: no cleanup until cancel. |
+| **Branch cleanup per terminal** | `merged`: local deleted, remote left to GitHub. `closed_unmerged`: both deleted. `cancelled`: local deleted; remote retained iff PR open (or always deleted with `--close-pr`). Parked states retain worktrees/branches while parked, but tick applies the `merged` / `closed_unmerged` cleanup row if their associated PR later becomes terminal. |
 | **`advice_answered` not counted toward non-budget cap** | Human-input respawns are bounded by human availability and not a runaway-loop risk. The cap exists to safety-net stale GitHub signals; humans aren't a stale signal. |
 | **External-input slugification** | `external_ref` is normalized via **two separate derivations** (see §13). The branch slug applies per-component rules (no leading/trailing `./-` per component, no `.lock`-suffix per component, no `..`, ≤64 chars overall) and is **gated by a final `git check-ref-format` call** — pathological inputs that survive the rules fall back to `task-<task_id_short>`. The tmux identifier applies a stricter charset (`[A-Za-z0-9_-]` only, human part ≤38 chars) and **always appends `-<task_id_short>`**, guaranteeing per-task uniqueness even when two distinct `external_ref`s collapse to the same human-readable tmux slug while producing different branches. The two derivations do not need to match. Verbatim form preserved in SQL for queries. |
 | **Operator-controlled commands run via `/bin/sh -c`** | `agent_invocation` and `install_cmd` are deployment config; shell expansion is intentional and supported. Quay doesn't parse them beyond `{prompt_file}` substitution. External user-influenced input never feeds shell commands. |
@@ -1414,7 +1464,8 @@ The v1 test suite must cover the following cases. Each is a state-machine integr
 7. **CI passes, PR sits, human closes without merge.** Transition through `done` → `closed_unmerged`.
 8. **Reviewer marks `CHANGES_REQUESTED`.** Asserts: review comments artifact, re-queue with deterministic review brief, budget **not** consumed.
 9. **Merge conflict appears in `done`.** Asserts: conflict slice artifact, re-queue with deterministic conflict brief, budget **not** consumed.
-10. **Force-push to PR branch mid-task.** Tick picks up the new SHA's CI run cleanly without confusion.
+10. **Merge conflict and fresh `CHANGES_REQUESTED` both appear in `done`.** Asserts: one non-budget conflict-priority respawn, both trigger artifacts, combined worker brief, both dedupe markers updated, counter incremented once, budget **not** consumed.
+11. **Force-push to PR branch mid-task.** Tick picks up the new SHA's CI run cleanly without confusion.
 
 ### Escalation
 
@@ -1511,7 +1562,8 @@ The v1 test suite must cover the following cases. Each is a state-machine integr
 49. **New review filed after a review respawn.** Asserts: new `latest_review_id` triggers a fresh review respawn; `last_review_id_acted_on` updated; `non_budget_respawns_consumed` incremented.
 50. **Same conflict polled repeatedly without push.** Asserts: tick does NOT re-respawn (`last_conflict_observation` matches `head_sha:base_sha`).
 51. **Conflict re-respawned after a force-push that didn't resolve it.** Asserts: new head_sha → new observation → fresh respawn.
-52. **Non-budget safety cap (off-by-one boundary).** Set `max_non_budget_respawns = 3`. Synthetically trigger 4 distinct review or conflict events (each with a fresh dedupe key). Asserts: respawns #1, #2, #3 are scheduled normally and `non_budget_respawns_consumed` ticks 1→2→3; on event #4, the increment to 4 exceeds the cap and the task transitions to `non_budget_loop`; `non_budget_loop_parked` event logged; counter is recorded as 4 (post-increment, for forensics); tick stops cycling. Confirms the rule "cap N allows N respawns, parks on the (N+1)th."
+51a. **Same combined conflict/review pair polled after the combined respawn.** Asserts: tick does NOT schedule a second respawn because both `last_conflict_observation` and `last_review_id_acted_on` were recorded by the combined trigger.
+52. **Non-budget safety cap (off-by-one boundary).** Set `max_non_budget_respawns = 3`. Synthetically trigger 4 distinct review or conflict events (each with a fresh dedupe key). Asserts: respawns #1, #2, #3 are scheduled normally and `non_budget_respawns_consumed` ticks 1→2→3; on event #4, the increment to 4 exceeds the cap and the task transitions to `non_budget_loop`; `non_budget_loop_parked` event logged; counter is recorded as 4 (post-increment, for forensics); tick stops cycling. A combined conflict/review trigger counts as one event. Confirms the rule "cap N allows N respawns, parks on the (N+1)th."
 
 ### `pr-open` PR state polling
 

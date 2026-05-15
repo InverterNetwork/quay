@@ -52,6 +52,7 @@ test("test_071_task_get_returns_object", async () => {
   expect(parsed.task_id).toBe(taskId);
   expect(parsed.state).toBe("queued");
   expect(parsed.repo_id).toBe(repoId);
+  expect(parsed.authors).toEqual([]);
   expect(parsed.slack_thread_ref).toBe("GPRIVATE123:999.000000");
   // Current attempt is the most recent attempt row for this task.
   expect(parsed.current_attempt).toBeDefined();
@@ -61,6 +62,86 @@ test("test_071_task_get_returns_object", async () => {
   expect(Array.isArray(parsed.recent_events)).toBe(true);
   expect(parsed.recent_events.length).toBeGreaterThan(0);
   expect(parsed.recent_events[0].event_type).toBe("enqueued");
+});
+
+test("test_task_get_returns_parsed_authors", async () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-get-authors");
+  const taskId = insertTask(h.db, {
+    taskId: "task-get-authors",
+    repoId,
+    state: "queued",
+  });
+  const authors = [
+    { name: "Fabian Scherer", slack_id: "U06TDC56VJB" },
+    { name: "Marvin Gross", slack_id: "U07ABCDE" },
+  ];
+  h.db
+    .query(`UPDATE tasks SET authors_json = ? WHERE task_id = ?`)
+    .run(JSON.stringify(authors), taskId);
+
+  const built = buildCliDeps(h);
+  const io = bufferIO();
+
+  const result = await dispatch(["task", "get", taskId], built.deps, io);
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const parsed = JSON.parse(io.out());
+  expect(parsed.authors).toEqual(authors);
+  expect(parsed.authors_json).toBeUndefined();
+});
+
+test("test_task_get_malformed_authors_json_returns_empty_authors", async () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-get-bad-authors");
+  const taskId = insertTask(h.db, {
+    taskId: "task-get-bad-authors",
+    repoId,
+    state: "queued",
+  });
+  h.db
+    .query(`UPDATE tasks SET authors_json = ? WHERE task_id = ?`)
+    .run("{bad json", taskId);
+
+  const built = buildCliDeps(h);
+  const io = bufferIO();
+
+  const result = await dispatch(["task", "get", taskId], built.deps, io);
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const parsed = JSON.parse(io.out());
+  expect(parsed.authors).toEqual([]);
+});
+
+test("test_task_get_malformed_author_slack_id_returns_empty_authors", async () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-get-bad-author-id");
+  const taskId = insertTask(h.db, {
+    taskId: "task-get-bad-author-id",
+    repoId,
+    state: "queued",
+  });
+  h.db
+    .query(`UPDATE tasks SET authors_json = ? WHERE task_id = ?`)
+    .run(
+      JSON.stringify([
+        { name: "Not A User", slack_id: "!channel" },
+        { name: "Also Bad", slack_id: "U123>" },
+      ]),
+      taskId,
+    );
+
+  const built = buildCliDeps(h);
+  const io = bufferIO();
+
+  const result = await dispatch(["task", "get", taskId], built.deps, io);
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const parsed = JSON.parse(io.out());
+  expect(parsed.authors).toEqual([]);
 });
 
 test("test_071_task_get_unknown_emits_error_object_on_stderr", async () => {

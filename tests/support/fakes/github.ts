@@ -18,6 +18,8 @@ export class FakeGitHub implements GitHubPort {
   readonly snapshotsByNumber = new Map<string, PrSnapshot | null>();
   readonly prViews = new Map<string, PullRequestView | null>();
   readonly postedReviews = new Map<string, PostedReview | null>();
+  readonly tokenAccessCalls: { repoId: string; token: string }[] = [];
+  private tokenAccessHandler: (repoId: string, token: string) => void = () => {};
 
   prExistsForBranch(repoId: string, branch: string): boolean {
     this.calls.push({ repoId, branch });
@@ -98,6 +100,15 @@ export class FakeGitHub implements GitHubPort {
     review: PostedReview | null,
   ): void {
     this.postedReviews.set(`${repoId}\0${prNumber}\0${headSha}`, review);
+  }
+
+  probeTokenAccess(repoId: string, token: string): void {
+    this.tokenAccessCalls.push({ repoId, token });
+    this.tokenAccessHandler(repoId, token);
+  }
+
+  setTokenAccessHandler(handler: (repoId: string, token: string) => void): void {
+    this.tokenAccessHandler = handler;
   }
 }
 

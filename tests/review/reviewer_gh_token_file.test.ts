@@ -18,6 +18,7 @@ afterEach(() => {
 });
 
 function seedPendingReview(harness: Harness, slug: string): {
+  repoId: string;
   taskId: string;
   attemptId: number;
 } {
@@ -46,13 +47,13 @@ function seedPendingReview(harness: Harness, slug: string): {
     attemptId,
     "review prompt",
   );
-  return { taskId, attemptId };
+  return { repoId, taskId, attemptId };
 }
 
 test("reviewer spawn passes only the token file path, never the token bytes", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
-  const { taskId } = seedPendingReview(h, "token-ok");
+  const { repoId, taskId } = seedPendingReview(h, "token-ok");
   const tokenPath = join(h.dataDir, "reviewer-gh-token");
   mkdirSync(h.dataDir, { recursive: true });
   // Marker distinctive enough that a serialization check can prove the
@@ -66,6 +67,7 @@ test("reviewer spawn passes only the token file path, never the token bytes", as
   });
 
   expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
+  expect(built.github.tokenAccessCalls).toEqual([{ repoId, token: tokenBytes }]);
   expect(built.tmux.spawnCalls).toHaveLength(1);
   const call = built.tmux.spawnCalls[0]!;
   expect(call.envFiles).toEqual([{ name: "GH_TOKEN", path: tokenPath }]);
@@ -113,7 +115,7 @@ test("worker spawn never receives GH_TOKEN envFiles even when reviewer config is
 test("reviewer spawn fails when gh_token_file is missing", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
-  const { taskId } = seedPendingReview(h, "token-missing");
+  const { taskId, attemptId } = seedPendingReview(h, "token-missing");
   const tokenPath = join(h.dataDir, "missing-reviewer-token");
 
   const results = await tick_once(built.deps, {
@@ -124,13 +126,15 @@ test("reviewer spawn fails when gh_token_file is missing", async () => {
   const match = results.find((r) => r.task_id === taskId);
   expect(match?.action).toBe("spawn_substrate_failed");
   expect(match?.error).toContain("reviewer gh_token_file");
+  expect(match?.error).toMatch(/missing|unreadable/i);
   expect(built.tmux.spawnCalls).toHaveLength(0);
+  expect(reviewAttemptSpawnedAt(h, attemptId)).toBeNull();
 });
 
 test("reviewer spawn fails when gh_token_file is empty", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
-  const { taskId } = seedPendingReview(h, "token-empty");
+  const { taskId, attemptId } = seedPendingReview(h, "token-empty");
   const tokenPath = join(h.dataDir, "empty-reviewer-token");
   mkdirSync(h.dataDir, { recursive: true });
   // Whitespace-only file — operator wrote it but the minter hasn't filled
@@ -147,4 +151,55 @@ test("reviewer spawn fails when gh_token_file is empty", async () => {
   expect(match?.action).toBe("spawn_substrate_failed");
   expect(match?.error).toMatch(/empty/i);
   expect(built.tmux.spawnCalls).toHaveLength(0);
+  expect(built.github.tokenAccessCalls).toHaveLength(0);
+  expect(reviewAttemptSpawnedAt(h, attemptId)).toBeNull();
 });
+
+test("reviewer spawn validates non-empty gh_token_file credentials before promoting attempt", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const { repoId, taskId, attemptId } = seedPendingReview(h, "token-invalid");
+  const tokenPath = join(h.dataDir, "invalid-reviewer-token");
+  mkdirSync(h.dataDir, { recursive: true });
+  const tokenBytes = "ghs_STALE_TOKEN_MARKER_125";
+  writeFileSync(tokenPath, `${tokenBytes}\n`);
+  built.github.setTokenAccessHandler(() => {
+    throw new Error(`HTTP 401: Bad credentials for ${tokenBytes}`);
+  });
+
+  const results = await tick_once(built.deps, {
+    reviewerEnabled: true,
+    reviewerGhTokenFile: tokenPath,
+  });
+
+  const match = results.find((r) => r.task_id === taskId);
+  expect(match?.action).toBe("spawn_substrate_failed");
+  expect(match?.error).toContain("token is invalid, expired");
+  expect(match?.error).toContain("HTTP 401");
+  expect(match?.error).not.toContain(tokenBytes);
+  expect(built.github.tokenAccessCalls).toEqual([{ repoId, token: tokenBytes }]);
+  expect(built.tmux.spawnCalls).toHaveLength(0);
+  expect(reviewAttemptSpawnedAt(h, attemptId)).toBeNull();
+  expect(reviewInfraFailureEventCount(h, taskId)).toBe(0);
+});
+
+function reviewAttemptSpawnedAt(harness: Harness, attemptId: number): string | null {
+  const row = harness.db
+    .query<{ spawned_at: string | null }, [number]>(
+      `SELECT spawned_at FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  return row?.spawned_at ?? null;
+}
+
+function reviewInfraFailureEventCount(harness: Harness, taskId: string): number {
+  const row = harness.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n
+         FROM events
+        WHERE task_id = ?
+          AND event_type = 'review_infra_failed'`,
+    )
+    .get(taskId);
+  return row?.n ?? 0;
+}

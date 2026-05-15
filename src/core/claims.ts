@@ -35,7 +35,7 @@ import {
   completeClaimedOrchestratorHandoffs,
   reopenClaimedOrchestratorHandoffs,
 } from "./orchestrator_handoffs.ts";
-import { loadPreambleBody } from "./preamble.ts";
+import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 
 export type ClaimErrorCode =
   | "unknown_task"
@@ -355,14 +355,13 @@ export function release_claim(
 interface PriorAttemptRow {
   attempt_id: number;
   attempt_number: number;
-  preamble_id: number;
 }
 
 function loadLatestAttempt(db: DB, taskId: string): PriorAttemptRow | null {
   return (
     db
       .query<PriorAttemptRow, [string]>(
-        `SELECT attempt_id, attempt_number, preamble_id
+        `SELECT attempt_id, attempt_number
            FROM attempts
           WHERE task_id = ?
           ORDER BY attempt_id DESC
@@ -418,7 +417,12 @@ export async function submit_brief(
 
   const now = deps.clock.nowISO();
   const consumedBudget = input.reason === "blocker_resolved" ? 1 : 0;
-  const preambleBody = loadPreambleBody(deps.db, prior.preamble_id);
+  const preambleId = ensurePreambleIdForAttemptReason(
+    deps.db,
+    deps.clock,
+    input.reason,
+  );
+  const preambleBody = loadPreambleBody(deps.db, preambleId);
 
   let attemptId = -1;
   deps.db.exec("BEGIN IMMEDIATE");
@@ -475,7 +479,7 @@ export async function submit_brief(
       .get(
         input.taskId,
         prior.attempt_number + 1,
-        prior.preamble_id,
+        preambleId,
         input.reason,
         consumedBudget,
       );
