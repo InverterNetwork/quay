@@ -41,7 +41,7 @@ export interface GitHubPort {
     headSha: string,
     expectedLogin?: string,
   ): PostedReview | null;
-  // Validate an explicit GH_TOKEN before handing its file path to a reviewer
+  // Validate an explicit reviewer GH_TOKEN before handing it to a reviewer
   // pane. Throws when the token is invalid, expired, or cannot access the
   // target repository. Kept repo-scoped so GitHub App installation tokens are
   // supported; installation tokens cannot use the authenticated-user endpoint.

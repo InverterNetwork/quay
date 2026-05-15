@@ -56,6 +56,7 @@ export const DEFAULT_MAX_SPAWN_FAILURES = 3;
 export const DEFAULT_CLAIM_TIMEOUT_SECONDS = 1800;
 export const DEFAULT_MAX_CLAIM_EXPIRATIONS = 3;
 export const DEFAULT_MAX_NON_BUDGET_RESPAWNS = 20;
+export const REVIEWER_GH_TOKEN_ENV = "QUAY_REVIEWER_GH_TOKEN";
 // Canonical claude worker template, kept here as a named re-export so
 // callers that imported it from `tick.ts` before the agent-resolver
 // refactor (and tests that still pass `agentInvocation: "..."` as a
@@ -102,13 +103,14 @@ export interface TickOptions {
   // ingest matches the right author when tick and worker authenticate as
   // different identities. Defaults to whatever `gh api user` reports.
   reviewerLogin?: string;
-  // Absolute path to a file (expected mode 0600) whose contents are
-  // exported as `GH_TOKEN` in the reviewer tmux pane's environment, so
-  // the reviewer can authenticate as a different GitHub identity than the
-  // worker that opened the PR (GitHub blocks self-review). Read fresh on
-  // every reviewer spawn so a token-refresher timer can rotate the file
-  // without bouncing tick. Worker spawns are unaffected.
+  // Absolute path to a fallback file (expected mode 0600) whose contents
+  // are exported as `GH_TOKEN` in the reviewer tmux pane's environment.
+  // `QUAY_REVIEWER_GH_TOKEN` in the tick process environment wins when
+  // present; this file path exists for migration compatibility.
   reviewerGhTokenFile?: string;
+  // Test seam for token-source selection. Production callers leave this
+  // unset so tick reads the real process environment.
+  env?: NodeJS.ProcessEnv;
   // Either `agentResolver` (production: looks up the registered agent
   // for a given (repo_id, role)) or `agentInvocation` (test shorthand:
   // same string for every attempt). When both are set, the resolver
@@ -481,7 +483,9 @@ export async function tick_once(
         continue;
       }
       try {
-        results.push(promoteAndSpawn(deps, task, agentResolver, linearSyncs));
+        results.push(
+          promoteAndSpawn(deps, task, agentResolver, linearSyncs, options),
+        );
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
       }
@@ -3135,6 +3139,7 @@ function promoteAndSpawn(
   task: QueuedTaskRow,
   agentResolver: AgentResolver,
   linearSyncs: LinearSyncQueue,
+  options: TickOptions,
 ): TickTaskResult {
   const { agent: agentName, invocation: agentInvocation } = agentResolver.resolve(
     task.repo_id,
@@ -3174,6 +3179,7 @@ function promoteAndSpawn(
   // (paired with `tmux_session`) — this earlier probe is event-only.
   const sessionName = `quay-task-${task.tmux_id}-${pending.attempt_number}`;
   const agentIdentity = probeAgentIdentity(agentInvocation);
+  const githubToken = resolveWorkerGithubToken(options);
 
   const promoted = runPromotionTransaction(deps.db, {
     taskId: task.task_id,
@@ -3187,6 +3193,7 @@ function promoteAndSpawn(
     spawnedAt: now,
     remoteSha,
     prExisted,
+    githubTokenSource: githubToken.source,
   });
   if (!promoted) {
     return { task_id: task.task_id, action: "skipped_predicate" };
@@ -3201,6 +3208,7 @@ function promoteAndSpawn(
       worktreePath: task.worktree_path,
       promptContent,
       agentInvocation,
+      env: githubToken.env,
     });
   } catch (err) {
     return {
@@ -3242,16 +3250,83 @@ function promoteAndSpawn(
 }
 
 type ReviewerGhTokenPreflightResult =
-  | { ok: true; envFiles?: TmuxSpawnInput["envFiles"] }
+  | {
+      ok: true;
+      env?: TmuxSpawnInput["env"];
+      envFiles?: TmuxSpawnInput["envFiles"];
+      source: string;
+    }
   | { ok: false; error: string };
 
-function preflightReviewerGhTokenFile(
+function resolveWorkerGithubToken(options: TickOptions): {
+  env: NonNullable<TmuxSpawnInput["env"]>;
+  source: string;
+} {
+  const env = options.env ?? process.env;
+  const overrides: NonNullable<TmuxSpawnInput["env"]> = {
+    [REVIEWER_GH_TOKEN_ENV]: undefined,
+  };
+  const token = env.GH_TOKEN;
+  if (token !== undefined) {
+    overrides.GH_TOKEN = token;
+  }
+  const githubToken = env.GITHUB_TOKEN;
+  const source =
+    token !== undefined && token.length > 0
+      ? "env:GH_TOKEN"
+      : githubToken !== undefined && githubToken.length > 0
+        ? "env:GITHUB_TOKEN"
+        : "ambient_gh_auth";
+  return {
+    env: overrides,
+    source,
+  };
+}
+
+function preflightReviewerGhToken(
   deps: TickDeps,
   task: ReviewAttemptTaskRow,
   options: TickOptions,
 ): ReviewerGhTokenPreflightResult {
+  const env = options.env ?? process.env;
+  const envToken = env[REVIEWER_GH_TOKEN_ENV];
+  if (envToken !== undefined) {
+    if (envToken.trim().length === 0) {
+      return {
+        ok: false,
+        error: `reviewer GitHub token env ${REVIEWER_GH_TOKEN_ENV} is empty`,
+      };
+    }
+    try {
+      deps.github.probeTokenAccess(task.repo_id, envToken);
+    } catch (err) {
+      const message = redactSecret(
+        err instanceof Error ? err.message : String(err),
+        envToken,
+      );
+      return {
+        ok: false,
+        error: `reviewer GitHub token env ${REVIEWER_GH_TOKEN_ENV} is invalid, expired, or cannot access the repository: ${message}`,
+      };
+    }
+    return {
+      ok: true,
+      env: {
+        GH_TOKEN: envToken,
+        GITHUB_TOKEN: undefined,
+        [REVIEWER_GH_TOKEN_ENV]: undefined,
+      },
+      source: `env:${REVIEWER_GH_TOKEN_ENV}`,
+    };
+  }
+
   const tokenFile = options.reviewerGhTokenFile;
-  if (tokenFile === undefined) return { ok: true };
+  if (tokenFile === undefined) {
+    return {
+      ok: false,
+      error: `reviewer GitHub token missing: set ${REVIEWER_GH_TOKEN_ENV} or reviewer.gh_token_file before spawning reviewer attempts`,
+    };
+  }
 
   let token: string;
   try {
@@ -3286,7 +3361,12 @@ function preflightReviewerGhTokenFile(
 
   return {
     ok: true,
+    env: {
+      GITHUB_TOKEN: undefined,
+      [REVIEWER_GH_TOKEN_ENV]: undefined,
+    },
     envFiles: [{ name: "GH_TOKEN", path: tokenFile }],
+    source: "file:reviewer.gh_token_file",
   };
 }
 
@@ -3318,7 +3398,7 @@ function promoteAndSpawnReviewer(
     );
   }
 
-  const tokenPreflight = preflightReviewerGhTokenFile(deps, task, options);
+  const tokenPreflight = preflightReviewerGhToken(deps, task, options);
   if (!tokenPreflight.ok) {
     return {
       task_id: task.task_id,
@@ -3343,6 +3423,8 @@ function promoteAndSpawnReviewer(
 
   const promptContent = loadFinalPrompt(deps.db, task.task_id, task.attempt_id);
   const now = deps.clock.nowISO();
+  const sessionName = `quay-review-${task.tmux_id}-${task.attempt_number}`;
+  const agentIdentity = probeAgentIdentity(agentInvocation);
   deps.db.exec("BEGIN");
   try {
     // For code workers `remote_sha_at_spawn` records what the remote looked
@@ -3366,13 +3448,22 @@ function promoteAndSpawnReviewer(
       deps.db.exec("ROLLBACK");
       return { task_id: task.task_id, action: "skipped_predicate" };
     }
+    const eventData = JSON.stringify({
+      tmux_session: sessionName,
+      worktree_path: task.worktree_path,
+      attempt_number: task.attempt_number,
+      agent_identity: agentIdentity,
+      github_token_source: tokenPreflight.source,
+      pr_number: task.pr_number,
+      head_sha: task.head_sha,
+    });
     deps.db
       .query(
         `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state, occurred_at
-         ) VALUES (?, ?, 'review_spawned', 'pr-review', 'pr-review', ?)`,
+           task_id, attempt_id, event_type, from_state, to_state, occurred_at, event_data
+         ) VALUES (?, ?, 'review_spawned', 'pr-review', 'pr-review', ?, ?)`,
       )
-      .run(task.task_id, task.attempt_id, now);
+      .run(task.task_id, task.attempt_id, now, eventData);
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -3381,13 +3472,13 @@ function promoteAndSpawnReviewer(
     throw err;
   }
 
-  const sessionName = `quay-review-${task.tmux_id}-${task.attempt_number}`;
   try {
     deps.tmux.spawn({
       sessionName,
       worktreePath: task.worktree_path,
       promptContent,
       agentInvocation,
+      ...(tokenPreflight.env !== undefined ? { env: tokenPreflight.env } : {}),
       ...(tokenPreflight.envFiles !== undefined
         ? { envFiles: tokenPreflight.envFiles }
         : {}),
@@ -3401,7 +3492,6 @@ function promoteAndSpawnReviewer(
   }
 
   fireFailpoint("after_tmux_session_created");
-  const agentIdentity = probeAgentIdentity(agentInvocation);
   deps.db
     .query(
       `UPDATE attempts
@@ -3481,6 +3571,7 @@ interface PromotionInput {
   spawnedAt: string;
   remoteSha: string | null;
   prExisted: number;
+  githubTokenSource: string;
 }
 
 function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
@@ -3524,6 +3615,7 @@ function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
       branch_name: p.branchName,
       attempt_number: p.attemptNumber,
       agent_identity: p.agentIdentity,
+      github_token_source: p.githubTokenSource,
       remote_sha_at_spawn: p.remoteSha,
       pr_existed_at_spawn: p.prExisted === 1,
     });

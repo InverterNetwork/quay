@@ -1,7 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
-import { tick_once } from "../../src/core/tick.ts";
+import {
+  REVIEWER_GH_TOKEN_ENV,
+  tick_once,
+  type TickOptions,
+} from "../../src/core/tick.ts";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
@@ -17,6 +21,15 @@ afterEach(() => {
   h?.cleanup();
   h = null;
 });
+
+const REVIEWER_ENV: NodeJS.ProcessEnv = {
+  GH_TOKEN: "ghs_worker_runtime_test",
+  [REVIEWER_GH_TOKEN_ENV]: "ghs_reviewer_runtime_test",
+};
+
+function reviewerTickOptions(extra: TickOptions = {}): TickOptions {
+  return { reviewerEnabled: true, env: REVIEWER_ENV, ...extra };
+}
 
 test("CI-green pr-open task enters pr-review when reviewer gate is enabled", async () => {
   h = createHarness();
@@ -60,10 +73,10 @@ test("CI-green pr-open task enters pr-review when reviewer gate is enabled", asy
     headSha: "head-99",
   });
 
-  const results = await tick_once(built.deps, {
-    reviewerEnabled: true,
-    gateQuayOwnedDone: true,
-  });
+  const results = await tick_once(
+    built.deps,
+    reviewerTickOptions({ gateQuayOwnedDone: true }),
+  );
 
   expect(results).toContainEqual({ task_id: taskId, action: "review_requested" });
   const task = h.db
@@ -103,7 +116,7 @@ test("tick spawns pending review attempts without moving task to running", async
     .run(attemptId);
   insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, attemptId, "review prompt");
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
   expect(built.tmux.spawnCalls).toHaveLength(1);
@@ -156,7 +169,7 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     comments: "Looks good.",
   });
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toContainEqual({ task_id: taskId, action: "review_approved" });
   const task = h.db
@@ -217,7 +230,7 @@ test("dead synthetic reviewer changes_requested waits for external changes", asy
     comments: "Inline review comments (1):\n- src/a.ts:1 - fix this",
   });
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toContainEqual({
     task_id: taskId,
@@ -281,7 +294,7 @@ test("Quay-owned reviewer changes_requested schedules non-budget code respawn", 
     comments: "Blocking issue.",
   });
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toContainEqual({
     task_id: taskId,
@@ -420,10 +433,10 @@ test("review after CHANGES_REQUESTED respawn gets reviewer-specific prompt", asy
     headSha: "new-head",
   });
 
-  const results = await tick_once(built.deps, {
-    reviewerEnabled: true,
-    gateQuayOwnedDone: true,
-  });
+  const results = await tick_once(
+    built.deps,
+    reviewerTickOptions({ gateQuayOwnedDone: true }),
+  );
 
   expect(results).toContainEqual({ task_id: taskId, action: "review_requested" });
   const reviewerAttempt = h.db
@@ -544,10 +557,10 @@ test("review after conflict respawn does not reuse the worker conflict brief", a
     headSha: "conflict-fixed-head",
   });
 
-  const results = await tick_once(built.deps, {
-    reviewerEnabled: true,
-    gateQuayOwnedDone: true,
-  });
+  const results = await tick_once(
+    built.deps,
+    reviewerTickOptions({ gateQuayOwnedDone: true }),
+  );
 
   expect(results).toContainEqual({ task_id: taskId, action: "review_requested" });
   const reviewerAttempt = h.db
@@ -585,18 +598,18 @@ test("review after conflict respawn does not reuse the worker conflict brief", a
     expect(prompt).not.toContain(phrase);
   }
 
-  const spawnResults = await tick_once(built.deps, {
-    reviewerEnabled: true,
-    gateQuayOwnedDone: true,
-  });
+  const spawnResults = await tick_once(
+    built.deps,
+    reviewerTickOptions({ gateQuayOwnedDone: true }),
+  );
   expect(spawnResults).toContainEqual({ task_id: taskId, action: "spawned" });
   const session = built.tmux.spawnCalls.at(-1)!.sessionName;
   built.tmux.markDead(session);
 
-  const retryResults = await tick_once(built.deps, {
-    reviewerEnabled: true,
-    gateQuayOwnedDone: true,
-  });
+  const retryResults = await tick_once(
+    built.deps,
+    reviewerTickOptions({ gateQuayOwnedDone: true }),
+  );
   expect(retryResults).toContainEqual({
     task_id: taskId,
     action: "review_retry_scheduled",
@@ -674,7 +687,7 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
     extension: "md",
   });
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toContainEqual({
     task_id: taskId,
@@ -735,7 +748,7 @@ test("dead reviewer leaving .quay-blocked.md retries once and records a single r
     .run(attemptId);
   // Reviewer tmux is dead: deliberately not added to FakeTmux.liveSessions.
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toContainEqual({
     task_id: taskId,
@@ -802,7 +815,7 @@ test("tick reaps a superseded reviewer whose tmux outlived enterReview's commit"
     .run(supersededId);
   built.tmux.liveSessions.add("quay-review-orphan");
 
-  await tick_once(built.deps, { reviewerEnabled: true });
+  await tick_once(built.deps, reviewerTickOptions());
 
   expect(built.tmux.killCalls).toContain("quay-review-orphan");
   expect(built.tmux.liveSessions.has("quay-review-orphan")).toBe(false);
@@ -839,6 +852,6 @@ test("tick reaper skips a dead session and does not call kill twice", async () =
     .run(supersededId);
   // Session intentionally NOT added to liveSessions.
 
-  await tick_once(built.deps, { reviewerEnabled: true });
+  await tick_once(built.deps, reviewerTickOptions());
   expect(built.tmux.killCalls).not.toContain("quay-review-already-dead");
 });

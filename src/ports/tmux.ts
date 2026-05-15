@@ -16,6 +16,11 @@ export interface TmuxSpawnInput {
   worktreePath: string;
   promptContent: string;
   agentInvocation: string;
+  // Per-spawn environment overrides applied to the tmux client process that
+  // creates the session. Values become part of the session environment
+  // without appearing in argv; `undefined` removes the variable from the
+  // inherited process environment for this spawn.
+  env?: Record<string, string | undefined>;
   // Per-spawn environment variables to read from a file inside the pane,
   // not from argv. The pane wrapper does `export <name>="$(cat <path>)"`,
   // so the file path is the only thing that ends up in any process's
