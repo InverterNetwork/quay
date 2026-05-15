@@ -1,5 +1,6 @@
 // JSON output shapes for read commands. Read-only SQL; no behavior.
 import type { DB } from "../db/connection.ts";
+import type { TicketAuthor } from "../ports/ticket_context.ts";
 
 export interface TaskListRow {
   task_id: string;
@@ -34,6 +35,7 @@ export interface TaskGetEvent {
 }
 
 export interface TaskGetPayload extends TaskListRow {
+  authors: TicketAuthor[];
   slack_thread_ref: string | null;
   pr_number: number | null;
   pr_url: string | null;
@@ -87,6 +89,7 @@ export function listTasks(db: DB): TaskListRow[] {
 }
 
 interface TaskGetRawRow extends TaskListRawRow {
+  authors_json: string | null;
   slack_thread_ref: string | null;
   pr_number: number | null;
   pr_url: string | null;
@@ -95,11 +98,37 @@ interface TaskGetRawRow extends TaskListRawRow {
 }
 
 const RECENT_EVENT_LIMIT = 20;
+const SLACK_USER_ID = /^U[A-Z0-9]+$/;
+
+function parseTaskAuthors(authorsJson: string | null): TicketAuthor[] {
+  if (authorsJson === null) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(authorsJson);
+  } catch {
+    return [];
+  }
+
+  if (!Array.isArray(parsed)) return [];
+
+  const authors: TicketAuthor[] = [];
+  for (const entry of parsed) {
+    if (entry === null || typeof entry !== "object") return [];
+    const author = entry as { name?: unknown; slack_id?: unknown };
+    if (typeof author.name !== "string") return [];
+    if (typeof author.slack_id !== "string") return [];
+    if (!SLACK_USER_ID.test(author.slack_id)) return [];
+    authors.push({ name: author.name, slack_id: author.slack_id });
+  }
+  return authors;
+}
 
 export function getTask(db: DB, taskId: string): TaskGetPayload | null {
   const row = db
     .query<TaskGetRawRow, [string]>(
-      `SELECT ${TASK_LIST_COLUMNS}, slack_thread_ref, pr_number, pr_url, head_sha, base_sha
+      `SELECT ${TASK_LIST_COLUMNS}, authors_json, slack_thread_ref,
+              pr_number, pr_url, head_sha, base_sha
          FROM tasks WHERE task_id = ?`,
     )
     .get(taskId);
@@ -128,6 +157,7 @@ export function getTask(db: DB, taskId: string): TaskGetPayload | null {
 
   return {
     ...rowToList(row),
+    authors: parseTaskAuthors(row.authors_json),
     slack_thread_ref: row.slack_thread_ref,
     pr_number: row.pr_number,
     pr_url: row.pr_url,
