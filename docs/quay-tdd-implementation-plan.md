@@ -634,12 +634,13 @@ Each slice should be planned and implemented in this format:
 | `test_054_pr_open_closed_transitions_closed_unmerged` | A `pr-open` task whose PR was closed without merge transitions to `closed_unmerged` and runs terminal cleanup. |
 | `test_review_feedback_schedules_non_budget_respawn` | New `CHANGES_REQUESTED` feedback snapshots review comments, schedules a pending `review` attempt with `consumed_budget = 0`, and records `last_review_id_acted_on`. |
 | `test_conflict_schedules_non_budget_respawn` | A new merge-conflict observation snapshots conflict context, schedules a pending `conflict` attempt with `consumed_budget = 0`, and records `last_conflict_observation`. |
+| `test_conflict_review_combined_respawn` | A `done` task whose PR has both a fresh conflict and fresh `CHANGES_REQUESTED` review schedules exactly one non-budget conflict-priority respawn, writes both `conflict_slice` and `review_comments`, records both dedupe markers, and increments `non_budget_respawns_consumed` once. |
 
 **Minimal implementation**
 
 - Fake GitHub PR state, checks, reviews, mergeability, and SHAs.
 - CI classifier.
-- Review and conflict scheduling helpers using shared non-budget routine.
+- Review, conflict, and combined conflict+review scheduling helpers using the shared non-budget routine.
 
 **Done criteria**
 
