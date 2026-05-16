@@ -1561,7 +1561,6 @@ function scheduleCiFailRetry(
   prevAttempt: RetryAttemptRef,
   snapshot: PrSnapshot,
   fromState: "pr-open" | "pr-review",
-  priorBrief?: string,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");
@@ -1573,7 +1572,6 @@ function scheduleCiFailRetry(
       snapshot,
       fromState,
       now,
-      priorBrief,
     );
     deps.db.exec("COMMIT");
     return { task_id: taskId, action: "ci_failed" };
@@ -1592,7 +1590,6 @@ function applyCiFailRetryInOpenTxn(
   snapshot: PrSnapshot,
   fromState: "pr-open" | "pr-review",
   now: string,
-  priorBrief?: string,
 ): void {
   const failureExcerpt = composeCiFailureExcerpt(snapshot);
   const excerpt = deps.artifactStore.writeArtifact({
@@ -1608,7 +1605,6 @@ function applyCiFailRetryInOpenTxn(
     reason: "ci_fail",
     diagnostics: failureExcerpt,
     fromState,
-    priorBrief,
   });
   deps.db
     .query(
@@ -1953,7 +1949,6 @@ function finalizeApprovedReviewBlockedByCi(
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   const content = reviewArtifactContent(posted, task.head_sha);
-  const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
 
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -2003,7 +1998,6 @@ function finalizeApprovedReviewBlockedByCi(
       snapshot,
       "pr-review",
       now,
-      priorCodeBrief,
     );
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -2025,7 +2019,6 @@ function finalizeStaleApprovedReviewBlockedByCi(
 ): TickTaskResult {
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
-  const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
 
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -2048,7 +2041,6 @@ function finalizeStaleApprovedReviewBlockedByCi(
       snapshot,
       "pr-review",
       now,
-      priorCodeBrief,
     );
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -2446,27 +2438,6 @@ function reviewArtifactContent(posted: PostedReview, headSha: string): string {
     body: posted.body,
     comments: posted.comments,
   });
-}
-
-function loadMostRecentNonReviewBrief(db: DB, taskId: string): string | undefined {
-  const row = db
-    .query<{ file_path: string }, [string]>(
-      `SELECT ar.file_path
-         FROM artifacts ar
-         JOIN attempts a ON a.attempt_id = ar.attempt_id
-        WHERE ar.task_id = ?
-          AND ar.kind = 'brief'
-          AND a.reason <> 'review_only'
-        ORDER BY ar.artifact_id DESC
-        LIMIT 1`,
-    )
-    .get(taskId);
-  if (!row) return undefined;
-  try {
-    return readFileSync(row.file_path, "utf8");
-  } catch {
-    return undefined;
-  }
 }
 
 function loadAttemptArtifactContent(

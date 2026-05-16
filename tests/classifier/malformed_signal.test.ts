@@ -6,6 +6,7 @@ import { createHarness, type Harness } from "../support/harness.ts";
 import {
   insertRepo,
   insertRunningTask,
+  seedTaskObjective,
   writeBlockerFile,
 } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
@@ -27,6 +28,7 @@ test("test_malformed_blocker_schedules_malformed_signal_retry", async () => {
     repoId,
     worktreesRoot,
   });
+  seedTaskObjective(h, t.taskId);
 
   // Whitespace-only body fails the spec's "non-empty after trim" rule.
   const malformedBody = "   \n\t  \n";

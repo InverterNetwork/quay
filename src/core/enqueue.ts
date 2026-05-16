@@ -15,6 +15,10 @@ import {
 import type { AgentResolver } from "./agents.ts";
 import { QuayError } from "./errors.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import {
+  composeWorkerPrompt,
+  INITIAL_ATTEMPT_GUIDANCE,
+} from "./worker_prompt.ts";
 
 export const DEFAULT_RETRY_BUDGET = 5;
 
@@ -213,7 +217,6 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       "initial",
     );
     const preambleBody = loadPreambleBody(deps.db, preambleId);
-    const finalPrompt = `${preambleBody}\n\n${input.brief}`;
     const now = deps.clock.nowISO();
 
     deps.db.exec("BEGIN");
@@ -283,11 +286,35 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         writtenArtifactPaths.push(t.filePath);
       }
 
+      // Stable task objective: one task-level artifact that every later
+      // code-worker attempt loads via loadOriginalTaskObjective().
+      const objectiveArtifact = deps.artifactStore.writeArtifact({
+        taskId,
+        attemptId: null,
+        kind: "task_objective",
+        content: input.brief,
+        extension: "md",
+      });
+      writtenArtifactPaths.push(objectiveArtifact.filePath);
+
+      const composed = composeWorkerPrompt({
+        preambleBody,
+        taskObjective: {
+          body: input.brief,
+          artifactId: objectiveArtifact.artifactId,
+          filePath: objectiveArtifact.filePath,
+        },
+        attemptGuidance: {
+          reason: "initial",
+          body: INITIAL_ATTEMPT_GUIDANCE,
+        },
+      });
+
       const briefArtifact = deps.artifactStore.writeArtifact({
         taskId,
         attemptId,
         kind: "brief",
-        content: input.brief,
+        content: composed.brief,
         extension: "md",
       });
       writtenArtifactPaths.push(briefArtifact.filePath);
@@ -296,7 +323,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         taskId,
         attemptId,
         kind: "final_prompt",
-        content: finalPrompt,
+        content: composed.finalPrompt,
         extension: "md",
       });
       writtenArtifactPaths.push(finalArtifact.filePath);

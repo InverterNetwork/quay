@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { join } from "node:path";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertRepo, insertRunningTask } from "../support/fixtures.ts";
+import { insertRepo, insertRunningTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -21,6 +21,7 @@ test("wall-clock finalizer stamps exit_signal captured between kill and dead-obs
     worktreesRoot: join(h.dataDir, "worktrees"),
     spawnedAt: "2026-05-10T10:30:00.000Z",
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.liveSessions.add(t.sessionName!);

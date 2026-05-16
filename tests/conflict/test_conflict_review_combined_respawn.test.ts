@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import { insertAttempt, insertRepo, insertTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -21,6 +21,7 @@ test("conflict plus changes-requested review schedules one combined non-budget r
     repoId,
     state: "done",
   });
+  seedTaskObjective(h, taskId);
   const attemptId = insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
