@@ -81,8 +81,9 @@ binary and invalid UTF-8 artifacts such as `malformed_signal`.
 | Kind | Meaning |
 | --- | --- |
 | `ticket_snapshot` | Snapshot of source ticket/context at enqueue time. |
-| `brief` | Human/orchestrator brief for an attempt. |
-| `final_prompt` | Worker preamble plus brief. |
+| `task_objective` | Stable original task brief, written once at enqueue and reused by every later code-worker attempt as the canonical objective. Task-level (no `attempt_id`). |
+| `brief` | Per-attempt composed prompt body: a structured `<quay-task-objective>` block pointing at the task-level `task_objective` artifact, a `<quay-current-attempt-guidance>` block (initial instruction, retry/respawn template, or orchestrator-submitted brief), and an optional `<quay-diagnostics>` block (CI excerpt, review comments, conflict slice, etc.). The raw original brief lives in `task_objective`, not here. |
+| `final_prompt` | Worker preamble plus the attempt's composed `brief`. |
 | `session_log` | Captured tmux output. |
 | `usage` | JSON envelope from the agent's `--output-format json` stdout (`.quay-usage.json`), captured per attempt. |
 | `tool_trace` | Tool-call / debug stream from the agent's `--debug-file` (`.quay-tool-trace.log`), captured per attempt with a 4 MiB tail. |

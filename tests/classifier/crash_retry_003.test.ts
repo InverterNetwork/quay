@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { join } from "node:path";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertRepo, insertRunningTask } from "../support/fixtures.ts";
+import { insertRepo, insertRunningTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -24,6 +24,7 @@ test("test_003_dead_worker_without_pr_or_signal_schedules_crash_retry", async ()
     remoteShaAtSpawn: null,
     prExistedAtSpawn: 0,
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.markDead(t.sessionName!);

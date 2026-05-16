@@ -9,7 +9,7 @@ import { afterEach, expect, test } from "bun:test";
 import { claim_task, submit_brief } from "../../src/core/claims.ts";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import { insertAttempt, insertRepo, insertTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -29,6 +29,7 @@ test("test_083_advice_answered_does_not_increment_non_budget_counter", async () 
     repoId: repoA,
     state: "pr-open",
   });
+  seedTaskObjective(h, taskA);
   const attemptA = insertAttempt(h.db, {
     taskId: taskA,
     attemptNumber: 1,
@@ -71,6 +72,7 @@ test("test_083_advice_answered_does_not_increment_non_budget_counter", async () 
     repoId: repoB,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskB);
   insertAttempt(h.db, {
     taskId: taskB,
     attemptNumber: 1,

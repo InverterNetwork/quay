@@ -14,6 +14,7 @@ import {
   insertFinalPromptArtifact,
   insertRepo,
   insertTask,
+  seedTaskObjective,
 } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
@@ -36,6 +37,7 @@ test("CI-green pr-open task enters pr-review when reviewer gate is enabled", asy
   const built = buildTickDeps(h);
   const repoId = insertRepo(h.db, "repo-gated");
   const taskId = insertTask(h.db, { repoId, taskId: "task-gated", state: "pr-open" });
+  seedTaskObjective(h, taskId);
   const attemptId = insertAttempt(h.db, {
     taskId,
     spawnedAt: "2026-01-01T00:00:00.000Z",
@@ -103,6 +105,7 @@ test("tick spawns pending review attempts without moving task to running", async
     taskId: "task-review-spawn",
     state: "pr-review",
   });
+  seedTaskObjective(h, taskId);
   h.db
     .query(`UPDATE tasks SET pr_number = 10, head_sha = 'review-sha' WHERE task_id = ?`)
     .run(taskId);
@@ -157,6 +160,7 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
                  ?, 7, 'sha-7', 1, ?, ?)`,
     )
     .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
   const attemptId = insertAttempt(h.db, {
     taskId,
     reason: "review_only",
@@ -231,6 +235,7 @@ test("dead synthetic reviewer changes_requested waits for external changes", asy
                  ?, 8, 'sha-8', 1, ?, ?)`,
     )
     .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
   const attemptId = insertAttempt(h.db, {
     taskId,
     reason: "review_only",
@@ -272,6 +277,7 @@ test("Quay-owned reviewer changes_requested schedules non-budget code respawn", 
     taskId: "task-review-respawn",
     state: "pr-review",
   });
+  seedTaskObjective(h, taskId);
   h.db
     .query(`UPDATE tasks SET pr_number = 11, head_sha = 'sha-11' WHERE task_id = ?`)
     .run(taskId);
@@ -345,6 +351,7 @@ test("review after CHANGES_REQUESTED respawn gets reviewer-specific prompt", asy
     taskId: "task-review-respawn-prompt",
     state: "pr-open",
   });
+  seedTaskObjective(h, taskId);
   const store = createArtifactStore({
     db: h.db,
     artifactRoot: h.artifactRoot,
@@ -495,6 +502,7 @@ test("review after conflict respawn does not reuse the worker conflict brief", a
     taskId: "task-conflict-review-prompt",
     state: "pr-open",
   });
+  seedTaskObjective(h, taskId);
   const store = createArtifactStore({
     db: h.db,
     artifactRoot: h.artifactRoot,
@@ -683,6 +691,7 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
                  ?, 9, 'sha-9', 1, 2, 'sha-9', ?, ?)`,
     )
     .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
   const attemptId = insertAttempt(h.db, {
     taskId,
     reason: "review_only",
@@ -775,6 +784,7 @@ test("dead reviewer leaving .quay-blocked.md retries once and records a single r
                  ?, 12, 'sha-12', 1, ?, ?)`,
     )
     .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
   const attemptId = insertAttempt(h.db, {
     taskId,
     reason: "review_only",
@@ -831,6 +841,7 @@ test("tick reaps a superseded reviewer whose tmux outlived enterReview's commit"
     taskId: "pr-review-repo-reap-7",
     state: "pr-review",
   });
+  seedTaskObjective(h, taskId);
   h.db
     .query(`UPDATE tasks SET pr_number = 7, head_sha = 'new-sha' WHERE task_id = ?`)
     .run(taskId);
@@ -872,6 +883,7 @@ test("tick reaper skips a dead session and does not call kill twice", async () =
     taskId: "pr-review-repo-reap-idem-8",
     state: "pr-review",
   });
+  seedTaskObjective(h, taskId);
   h.db
     .query(`UPDATE tasks SET pr_number = 8, head_sha = 'new-sha' WHERE task_id = ?`)
     .run(taskId);

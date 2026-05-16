@@ -4,7 +4,7 @@ import { claim_task, submit_brief } from "../../src/core/claims.ts";
 import { ensurePreambleIdForAttemptReason } from "../../src/core/preamble.ts";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import { insertAttempt, insertRepo, insertTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -22,6 +22,7 @@ test("test_058_submit_brief_schedules_queued_not_running", async () => {
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-28T08:00:00.000Z" });
   // Simulate prior state: budget already consumed once and one expiration on
   // record so we can assert the reset.
@@ -123,6 +124,7 @@ test("test_058_submit_brief_advice_answered_does_not_consume_budget", async () =
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-28T08:00:00.000Z" });
 
   const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
@@ -159,6 +161,7 @@ for (const reason of ["blocker_resolved", "advice_answered"] as const) {
       repoId,
       state: "awaiting-next-brief",
     });
+    seedTaskObjective(h, taskId);
     const codePreambleId = ensurePreambleIdForAttemptReason(
       h.db,
       h.clock,

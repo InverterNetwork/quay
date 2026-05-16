@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { join } from "node:path";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertRepo, insertRunningTask } from "../support/fixtures.ts";
+import { insertRepo, insertRunningTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -30,6 +30,7 @@ test("crashed path stamps exit_code from a clean tmux exit observation", async (
     remoteShaAtSpawn: null,
     prExistedAtSpawn: 0,
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.markDead(t.sessionName!);
@@ -71,6 +72,7 @@ test("crashed path stamps exit_signal when tmux reports a signaled exit", async 
     remoteShaAtSpawn: null,
     prExistedAtSpawn: 0,
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.markDead(t.sessionName!);
@@ -115,6 +117,7 @@ test("dead-worker path leaves exit_code and exit_signal NULL when tmux reports n
     remoteShaAtSpawn: null,
     prExistedAtSpawn: 0,
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.markDead(t.sessionName!);
@@ -156,6 +159,7 @@ test("spawn_substrate_failed leaves exit_code and exit_signal NULL", async () =>
     prExistedAtSpawn: 0,
     tmuxSession: null,
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.git.setRemoteHeadSha(repoId, t.branchName, null);

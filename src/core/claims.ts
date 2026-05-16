@@ -36,6 +36,10 @@ import {
   reopenClaimedOrchestratorHandoffs,
 } from "./orchestrator_handoffs.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import {
+  composeWorkerPrompt,
+  loadOriginalTaskObjective,
+} from "./worker_prompt.ts";
 
 export type ClaimErrorCode =
   | "unknown_task"
@@ -423,6 +427,12 @@ export async function submit_brief(
     input.reason,
   );
   const preambleBody = loadPreambleBody(deps.db, preambleId);
+  const objective = loadOriginalTaskObjective(deps.db, input.taskId);
+  const composed = composeWorkerPrompt({
+    preambleBody,
+    taskObjective: objective,
+    attemptGuidance: { reason: input.reason, body: input.brief },
+  });
 
   let attemptId = -1;
   deps.db.exec("BEGIN IMMEDIATE");
@@ -490,14 +500,14 @@ export async function submit_brief(
       taskId: input.taskId,
       attemptId,
       kind: "brief",
-      content: input.brief,
+      content: composed.brief,
       extension: "md",
     });
     deps.artifactStore.writeArtifact({
       taskId: input.taskId,
       attemptId,
       kind: "final_prompt",
-      content: `${preambleBody}\n\n${input.brief}`,
+      content: composed.finalPrompt,
       extension: "md",
     });
 

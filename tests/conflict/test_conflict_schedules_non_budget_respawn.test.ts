@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { tick_once } from "../../src/core/tick.ts";
 import { ensurePreambleIdForAttemptReason } from "../../src/core/preamble.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import { insertAttempt, insertRepo, insertTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -26,6 +26,7 @@ test("test_conflict_schedules_non_budget_respawn", async () => {
     repoId,
     state: "pr-open",
   });
+  seedTaskObjective(h, taskId);
   const attemptId = insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -134,6 +135,7 @@ test("conflict respawn after latest review_only uses worker preamble and worker 
     repoId,
     state: "done",
   });
+  seedTaskObjective(h, taskId);
   const codePreambleId = ensurePreambleIdForAttemptReason(
     h.db,
     h.clock,
@@ -223,7 +225,10 @@ test("conflict respawn after latest review_only uses worker preamble and worker 
   expect(finalPrompt).not.toContain("Do not modify code");
   expect(finalPrompt).not.toContain("Do not push");
   expect(finalPrompt).not.toContain("You do not push");
-  expect(finalPrompt).toContain("worker implementation brief");
+  // Composer carries the stable original task objective forward, not a
+  // prior worker or reviewer brief.
+  expect(finalPrompt).toContain("Original task objective.");
+  expect(finalPrompt).not.toContain("worker implementation brief");
   expect(finalPrompt).not.toContain("review-only latest brief");
 });
 
@@ -237,6 +242,7 @@ test("changes-requested respawn from done after latest review_only uses worker p
     repoId,
     state: "done",
   });
+  seedTaskObjective(h, taskId);
   const codePreambleId = ensurePreambleIdForAttemptReason(
     h.db,
     h.clock,
@@ -330,6 +336,9 @@ test("changes-requested respawn from done after latest review_only uses worker p
   expect(finalPrompt).not.toContain("Do not modify code");
   expect(finalPrompt).not.toContain("Do not push");
   expect(finalPrompt).not.toContain("You do not push");
-  expect(finalPrompt).toContain("worker implementation brief for review follow-up");
+  // Composer carries the stable original task objective forward, not a
+  // prior worker or reviewer brief.
+  expect(finalPrompt).toContain("Original task objective.");
+  expect(finalPrompt).not.toContain("worker implementation brief for review follow-up");
   expect(finalPrompt).not.toContain("review-only latest brief should be skipped");
 });

@@ -8,7 +8,7 @@ import {
 import { createArtifactStore } from "../../src/artifacts/store.ts";
 import { enqueueOrchestratorHandoff } from "../../src/core/orchestrator_handoffs.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import { insertAttempt, insertRepo, insertTask, seedTaskObjective } from "../support/fixtures.ts";
 import { FakeSlack } from "../support/fakes/slack.ts";
 
 let h: Harness | null = null;
@@ -26,6 +26,7 @@ test("test_escalate_human_claim_transition_is_sql_only", async () => {
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-28T08:00:00.000Z" });
   h.db
     .query(`UPDATE tasks SET slack_thread_ref = ?, claim_expirations_consecutive = 1 WHERE task_id = ?`)
@@ -129,6 +130,7 @@ test("test_escalate_human_thread_ref_override_persists", async () => {
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-28T08:00:00.000Z" });
   h.db
     .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
@@ -166,6 +168,7 @@ test("test_orchestrator_owned_human_loop_records_reply_then_submits_brief", asyn
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-28T08:00:00.000Z" });
   const eventId = insertAwaitingEvent(taskId, "blocker_ingested");
   enqueueOrchestratorHandoff(

@@ -4,6 +4,10 @@ import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import { enqueueOrchestratorHandoff } from "./orchestrator_handoffs.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import {
+  composeWorkerPrompt,
+  loadOriginalTaskObjective,
+} from "./worker_prompt.ts";
 
 export type BudgetRetryReason =
   | "ci_fail"
@@ -30,8 +34,15 @@ export interface ScheduleDeterministicRetryInput {
   reason: BudgetRetryReason;
   diagnostics: string;
   fromState?: string;
-  priorBrief?: string | undefined;
 }
+
+const RETRY_DIAGNOSTIC_KIND: Record<BudgetRetryReason, string> = {
+  ci_fail: "ci_failure_excerpt",
+  crash: "crash_details",
+  stale: "stale_details",
+  wall_clock: "wall_clock_details",
+  malformed_signal: "malformed_signal_details",
+};
 
 export interface ScheduleDeterministicRetryResult {
   scheduled: boolean;
@@ -63,12 +74,16 @@ export function scheduleDeterministicRetry(
     deps.clock,
     input.reason,
   );
-  const priorBrief = input.priorBrief ?? loadMostRecentWorkerBrief(deps.db, input.taskId);
-  const retryBrief = composeRetryBrief({
-    reason: input.reason,
-    templateBody: template.body,
-    diagnostics: input.diagnostics,
-    priorBrief,
+  const objective = loadOriginalTaskObjective(deps.db, input.taskId);
+  const preambleBody = loadPreambleBody(deps.db, preambleId);
+  const composed = composeWorkerPrompt({
+    preambleBody,
+    taskObjective: objective,
+    attemptGuidance: { reason: input.reason, body: template.body },
+    diagnostics: {
+      kind: RETRY_DIAGNOSTIC_KIND[input.reason],
+      body: input.diagnostics,
+    },
   });
 
   const task = deps.db
@@ -83,7 +98,7 @@ export function scheduleDeterministicRetry(
       taskId: input.taskId,
       attemptId: input.prevAttempt.attempt_id,
       kind: "last_failure",
-      content: retryBrief,
+      content: composed.brief,
       extension: "md",
     });
     deps.db
@@ -148,15 +163,14 @@ export function scheduleDeterministicRetry(
     taskId: input.taskId,
     attemptId: attempt.attempt_id,
     kind: "brief",
-    content: retryBrief,
+    content: composed.brief,
     extension: "md",
   });
-  const preamble = loadPreambleBody(deps.db, preambleId);
   deps.artifactStore.writeArtifact({
     taskId: input.taskId,
     attemptId: attempt.attempt_id,
     kind: "final_prompt",
-    content: `${preamble}\n\n${retryBrief}`,
+    content: composed.finalPrompt,
     extension: "md",
   });
 
@@ -364,23 +378,3 @@ function loadMostRecentWorkerBrief(db: DB, taskId: string): string {
   }
 }
 
-function composeRetryBrief(input: {
-  reason: BudgetRetryReason;
-  templateBody: string;
-  diagnostics: string;
-  priorBrief: string;
-}): string {
-  return [
-    `# Quay deterministic retry: ${input.reason}`,
-    "",
-    input.templateBody,
-    "",
-    "## Observed context",
-    "",
-    input.diagnostics,
-    "",
-    "## Most recent brief",
-    "",
-    input.priorBrief,
-  ].join("\n");
-}

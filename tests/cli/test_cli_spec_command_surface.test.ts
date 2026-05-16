@@ -17,6 +17,7 @@ import {
   insertAttempt,
   insertRepo,
   insertTask,
+  seedTaskObjective,
 } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
@@ -160,6 +161,7 @@ test("task claim returns claim_id, then submit-brief flag form succeeds", async 
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -256,6 +258,7 @@ test("escalate-human flag form records question and preserves orchestrator claim
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -313,6 +316,7 @@ test("record-human-reply flag form persists answer and returns to claimed state"
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -384,6 +388,7 @@ test("task release-claim accepts --claim-id flag form", async () => {
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -413,8 +418,11 @@ test("task list filters by --state, --repo, --external-ref", async () => {
   const repoA = insertRepo(h.db, "repo-list-a");
   const repoB = insertRepo(h.db, "repo-list-b");
   insertTask(h.db, { taskId: "t-a-1", repoId: repoA, state: "queued" });
+  seedTaskObjective(h, "t-a-1");
   insertTask(h.db, { taskId: "t-a-2", repoId: repoA, state: "running" });
+  seedTaskObjective(h, "t-a-2");
   insertTask(h.db, { taskId: "t-b-1", repoId: repoB, state: "queued" });
+  seedTaskObjective(h, "t-b-1");
   // Set an external_ref on one row so we can filter on it.
   h.db.query("UPDATE tasks SET external_ref = ? WHERE task_id = ?").run(
     "ITRY-1",
@@ -454,6 +462,7 @@ test("task events returns the append-only log oldest-first", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-events");
   const taskId = insertTask(h.db, { taskId: "t-events", repoId, state: "queued" });
+  seedTaskObjective(h, taskId);
   h.db
     .query(
       `INSERT INTO events (task_id, event_type, from_state, to_state, occurred_at)
