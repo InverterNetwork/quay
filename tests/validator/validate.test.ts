@@ -526,7 +526,7 @@ test("shipped default schema parses and matches §6 field set", () => {
     ["authors", "body", "repo", "tags"],
   );
   expect(Object.keys(schema.optional).sort()).toEqual(
-    ["external_ref", "slack_thread"],
+    ["external_ref", "slack_thread", "worker_execution"],
   );
 });
 

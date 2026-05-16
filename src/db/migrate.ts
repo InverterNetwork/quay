@@ -41,9 +41,21 @@ export function runMigrations(
 
   for (const { name, sql } of migrations) {
     if (applied.has(name)) continue;
+    const disableForeignKeys = sql.includes("-- quay: foreign_keys_off");
+    if (disableForeignKeys) db.exec("PRAGMA foreign_keys = OFF;");
     db.exec("BEGIN");
     try {
       db.exec(sql);
+      if (disableForeignKeys) {
+        const violations = db.query<Record<string, unknown>, []>(
+          "PRAGMA foreign_key_check",
+        ).all();
+        if (violations.length > 0) {
+          throw new Error(
+            `foreign key check failed after migration ${name}: ${JSON.stringify(violations)}`,
+          );
+        }
+      }
       db.query("INSERT INTO schema_migrations(name, applied_at) VALUES (?, ?)").run(
         name,
         new Date().toISOString(),
@@ -52,6 +64,8 @@ export function runMigrations(
     } catch (err) {
       db.exec("ROLLBACK");
       throw err;
+    } finally {
+      if (disableForeignKeys) db.exec("PRAGMA foreign_keys = ON;");
     }
     newlyApplied.push(name);
   }

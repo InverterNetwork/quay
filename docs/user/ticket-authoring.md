@@ -17,11 +17,14 @@ slack_thread: https://example.slack.com/archives/C123456/p1712345678901234
 authors:
   - name: Ada Lovelace
     slack_id: U06TDC56VJB
+worker_execution: goal
 ```
 ````
 
-`slack_thread` is optional. `authors` is required and must contain at least one
-entry.
+`slack_thread` and `worker_execution` are optional. `worker_execution` defaults
+to `oneshot`; set it to `goal` when the task should use durable goal mode and
+continue across worker attempts. `authors` is required and must contain at
+least one entry.
 
 ## Block Rules
 
@@ -33,6 +36,7 @@ entry.
 - `slack_id` must be a bare Slack user id like `U06TDC56VJB`.
 - `slack_thread`, when present, must be a Slack permalink that can be converted
   to `<channel>:<ts>`.
+- `worker_execution`, when present, must be `oneshot` or `goal`.
 
 ## Validation
 
@@ -94,6 +98,7 @@ Optional:
 
 - `slack_thread`: `<channel>:<ts>`
 - `external_ref`: string
+- `worker_execution`: `oneshot` or `goal`
 
 Override the schema with `--schema-file` or by placing `ticket_schema.toml` in
 `QUAY_CONFIG_DIR` or `$HOME/.quay`.

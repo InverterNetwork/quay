@@ -153,6 +153,7 @@ export async function handleEnqueueLinearIssue(
       ticket_snapshot: ctx.ticket_snapshot,
       slack_thread_ref: ctx.slack_thread_ref,
       tags: mergedTags,
+      worker_execution: ctx.worker_execution,
       authors_json: authorsJson,
       worker_agent: args.workerAgent,
       worker_model: args.workerModel,
@@ -203,6 +204,7 @@ export function buildValidatorPayload(
     tags: mergedTags,
     authors: ctx.authors,
     external_ref: ctx.external_ref,
+    worker_execution: ctx.worker_execution,
   };
   if (ctx.slack_thread_ref !== null) {
     payload.slack_thread = ctx.slack_thread_ref;

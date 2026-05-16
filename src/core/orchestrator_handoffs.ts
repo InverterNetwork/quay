@@ -5,7 +5,8 @@ export type OrchestratorHandoffReason =
   | "worker_blocker"
   | "budget_exhausted"
   | "human_reply_ingested"
-  | "manual_resume";
+  | "manual_resume"
+  | "no_progress";
 
 export type OrchestratorHandoffStatus =
   | "pending"

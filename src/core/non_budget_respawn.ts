@@ -26,6 +26,11 @@ import {
   composeWorkerPrompt,
   loadOriginalTaskObjective,
 } from "./worker_prompt.ts";
+import {
+  activateGoalForWorkerAttempt,
+  loadGoalId,
+  loadGoalPromptContext,
+} from "./goals.ts";
 
 export type NonBudgetReason = "review" | "conflict";
 
@@ -177,10 +182,12 @@ export function scheduleNonBudgetRespawn(
       input.reason,
     );
     const objective = loadOriginalTaskObjective(deps.db, input.taskId);
+    const goalContext = loadGoalPromptContext(deps.db, input.taskId);
     const preambleBody = loadPreambleBody(deps.db, preambleId);
     const composed = composeWorkerPrompt({
       preambleBody,
       taskObjective: objective,
+      goalContext,
       attemptGuidance: { reason: input.reason, body: template.body },
       diagnostics: {
         kind:
@@ -189,14 +196,24 @@ export function scheduleNonBudgetRespawn(
       },
     });
 
+    const goalId = loadGoalId(deps.db, input.taskId);
+    if (goalId !== null) {
+      const activated = activateGoalForWorkerAttempt(deps.db, input.taskId, now);
+      if (!activated) {
+        throw new Error(
+          `goal ${goalId} for task ${input.taskId} cannot be activated; goal token budget is exhausted`,
+        );
+      }
+    }
+
     const attempt = deps.db
       .query<
         { attempt_id: number },
-        [string, number, number, number, string]
+        [string, number, number, number, string, string | null]
       >(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, template_id, reason, consumed_budget
-         ) VALUES (?, ?, ?, ?, ?, 0)
+           task_id, attempt_number, preamble_id, template_id, reason, consumed_budget, goal_id
+         ) VALUES (?, ?, ?, ?, ?, 0, ?)
          RETURNING attempt_id`,
       )
       .get(
@@ -205,6 +222,7 @@ export function scheduleNonBudgetRespawn(
         preambleId,
         template.template_id,
         input.reason,
+        goalId,
       );
     if (!attempt) throw new Error("non-budget respawn attempt insert returned no row");
 
@@ -351,4 +369,3 @@ function ensureNonBudgetTemplate(
   if (!inserted) throw new Error("retry template insert returned no row");
   return inserted;
 }
-

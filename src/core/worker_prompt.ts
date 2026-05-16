@@ -23,6 +23,7 @@
 
 import { readFileSync } from "node:fs";
 import type { DB } from "../db/connection.ts";
+import { renderGoalContext, type GoalPromptContext } from "./goals.ts";
 
 export const DEFAULT_OBJECTIVE_RENDER_CAP_BYTES = 16_384;
 
@@ -48,6 +49,7 @@ export interface DiagnosticsSection {
 export interface WorkerPromptInput {
   preambleBody: string;
   taskObjective: TaskObjectiveRef;
+  goalContext?: GoalPromptContext | undefined;
   attemptGuidance: AttemptGuidance;
   diagnostics?: DiagnosticsSection | undefined;
   renderCapBytes?: number | undefined;
@@ -64,8 +66,11 @@ export function composeWorkerPrompt(
   const cap = input.renderCapBytes ?? DEFAULT_OBJECTIVE_RENDER_CAP_BYTES;
   const sections: string[] = [
     renderTaskObjective(input.taskObjective, cap),
-    renderAttemptGuidance(input.attemptGuidance),
   ];
+  if (input.goalContext !== undefined) {
+    sections.push(renderGoalContext(input.goalContext));
+  }
+  sections.push(renderAttemptGuidance(input.attemptGuidance));
   if (input.diagnostics !== undefined) {
     sections.push(renderDiagnostics(input.diagnostics));
   }
@@ -122,20 +127,20 @@ function renderTaskObjective(obj: TaskObjectiveRef, cap: number): string {
     attrs.push(`excerpt-bytes="${utf8ByteLength(rendered)}"`);
   }
   const inner = truncated
-    ? `${escapeCdata(rendered)}\n\n[Excerpt truncated. Read the full original task objective from artifact #${obj.artifactId} at ${obj.filePath}.]`
-    : escapeCdata(obj.body);
+    ? `${escapeXmlText(rendered)}\n\n[Excerpt truncated. Read the full original task objective from artifact #${obj.artifactId} at ${obj.filePath}.]`
+    : escapeXmlText(obj.body);
   return `<quay-task-objective ${attrs.join(" ")}>\n${inner}\n</quay-task-objective>`;
 }
 
 function renderAttemptGuidance(g: AttemptGuidance): string {
-  return `<quay-current-attempt-guidance reason="${escapeAttr(g.reason)}">\n${escapeCdata(g.body)}\n</quay-current-attempt-guidance>`;
+  return `<quay-current-attempt-guidance reason="${escapeAttr(g.reason)}">\n${escapeXmlText(g.body)}\n</quay-current-attempt-guidance>`;
 }
 
 function renderDiagnostics(d: DiagnosticsSection): string {
-  return `<quay-diagnostics kind="${escapeAttr(d.kind)}">\n${escapeCdata(d.body)}\n</quay-diagnostics>`;
+  return `<quay-diagnostics kind="${escapeAttr(d.kind)}">\n${escapeXmlText(d.body)}\n</quay-diagnostics>`;
 }
 
-function escapeCdata(text: string): string {
+function escapeXmlText(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

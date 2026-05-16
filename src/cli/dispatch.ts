@@ -493,6 +493,7 @@ async function handleEnqueue(
     const workerModel = readFlag(argv, "--worker-model");
     const reviewerAgent = readFlag(argv, "--reviewer-agent");
     const reviewerModel = readFlag(argv, "--reviewer-model");
+    const workerExecution = readFlag(argv, "--worker-execution");
     const tags = collectFlagValues(argv, "--tag");
     const briefRead = tryReadFile(briefPath);
     if (!briefRead.ok) return writeError(io, "usage_error", briefRead.message);
@@ -519,6 +520,17 @@ async function handleEnqueue(
     if (workerModel !== null) input.worker_model = workerModel;
     if (reviewerAgent !== null) input.reviewer_agent = reviewerAgent;
     if (reviewerModel !== null) input.reviewer_model = reviewerModel;
+    if (workerExecution !== null) {
+      if (workerExecution !== "oneshot" && workerExecution !== "goal") {
+        return writeError(
+          io,
+          "usage_error",
+          `--worker-execution must be oneshot or goal (got ${workerExecution})`,
+          { worker_execution: workerExecution },
+        );
+      }
+      input.worker_execution = workerExecution;
+    }
     if (tags.length > 0) input.tags = tags;
   }
   const enqueueDeps: EnqueueDeps = {
@@ -1486,7 +1498,13 @@ async function handleSubmitBrief(
   if (wantsHelp(argv)) return printHelp(io, ["submit-brief"]);
   const json = tryParseJsonFlag(argv);
   if (!json.ok) return writeError(io, "usage_error", json.message);
-  let input: { taskId: string; claimId: string; brief: string; reason: string };
+  let input: {
+    taskId: string;
+    claimId: string;
+    brief: string;
+    reason: string;
+    goalTokenBudget?: number | null;
+  };
   if (json.value !== undefined) {
     input = json.value as never;
   } else {
@@ -1494,6 +1512,7 @@ async function handleSubmitBrief(
     const claimId = readFlag(argv, "--claim-id");
     const briefFile = readFlag(argv, "--brief-file");
     const reason = readFlag(argv, "--reason");
+    const goalTokenBudgetRaw = readFlag(argv, "--goal-token-budget");
     if (!taskId || !claimId || !briefFile || !reason) {
       return writeError(
         io,
@@ -1504,6 +1523,11 @@ async function handleSubmitBrief(
     const briefRead = tryReadFile(briefFile);
     if (!briefRead.ok) return writeError(io, "usage_error", briefRead.message);
     input = { taskId, claimId, brief: briefRead.value, reason };
+    if (goalTokenBudgetRaw !== null) {
+      const parsed = parseGoalTokenBudget(goalTokenBudgetRaw);
+      if (!parsed.ok) return writeError(io, "usage_error", parsed.message);
+      input.goalTokenBudget = parsed.value;
+    }
   }
   if (input.reason !== "blocker_resolved" && input.reason !== "advice_answered") {
     return writeError(
@@ -1525,9 +1549,23 @@ async function handleSubmitBrief(
       claimId: input.claimId,
       brief: input.brief,
       reason: input.reason as "blocker_resolved" | "advice_answered",
+      goalTokenBudget: input.goalTokenBudget,
     }),
     io,
   );
+}
+
+function parseGoalTokenBudget(
+  raw: string,
+): { ok: true; value: number | null } | { ok: false; message: string } {
+  if (raw === "none") return { ok: true, value: null };
+  if (!/^[1-9]\d*$/.test(raw)) {
+    return {
+      ok: false,
+      message: `--goal-token-budget must be a positive integer or none (got ${raw})`,
+    };
+  }
+  return { ok: true, value: Number(raw) };
 }
 
 async function handleEscalateHuman(

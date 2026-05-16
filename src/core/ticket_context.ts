@@ -191,6 +191,7 @@ export async function fetchTicketContextWithIssue(
     ticket_snapshot,
     slack_thread_ref: slackThreadRef,
     tags: normalizeTags(block.tags),
+    worker_execution: block.worker_execution,
     authors: block.authors,
   };
   return { ctx, issue };

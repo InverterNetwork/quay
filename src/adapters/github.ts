@@ -7,7 +7,7 @@
 // Schema mapping (see ports/github.ts for the type definitions):
 //   - PR existence:       `gh pr list --head <branch> --state all --json number`
 //   - PR open?:           `gh pr list --head <branch> --state open --json number`
-//   - PR snapshot fields: `gh pr view <branch> --json number,url,state,headRefOid,
+//   - PR snapshot fields: `gh pr view <branch> --json number,url,state,isDraft,headRefOid,
 //                                                baseRefName,mergeable,
 //                                                reviewDecision,latestReviews,reviews`
 //     `baseRefOid` is intentionally NOT in this set — it was added in gh
@@ -158,6 +158,9 @@ export class GitHubCliAdapter implements GitHubPort {
     }
     if (view.baseTipSha !== null && view.baseTipSha !== undefined) {
       snapshot.baseTipSha = view.baseTipSha;
+    }
+    if (view.isDraft !== undefined) {
+      snapshot.isDraft = view.isDraft;
     }
     if (view.prNumber !== null && view.prNumber !== undefined) {
       snapshot.prNumber = view.prNumber;
@@ -361,6 +364,7 @@ export class GitHubCliAdapter implements GitHubPort {
       "number",
       "url",
       "state",
+      "isDraft",
       "headRefOid",
       "baseRefName",
       "mergeable",
@@ -438,6 +442,7 @@ export class GitHubCliAdapter implements GitHubPort {
         : null;
     const view: Omit<PrSnapshot, "checks"> = {
       state: mapPrState(parsed.state),
+      isDraft: parsed.isDraft === true,
       headSha,
       baseSha,
       mergeable: mapMergeable(parsed.mergeable),

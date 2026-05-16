@@ -99,6 +99,7 @@ export interface PrChecksReport {
 
 export interface PrSnapshot {
   state: PrTerminalState;
+  isDraft?: boolean;
   headSha: string;
   baseSha: string | null;
   // GitHub's numeric PR id and the human-readable PR URL. Optional because

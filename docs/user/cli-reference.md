@@ -135,12 +135,17 @@ quay enqueue \
   [--worker-model <model>] \
   [--reviewer-agent <name>] \
   [--reviewer-model <model>] \
+  [--worker-execution <oneshot|goal>] \
   [--tag <tag>]...
 ```
 
 Task-level agent/model overrides are snapshotted onto the queued task and take
-precedence over repo and deployment role defaults. `--linear-issue` is mutually
-exclusive with `--brief-file`, `--external-ref`, and `--slack-thread-ref`.
+precedence over repo and deployment role defaults. On the manual brief path,
+`--worker-execution` defaults to `oneshot`; `goal` enables durable goal mode
+and requires the worker to write `.quay-goal-report.json` before exit. On the
+Linear path, set `worker_execution: goal` in the ticket's `quay-config` block.
+`--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,
+and `--slack-thread-ref`.
 
 ## PR Review
 
@@ -210,11 +215,14 @@ block as `{name, slack_id}` objects. Legacy or malformed rows return
 quay submit-brief <task_id> \
   --claim-id <claim_id> \
   --brief-file <path> \
-  --reason <blocker_resolved|advice_answered>
+  --reason <blocker_resolved|advice_answered> \
+  [--goal-token-budget <number|none>]
 ```
 
 `blocker_resolved` consumes retry budget when promoted. `advice_answered` does
-not.
+not. `--goal-token-budget` is only required when resuming a budget-limited goal
+task; pass a number greater than the goal's `tokens_used`, or `none` to clear
+the goal budget.
 
 ## Escalate Human
 
