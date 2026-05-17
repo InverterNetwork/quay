@@ -39,6 +39,7 @@ export interface NonBudgetRetryDeps {
   db: DB;
   clock: Clock;
   artifactStore: ArtifactStore;
+  referenceReposRoot?: string | undefined;
 }
 
 export interface NonBudgetAttemptRef {
@@ -191,6 +192,7 @@ export function scheduleNonBudgetRespawn(
       taskObjective: objective,
       prBaseBranch,
       goalContext,
+      referenceReposRoot: deps.referenceReposRoot,
       attemptGuidance: { reason: input.reason, body: template.body },
       diagnostics: {
         kind:

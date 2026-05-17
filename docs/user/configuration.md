@@ -41,6 +41,9 @@ enabled = true
 bot_token_env = "SLACK_TOKEN"
 max_thread_messages = 200
 
+[context]
+reference_repos_root = "/home/hermes/.hermes/code"
+
 [reviewer]
 enabled = false
 gate_quay_owned_done = false
@@ -79,6 +82,7 @@ reviewer = "claude --permission-mode bypassPermissions --output-format json < {p
 | `max_non_budget_respawns` | `20` | Review/conflict respawns before `non_budget_loop`. |
 | `tick_lock_path` | `${data_dir}/tick.lock` | Supervisor lock path. |
 | `supervisor_lock_stale_seconds` | `30` | Stale lock grace window. |
+| `[context].reference_repos_root` | unset | Optional root containing read-only working-tree mirrors. Immediate child repos are listed in worker and reviewer prompts. |
 
 ## Reviewer
 
@@ -207,6 +211,13 @@ When `repos_root` is omitted, Quay creates `${data_dir}/repos`.
 
 When `repos_root` is set explicitly, Quay does not create it. A missing explicit
 path fails with `repos_root_missing`. This catches typos before enqueueing work.
+
+## Reference Repos Context
+
+When `[context].reference_repos_root` is set, Quay looks for immediate child
+directories that contain `.git` and adds them to generated worker and reviewer
+prompts as read-only context. Missing, unreadable, or empty roots do not block
+enqueue or review; empty roots render an explicit `(none discovered)` list.
 
 ## Environment Variables
 

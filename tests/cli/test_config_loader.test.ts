@@ -65,6 +65,9 @@ claim_timeout_seconds = 600
 max_claim_expirations = 2
 max_non_budget_respawns = 30
 
+[context]
+reference_repos_root = "/home/hermes/.hermes/code"
+
 [reviewer]
 enabled = true
 gate_quay_owned_done = false
@@ -84,6 +87,9 @@ gate_quay_owned_done = false
   expect(result.config.supervisor_lock_stale_seconds).toBe(60);
   expect(result.config.tick_lock_path).toBe("/tmp/custom-tick.lock");
   expect(result.config.worktree_root).toBe("/var/lib/quay/worktrees");
+  expect(result.config.context?.reference_repos_root).toBe(
+    "/home/hermes/.hermes/code",
+  );
 });
 
 test("rejects a non-positive integer for retry_budget", () => {
@@ -118,6 +124,15 @@ test("rejects an empty string for worktree_root", () => {
   writeFileSync(path, `worktree_root = ""\n`);
   expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
     /worktree_root/,
+  );
+});
+
+test("[context].reference_repos_root rejects an empty string", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(path, `[context]\nreference_repos_root = ""\n`);
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /reference_repos_root/,
   );
 });
 
@@ -247,12 +262,14 @@ test("tickOptionsFromConfig only forwards keys that are present", () => {
       max_concurrent_reviewers: 2,
       agent_invocation: "claude < {prompt_file}",
       reviewer: { enabled: true },
+      context: { reference_repos_root: "/home/hermes/.hermes/code" },
     }),
   ).toEqual({
     maxConcurrent: 6,
     maxConcurrentReviewers: 2,
     agentInvocation: "claude < {prompt_file}",
     reviewerEnabled: true,
+    referenceReposRoot: "/home/hermes/.hermes/code",
   });
 });
 
@@ -325,6 +342,9 @@ test("tickOptionsFromConfig maps every supported key", () => {
       gate_quay_owned_done: true,
       gh_token_file: "/run/hermes/reviewer-gh-token",
     },
+    context: {
+      reference_repos_root: "/home/hermes/.hermes/code",
+    },
   });
   expect(opts).toEqual({
     maxConcurrent: 1,
@@ -339,6 +359,7 @@ test("tickOptionsFromConfig maps every supported key", () => {
     reviewerEnabled: true,
     gateQuayOwnedDone: true,
     reviewerGhTokenFile: "/run/hermes/reviewer-gh-token",
+    referenceReposRoot: "/home/hermes/.hermes/code",
   });
 });
 

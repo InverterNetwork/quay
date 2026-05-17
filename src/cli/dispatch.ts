@@ -544,6 +544,7 @@ async function handleEnqueue(
     artifactStore: deps.artifactStore,
     paths: deps.paths,
     agentResolver: deps.agentResolver,
+    referenceReposRoot: deps.tickOptions?.referenceReposRoot,
   };
   if (deps.retryBudget !== undefined) {
     enqueueDeps.retryBudget = deps.retryBudget;
@@ -612,12 +613,14 @@ function handleReviewPr(
       gateQuayOwnedDone: boolean;
       reviewerAgent?: string;
       reviewerModel?: string;
+      referenceReposRoot?: string | undefined;
     } = {
       repoId,
       prNumber: parsedPr.prNumber,
       tags: collectFlagValues(argv, "--tag"),
       reviewerEnabled: deps.tickOptions?.reviewerEnabled === true,
       gateQuayOwnedDone: deps.tickOptions?.gateQuayOwnedDone === true,
+      referenceReposRoot: deps.tickOptions?.referenceReposRoot,
     };
     if (headSha !== null) input.headSha = headSha;
     const reviewerAgent = readFlag(argv, "--reviewer-agent");
@@ -714,6 +717,7 @@ async function handleEnqueueLinearIssueFlow(
     artifactStore: deps.artifactStore,
     paths: deps.paths,
     agentResolver: deps.agentResolver,
+    referenceReposRoot: deps.tickOptions?.referenceReposRoot,
   };
   if (deps.retryBudget !== undefined) {
     enqueueDeps.retryBudget = deps.retryBudget;
@@ -1544,6 +1548,7 @@ async function handleSubmitBrief(
     db: deps.db,
     clock: deps.clock,
     artifactStore: deps.artifactStore,
+    referenceReposRoot: deps.tickOptions?.referenceReposRoot,
   };
   const submitLinear = pickLinearAdapter(deps);
   if (submitLinear !== undefined) submitDeps.linear = submitLinear;

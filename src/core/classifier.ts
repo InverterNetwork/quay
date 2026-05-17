@@ -92,6 +92,7 @@ export interface ClassifierDeps {
   github: GitHubPort;
   tmux: TmuxPort;
   artifactStore: ArtifactStore;
+  referenceReposRoot?: string | undefined;
 }
 
 export interface ClassifyOptions {
@@ -685,6 +686,7 @@ function ingestActiveGoalReport(
       taskObjective: objective,
       prBaseBranch,
       goalContext,
+      referenceReposRoot: deps.referenceReposRoot,
       attemptGuidance: {
         reason: GOAL_CONTINUE_ATTEMPT_REASON,
         body: guidance,

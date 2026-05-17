@@ -3,18 +3,19 @@
 // Every code-worker attempt — initial, deterministic retry, non-budget
 // respawn, orchestrator submit-brief — assembles its final prompt from the
 // same conceptual sections so the original task objective remains first-class
-// across the whole lifecycle. Reviewer (`review_only`) attempts are out of
-// scope and continue to use ad-hoc composition in `pr_review.ts` / `tick.ts`.
+// across the whole lifecycle.
 //
 // Sections in render order:
 //   1. Output contract        — the code-worker protocol preamble.
 //   2. Stable task objective  — original brief, capped if oversized, with a
 //                               pointer to the full `task_objective` artifact.
-//   3. Attempt guidance       — what this specific attempt is asked to do
+//   3. Reference repos        — optional deployment/runtime context for
+//                               read-only sibling repo checkouts.
+//   4. Attempt guidance       — what this specific attempt is asked to do
 //                               (initial instruction, retry template body,
 //                               orchestrator-submitted brief, review/conflict
 //                               template body).
-//   4. Diagnostics            — observed context (CI excerpt, crash details,
+//   5. Diagnostics            — observed context (CI excerpt, crash details,
 //                               review comments JSON, conflict slice, ...).
 //                               Omitted on initial / orchestrator paths.
 //
@@ -24,6 +25,7 @@
 import { readFileSync } from "node:fs";
 import type { DB } from "../db/connection.ts";
 import { renderGoalContext, type GoalPromptContext } from "./goals.ts";
+import { renderReferenceReposPrompt } from "./reference_repos.ts";
 
 export const DEFAULT_OBJECTIVE_RENDER_CAP_BYTES = 16_384;
 
@@ -51,6 +53,7 @@ export interface WorkerPromptInput {
   taskObjective: TaskObjectiveRef;
   prBaseBranch?: string | undefined;
   goalContext?: GoalPromptContext | undefined;
+  referenceReposRoot?: string | undefined;
   attemptGuidance: AttemptGuidance;
   diagnostics?: DiagnosticsSection | undefined;
   renderCapBytes?: number | undefined;
@@ -73,6 +76,13 @@ export function composeWorkerPrompt(
   }
   if (input.goalContext !== undefined) {
     sections.push(renderGoalContext(input.goalContext));
+  }
+  const referenceRepos = renderReferenceReposPrompt(
+    input.referenceReposRoot,
+    "worker",
+  );
+  if (referenceRepos !== null) {
+    sections.push(referenceRepos);
   }
   sections.push(renderAttemptGuidance(input.attemptGuidance));
   if (input.diagnostics !== undefined) {

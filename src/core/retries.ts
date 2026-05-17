@@ -28,6 +28,7 @@ export interface RetryDeps {
   db: DB;
   clock: Clock;
   artifactStore: ArtifactStore;
+  referenceReposRoot?: string | undefined;
 }
 
 export interface RetryAttemptRef {
@@ -98,6 +99,7 @@ export function scheduleDeterministicRetry(
     taskObjective: objective,
     prBaseBranch,
     goalContext,
+    referenceReposRoot: deps.referenceReposRoot,
     attemptGuidance: { reason: input.reason, body: template.body },
     diagnostics: {
       kind: RETRY_DIAGNOSTIC_KIND[input.reason],

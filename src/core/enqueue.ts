@@ -44,6 +44,7 @@ export interface EnqueueDeps {
   paths: EnqueuePaths;
   retryBudget?: number;
   agentResolver?: AgentResolver;
+  referenceReposRoot?: string | undefined;
 }
 
 export const enqueueInputSchema = z
@@ -334,6 +335,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           filePath: objectiveArtifact.filePath,
         },
         prBaseBranch: effectiveBaseBranch,
+        referenceReposRoot: deps.referenceReposRoot,
         goalContext:
           workerExecution === "goal" && goalId !== null
             ? {
