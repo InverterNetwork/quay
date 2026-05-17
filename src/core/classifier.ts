@@ -1169,6 +1169,7 @@ function ingestCompleteGoalReport(
       deps,
       task,
       attempt,
+      report,
       reportArtifactId,
       remoteShaAtExit,
       exitInfo,
@@ -1269,6 +1270,7 @@ function scheduleCompleteWithoutDeliveryRetry(
   deps: ClassifierDeps,
   task: ClassifyContextTask,
   attempt: ClassifyContextAttempt,
+  report: GoalReport,
   reportArtifactId: number,
   remoteShaAtExit: string | null,
   exitInfo: PaneExitInfo,
@@ -1298,6 +1300,25 @@ function scheduleCompleteWithoutDeliveryRetry(
       spawnedAt: attempt.spawned_at,
       endedAt: now,
     });
+    const freshGoal = loadTaskGoal(deps.db, task.task_id);
+    if (freshGoal !== null && goalBudgetIsExhausted(freshGoal)) {
+      const outcome = transitionGoalBudgetLimitedInOpenTxn(
+        deps,
+        task,
+        attempt,
+        report,
+        reportArtifactId,
+        remoteShaAtExit,
+        delivery,
+        exitInfo,
+        now,
+      );
+      deps.db.exec("COMMIT");
+      try {
+        rmSync(join(task.worktree_path, GOAL_REPORT_FILENAME), { force: true });
+      } catch {}
+      return outcome;
+    }
     deps.db
       .query(
         `UPDATE task_goals

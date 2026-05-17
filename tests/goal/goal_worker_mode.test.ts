@@ -160,6 +160,7 @@ test("goal enqueue creates task_goals row and injects escaped goal context", () 
   expect(prompt).toContain("<goal_context>");
   expect(prompt).toContain("write `.quay-goal-report.json`");
   expect(prompt).toContain("Do &lt;all&gt; the work &amp; open a PR.");
+  expect(prompt).not.toContain("<objective_excerpt>");
 });
 
 test("oneshot enqueue keeps default worker execution and no goal row", () => {
@@ -229,7 +230,8 @@ test("goal prompt renders long objective as bounded excerpt with full brief poin
   const goalContext = prompt.slice(start, end);
   expect(goalContext).toContain("- Brief artifact: task_objective #");
   expect(goalContext).toContain("- Path: ");
-  expect(goalContext).toContain("- Excerpt truncated: true");
+  expect(goalContext).toContain("- Objective already rendered above: true");
+  expect(goalContext).toContain("- Objective bytes: ");
   expect(goalContext).not.toContain(tail);
 });
 
@@ -580,6 +582,74 @@ test("complete goal report with draft PR schedules complete_without_delivery ret
     reason: "complete_without_delivery",
     goal_id: "goal-active",
   });
+});
+
+test("complete goal report with draft PR budget-limits after accounting usage", async () => {
+  h = createHarness();
+  const t = setupRunningGoalTask();
+  h.db
+    .query(`UPDATE task_goals SET token_budget = 20 WHERE task_id = ?`)
+    .run(t.taskId);
+  writeGoalReport(t.worktreePath, {
+    status: "complete",
+    summary: "Draft PR exists.",
+    evidence: ["opened draft PR"],
+    blocker: null,
+    next_steps: [],
+  });
+  writeFileSync(
+    join(t.worktreePath, ".quay-usage.json"),
+    JSON.stringify({ input_tokens: 12, output_tokens: 9 }),
+  );
+
+  const built = buildTickDeps(h);
+  built.tmux.markDead(t.sessionName!);
+  built.git.setRemoteHeadSha(t.repoId, t.branchName, "head-draft-budget");
+  built.github.setPrSnapshot(
+    t.repoId,
+    t.branchName,
+    makeSnapshot({ isDraft: true, headSha: "head-draft-budget" }),
+  );
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([{ task_id: t.taskId, action: "goal_budget_limited" }]);
+  const row = h.db
+    .query<
+      {
+        task_state: string;
+        goal_status: string;
+        tokens_used: number;
+        time_used_seconds: number;
+        current_handoff_id: number | null;
+      },
+      [string]
+    >(
+      `SELECT t.state AS task_state, g.status AS goal_status,
+              g.tokens_used, g.time_used_seconds, g.current_handoff_id
+         FROM tasks t JOIN task_goals g ON g.task_id = t.task_id
+        WHERE t.task_id = ?`,
+    )
+    .get(t.taskId);
+  expect(row?.task_state).toBe("awaiting-next-brief");
+  expect(row?.goal_status).toBe("budget_limited");
+  expect(row?.tokens_used).toBe(21);
+  expect(row?.time_used_seconds).toBe(60);
+  expect(row?.current_handoff_id).toBeGreaterThan(0);
+  const pendingRetries = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM attempts
+        WHERE task_id = ? AND spawned_at IS NULL`,
+    )
+    .get(t.taskId)!.n;
+  expect(pendingRetries).toBe(0);
+  const completeWithoutDeliveryEvents = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM events
+        WHERE task_id = ? AND event_type = 'complete_without_delivery'`,
+    )
+    .get(t.taskId)!.n;
+  expect(completeWithoutDeliveryEvents).toBe(0);
 });
 
 test("complete_without_delivery at retry budget emits only budget handoff event", async () => {
