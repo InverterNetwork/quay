@@ -10,6 +10,8 @@ from ordinary prose.
 Implement the requested API validation.
 
 ```quay-config
+repo: hermes-agent
+base_branch: dev
 tags:
   - backend
   - validation
@@ -21,10 +23,12 @@ worker_execution: goal
 ```
 ````
 
-`slack_thread` and `worker_execution` are optional. `worker_execution` defaults
-to `oneshot`; set it to `goal` when the task should use durable goal mode and
-continue across worker attempts. `authors` is required and must contain at
-least one entry.
+`base_branch`, `slack_thread`, and `worker_execution` are optional.
+`base_branch` overrides the repo default for this task only; Quay branches from
+`origin/<base_branch>` and instructs the worker to open the PR into that branch.
+`worker_execution` defaults to `oneshot`; set it to `goal` when the task should
+use durable goal mode and continue across worker attempts. `authors` is
+required and must contain at least one entry.
 
 ## Block Rules
 
@@ -32,6 +36,7 @@ least one entry.
 - Exactly one block is allowed.
 - Tabs are rejected in the block indentation.
 - `tags` must be a list of strings.
+- `base_branch`, when present, must be a git branch name, not a full ref.
 - `authors` must be a non-empty list of objects with `name` and `slack_id`.
 - `slack_id` must be a bare Slack user id like `U06TDC56VJB`.
 - `slack_thread`, when present, must be a Slack permalink that can be converted
@@ -99,6 +104,7 @@ Optional:
 - `slack_thread`: `<channel>:<ts>`
 - `external_ref`: string
 - `worker_execution`: `oneshot` or `goal`
+- `base_branch`: task-level PR base override
 
 Override the schema with `--schema-file` or by placing `ticket_schema.toml` in
 `QUAY_CONFIG_DIR` or `$HOME/.quay`.

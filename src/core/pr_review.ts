@@ -76,6 +76,7 @@ interface TaskLookupRow {
   worktree_path: string;
   tmux_id: string;
   pr_number: number | null;
+  base_branch: string | null;
   base_sha: string | null;
   review_infra_failures_consecutive: number;
   review_infra_failure_head_sha: string | null;
@@ -541,13 +542,14 @@ function findTaskByPr(
   return (
     db
       .query<TaskLookupRow, [string, number]>(
-        `SELECT task_id, state, branch_name, worktree_path, tmux_id, pr_number,
-                base_sha,
+        `SELECT t.task_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
+                t.pr_number, COALESCE(t.base_branch, r.base_branch) AS base_branch,
+                t.base_sha,
                 review_infra_failures_consecutive,
                 review_infra_failure_head_sha
-           FROM tasks
-          WHERE repo_id = ? AND pr_number = ?
-          ORDER BY created_at ASC, task_id ASC
+           FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+          WHERE t.repo_id = ? AND t.pr_number = ?
+          ORDER BY t.created_at ASC, t.task_id ASC
           LIMIT 1`,
       )
       .get(repoId, prNumber) ?? null
@@ -566,13 +568,14 @@ function findTaskByBranch(
   return (
     db
       .query<TaskLookupRow, [string, string]>(
-        `SELECT task_id, state, branch_name, worktree_path, tmux_id, pr_number,
-                base_sha,
+        `SELECT t.task_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
+                t.pr_number, COALESCE(t.base_branch, r.base_branch) AS base_branch,
+                t.base_sha,
                 review_infra_failures_consecutive,
                 review_infra_failure_head_sha
-           FROM tasks
-          WHERE repo_id = ? AND branch_name = ?
-          ORDER BY created_at DESC, task_id DESC
+           FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+          WHERE t.repo_id = ? AND t.branch_name = ?
+          ORDER BY t.created_at DESC, t.task_id DESC
           LIMIT 1`,
       )
       .get(repoId, branchName) ?? null
@@ -583,12 +586,13 @@ function findTaskById(db: DB, taskId: string): TaskLookupRow | null {
   return (
     db
       .query<TaskLookupRow, [string]>(
-        `SELECT task_id, state, branch_name, worktree_path, tmux_id, pr_number,
-                base_sha,
+        `SELECT t.task_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
+                t.pr_number, COALESCE(t.base_branch, r.base_branch) AS base_branch,
+                t.base_sha,
                 review_infra_failures_consecutive,
                 review_infra_failure_head_sha
-           FROM tasks
-          WHERE task_id = ?`,
+           FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+          WHERE t.task_id = ?`,
       )
       .get(taskId) ?? null
   );
@@ -633,6 +637,10 @@ function composeQuayOwnedReviewBrief(
     `Head branch: ${pr.headRefName}`,
     `Head SHA: ${headSha}`,
   ];
+
+  if (task.base_branch !== null && task.base_branch.trim() !== "") {
+    lines.push(`Base branch: ${task.base_branch}`);
+  }
 
   if (task.base_sha !== null && task.base_sha.trim() !== "") {
     lines.push(`Base SHA: ${task.base_sha}`);

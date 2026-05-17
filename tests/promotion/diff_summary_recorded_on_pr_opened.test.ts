@@ -151,6 +151,54 @@ test("pr_opened with spawn SHA NULL (first push) falls back to the repo base bra
   expect(summary.files[0].path).toBe("src/new.ts");
 });
 
+test("pr_opened first-push diff fallback uses task-level base_branch override", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-10T16:02:15.000Z");
+
+  const repoId = insertRepo(h.db, "repo-diff-task-base");
+  const worktreesRoot = join(h.dataDir, "worktrees");
+
+  const t = insertRunningTask(h.db, {
+    taskId: "task-diff-task-base",
+    repoId,
+    worktreesRoot,
+    remoteShaAtSpawn: null,
+    prExistedAtSpawn: 0,
+  });
+  h.db.query(`UPDATE tasks SET base_branch = 'dev' WHERE task_id = ?`).run(
+    t.taskId,
+  );
+
+  const built = buildTickDeps(h);
+  built.tmux.markDead(t.sessionName!);
+  built.git.setRemoteHeadSha(repoId, t.branchName, "first-push-sha");
+  built.git.setRemoteHeadSha(repoId, "main", "main-tip-sha");
+  built.git.setRemoteHeadSha(repoId, "dev", "dev-tip-sha");
+  built.git.setDiffSummary(repoId, "dev-tip-sha", "first-push-sha", {
+    files_changed: 1,
+    insertions: 5,
+    deletions: 0,
+    files: [{ path: "src/dev.ts", status: "A", ins: 5, del: 0 }],
+  });
+  built.github.setPrExists(repoId, t.branchName, true);
+
+  await tick_once(built.deps);
+
+  const row = readAttempt(t.attemptId);
+  expect(row.exit_kind).toBe("pr_opened");
+  expect(row.diff_summary).not.toBeNull();
+  const summary = JSON.parse(row.diff_summary!);
+  expect(summary.files[0].path).toBe("src/dev.ts");
+  expect(built.git.calls).toContainEqual({
+    op: "fetchBranchIfExists",
+    args: { repoId, branch: "dev" },
+  });
+  expect(built.git.calls).not.toContainEqual({
+    op: "fetchBranchIfExists",
+    args: { repoId, branch: "main" },
+  });
+});
+
 test("pr_opened with no base-branch SHA cached locally leaves diff_summary NULL", async () => {
   // Edge case: `remote_sha_at_spawn` is null AND the bare clone has never
   // fetched the base branch (so `git.remoteHeadSha(base)` returns null).

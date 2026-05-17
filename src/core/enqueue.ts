@@ -12,6 +12,7 @@ import {
   computeTmuxId,
   taskIdShort,
 } from "./branch_slug.ts";
+import { baseBranchNameSchema } from "./base_branch.ts";
 import type { AgentResolver } from "./agents.ts";
 import { QuayError } from "./errors.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
@@ -63,6 +64,7 @@ export const enqueueInputSchema = z
     reviewer_agent: z.string().min(1).nullable().optional(),
     reviewer_model: z.string().min(1).nullable().optional(),
     worker_execution: z.enum(["oneshot", "goal"]).optional(),
+    base_branch: baseBranchNameSchema.optional(),
   })
   .strict();
 
@@ -110,6 +112,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   }
 
   const taskId = deps.ids.next();
+  const effectiveBaseBranch = input.base_branch ?? repo.base_branch;
   const workerExecution: WorkerExecution = parseWorkerExecution(
     input.worker_execution,
   );
@@ -178,8 +181,9 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       );
     }
 
-    // Step 2: fetch base branch.
-    deps.git.fetch(repo.repo_id, repo.base_branch);
+    // Step 2: fetch the effective base branch. A task-level override does
+    // not mutate the repo default; it is copied onto the task row below.
+    deps.git.fetch(repo.repo_id, effectiveBaseBranch);
 
     // Step 3: branch resolution + collision check. Returns the bare slug;
     // the local/remote branch is `quay/<slug>` per spec §13. We carry the
@@ -199,7 +203,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       repo.repo_id,
       worktreePath,
       fullBranchName,
-      `origin/${repo.base_branch}`,
+      `origin/${effectiveBaseBranch}`,
     );
     worktreeCreated = true;
     branchCreated = true;
@@ -235,17 +239,18 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       deps.db
         .query(
           `INSERT INTO tasks (
-             task_id, repo_id, external_ref, state, branch_name, tmux_id, worktree_path,
+             task_id, repo_id, external_ref, state, branch_name, base_branch, tmux_id, worktree_path,
              retry_budget, slack_thread_ref, authors_json, worker_execution,
              worker_agent, worker_model, reviewer_agent, reviewer_model,
              created_at, updated_at
-           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
           repo.repo_id,
           input.external_ref ?? null,
           fullBranchName,
+          effectiveBaseBranch,
           tmuxId,
           worktreePath,
           retryBudget,
@@ -328,6 +333,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           artifactId: objectiveArtifact.artifactId,
           filePath: objectiveArtifact.filePath,
         },
+        prBaseBranch: effectiveBaseBranch,
         goalContext:
           workerExecution === "goal" && goalId !== null
             ? {

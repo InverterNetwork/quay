@@ -49,6 +49,7 @@ export interface DiagnosticsSection {
 export interface WorkerPromptInput {
   preambleBody: string;
   taskObjective: TaskObjectiveRef;
+  prBaseBranch?: string | undefined;
   goalContext?: GoalPromptContext | undefined;
   attemptGuidance: AttemptGuidance;
   diagnostics?: DiagnosticsSection | undefined;
@@ -67,6 +68,9 @@ export function composeWorkerPrompt(
   const sections: string[] = [
     renderTaskObjective(input.taskObjective, cap),
   ];
+  if (input.prBaseBranch !== undefined) {
+    sections.push(renderPrTarget(input.prBaseBranch));
+  }
   if (input.goalContext !== undefined) {
     sections.push(renderGoalContext(input.goalContext));
   }
@@ -113,6 +117,17 @@ export function loadOriginalTaskObjective(
   return { body, artifactId: row.artifact_id, filePath: row.file_path };
 }
 
+export function loadTaskPrBaseBranch(db: DB, taskId: string): string | undefined {
+  const row = db
+    .query<{ base_branch: string | null }, [string]>(
+      `SELECT COALESCE(t.base_branch, r.base_branch) AS base_branch
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        WHERE t.task_id = ?`,
+    )
+    .get(taskId);
+  return row?.base_branch ?? undefined;
+}
+
 function renderTaskObjective(obj: TaskObjectiveRef, cap: number): string {
   const totalBytes = utf8ByteLength(obj.body);
   const truncated = totalBytes > cap;
@@ -134,6 +149,10 @@ function renderTaskObjective(obj: TaskObjectiveRef, cap: number): string {
 
 function renderAttemptGuidance(g: AttemptGuidance): string {
   return `<quay-current-attempt-guidance reason="${escapeAttr(g.reason)}">\n${escapeXmlText(g.body)}\n</quay-current-attempt-guidance>`;
+}
+
+function renderPrTarget(baseBranch: string): string {
+  return `<quay-pr-target base-branch="${escapeAttr(baseBranch)}">\nOpen or update the pull request against base branch ${escapeXmlText(baseBranch)}.\n</quay-pr-target>`;
 }
 
 function renderDiagnostics(d: DiagnosticsSection): string {

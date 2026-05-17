@@ -17,6 +17,7 @@ Output is a JSON array ordered by creation time and task id. Rows include:
 
 - `task_id`
 - `repo_id`
+- `base_branch`
 - `state`
 - `external_ref`
 - `branch_name`

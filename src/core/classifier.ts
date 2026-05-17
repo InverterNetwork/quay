@@ -44,6 +44,7 @@ import {
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 import {
   composeWorkerPrompt,
+  loadTaskPrBaseBranch,
   loadOriginalTaskObjective,
 } from "./worker_prompt.ts";
 
@@ -68,6 +69,7 @@ export interface ClassifyContextTask {
   tmux_id: string;
   worktree_path: string;
   state: string;
+  base_branch: string | null;
   worker_execution: "oneshot" | "goal";
 }
 
@@ -675,11 +677,13 @@ function ingestActiveGoalReport(
     );
     const objective = loadOriginalTaskObjective(deps.db, task.task_id);
     const goalContext = loadGoalPromptContext(deps.db, task.task_id);
+    const prBaseBranch = loadTaskPrBaseBranch(deps.db, task.task_id);
     const preambleBody = loadPreambleBody(deps.db, preambleId);
     const guidance = composeGoalContinuationGuidance(report, warnings);
     const composed = composeWorkerPrompt({
       preambleBody,
       taskObjective: objective,
+      prBaseBranch,
       goalContext,
       attemptGuidance: {
         reason: GOAL_CONTINUE_ATTEMPT_REASON,
@@ -1729,7 +1733,7 @@ function transitionPrOpened(
 //   1. attempt.remote_sha_at_spawn — the natural choice for respawns where
 //      `quay/<branch>` already existed on origin and the worker pushed on
 //      top.
-//   2. The repo's base_branch tip when the spawn-time SHA is null (first
+//   2. The task's effective base_branch tip when the spawn-time SHA is null (first
 //      push: the branch was created and pushed for the very first time
 //      this attempt). Without this fallback, every successful first-attempt
 //      PR loses its diff_summary — exactly the AST-103 regression.
@@ -1746,7 +1750,7 @@ function captureDiffSummary(
   if (remoteShaAtExit === null) return;
   let baseSha = attempt.remote_sha_at_spawn;
   if (baseSha === null) {
-    baseSha = loadBaseBranchSha(deps, task.repo_id);
+    baseSha = loadBaseBranchSha(deps, task);
   }
   if (baseSha === null || baseSha === remoteShaAtExit) {
     return;
@@ -1788,22 +1792,18 @@ function captureDiffSummary(
 // caller leaves diff_summary NULL.
 function loadBaseBranchSha(
   deps: ClassifierDeps,
-  repoId: string,
+  task: ClassifyContextTask,
 ): string | null {
-  const row = deps.db
-    .query<{ base_branch: string }, [string]>(
-      `SELECT base_branch FROM repos WHERE repo_id = ?`,
-    )
-    .get(repoId);
-  if (!row) return null;
+  const baseBranch = task.base_branch;
+  if (baseBranch === null || baseBranch.trim() === "") return null;
   try {
-    deps.git.fetchBranchIfExists(repoId, row.base_branch);
+    deps.git.fetchBranchIfExists(task.repo_id, baseBranch);
   } catch {
     // Best-effort: a transient fetch failure falls through to whatever
     // SHA is already cached locally.
   }
   try {
-    return deps.git.remoteHeadSha(repoId, row.base_branch);
+    return deps.git.remoteHeadSha(task.repo_id, baseBranch);
   } catch {
     return null;
   }

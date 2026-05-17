@@ -49,6 +49,7 @@ const SLACK_THREAD_REF = "C0123ABC:1700000123.000001";
 
 interface BlockOpts {
   repo?: string;
+  base_branch?: string | null;
   tags?: string[];
   slack_thread?: string | null;
   authors?: { name: string; slack_id: string }[];
@@ -62,6 +63,9 @@ function quayConfigBlock(opts: BlockOpts = {}): string {
     { name: "Marvin Gross", slack_id: "U07ABCDEFGH" },
   ];
   const lines: string[] = [`${FENCE}quay-config`, `repo: ${repo}`, "tags:"];
+  if (opts.base_branch !== null && opts.base_branch !== undefined) {
+    lines.splice(2, 0, `base_branch: ${opts.base_branch}`);
+  }
   for (const t of tags) lines.push(`  - ${t}`);
   if (opts.slack_thread !== null && opts.slack_thread !== undefined) {
     lines.push(`slack_thread: ${opts.slack_thread}`);
@@ -204,6 +208,95 @@ test("test_enqueue_linear_issue_end_to_end", async () => {
     )
     .all(enqResult.task_id);
   expect(tags.map((r) => r.tag)).toEqual(["auth-session", "cache"]);
+});
+
+test("enqueue linear issue preserves task-level base_branch override", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-1278",
+      block: {
+        base_branch: "dev",
+        tags: ["auth-session"],
+        slack_thread: null,
+        authors: [{ name: "Fabian Scherer", slack_id: "U06TDC56VJB" }],
+      },
+    }),
+  );
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-1278"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const enqResult = JSON.parse(io.out().trim());
+  expect(built.git.calls.find((c) => c.op === "fetch")?.args).toEqual({
+    repoId: REPO_ID,
+    ref: "dev",
+  });
+  expect(
+    (built.validatorRunner.runCalls[0]?.payload as Record<string, unknown>)
+      .base_branch,
+  ).toBe("dev");
+
+  const row = h.db
+    .query<{ base_branch: string | null }, [string]>(
+      `SELECT base_branch FROM tasks WHERE task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(row?.base_branch).toBe("dev");
+});
+
+test("enqueue linear issue CLI base_branch overrides ticket base_branch", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-1279",
+      block: {
+        base_branch: "feature/ticket",
+        tags: ["auth-session"],
+        slack_thread: null,
+        authors: [{ name: "Fabian Scherer", slack_id: "U06TDC56VJB" }],
+      },
+    }),
+  );
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      REPO_ID,
+      "--linear-issue",
+      "ENG-1279",
+      "--base-branch",
+      "dev",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const enqResult = JSON.parse(io.out().trim());
+  const row = h.db
+    .query<{ base_branch: string | null }, [string]>(
+      `SELECT base_branch FROM tasks WHERE task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(row?.base_branch).toBe("dev");
+  expect(
+    (built.validatorRunner.runCalls[0]?.payload as Record<string, unknown>)
+      .base_branch,
+  ).toBe("dev");
 });
 
 test("test_enqueue_linear_issue_validation_failure_writes_no_db_state", async () => {

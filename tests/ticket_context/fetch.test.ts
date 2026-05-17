@@ -22,6 +22,7 @@ const FENCE = "```";
 
 interface BlockOpts {
   repo?: string;
+  base_branch?: string | null;
   tags?: string[];
   slack_thread?: string | null;
   authors?: { name: string; slack_id: string }[];
@@ -34,6 +35,9 @@ function quayConfigBlock(opts: BlockOpts = {}): string {
     { name: "Fabian Scherer", slack_id: "U06TDC56VJB" },
   ];
   const lines: string[] = [`${FENCE}quay-config`, `repo: ${repo}`, "tags:"];
+  if (opts.base_branch !== null && opts.base_branch !== undefined) {
+    lines.splice(2, 0, `base_branch: ${opts.base_branch}`);
+  }
   for (const t of tags) lines.push(`  - ${t}`);
   if (opts.slack_thread !== null && opts.slack_thread !== undefined) {
     lines.push(`slack_thread: ${opts.slack_thread}`);
@@ -212,6 +216,24 @@ test("test_fetch_ticket_context_omits_slack_section_when_no_thread_ref_parsed", 
   expect(ctx.slack_thread_ref).toBeNull();
   expect(ctx.brief).not.toContain("## Slack Context");
   expect(slack.fetchThreadContextCalls).toEqual([]);
+});
+
+test("fetch_ticket_context_carries_base_branch_override", async () => {
+  const { linear, deps } = setupFakes();
+  linear.setIssue(
+    makeIssue({
+      block: {
+        base_branch: "dev",
+        tags: ["foo"],
+        slack_thread: null,
+        authors: [{ name: "A", slack_id: "U001" }],
+      },
+    }),
+  );
+
+  const ctx = await fetchTicketContext(deps, "ENG-1276");
+
+  expect(ctx.base_branch).toBe("dev");
 });
 
 test("test_fetch_ticket_context_degrades_when_slack_disabled_but_link_parsed", async () => {

@@ -115,6 +115,7 @@ Manual brief:
 quay enqueue \
   --repo <repo_id> \
   --brief-file <path> \
+  [--base-branch <branch>] \
   [--ticket-snapshot-file <path>] \
   [--external-ref <ref>] \
   [--slack-thread-ref <channel:ts>] \
@@ -131,6 +132,7 @@ Linear:
 quay enqueue \
   --repo <repo_id> \
   --linear-issue <identifier> \
+  [--base-branch <branch>] \
   [--worker-agent <name>] \
   [--worker-model <model>] \
   [--reviewer-agent <name>] \
@@ -144,6 +146,8 @@ precedence over repo and deployment role defaults. On the manual brief path,
 `--worker-execution` defaults to `oneshot`; `goal` enables durable goal mode
 and requires the worker to write `.quay-goal-report.json` before exit. On the
 Linear path, set `worker_execution: goal` in the ticket's `quay-config` block.
+`--base-branch` overrides the repo default for one task on either enqueue path;
+Linear tickets can also set `base_branch` in `quay-config`.
 `--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,
 and `--slack-thread-ref`.
 

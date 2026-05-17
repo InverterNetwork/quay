@@ -107,6 +107,8 @@ test("test_065_initial_attempt_has_brief_and_final_prompt", () => {
   );
   expect(briefContent).toContain('truncated="false"');
   expect(briefContent).toContain("Do the thing");
+  expect(briefContent).toContain('<quay-pr-target base-branch="main">');
+  expect(briefContent).toContain("Open or update the pull request against base branch main.");
   expect(briefContent).toContain(
     '<quay-current-attempt-guidance reason="initial">',
   );

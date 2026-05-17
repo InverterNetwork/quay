@@ -60,6 +60,21 @@ test("diagnostics section is omitted when no diagnostics supplied", () => {
   expect(composed.brief).not.toContain("<quay-diagnostics");
 });
 
+test("PR target section renders effective base branch when supplied", () => {
+  const composed = composeWorkerPrompt({
+    preambleBody: PREAMBLE,
+    taskObjective: SAFE_OBJECTIVE,
+    prBaseBranch: "release/2026.05",
+    attemptGuidance: { reason: "initial", body: "guidance" },
+  });
+  expect(composed.brief).toContain(
+    '<quay-pr-target base-branch="release/2026.05">',
+  );
+  expect(composed.brief).toContain(
+    "Open or update the pull request against base branch release/2026.05.",
+  );
+});
+
 test("diagnostics section appears when provided and tags reason kind", () => {
   const composed = composeWorkerPrompt({
     preambleBody: PREAMBLE,

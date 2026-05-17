@@ -494,6 +494,7 @@ async function handleEnqueue(
     const reviewerAgent = readFlag(argv, "--reviewer-agent");
     const reviewerModel = readFlag(argv, "--reviewer-model");
     const workerExecution = readFlag(argv, "--worker-execution");
+    const baseBranch = readFlag(argv, "--base-branch");
     const tags = collectFlagValues(argv, "--tag");
     const briefRead = tryReadFile(briefPath);
     if (!briefRead.ok) return writeError(io, "usage_error", briefRead.message);
@@ -505,6 +506,7 @@ async function handleEnqueue(
     }
     if (externalRef !== null) input.external_ref = externalRef;
     if (slackThreadRef !== null) input.slack_thread_ref = slackThreadRef;
+    if (baseBranch !== null) input.base_branch = baseBranch;
     const agentErr = validateTaskSelectionOverrides(
       {
         worker_agent: workerAgent,
@@ -678,6 +680,7 @@ async function handleEnqueueLinearIssueFlow(
   // --repo is optional on the --linear-issue path; when absent the target repo
   // is read from the ticket's validated `repo` field. An explicit --repo wins.
   const repoId = readFlag(argv, "--repo");
+  const baseBranch = readFlag(argv, "--base-branch");
   const cliTags = collectFlagValues(argv, "--tag");
   const agentErr = validateTaskSelectionOverrides(
     {
@@ -720,6 +723,7 @@ async function handleEnqueueLinearIssueFlow(
       repoId,
       identifier,
       cliTags,
+      baseBranch,
       workerAgent: readFlag(argv, "--worker-agent"),
       workerModel: readFlag(argv, "--worker-model"),
       reviewerAgent: readFlag(argv, "--reviewer-agent"),
