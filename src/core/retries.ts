@@ -8,13 +8,20 @@ import {
   composeWorkerPrompt,
   loadOriginalTaskObjective,
 } from "./worker_prompt.ts";
+import {
+  activateGoalForWorkerAttempt,
+  loadGoalId,
+  loadGoalPromptContext,
+} from "./goals.ts";
 
 export type BudgetRetryReason =
   | "ci_fail"
   | "crash"
   | "stale"
   | "wall_clock"
-  | "malformed_signal";
+  | "malformed_signal"
+  | "malformed_goal_report"
+  | "complete_without_delivery";
 
 export interface RetryDeps {
   db: DB;
@@ -42,12 +49,15 @@ const RETRY_DIAGNOSTIC_KIND: Record<BudgetRetryReason, string> = {
   stale: "stale_details",
   wall_clock: "wall_clock_details",
   malformed_signal: "malformed_signal_details",
+  malformed_goal_report: "malformed_goal_report_details",
+  complete_without_delivery: "complete_without_delivery_details",
 };
 
 export interface ScheduleDeterministicRetryResult {
   scheduled: boolean;
   artifactId: number;
   nextAttemptId?: number;
+  budgetExhausted?: boolean;
 }
 
 const DEFAULT_RETRY_TEMPLATES: Record<BudgetRetryReason, string> = {
@@ -61,6 +71,10 @@ const DEFAULT_RETRY_TEMPLATES: Record<BudgetRetryReason, string> = {
     "The previous worker exceeded the maximum allowed attempt duration and was killed. Continue from the persisted worktree with a narrower, practical next step.",
   malformed_signal:
     "The previous worker wrote an invalid .quay-blocked.md signal. Inspect the malformed signal artifact and continue or write a valid blocker if work cannot proceed.",
+  malformed_goal_report:
+    "The previous goal-mode worker wrote an invalid .quay-goal-report.json. Inspect the malformed report diagnostics, continue the task, and write a valid goal report before exiting.",
+  complete_without_delivery:
+    "The previous goal-mode worker reported complete, but Quay could not find a non-draft PR ready for review. Push the branch, open or update the PR, mark it ready for review, and then write a complete goal report.",
 };
 
 export function scheduleDeterministicRetry(
@@ -75,10 +89,12 @@ export function scheduleDeterministicRetry(
     input.reason,
   );
   const objective = loadOriginalTaskObjective(deps.db, input.taskId);
+  const goalContext = loadGoalPromptContext(deps.db, input.taskId);
   const preambleBody = loadPreambleBody(deps.db, preambleId);
   const composed = composeWorkerPrompt({
     preambleBody,
     taskObjective: objective,
+    goalContext,
     attemptGuidance: { reason: input.reason, body: template.body },
     diagnostics: {
       kind: RETRY_DIAGNOSTIC_KIND[input.reason],
@@ -140,14 +156,31 @@ export function scheduleDeterministicRetry(
         retry_reason: input.reason,
       },
     });
-    return { scheduled: false, artifactId: lastFailure.artifactId };
+    return {
+      scheduled: false,
+      artifactId: lastFailure.artifactId,
+      budgetExhausted: true,
+    };
+  }
+
+  const goalId = loadGoalId(deps.db, input.taskId);
+  if (goalId !== null) {
+    const activated = activateGoalForWorkerAttempt(deps.db, input.taskId, now);
+    if (!activated) {
+      throw new Error(
+        `goal ${goalId} for task ${input.taskId} cannot be activated; goal token budget is exhausted`,
+      );
+    }
   }
 
   const attempt = deps.db
-    .query<{ attempt_id: number }, [string, number, number, number, string]>(
+    .query<
+      { attempt_id: number },
+      [string, number, number, number, string, string | null]
+    >(
       `INSERT INTO attempts (
-         task_id, attempt_number, preamble_id, template_id, reason, consumed_budget
-       ) VALUES (?, ?, ?, ?, ?, 1)
+         task_id, attempt_number, preamble_id, template_id, reason, consumed_budget, goal_id
+       ) VALUES (?, ?, ?, ?, ?, 1, ?)
        RETURNING attempt_id`,
     )
     .get(
@@ -156,6 +189,7 @@ export function scheduleDeterministicRetry(
       preambleId,
       template.template_id,
       input.reason,
+      goalId,
     );
   if (!attempt) throw new Error("attempt insert returned no row");
 
@@ -270,11 +304,18 @@ export function scheduleCleanSpawnRetry(
     deps.clock,
     input.prevAttempt.reason,
   );
+  const goalId =
+    input.prevAttempt.reason === "review_only"
+      ? null
+      : loadGoalId(deps.db, input.taskId);
   const attempt = deps.db
-    .query<{ attempt_id: number }, [string, number, number, number | null, string, number]>(
+    .query<
+      { attempt_id: number },
+      [string, number, number, number | null, string, number, string | null]
+    >(
       `INSERT INTO attempts (
-         task_id, attempt_number, preamble_id, template_id, reason, consumed_budget
-       ) VALUES (?, ?, ?, ?, ?, ?)
+         task_id, attempt_number, preamble_id, template_id, reason, consumed_budget, goal_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
        RETURNING attempt_id`,
     )
     .get(
@@ -284,6 +325,7 @@ export function scheduleCleanSpawnRetry(
       input.prevAttempt.template_id,
       input.prevAttempt.reason,
       input.prevAttempt.consumed_budget,
+      goalId,
     );
   if (!attempt) throw new Error("attempt insert returned no row");
 
@@ -377,4 +419,3 @@ function loadMostRecentWorkerBrief(db: DB, taskId: string): string {
     return "(Prior brief artifact file was missing or unreadable.)";
   }
 }
-

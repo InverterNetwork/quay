@@ -13,6 +13,7 @@ export interface QuayConfigAuthor {
 export interface QuayConfigBlock {
   repo: string;
   tags: string[];
+  worker_execution: "oneshot" | "goal";
   slack_thread_ref: string | null;
   authors: QuayConfigAuthor[];
 }
@@ -305,6 +306,19 @@ function validateBlock(yaml: { [key: string]: YamlValue }): QuayConfigBlock {
     tags.push(v);
   }
 
+  let worker_execution: "oneshot" | "goal" = "oneshot";
+  if (
+    "worker_execution" in yaml &&
+    yaml.worker_execution !== null &&
+    yaml.worker_execution !== undefined
+  ) {
+    const raw = yaml.worker_execution;
+    if (raw !== "oneshot" && raw !== "goal") {
+      throw blockError("worker_execution must be oneshot or goal");
+    }
+    worker_execution = raw;
+  }
+
   // slack_thread (optional)
   let slack_thread_ref: string | null = null;
   if (
@@ -363,5 +377,5 @@ function validateBlock(yaml: { [key: string]: YamlValue }): QuayConfigBlock {
     authors.push({ name, slack_id });
   }
 
-  return { repo, tags, slack_thread_ref, authors };
+  return { repo, tags, worker_execution, slack_thread_ref, authors };
 }

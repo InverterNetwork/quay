@@ -11,6 +11,7 @@ export interface TaskListRow {
   attempts_consumed: number;
   retry_budget: number;
   budget_exhausted: boolean;
+  worker_execution: "oneshot" | "goal";
   worker_agent: string | null;
   worker_model: string | null;
   reviewer_agent: string | null;
@@ -49,11 +50,13 @@ export interface TaskGetPayload extends TaskListRow {
   base_sha: string | null;
   current_attempt: TaskGetCurrentAttempt | null;
   recent_events: TaskGetEvent[];
+  goal: TaskGetGoal | null;
 }
 
 const TASK_LIST_COLUMNS = `
   task_id, repo_id, state, external_ref, branch_name,
   attempts_consumed, retry_budget, budget_exhausted,
+  worker_execution,
   worker_agent, worker_model, reviewer_agent, reviewer_model,
   created_at, updated_at
 `;
@@ -67,6 +70,7 @@ interface TaskListRawRow {
   attempts_consumed: number;
   retry_budget: number;
   budget_exhausted: number;
+  worker_execution: "oneshot" | "goal";
   worker_agent: string | null;
   worker_model: string | null;
   reviewer_agent: string | null;
@@ -85,6 +89,7 @@ function rowToList(r: TaskListRawRow): TaskListRow {
     attempts_consumed: r.attempts_consumed,
     retry_budget: r.retry_budget,
     budget_exhausted: r.budget_exhausted === 1,
+    worker_execution: r.worker_execution,
     worker_agent: r.worker_agent,
     worker_model: r.worker_model,
     reviewer_agent: r.reviewer_agent,
@@ -110,6 +115,18 @@ interface TaskGetRawRow extends TaskListRawRow {
   pr_url: string | null;
   head_sha: string | null;
   base_sha: string | null;
+}
+
+export interface TaskGetGoal {
+  goal_id: string;
+  status: string;
+  tokens_used: number;
+  token_budget: number | null;
+  time_used_seconds: number;
+  no_progress_active_count: number;
+  last_attempt_id: number | null;
+  current_handoff_id: number | null;
+  completed_at: string | null;
 }
 
 const RECENT_EVENT_LIMIT = 20;
@@ -171,6 +188,17 @@ export function getTask(db: DB, taskId: string): TaskGetPayload | null {
     )
     .all(taskId, RECENT_EVENT_LIMIT);
 
+  const goal =
+    db
+      .query<TaskGetGoal, [string]>(
+        `SELECT goal_id, status, tokens_used, token_budget,
+                time_used_seconds, no_progress_active_count,
+                last_attempt_id, current_handoff_id, completed_at
+           FROM task_goals
+          WHERE task_id = ?`,
+      )
+      .get(taskId) ?? null;
+
   return {
     ...rowToList(row),
     authors: parseTaskAuthors(row.authors_json),
@@ -181,5 +209,6 @@ export function getTask(db: DB, taskId: string): TaskGetPayload | null {
     base_sha: row.base_sha,
     current_attempt: attempt,
     recent_events: events,
+    goal,
   };
 }

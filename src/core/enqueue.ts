@@ -19,6 +19,11 @@ import {
   composeWorkerPrompt,
   INITIAL_ATTEMPT_GUIDANCE,
 } from "./worker_prompt.ts";
+import {
+  insertTaskGoal,
+  parseWorkerExecution,
+  type WorkerExecution,
+} from "./goals.ts";
 
 export const DEFAULT_RETRY_BUDGET = 5;
 
@@ -57,6 +62,7 @@ export const enqueueInputSchema = z
     worker_model: z.string().min(1).nullable().optional(),
     reviewer_agent: z.string().min(1).nullable().optional(),
     reviewer_model: z.string().min(1).nullable().optional(),
+    worker_execution: z.enum(["oneshot", "goal"]).optional(),
   })
   .strict();
 
@@ -104,6 +110,10 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   }
 
   const taskId = deps.ids.next();
+  const workerExecution: WorkerExecution = parseWorkerExecution(
+    input.worker_execution,
+  );
+  const goalId = workerExecution === "goal" ? deps.ids.next() : null;
   const shortId = taskIdShort(taskId);
   const tmuxId = computeTmuxId(input.external_ref, shortId);
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
@@ -226,10 +236,10 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         .query(
           `INSERT INTO tasks (
              task_id, repo_id, external_ref, state, branch_name, tmux_id, worktree_path,
-             retry_budget, slack_thread_ref, authors_json,
+             retry_budget, slack_thread_ref, authors_json, worker_execution,
              worker_agent, worker_model, reviewer_agent, reviewer_model,
              created_at, updated_at
-           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
@@ -241,6 +251,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           retryBudget,
           input.slack_thread_ref ?? null,
           input.authors_json ?? null,
+          workerExecution,
           agentSnapshot.worker_agent,
           agentSnapshot.worker_model,
           agentSnapshot.reviewer_agent,
@@ -265,13 +276,16 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       }
 
       const attemptRow = deps.db
-        .query<{ attempt_id: number }, [string, number, number, string, number]>(
+        .query<
+          { attempt_id: number },
+          [string, number, number, string, number, string | null]
+        >(
           `INSERT INTO attempts (
-             task_id, attempt_number, preamble_id, reason, consumed_budget
-           ) VALUES (?, ?, ?, ?, ?)
+             task_id, attempt_number, preamble_id, reason, consumed_budget, goal_id
+           ) VALUES (?, ?, ?, ?, ?, ?)
            RETURNING attempt_id`,
         )
-        .get(taskId, 1, preambleId, "initial", 1);
+        .get(taskId, 1, preambleId, "initial", 1, goalId);
       if (!attemptRow) throw new Error("attempt insert returned no row");
       attemptId = attemptRow.attempt_id;
 
@@ -297,6 +311,16 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       });
       writtenArtifactPaths.push(objectiveArtifact.filePath);
 
+      if (workerExecution === "goal") {
+        if (goalId === null) throw new Error("goal_id missing for goal task");
+        insertTaskGoal(deps.db, {
+          taskId,
+          goalId,
+          objective: input.brief,
+          createdAt: now,
+        });
+      }
+
       const composed = composeWorkerPrompt({
         preambleBody,
         taskObjective: {
@@ -304,6 +328,19 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           artifactId: objectiveArtifact.artifactId,
           filePath: objectiveArtifact.filePath,
         },
+        goalContext:
+          workerExecution === "goal" && goalId !== null
+            ? {
+                goalId,
+                status: "active",
+                objective: input.brief,
+                objectiveArtifactId: objectiveArtifact.artifactId,
+                objectiveFilePath: objectiveArtifact.filePath,
+                tokensUsed: 0,
+                tokenBudget: null,
+                timeUsedSeconds: 0,
+              }
+            : undefined,
         attemptGuidance: {
           reason: "initial",
           body: INITIAL_ATTEMPT_GUIDANCE,

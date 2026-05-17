@@ -12,5 +12,6 @@ export interface TicketContext {
   ticket_snapshot: string;
   slack_thread_ref: string | null;
   tags: string[];
+  worker_execution: "oneshot" | "goal";
   authors: TicketAuthor[];
 }

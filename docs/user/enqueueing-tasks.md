@@ -11,7 +11,8 @@ quay enqueue \
   --brief-file ./brief.md \
   --external-ref ENG-1234 \
   --ticket-snapshot-file ./ticket.md \
-  --slack-thread-ref C123456:1712345678.901234
+  --slack-thread-ref C123456:1712345678.901234 \
+  --worker-execution oneshot
 ```
 
 Required:
@@ -25,6 +26,9 @@ Optional:
   names. If omitted, Quay uses the task id.
 - `--ticket-snapshot-file <path>`: stored as a `ticket_snapshot` artifact.
 - `--slack-thread-ref <channel:ts>`: used later for human escalation.
+- `--worker-execution <oneshot|goal>`: defaults to `oneshot`. Use `goal` for
+  long-running tasks that should continue across worker attempts until the
+  worker reports active, blocked, or complete goal status.
 
 Output:
 
@@ -60,10 +64,67 @@ enters the same enqueue path as manual briefs.
 - `--external-ref`
 - `--slack-thread-ref`
 
-The adapter derives those from the ticket.
+The adapter derives those from the ticket. Goal mode for Linear-backed tasks is
+selected inside the ticket's `quay-config` block with `worker_execution: goal`.
 
 Calling the same Linear issue twice for the same repo returns the existing task
 instead of creating a duplicate.
+
+## Goal Worker Mode
+
+Goal mode is task-level and opt-in:
+
+```bash
+quay enqueue --repo myrepo --brief-file ./brief.md --worker-execution goal
+```
+
+Linear tickets can request the same mode in their `quay-config` block:
+
+```yaml
+worker_execution: goal
+```
+
+In goal mode, Quay stores the initial brief as a durable task goal, renders a
+bounded `<goal_context>` into each code-worker prompt, and keeps scheduling
+normal worker attempts until the worker reports one of three statuses through
+`.quay-goal-report.json` in the worktree root:
+
+```json
+{
+  "status": "active",
+  "summary": "What changed or was learned in this attempt.",
+  "evidence": ["Concrete evidence inspected or produced."],
+  "blocker": null,
+  "next_steps": ["Concrete next step for the next worker attempt."]
+}
+```
+
+`status` must be `active`, `blocked`, or `complete`.
+
+- `active`: Quay records usage/time and schedules a `goal_continue` attempt.
+  This is productive continuation and does not consume regular retry budget.
+- `blocked`: Quay creates a blocker artifact and an orchestrator handoff.
+- `complete`: Quay only enters normal `pr-open` flow when a non-draft PR is
+  ready for review, or when the PR has already reached a terminal merged/closed
+  state. Draft PRs do not count as delivery.
+
+If a goal hits its token budget, Quay moves the task to `awaiting-next-brief`
+with a `budget_exhausted` handoff. Resuming a budget-limited goal requires an
+explicit budget change:
+
+```bash
+quay submit-brief <task_id> \
+  --claim-id <claim_id> \
+  --brief-file ./resume.md \
+  --reason blocker_resolved \
+  --goal-token-budget 200000
+
+quay submit-brief <task_id> ... --goal-token-budget none
+```
+
+The first form raises the lifetime goal token budget. The `none` form clears
+the goal token budget and makes the resumed goal unbounded. Tokens already used
+remain lifetime accounting and are not reset.
 
 ## What Enqueue Does
 
