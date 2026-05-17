@@ -93,6 +93,7 @@ export interface TickDeps {
   // Passed through to runCancelFinalizer so the cancel sweep also picks
   // up the writeback without a separate wiring.
   linear?: LinearPort;
+  referenceReposRoot?: string | undefined;
 }
 
 export interface TickOptions {
@@ -127,6 +128,7 @@ export interface TickOptions {
   claimTimeoutSeconds?: number;
   maxClaimExpirations?: number;
   maxNonBudgetRespawns?: number;
+  referenceReposRoot?: string | undefined;
 }
 
 export type TickAction =
@@ -331,6 +333,9 @@ export async function tick_once(
   deps: TickDeps,
   options: TickOptions = {},
 ): Promise<TickTaskResult[]> {
+  if (options.referenceReposRoot !== undefined) {
+    deps = { ...deps, referenceReposRoot: options.referenceReposRoot };
+  }
   const max = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const agentResolver = resolveTickAgentResolver(options);
   // Linear writebacks are scheduled inside the lock but drained after it
@@ -629,6 +634,7 @@ function processPendingReviewRequest(
       headSha: snapshot.headSha,
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
+      referenceReposRoot: deps.referenceReposRoot,
     },
   );
   if (result.scheduled) {
@@ -1151,6 +1157,7 @@ function processPrOpenTask(
           headSha: snapshot.headSha,
           reviewerEnabled: true,
           gateQuayOwnedDone: true,
+          referenceReposRoot: deps.referenceReposRoot,
         },
       );
       if (
@@ -1292,6 +1299,7 @@ function processSyntheticReviewLifecycle(
       headSha: snapshot.headSha,
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
+      referenceReposRoot: deps.referenceReposRoot,
     },
   );
 
@@ -1954,6 +1962,7 @@ function handleStaleApprovedReview(
       headSha: snapshot.headSha,
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
+      referenceReposRoot: deps.referenceReposRoot,
     },
   );
   return {

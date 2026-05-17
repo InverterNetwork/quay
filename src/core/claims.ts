@@ -108,6 +108,7 @@ export interface ClaimDeps {
 export interface SubmitBriefDeps extends ClaimDeps {
   artifactStore: ArtifactStore;
   linear?: LinearPort;
+  referenceReposRoot?: string | undefined;
 }
 
 export interface EscalateHumanDeps extends ClaimDeps {
@@ -503,6 +504,7 @@ export async function submit_brief(
     taskObjective: objective,
     prBaseBranch,
     goalContext,
+    referenceReposRoot: deps.referenceReposRoot,
     attemptGuidance: { reason: input.reason, body: input.brief },
   });
 

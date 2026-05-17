@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DEFAULT_OBJECTIVE_RENDER_CAP_BYTES,
   INITIAL_ATTEMPT_GUIDANCE,
@@ -58,6 +60,7 @@ test("diagnostics section is omitted when no diagnostics supplied", () => {
     attemptGuidance: { reason: "initial", body: "guidance" },
   });
   expect(composed.brief).not.toContain("<quay-diagnostics");
+  expect(composed.brief).not.toContain("<quay-reference-repos");
 });
 
 test("PR target section renders effective base branch when supplied", () => {
@@ -134,6 +137,74 @@ test("attribute values escape double-quote, &, <, >", () => {
   );
   expect(composed.brief).toContain('reason="malicious&quot;reason"');
   expect(composed.brief).toContain('kind="kind&quot;with&quot;quotes"');
+});
+
+test("reference repos section renders sorted immediate git children", () => {
+  const root = mkdtempSync(join(tmpdir(), "quay-reference-repos-"));
+  try {
+    mkdirSync(join(root, "beta", ".git"), { recursive: true });
+    mkdirSync(join(root, "alpha", ".git"), { recursive: true });
+    mkdirSync(join(root, "not-a-repo"), { recursive: true });
+
+    const composed = composeWorkerPrompt({
+      preambleBody: PREAMBLE,
+      taskObjective: SAFE_OBJECTIVE,
+      referenceReposRoot: root,
+      attemptGuidance: { reason: "initial", body: "guidance" },
+    });
+
+    expect(composed.brief).toContain(
+      `<quay-reference-repos root="${root}">`,
+    );
+    expect(composed.brief).toContain(
+      `- alpha: ${join(root, "alpha")}`,
+    );
+    expect(composed.brief).toContain(`- beta: ${join(root, "beta")}`);
+    expect(composed.brief).not.toContain("not-a-repo");
+    expect(composed.brief.indexOf("alpha")).toBeLessThan(
+      composed.brief.indexOf("beta"),
+    );
+    expect(composed.brief).toContain(
+      "Do not edit, commit, branch, or push from these directories.",
+    );
+    expect(composed.brief).toContain("Only modify the Quay task worktree.");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reference repos section renders an empty configured root", () => {
+  const root = mkdtempSync(join(tmpdir(), "quay-reference-repos-empty-"));
+  try {
+    const composed = composeWorkerPrompt({
+      preambleBody: PREAMBLE,
+      taskObjective: SAFE_OBJECTIVE,
+      referenceReposRoot: root,
+      attemptGuidance: { reason: "initial", body: "guidance" },
+    });
+    expect(composed.brief).toContain(
+      `<quay-reference-repos root="${root}">`,
+    );
+    expect(composed.brief).toContain("- (none discovered)");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("missing reference repos root is omitted without throwing", () => {
+  const parent = mkdtempSync(join(tmpdir(), "quay-reference-repos-missing-"));
+  try {
+    const root = join(parent, "missing");
+    const composed = composeWorkerPrompt({
+      preambleBody: PREAMBLE,
+      taskObjective: SAFE_OBJECTIVE,
+      referenceReposRoot: root,
+      attemptGuidance: { reason: "initial", body: "guidance" },
+    });
+    expect(composed.brief).not.toContain("<quay-reference-repos");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
 });
 
 test("objective under cap renders truncated=false with full body", () => {
