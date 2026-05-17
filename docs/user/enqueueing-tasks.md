@@ -130,7 +130,7 @@ remain lifetime accounting and are not reset.
 
 1. Validates repo registration and archived status.
 2. Verifies the bare clone exists.
-3. Fetches the configured base branch.
+3. Fetches the effective base branch.
 4. Resolves a `quay/<slug>` branch name.
 5. Creates a worktree from `origin/<base_branch>`.
 6. Runs the repo `install_cmd` in the worktree.
@@ -139,6 +139,13 @@ remain lifetime accounting and are not reset.
 
 If any step fails, Quay rolls back worktree, branch, SQL, and artifact side
 effects as far as possible.
+
+By default, the effective base branch is the repo's configured `base_branch`.
+For one task, pass `quay enqueue --base-branch <branch>` or set
+`base_branch:` in the Linear ticket's `quay-config` block. Quay stores that
+effective branch on the task, branches from `origin/<base_branch>`, and tells
+the worker to open the PR into the same branch without changing the repo
+default.
 
 ## Branch Names
 

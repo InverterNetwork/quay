@@ -30,3 +30,12 @@ test("test_schema_creates_required_tables", () => {
     expect(names.has(t)).toBe(true);
   }
 });
+
+test("tasks table has effective base_branch column", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(tasks)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toContain("base_branch");
+});

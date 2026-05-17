@@ -113,6 +113,8 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
       "repo-enqueue-flag",
       "--brief-file",
       briefPath,
+      "--base-branch",
+      "dev",
       "--ticket-snapshot-file",
       ticketPath,
       "--external-ref",
@@ -133,12 +135,17 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
 
   const row = h.db
     .query<
-      { external_ref: string | null; slack_thread_ref: string | null },
+      {
+        base_branch: string | null;
+        external_ref: string | null;
+        slack_thread_ref: string | null;
+      },
       [string]
     >(
-      "SELECT external_ref, slack_thread_ref FROM tasks WHERE task_id = ?",
+      "SELECT base_branch, external_ref, slack_thread_ref FROM tasks WHERE task_id = ?",
     )
     .get(enqueueResult.task_id);
+  expect(row?.base_branch).toBe("dev");
   expect(row?.external_ref).toBe("ITRY-900");
   expect(row?.slack_thread_ref).toBe("C123:1700000000.0001");
 
@@ -456,6 +463,14 @@ test("task list filters by --state, --repo, --external-ref", async () => {
   );
   const byExt = JSON.parse(ioExt.out()).map((r: { task_id: string }) => r.task_id);
   expect(byExt).toEqual(["t-a-1"]);
+
+  const listed = JSON.parse(ioExt.out()) as Array<{ base_branch: string }>;
+  expect(listed[0]?.base_branch).toBe("main");
+
+  const ioGet = bufferIO();
+  await dispatch(["task", "get", "t-a-1"], built.deps, ioGet);
+  const got = JSON.parse(ioGet.out()) as { base_branch: string };
+  expect(got.base_branch).toBe("main");
 });
 
 test("task events returns the append-only log oldest-first", async () => {

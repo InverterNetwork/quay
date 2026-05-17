@@ -6,6 +6,7 @@ import { enqueueOrchestratorHandoff } from "./orchestrator_handoffs.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 import {
   composeWorkerPrompt,
+  loadTaskPrBaseBranch,
   loadOriginalTaskObjective,
 } from "./worker_prompt.ts";
 import {
@@ -90,10 +91,12 @@ export function scheduleDeterministicRetry(
   );
   const objective = loadOriginalTaskObjective(deps.db, input.taskId);
   const goalContext = loadGoalPromptContext(deps.db, input.taskId);
+  const prBaseBranch = loadTaskPrBaseBranch(deps.db, input.taskId);
   const preambleBody = loadPreambleBody(deps.db, preambleId);
   const composed = composeWorkerPrompt({
     preambleBody,
     taskObjective: objective,
+    prBaseBranch,
     goalContext,
     attemptGuidance: { reason: input.reason, body: template.body },
     diagnostics: {

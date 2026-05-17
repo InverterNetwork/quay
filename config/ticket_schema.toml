@@ -49,3 +49,10 @@ description = "Source-system identifier (e.g., 'ITRY-1276'). Stored opaquely by 
 type = "enum"
 allowed = ["oneshot", "goal"]
 description = "Worker execution mode. Defaults to oneshot; goal enables durable Quay goal worker mode."
+
+[optional.base_branch]
+type = "string"
+min_length = 1
+max_length = 255
+pattern = '^(?!refs/)(?!origin/)(?!@$)(?!.*@\{)(?!.*\.\.)(?!.*//)(?!/)(?!.*[/.]$)(?!.*(?:^|/)\.)(?!.*(?:^|/)[^/]*\.lock(?:/|$))[A-Za-z0-9._/-]+$'
+description = "Task-level PR base override. When present, Quay branches from origin/<base_branch> and instructs the worker to open the PR into that same branch without changing the repo default."

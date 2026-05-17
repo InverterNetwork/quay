@@ -24,11 +24,12 @@ Before enqueueing work, the operator must:
 1. Register metadata with `quay repo add`.
 2. Create a bare clone at `<repos_root>/<repo_id>.git`.
 
-At enqueue time, Quay fetches the configured base branch, creates a local branch
-named `quay/<slug>`, creates a worktree, runs the repo `install_cmd`, stores the
-task-level `task_objective` artifact (the raw original brief) plus the first
-attempt's `brief` and `final_prompt` artifacts, and creates the first pending
-attempt.
+At enqueue time, Quay fetches the effective base branch, creates a local branch
+named `quay/<slug>`, creates a worktree from `origin/<base_branch>`, runs the
+repo `install_cmd`, stores the task-level `task_objective` artifact (the raw
+original brief) plus the first attempt's `brief` and `final_prompt` artifacts,
+and creates the first pending attempt. The effective base branch is the repo
+default unless a task-level override is supplied.
 
 ## Tasks And Attempts
 

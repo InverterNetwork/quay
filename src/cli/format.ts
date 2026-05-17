@@ -5,6 +5,7 @@ import type { TicketAuthor } from "../ports/ticket_context.ts";
 export interface TaskListRow {
   task_id: string;
   repo_id: string;
+  base_branch: string;
   state: string;
   external_ref: string | null;
   branch_name: string;
@@ -54,16 +55,18 @@ export interface TaskGetPayload extends TaskListRow {
 }
 
 const TASK_LIST_COLUMNS = `
-  task_id, repo_id, state, external_ref, branch_name,
-  attempts_consumed, retry_budget, budget_exhausted,
-  worker_execution,
-  worker_agent, worker_model, reviewer_agent, reviewer_model,
-  created_at, updated_at
+  t.task_id, t.repo_id, COALESCE(t.base_branch, r.base_branch) AS base_branch,
+  t.state, t.external_ref, t.branch_name,
+  t.attempts_consumed, t.retry_budget, t.budget_exhausted,
+  t.worker_execution,
+  t.worker_agent, t.worker_model, t.reviewer_agent, t.reviewer_model,
+  t.created_at, t.updated_at
 `;
 
 interface TaskListRawRow {
   task_id: string;
   repo_id: string;
+  base_branch: string;
   state: string;
   external_ref: string | null;
   branch_name: string;
@@ -83,6 +86,7 @@ function rowToList(r: TaskListRawRow): TaskListRow {
   return {
     task_id: r.task_id,
     repo_id: r.repo_id,
+    base_branch: r.base_branch,
     state: r.state,
     external_ref: r.external_ref,
     branch_name: r.branch_name,
@@ -102,7 +106,9 @@ function rowToList(r: TaskListRawRow): TaskListRow {
 export function listTasks(db: DB): TaskListRow[] {
   const rows = db
     .query<TaskListRawRow, []>(
-      `SELECT ${TASK_LIST_COLUMNS} FROM tasks ORDER BY created_at, task_id`,
+      `SELECT ${TASK_LIST_COLUMNS}
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        ORDER BY t.created_at, t.task_id`,
     )
     .all();
   return rows.map(rowToList);
@@ -159,9 +165,11 @@ function parseTaskAuthors(authorsJson: string | null): TicketAuthor[] {
 export function getTask(db: DB, taskId: string): TaskGetPayload | null {
   const row = db
     .query<TaskGetRawRow, [string]>(
-      `SELECT ${TASK_LIST_COLUMNS}, authors_json, slack_thread_ref,
-              pr_number, pr_url, head_sha, base_sha
-         FROM tasks WHERE task_id = ?`,
+      `SELECT ${TASK_LIST_COLUMNS},
+              t.authors_json, t.slack_thread_ref,
+              t.pr_number, t.pr_url, t.head_sha, t.base_sha
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        WHERE t.task_id = ?`,
     )
     .get(taskId);
   if (!row) return null;

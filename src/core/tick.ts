@@ -194,6 +194,7 @@ interface RunningTaskRow {
   task_id: string;
   repo_id: string;
   branch_name: string;
+  base_branch: string | null;
   tmux_id: string;
   worktree_path: string;
   cancel_requested_at: string | null;
@@ -667,11 +668,13 @@ function readQueued(db: DB): QueuedTaskRow[] {
 function readRunning(db: DB): RunningTaskRow[] {
   return db
     .query<RunningTaskRow, []>(
-      `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path,
-              cancel_requested_at, worker_execution
-         FROM tasks
-        WHERE state = 'running'
-        ORDER BY created_at, task_id`,
+      `SELECT t.task_id, t.repo_id, t.branch_name,
+              COALESCE(t.base_branch, r.base_branch) AS base_branch,
+              t.tmux_id, t.worktree_path,
+              t.cancel_requested_at, t.worker_execution
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        WHERE t.state = 'running'
+        ORDER BY t.created_at, t.task_id`,
     )
     .all();
 }
@@ -855,6 +858,7 @@ function processRunningTask(
     task_id: task.task_id,
     repo_id: task.repo_id,
     branch_name: task.branch_name,
+    base_branch: task.base_branch,
     tmux_id: task.tmux_id,
     worktree_path: task.worktree_path,
     state: "running",
