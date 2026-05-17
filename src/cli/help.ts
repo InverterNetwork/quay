@@ -110,16 +110,18 @@ const COMMANDS: Record<string, CommandSpec> = {
   enqueue: {
     path: "enqueue",
     synopsis:
-      "quay enqueue --repo <id> --brief-file <path> [--ticket-snapshot-file <p>] [--external-ref <r>] [--slack-thread-ref <r>] [--worker-agent <a>] [--worker-model <m>] [--reviewer-agent <a>] [--reviewer-model <m>] [--tag <name>]...",
+      "quay enqueue --repo <id> --brief-file <path> [--base-branch <b>] [--worker-execution oneshot|goal] [--ticket-snapshot-file <p>] [--external-ref <r>] [--slack-thread-ref <r>] [--worker-agent <a>] [--worker-model <m>] [--reviewer-agent <a>] [--reviewer-model <m>] [--tag <name>]...",
     summary: "Enqueue a new task from a brief file (or a Linear issue).",
     details:
       "Pass --linear-issue <id> instead of --brief-file to derive the task from a Linear ticket via the configured adapter.",
     flags: [
       { flag: "--repo <id>", desc: "Target repo_id (required, unless --linear-issue carries one)." },
       { flag: "--brief-file <path>", desc: "Path to the brief markdown file (required)." },
+      { flag: "--base-branch <b>", desc: "Task-level base branch override for branch-from and PR-into." },
       { flag: "--ticket-snapshot-file <p>", desc: "Optional ticket-snapshot file." },
       { flag: "--external-ref <ref>", desc: "Optional ticket reference (e.g., ITRY-900)." },
       { flag: "--slack-thread-ref <ref>", desc: "Optional Slack thread reference." },
+      { flag: "--worker-execution <mode>", desc: "oneshot | goal. Defaults to oneshot." },
       { flag: "--worker-agent <a>", desc: "Override the worker agent for this task." },
       { flag: "--worker-model <m>", desc: "Override the worker model for this task." },
       { flag: "--reviewer-agent <a>", desc: "Override the reviewer agent for this task." },
@@ -365,12 +367,13 @@ const COMMANDS: Record<string, CommandSpec> = {
   "submit-brief": {
     path: "submit-brief",
     synopsis:
-      "quay submit-brief <task_id> --claim-id <id> --brief-file <path> --reason <blocker_resolved|advice_answered>",
+      "quay submit-brief <task_id> --claim-id <id> --brief-file <path> --reason <blocker_resolved|advice_answered> [--goal-token-budget <number|none>]",
     summary: "Submit a follow-up brief to resume a waiting task.",
     flags: [
       { flag: "--claim-id <id>", desc: "The claim_id held by the caller (required)." },
       { flag: "--brief-file <path>", desc: "Path to the new brief (required)." },
       { flag: "--reason <r>", desc: "blocker_resolved | advice_answered (required)." },
+      { flag: "--goal-token-budget <n|none>", desc: "Required to resume a budget_limited goal; raises or clears the goal token budget." },
       { flag: "--input <json>", desc: "Alternative: pass the full payload as JSON." },
     ],
   },

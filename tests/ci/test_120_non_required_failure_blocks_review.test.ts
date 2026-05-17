@@ -3,7 +3,7 @@ import { afterEach, expect, test } from "bun:test";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import { insertAttempt, insertRepo, insertTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -21,6 +21,7 @@ test("AST-120: non-required failing check blocks pr-review and schedules ci_fail
     repoId,
     state: "pr-open",
   });
+  seedTaskObjective(h, taskId);
   const attemptId = insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -96,6 +97,7 @@ test("AST-120: approved Quay-owned review cannot mark done with failing checks",
     repoId,
     state: "pr-review",
   });
+  seedTaskObjective(h, taskId);
   h.db
     .query(`UPDATE tasks SET pr_number = 91, head_sha = 'head-reviewed' WHERE task_id = ?`)
     .run(taskId);
@@ -194,7 +196,9 @@ test("AST-120: approved Quay-owned review cannot mark done with failing checks",
     "installer-smoke/install = fail",
   );
   const retryBrief = readArtifact("brief");
-  expect(retryBrief).toContain("fix the installer");
+  // The shared composer pulls the stable task objective into every retry and
+  // never inherits the reviewer-only brief.
+  expect(retryBrief).toContain("Original task objective.");
   expect(retryBrief).not.toContain("reviewer-only brief");
 });
 
@@ -207,6 +211,7 @@ test("AST-120: stale approved review on red new head schedules ci_fail", async (
     repoId,
     state: "pr-review",
   });
+  seedTaskObjective(h, taskId);
   h.db
     .query(`UPDATE tasks SET pr_number = 92, head_sha = 'old-head' WHERE task_id = ?`)
     .run(taskId);
@@ -299,6 +304,7 @@ test("AST-120: stale approved review on green new head schedules fresh review", 
     repoId,
     state: "pr-review",
   });
+  seedTaskObjective(h, taskId);
   h.db
     .query(`UPDATE tasks SET pr_number = 93, head_sha = 'old-head' WHERE task_id = ?`)
     .run(taskId);
@@ -394,6 +400,7 @@ test("AST-120: approved review waiting on pending CI frees reviewer capacity", a
     repoId,
     state: "pr-review",
   });
+  seedTaskObjective(h, taskId);
   h.db
     .query(`UPDATE tasks SET pr_number = 94, head_sha = 'head-pending' WHERE task_id = ?`)
     .run(taskId);

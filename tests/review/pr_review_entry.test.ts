@@ -1,4 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { createAgentResolver } from "../../src/core/agents.ts";
@@ -82,6 +85,69 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
   expect(out2.scheduled).toBe(false);
   expect(out2.skipped_reason).toBe("active_attempt_exists");
   expect(out2.attempt_id).toBe(out.attempt_id);
+});
+
+test("review-pr includes read-only reference repos context in reviewer prompt", async () => {
+  h = createHarness();
+  const root = mkdtempSync(join(tmpdir(), "quay-review-reference-repos-"));
+  try {
+    mkdirSync(join(root, "shared-api", ".git"), { recursive: true });
+    const built = buildCliDeps(h);
+    built.deps.tickOptions = {
+      reviewerEnabled: true,
+      referenceReposRoot: root,
+    };
+    await dispatch(
+      [
+        "repo",
+        "add",
+        "--id",
+        "quay",
+        "--url",
+        "git@github.com:acc/quay.git",
+        "--base-branch",
+        "main",
+        "--package-manager",
+        "bun",
+        "--install-cmd",
+        "true",
+      ],
+      built.deps,
+      bufferIO(),
+    );
+    built.github.setPrView("quay", 50, {
+      number: 50,
+      title: "Cross-repo PR",
+      body: "Touches the shared-api contract",
+      url: "https://github.com/acc/quay/pull/50",
+      headRefName: "feature/cross-repo",
+      headSha: "abc500",
+    });
+
+    const io = bufferIO();
+    const result = await dispatch(["review-pr", "--pr", "acc/quay:50"], built.deps, io);
+
+    expect(result.exitCode).toBe(0);
+    const out = JSON.parse(io.out());
+    const row = h.db
+      .query<{ file_path: string }, [number]>(
+        `SELECT file_path FROM artifacts
+          WHERE attempt_id = ? AND kind = 'brief'`,
+      )
+      .get(out.attempt_id);
+    expect(row).toBeDefined();
+    const brief = readFileSync(row!.file_path, "utf8");
+    expect(brief).toContain(`<quay-reference-repos root="${root}">`);
+    expect(brief).toContain(`- shared-api: ${join(root, "shared-api")}`);
+    expect(brief).toContain(
+      "Do not modify code or git state in these directories.",
+    );
+    expect(brief).toContain(
+      "Keep findings focused on the PR under review unless cross-repo context proves the PR breaks a contract.",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("review-pr records a pending request when CI is not green", async () => {

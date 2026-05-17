@@ -36,6 +36,16 @@ import {
   reopenClaimedOrchestratorHandoffs,
 } from "./orchestrator_handoffs.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import {
+  composeWorkerPrompt,
+  loadTaskPrBaseBranch,
+  loadOriginalTaskObjective,
+} from "./worker_prompt.ts";
+import {
+  loadGoalPromptContext,
+  loadTaskGoal,
+  type TaskGoalRow,
+} from "./goals.ts";
 
 export type ClaimErrorCode =
   | "unknown_task"
@@ -98,6 +108,7 @@ export interface ClaimDeps {
 export interface SubmitBriefDeps extends ClaimDeps {
   artifactStore: ArtifactStore;
   linear?: LinearPort;
+  referenceReposRoot?: string | undefined;
 }
 
 export interface EscalateHumanDeps extends ClaimDeps {
@@ -125,6 +136,7 @@ export interface SubmitBriefInput {
   claimId: string;
   brief: string;
   reason: SubmitBriefReason;
+  goalTokenBudget?: number | null | undefined;
 }
 
 export interface EscalateHumanInput {
@@ -371,6 +383,54 @@ function loadLatestAttempt(db: DB, taskId: string): PriorAttemptRow | null {
   );
 }
 
+function validateGoalResume(
+  db: DB,
+  goal: TaskGoalRow | null,
+  taskId: string,
+  claimId: string,
+  goalTokenBudget: number | null | undefined,
+): ServiceResult<void> {
+  if (goal === null) return { ok: true, value: undefined };
+  if (goal.current_handoff_id !== null) {
+    const handoff = db
+      .query<{ handoff_id: number }, [number, string, string]>(
+        `SELECT handoff_id
+           FROM orchestrator_handoffs
+          WHERE handoff_id = ?
+            AND task_id = ?
+            AND status = 'claimed'
+            AND claim_id = ?`,
+      )
+      .get(goal.current_handoff_id, taskId, claimId);
+    if (!handoff) {
+      return fail(
+        "claim_lost",
+        `goal handoff ${goal.current_handoff_id} is no longer claimed by this claim`,
+        { task_id: taskId, handoff_id: goal.current_handoff_id },
+      );
+    }
+  }
+  if (goal.status !== "budget_limited") return { ok: true, value: undefined };
+  if (goalTokenBudget === undefined) {
+    return fail(
+      "budget_exhausted",
+      `task ${taskId} goal is budget_limited; submit_brief requires --goal-token-budget <number|none>`,
+      { task_id: taskId, tokens_used: goal.tokens_used, token_budget: goal.token_budget },
+    );
+  }
+  if (
+    goalTokenBudget !== null &&
+    (!Number.isInteger(goalTokenBudget) || goalTokenBudget <= goal.tokens_used)
+  ) {
+    return fail(
+      "budget_exhausted",
+      `task ${taskId} goal token budget must be raised above tokens_used or cleared`,
+      { task_id: taskId, tokens_used: goal.tokens_used, token_budget: goalTokenBudget },
+    );
+  }
+  return { ok: true, value: undefined };
+}
+
 export async function submit_brief(
   deps: SubmitBriefDeps,
   input: SubmitBriefInput,
@@ -415,6 +475,16 @@ export async function submit_brief(
     );
   }
 
+  const goal = loadTaskGoal(deps.db, input.taskId);
+  const goalResumeCheck = validateGoalResume(
+    deps.db,
+    goal,
+    input.taskId,
+    input.claimId,
+    input.goalTokenBudget,
+  );
+  if (!goalResumeCheck.ok) return goalResumeCheck;
+
   const now = deps.clock.nowISO();
   const consumedBudget = input.reason === "blocker_resolved" ? 1 : 0;
   const preambleId = ensurePreambleIdForAttemptReason(
@@ -423,6 +493,20 @@ export async function submit_brief(
     input.reason,
   );
   const preambleBody = loadPreambleBody(deps.db, preambleId);
+  const objective = loadOriginalTaskObjective(deps.db, input.taskId);
+  const prBaseBranch = loadTaskPrBaseBranch(deps.db, input.taskId);
+  const goalContext = loadGoalPromptContext(deps.db, input.taskId);
+  if (goalContext !== undefined && input.goalTokenBudget !== undefined) {
+    goalContext.tokenBudget = input.goalTokenBudget;
+  }
+  const composed = composeWorkerPrompt({
+    preambleBody,
+    taskObjective: objective,
+    prBaseBranch,
+    goalContext,
+    referenceReposRoot: deps.referenceReposRoot,
+    attemptGuidance: { reason: input.reason, body: input.brief },
+  });
 
   let attemptId = -1;
   deps.db.exec("BEGIN IMMEDIATE");
@@ -469,11 +553,43 @@ export async function submit_brief(
       });
     }
 
+    if (goal !== null) {
+      if (input.goalTokenBudget !== undefined) {
+        deps.db
+          .query(`UPDATE task_goals SET token_budget = ? WHERE task_id = ?`)
+          .run(input.goalTokenBudget, input.taskId);
+      }
+      const goalUpd = deps.db
+        .query(
+          `UPDATE task_goals
+              SET status = 'active',
+                  current_handoff_id = NULL,
+                  no_progress_active_count = 0,
+                  completed_at = NULL,
+                  updated_at = ?
+            WHERE task_id = ?
+              AND (token_budget IS NULL OR tokens_used < token_budget)`,
+        )
+        .run(now, input.taskId);
+      const goalChanges = (goalUpd as { changes?: number }).changes ?? 0;
+      if (goalChanges === 0) {
+        deps.db.exec("ROLLBACK");
+        return fail(
+          "budget_exhausted",
+          `task ${input.taskId} goal budget remains exhausted; raise --goal-token-budget or pass none`,
+          { task_id: input.taskId },
+        );
+      }
+    }
+
     const attemptRow = deps.db
-      .query<{ attempt_id: number }, [string, number, number, string, number]>(
+      .query<
+        { attempt_id: number },
+        [string, number, number, string, number, string | null]
+      >(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, reason, consumed_budget
-         ) VALUES (?, ?, ?, ?, ?)
+           task_id, attempt_number, preamble_id, reason, consumed_budget, goal_id
+         ) VALUES (?, ?, ?, ?, ?, ?)
          RETURNING attempt_id`,
       )
       .get(
@@ -482,6 +598,7 @@ export async function submit_brief(
         preambleId,
         input.reason,
         consumedBudget,
+        goal?.goal_id ?? null,
       );
     if (!attemptRow) throw new Error("attempt insert returned no row");
     attemptId = attemptRow.attempt_id;
@@ -490,14 +607,14 @@ export async function submit_brief(
       taskId: input.taskId,
       attemptId,
       kind: "brief",
-      content: input.brief,
+      content: composed.brief,
       extension: "md",
     });
     deps.artifactStore.writeArtifact({
       taskId: input.taskId,
       attemptId,
       kind: "final_prompt",
-      content: `${preambleBody}\n\n${input.brief}`,
+      content: composed.finalPrompt,
       extension: "md",
     });
 

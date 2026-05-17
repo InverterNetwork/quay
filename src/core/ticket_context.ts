@@ -187,10 +187,12 @@ export async function fetchTicketContextWithIssue(
   const ctx: TicketContext = {
     external_ref: externalRef,
     repo: block.repo,
+    base_branch: block.base_branch,
     brief,
     ticket_snapshot,
     slack_thread_ref: slackThreadRef,
     tags: normalizeTags(block.tags),
+    worker_execution: block.worker_execution,
     authors: block.authors,
   };
   return { ctx, issue };

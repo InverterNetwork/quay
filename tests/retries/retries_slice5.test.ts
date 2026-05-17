@@ -9,6 +9,7 @@ import {
   insertRepo,
   insertRunningTask,
   insertTask,
+  seedTaskObjective,
   writeBlockerFile,
 } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
@@ -24,6 +25,7 @@ test("test_005_ci_fail_schedules_budget_consuming_retry", async () => {
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-ci");
   const taskId = insertTask(h.db, { taskId: "task-ci", repoId, state: "pr-open" });
+  seedTaskObjective(h, taskId);
   const attemptId = insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -77,9 +79,12 @@ test("test_005_ci_fail_schedules_budget_consuming_retry", async () => {
     )
     .get(pending!.attempt_id)!.file_path;
   const retryBrief = readFileSync(briefPath, "utf8");
-  expect(retryBrief).toContain("ci_fail");
+  expect(retryBrief).toContain('reason="ci_fail"');
   expect(retryBrief).toContain("unit test failed");
-  expect(retryBrief).toContain("latest implementation brief");
+  // Stable task objective is first-class; the prior attempt's brief is no
+  // longer nested into retry prompts.
+  expect(retryBrief).toContain("Original task objective.");
+  expect(retryBrief).not.toContain("latest implementation brief");
 });
 
 test("test_013_final_attempt_blocker_sets_budget_exhausted", async () => {
@@ -92,6 +97,7 @@ test("test_013_final_attempt_blocker_sets_budget_exhausted", async () => {
     worktreesRoot: join(h.dataDir, "worktrees"),
     attemptsConsumed: 5,
   });
+  seedTaskObjective(h, t.taskId);
   h.db
     .query(`UPDATE tasks SET retry_budget = 5 WHERE task_id = ?`)
     .run(t.taskId);
@@ -132,6 +138,7 @@ test("test_021_retry_budget_exhaustion_creates_last_failure", async () => {
     worktreesRoot: join(h.dataDir, "worktrees"),
     attemptsConsumed: 5,
   });
+  seedTaskObjective(h, t.taskId);
   h.db.query(`UPDATE tasks SET retry_budget = 5 WHERE task_id = ?`).run(t.taskId);
   artifactStore().writeArtifact({
     taskId: t.taskId,
@@ -159,7 +166,7 @@ test("test_021_retry_budget_exhaustion_creates_last_failure", async () => {
   expect(handoffReasons(t.taskId)).toEqual(["budget_exhausted"]);
 });
 
-test("test_023_retry_brief_uses_most_recent_brief", async () => {
+test("test_023_retry_brief_uses_stable_task_objective_not_prior_brief", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-latest-brief");
   const taskId = insertTask(h.db, {
@@ -167,6 +174,7 @@ test("test_023_retry_brief_uses_most_recent_brief", async () => {
     repoId,
     state: "pr-open",
   });
+  seedTaskObjective(h, taskId, "Stable original task objective.");
   const first = insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -183,7 +191,7 @@ test("test_023_retry_brief_uses_most_recent_brief", async () => {
     taskId,
     attemptId: first,
     kind: "brief",
-    content: "initial enqueue brief",
+    content: "initial composed brief body",
     extension: "md",
   });
   store.writeArtifact({
@@ -212,8 +220,12 @@ test("test_023_retry_brief_uses_most_recent_brief", async () => {
     )
     .get(pending.attempt_id)!.file_path;
   const retryBrief = readFileSync(briefPath, "utf8");
-  expect(retryBrief).toContain("orchestrator follow-up brief");
-  expect(retryBrief).not.toContain("initial enqueue brief");
+  // The stable task objective stays first-class across attempts; prior
+  // briefs (whether the original or an orchestrator follow-up) no longer
+  // get nested into retry prompts.
+  expect(retryBrief).toContain("Stable original task objective.");
+  expect(retryBrief).not.toContain("orchestrator follow-up brief");
+  expect(retryBrief).not.toContain("initial composed brief body");
 });
 
 function artifactStore() {

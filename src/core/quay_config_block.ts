@@ -4,6 +4,7 @@
 // No I/O, no Linear or Slack calls — this is a function over a string.
 
 import { QuayError } from "./errors.ts";
+import { BASE_BRANCH_ERROR, isValidBaseBranchName } from "./base_branch.ts";
 
 export interface QuayConfigAuthor {
   name: string;
@@ -12,7 +13,9 @@ export interface QuayConfigAuthor {
 
 export interface QuayConfigBlock {
   repo: string;
+  base_branch: string | null;
   tags: string[];
+  worker_execution: "oneshot" | "goal";
   slack_thread_ref: string | null;
   authors: QuayConfigAuthor[];
 }
@@ -291,6 +294,23 @@ function validateBlock(yaml: { [key: string]: YamlValue }): QuayConfigBlock {
   }
   const repo = rawRepo;
 
+  // base_branch (optional task-level override)
+  let base_branch: string | null = null;
+  if (
+    "base_branch" in yaml &&
+    yaml.base_branch !== null &&
+    yaml.base_branch !== undefined
+  ) {
+    const raw = yaml.base_branch;
+    if (typeof raw !== "string" || raw.length === 0) {
+      throw blockError("base_branch must be a non-empty string");
+    }
+    if (!isValidBaseBranchName(raw)) {
+      throw blockError(BASE_BRANCH_ERROR);
+    }
+    base_branch = raw;
+  }
+
   // tags
   const rawTags = yaml.tags;
   if (!Array.isArray(rawTags)) {
@@ -303,6 +323,19 @@ function validateBlock(yaml: { [key: string]: YamlValue }): QuayConfigBlock {
       throw blockError(`tags[${i}] must be a string`);
     }
     tags.push(v);
+  }
+
+  let worker_execution: "oneshot" | "goal" = "oneshot";
+  if (
+    "worker_execution" in yaml &&
+    yaml.worker_execution !== null &&
+    yaml.worker_execution !== undefined
+  ) {
+    const raw = yaml.worker_execution;
+    if (raw !== "oneshot" && raw !== "goal") {
+      throw blockError("worker_execution must be oneshot or goal");
+    }
+    worker_execution = raw;
   }
 
   // slack_thread (optional)
@@ -363,5 +396,5 @@ function validateBlock(yaml: { [key: string]: YamlValue }): QuayConfigBlock {
     authors.push({ name, slack_id });
   }
 
-  return { repo, tags, slack_thread_ref, authors };
+  return { repo, base_branch, tags, worker_execution, slack_thread_ref, authors };
 }

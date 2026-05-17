@@ -10,7 +10,7 @@ import {
   listOrchestratorHandoffs,
 } from "../../src/core/orchestrator_handoffs.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import { insertAttempt, insertRepo, insertTask, seedTaskObjective } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -26,6 +26,7 @@ test("orchestrator handoff enqueue is idempotent by task event and reason", () =
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   const eventId = insertAwaitingEvent(taskId, "blocker_ingested");
 
   const first = enqueueOrchestratorHandoff(
@@ -68,6 +69,7 @@ test("task claim, release, and submit advance handoff status", async () => {
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,

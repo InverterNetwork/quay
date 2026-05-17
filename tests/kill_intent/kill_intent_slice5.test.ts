@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { join } from "node:path";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertRepo, insertRunningTask } from "../support/fixtures.ts";
+import { insertRepo, insertRunningTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -21,6 +21,7 @@ test("test_022_wall_clock_kill_schedules_retry", async () => {
     worktreesRoot: join(h.dataDir, "worktrees"),
     spawnedAt: "2026-04-28T00:00:00.000Z",
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.liveSessions.add(t.sessionName!);
@@ -65,6 +66,7 @@ test("test_stale_kill_schedules_retry_once", async () => {
     worktreesRoot: join(h.dataDir, "worktrees"),
     spawnedAt: "2026-04-28T00:00:00.000Z",
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.liveSessions.add(t.sessionName!);

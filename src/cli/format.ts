@@ -5,12 +5,14 @@ import type { TicketAuthor } from "../ports/ticket_context.ts";
 export interface TaskListRow {
   task_id: string;
   repo_id: string;
+  base_branch: string;
   state: string;
   external_ref: string | null;
   branch_name: string;
   attempts_consumed: number;
   retry_budget: number;
   budget_exhausted: boolean;
+  worker_execution: "oneshot" | "goal";
   worker_agent: string | null;
   worker_model: string | null;
   reviewer_agent: string | null;
@@ -49,24 +51,29 @@ export interface TaskGetPayload extends TaskListRow {
   base_sha: string | null;
   current_attempt: TaskGetCurrentAttempt | null;
   recent_events: TaskGetEvent[];
+  goal: TaskGetGoal | null;
 }
 
 const TASK_LIST_COLUMNS = `
-  task_id, repo_id, state, external_ref, branch_name,
-  attempts_consumed, retry_budget, budget_exhausted,
-  worker_agent, worker_model, reviewer_agent, reviewer_model,
-  created_at, updated_at
+  t.task_id, t.repo_id, COALESCE(t.base_branch, r.base_branch) AS base_branch,
+  t.state, t.external_ref, t.branch_name,
+  t.attempts_consumed, t.retry_budget, t.budget_exhausted,
+  t.worker_execution,
+  t.worker_agent, t.worker_model, t.reviewer_agent, t.reviewer_model,
+  t.created_at, t.updated_at
 `;
 
 interface TaskListRawRow {
   task_id: string;
   repo_id: string;
+  base_branch: string;
   state: string;
   external_ref: string | null;
   branch_name: string;
   attempts_consumed: number;
   retry_budget: number;
   budget_exhausted: number;
+  worker_execution: "oneshot" | "goal";
   worker_agent: string | null;
   worker_model: string | null;
   reviewer_agent: string | null;
@@ -79,12 +86,14 @@ function rowToList(r: TaskListRawRow): TaskListRow {
   return {
     task_id: r.task_id,
     repo_id: r.repo_id,
+    base_branch: r.base_branch,
     state: r.state,
     external_ref: r.external_ref,
     branch_name: r.branch_name,
     attempts_consumed: r.attempts_consumed,
     retry_budget: r.retry_budget,
     budget_exhausted: r.budget_exhausted === 1,
+    worker_execution: r.worker_execution,
     worker_agent: r.worker_agent,
     worker_model: r.worker_model,
     reviewer_agent: r.reviewer_agent,
@@ -97,7 +106,9 @@ function rowToList(r: TaskListRawRow): TaskListRow {
 export function listTasks(db: DB): TaskListRow[] {
   const rows = db
     .query<TaskListRawRow, []>(
-      `SELECT ${TASK_LIST_COLUMNS} FROM tasks ORDER BY created_at, task_id`,
+      `SELECT ${TASK_LIST_COLUMNS}
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        ORDER BY t.created_at, t.task_id`,
     )
     .all();
   return rows.map(rowToList);
@@ -110,6 +121,18 @@ interface TaskGetRawRow extends TaskListRawRow {
   pr_url: string | null;
   head_sha: string | null;
   base_sha: string | null;
+}
+
+export interface TaskGetGoal {
+  goal_id: string;
+  status: string;
+  tokens_used: number;
+  token_budget: number | null;
+  time_used_seconds: number;
+  no_progress_active_count: number;
+  last_attempt_id: number | null;
+  current_handoff_id: number | null;
+  completed_at: string | null;
 }
 
 const RECENT_EVENT_LIMIT = 20;
@@ -142,9 +165,11 @@ function parseTaskAuthors(authorsJson: string | null): TicketAuthor[] {
 export function getTask(db: DB, taskId: string): TaskGetPayload | null {
   const row = db
     .query<TaskGetRawRow, [string]>(
-      `SELECT ${TASK_LIST_COLUMNS}, authors_json, slack_thread_ref,
-              pr_number, pr_url, head_sha, base_sha
-         FROM tasks WHERE task_id = ?`,
+      `SELECT ${TASK_LIST_COLUMNS},
+              t.authors_json, t.slack_thread_ref,
+              t.pr_number, t.pr_url, t.head_sha, t.base_sha
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        WHERE t.task_id = ?`,
     )
     .get(taskId);
   if (!row) return null;
@@ -171,6 +196,17 @@ export function getTask(db: DB, taskId: string): TaskGetPayload | null {
     )
     .all(taskId, RECENT_EVENT_LIMIT);
 
+  const goal =
+    db
+      .query<TaskGetGoal, [string]>(
+        `SELECT goal_id, status, tokens_used, token_budget,
+                time_used_seconds, no_progress_active_count,
+                last_attempt_id, current_handoff_id, completed_at
+           FROM task_goals
+          WHERE task_id = ?`,
+      )
+      .get(taskId) ?? null;
+
   return {
     ...rowToList(row),
     authors: parseTaskAuthors(row.authors_json),
@@ -181,5 +217,6 @@ export function getTask(db: DB, taskId: string): TaskGetPayload | null {
     base_sha: row.base_sha,
     current_attempt: attempt,
     recent_events: events,
+    goal,
   };
 }

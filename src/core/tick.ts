@@ -46,6 +46,7 @@ import {
   type BudgetRetryReason,
   type RetryAttemptRef,
 } from "./retries.ts";
+import { accountGoalFailureAndMaybeLimit } from "./goals.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
 
 export const DEFAULT_MAX_CONCURRENT = 2;
@@ -92,6 +93,7 @@ export interface TickDeps {
   // Passed through to runCancelFinalizer so the cancel sweep also picks
   // up the writeback without a separate wiring.
   linear?: LinearPort;
+  referenceReposRoot?: string | undefined;
 }
 
 export interface TickOptions {
@@ -126,6 +128,7 @@ export interface TickOptions {
   claimTimeoutSeconds?: number;
   maxClaimExpirations?: number;
   maxNonBudgetRespawns?: number;
+  referenceReposRoot?: string | undefined;
 }
 
 export type TickAction =
@@ -135,6 +138,8 @@ export type TickAction =
   | "skipped_no_pending_attempt"
   | "spawn_substrate_failed"
   | "blocker_ingested"
+  | "goal_continuation_scheduled"
+  | "goal_budget_limited"
   | "malformed_signal"
   | "pr_opened"
   | "no_progress"
@@ -184,15 +189,18 @@ interface QueuedTaskRow {
   external_ref: string | null;
   worker_agent: string | null;
   worker_model: string | null;
+  worker_execution: "oneshot" | "goal";
 }
 
 interface RunningTaskRow {
   task_id: string;
   repo_id: string;
   branch_name: string;
+  base_branch: string | null;
   tmux_id: string;
   worktree_path: string;
   cancel_requested_at: string | null;
+  worker_execution: "oneshot" | "goal";
 }
 
 interface PrOpenTaskRow {
@@ -317,12 +325,17 @@ interface CurrentAttemptRow {
   tmux_session: string | null;
   spawned_at: string | null;
   kill_intent: string | null;
+  goal_id: string | null;
+  goal_report_processed_at: string | null;
 }
 
 export async function tick_once(
   deps: TickDeps,
   options: TickOptions = {},
 ): Promise<TickTaskResult[]> {
+  if (options.referenceReposRoot !== undefined) {
+    deps = { ...deps, referenceReposRoot: options.referenceReposRoot };
+  }
   const max = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const agentResolver = resolveTickAgentResolver(options);
   // Linear writebacks are scheduled inside the lock but drained after it
@@ -621,6 +634,7 @@ function processPendingReviewRequest(
       headSha: snapshot.headSha,
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
+      referenceReposRoot: deps.referenceReposRoot,
     },
   );
   if (result.scheduled) {
@@ -648,7 +662,8 @@ function readQueued(db: DB): QueuedTaskRow[] {
   return db
     .query<QueuedTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path,
-              cancel_requested_at, external_ref, worker_agent, worker_model
+              cancel_requested_at, external_ref, worker_agent, worker_model,
+              worker_execution
          FROM tasks
         WHERE state = 'queued'
         ORDER BY created_at, task_id`,
@@ -659,10 +674,13 @@ function readQueued(db: DB): QueuedTaskRow[] {
 function readRunning(db: DB): RunningTaskRow[] {
   return db
     .query<RunningTaskRow, []>(
-      `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path, cancel_requested_at
-         FROM tasks
-        WHERE state = 'running'
-        ORDER BY created_at, task_id`,
+      `SELECT t.task_id, t.repo_id, t.branch_name,
+              COALESCE(t.base_branch, r.base_branch) AS base_branch,
+              t.tmux_id, t.worktree_path,
+              t.cancel_requested_at, t.worker_execution
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        WHERE t.state = 'running'
+        ORDER BY t.created_at, t.task_id`,
     )
     .all();
 }
@@ -821,7 +839,7 @@ function loadCurrentAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
         `SELECT attempt_id, attempt_number, preamble_id,
                 template_id, reason, consumed_budget,
                 remote_sha_at_spawn, pr_existed_at_spawn, tmux_session,
-                spawned_at, kill_intent
+                spawned_at, kill_intent, goal_id, goal_report_processed_at
            FROM attempts
           WHERE task_id = ? AND spawned_at IS NOT NULL
           ORDER BY attempt_id DESC
@@ -846,9 +864,11 @@ function processRunningTask(
     task_id: task.task_id,
     repo_id: task.repo_id,
     branch_name: task.branch_name,
+    base_branch: task.base_branch,
     tmux_id: task.tmux_id,
     worktree_path: task.worktree_path,
     state: "running",
+    worker_execution: task.worker_execution,
   };
   const ctxAttempt: ClassifyContextAttempt = {
     attempt_id: attempt.attempt_id,
@@ -857,6 +877,9 @@ function processRunningTask(
     remote_sha_at_spawn: attempt.remote_sha_at_spawn,
     pr_existed_at_spawn: attempt.pr_existed_at_spawn,
     tmux_session: attempt.tmux_session,
+    spawned_at: attempt.spawned_at,
+    goal_id: attempt.goal_id,
+    goal_report_processed_at: attempt.goal_report_processed_at,
   };
 
   if (attempt.tmux_session === null) {
@@ -1022,6 +1045,12 @@ function outcomeToResult(
         task_id: taskId,
         action: spawnWindow ? "spawn_window_recovered" : "blocker_ingested",
       };
+    case "goal_continuation_scheduled":
+      return { task_id: taskId, action: "goal_continuation_scheduled" };
+    case "goal_budget_limited":
+      return { task_id: taskId, action: "goal_budget_limited" };
+    case "goal_report_processed":
+      return null;
     case "malformed_signal":
       return { task_id: taskId, action: "malformed_signal" };
     case "pr_opened":
@@ -1128,6 +1157,7 @@ function processPrOpenTask(
           headSha: snapshot.headSha,
           reviewerEnabled: true,
           gateQuayOwnedDone: true,
+          referenceReposRoot: deps.referenceReposRoot,
         },
       );
       if (
@@ -1269,6 +1299,7 @@ function processSyntheticReviewLifecycle(
       headSha: snapshot.headSha,
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
+      referenceReposRoot: deps.referenceReposRoot,
     },
   );
 
@@ -1561,7 +1592,6 @@ function scheduleCiFailRetry(
   prevAttempt: RetryAttemptRef,
   snapshot: PrSnapshot,
   fromState: "pr-open" | "pr-review",
-  priorBrief?: string,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");
@@ -1573,7 +1603,6 @@ function scheduleCiFailRetry(
       snapshot,
       fromState,
       now,
-      priorBrief,
     );
     deps.db.exec("COMMIT");
     return { task_id: taskId, action: "ci_failed" };
@@ -1592,7 +1621,6 @@ function applyCiFailRetryInOpenTxn(
   snapshot: PrSnapshot,
   fromState: "pr-open" | "pr-review",
   now: string,
-  priorBrief?: string,
 ): void {
   const failureExcerpt = composeCiFailureExcerpt(snapshot);
   const excerpt = deps.artifactStore.writeArtifact({
@@ -1608,7 +1636,6 @@ function applyCiFailRetryInOpenTxn(
     reason: "ci_fail",
     diagnostics: failureExcerpt,
     fromState,
-    priorBrief,
   });
   deps.db
     .query(
@@ -1935,6 +1962,7 @@ function handleStaleApprovedReview(
       headSha: snapshot.headSha,
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
+      referenceReposRoot: deps.referenceReposRoot,
     },
   );
   return {
@@ -1953,7 +1981,6 @@ function finalizeApprovedReviewBlockedByCi(
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   const content = reviewArtifactContent(posted, task.head_sha);
-  const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
 
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -2003,7 +2030,6 @@ function finalizeApprovedReviewBlockedByCi(
       snapshot,
       "pr-review",
       now,
-      priorCodeBrief,
     );
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -2025,7 +2051,6 @@ function finalizeStaleApprovedReviewBlockedByCi(
 ): TickTaskResult {
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
-  const priorCodeBrief = loadMostRecentNonReviewBrief(deps.db, task.task_id);
 
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -2048,7 +2073,6 @@ function finalizeStaleApprovedReviewBlockedByCi(
       snapshot,
       "pr-review",
       now,
-      priorCodeBrief,
     );
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -2446,27 +2470,6 @@ function reviewArtifactContent(posted: PostedReview, headSha: string): string {
     body: posted.body,
     comments: posted.comments,
   });
-}
-
-function loadMostRecentNonReviewBrief(db: DB, taskId: string): string | undefined {
-  const row = db
-    .query<{ file_path: string }, [string]>(
-      `SELECT ar.file_path
-         FROM artifacts ar
-         JOIN attempts a ON a.attempt_id = ar.attempt_id
-        WHERE ar.task_id = ?
-          AND ar.kind = 'brief'
-          AND a.reason <> 'review_only'
-        ORDER BY ar.artifact_id DESC
-        LIMIT 1`,
-    )
-    .get(taskId);
-  if (!row) return undefined;
-  try {
-    return readFileSync(row.file_path, "utf8");
-  } catch {
-    return undefined;
-  }
 }
 
 function loadAttemptArtifactContent(
@@ -3061,7 +3064,7 @@ function loadLatestAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
         `SELECT attempt_id, attempt_number, preamble_id,
                 template_id, reason, consumed_budget,
                 remote_sha_at_spawn, pr_existed_at_spawn, tmux_session,
-                spawned_at, kill_intent
+                spawned_at, kill_intent, goal_id, goal_report_processed_at
            FROM attempts
           WHERE task_id = ?
           ORDER BY attempt_id DESC
@@ -3218,14 +3221,28 @@ function finalizeKillIntent(
         exitInfo.exitSignal,
         attempt.attempt_id,
       );
+    const diagnostics =
+      reason === "wall_clock"
+        ? "The live worker exceeded max_attempt_duration_seconds and was killed."
+        : "The live worker stopped producing fresh logs past staleness_threshold_seconds and was killed.";
+    const goalLimit = accountGoalFailureAndMaybeLimit(deps, {
+      taskId: task.task_id,
+      attemptId: attempt.attempt_id,
+      goalId: attempt.goal_id,
+      spawnedAt: attempt.spawned_at,
+      endedAt: now,
+      fromState: "running",
+      diagnostics,
+    });
+    if (goalLimit.budgetLimited) {
+      deps.db.exec("COMMIT");
+      return;
+    }
     scheduleDeterministicRetry(deps, {
       taskId: task.task_id,
       prevAttempt: attempt,
       reason,
-      diagnostics:
-        reason === "wall_clock"
-          ? "The live worker exceeded max_attempt_duration_seconds and was killed."
-          : "The live worker stopped producing fresh logs past staleness_threshold_seconds and was killed.",
+      diagnostics,
       fromState: "running",
     });
     deps.db

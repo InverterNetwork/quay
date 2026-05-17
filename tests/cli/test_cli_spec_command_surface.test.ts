@@ -17,6 +17,7 @@ import {
   insertAttempt,
   insertRepo,
   insertTask,
+  seedTaskObjective,
 } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
@@ -112,6 +113,8 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
       "repo-enqueue-flag",
       "--brief-file",
       briefPath,
+      "--base-branch",
+      "dev",
       "--ticket-snapshot-file",
       ticketPath,
       "--external-ref",
@@ -132,12 +135,17 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
 
   const row = h.db
     .query<
-      { external_ref: string | null; slack_thread_ref: string | null },
+      {
+        base_branch: string | null;
+        external_ref: string | null;
+        slack_thread_ref: string | null;
+      },
       [string]
     >(
-      "SELECT external_ref, slack_thread_ref FROM tasks WHERE task_id = ?",
+      "SELECT base_branch, external_ref, slack_thread_ref FROM tasks WHERE task_id = ?",
     )
     .get(enqueueResult.task_id);
+  expect(row?.base_branch).toBe("dev");
   expect(row?.external_ref).toBe("ITRY-900");
   expect(row?.slack_thread_ref).toBe("C123:1700000000.0001");
 
@@ -160,6 +168,7 @@ test("task claim returns claim_id, then submit-brief flag form succeeds", async 
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -256,6 +265,7 @@ test("escalate-human flag form records question and preserves orchestrator claim
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -313,6 +323,7 @@ test("record-human-reply flag form persists answer and returns to claimed state"
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -384,6 +395,7 @@ test("task release-claim accepts --claim-id flag form", async () => {
     repoId,
     state: "awaiting-next-brief",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -413,8 +425,11 @@ test("task list filters by --state, --repo, --external-ref", async () => {
   const repoA = insertRepo(h.db, "repo-list-a");
   const repoB = insertRepo(h.db, "repo-list-b");
   insertTask(h.db, { taskId: "t-a-1", repoId: repoA, state: "queued" });
+  seedTaskObjective(h, "t-a-1");
   insertTask(h.db, { taskId: "t-a-2", repoId: repoA, state: "running" });
+  seedTaskObjective(h, "t-a-2");
   insertTask(h.db, { taskId: "t-b-1", repoId: repoB, state: "queued" });
+  seedTaskObjective(h, "t-b-1");
   // Set an external_ref on one row so we can filter on it.
   h.db.query("UPDATE tasks SET external_ref = ? WHERE task_id = ?").run(
     "ITRY-1",
@@ -448,12 +463,21 @@ test("task list filters by --state, --repo, --external-ref", async () => {
   );
   const byExt = JSON.parse(ioExt.out()).map((r: { task_id: string }) => r.task_id);
   expect(byExt).toEqual(["t-a-1"]);
+
+  const listed = JSON.parse(ioExt.out()) as Array<{ base_branch: string }>;
+  expect(listed[0]?.base_branch).toBe("main");
+
+  const ioGet = bufferIO();
+  await dispatch(["task", "get", "t-a-1"], built.deps, ioGet);
+  const got = JSON.parse(ioGet.out()) as { base_branch: string };
+  expect(got.base_branch).toBe("main");
 });
 
 test("task events returns the append-only log oldest-first", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-events");
   const taskId = insertTask(h.db, { taskId: "t-events", repoId, state: "queued" });
+  seedTaskObjective(h, taskId);
   h.db
     .query(
       `INSERT INTO events (task_id, event_type, from_state, to_state, occurred_at)

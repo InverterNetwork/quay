@@ -3,7 +3,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertAttempt, insertTask } from "../support/fixtures.ts";
+import { insertAttempt, insertTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -36,6 +36,7 @@ test("test_066_named_workflow_does_not_hide_other_failures", async () => {
     repoId,
     state: "pr-open",
   });
+  seedTaskObjective(h, taskId);
   insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-29T07:30:00.000Z" });
 
   const built = buildTickDeps(h);
@@ -80,6 +81,7 @@ test("test_066_named_workflow_does_not_hide_other_failures", async () => {
     repoId: repoId2,
     state: "pr-open",
   });
+  seedTaskObjective(h, taskId2);
   insertAttempt(h.db, {
     taskId: taskId2,
     attemptNumber: 1,

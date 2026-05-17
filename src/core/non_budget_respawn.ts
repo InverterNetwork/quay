@@ -18,11 +18,20 @@
 // the SQL transaction and referenced by `payload_artifact_id` regardless of
 // the schedule-vs-park branch.
 
-import { readFileSync } from "node:fs";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import {
+  composeWorkerPrompt,
+  loadTaskPrBaseBranch,
+  loadOriginalTaskObjective,
+} from "./worker_prompt.ts";
+import {
+  activateGoalForWorkerAttempt,
+  loadGoalId,
+  loadGoalPromptContext,
+} from "./goals.ts";
 
 export type NonBudgetReason = "review" | "conflict";
 
@@ -30,6 +39,7 @@ export interface NonBudgetRetryDeps {
   db: DB;
   clock: Clock;
   artifactStore: ArtifactStore;
+  referenceReposRoot?: string | undefined;
 }
 
 export interface NonBudgetAttemptRef {
@@ -173,22 +183,42 @@ export function scheduleNonBudgetRespawn(
       deps.clock,
       input.reason,
     );
-    const priorBrief = loadMostRecentBrief(deps.db, input.taskId);
-    const retryBrief = composeNonBudgetBrief({
-      reason: input.reason,
-      templateBody: template.body,
-      diagnostics: input.diagnostics,
-      priorBrief,
+    const objective = loadOriginalTaskObjective(deps.db, input.taskId);
+    const prBaseBranch = loadTaskPrBaseBranch(deps.db, input.taskId);
+    const goalContext = loadGoalPromptContext(deps.db, input.taskId);
+    const preambleBody = loadPreambleBody(deps.db, preambleId);
+    const composed = composeWorkerPrompt({
+      preambleBody,
+      taskObjective: objective,
+      prBaseBranch,
+      goalContext,
+      referenceReposRoot: deps.referenceReposRoot,
+      attemptGuidance: { reason: input.reason, body: template.body },
+      diagnostics: {
+        kind:
+          input.reason === "review" ? "review_comments" : "conflict_slice",
+        body: input.diagnostics,
+      },
     });
+
+    const goalId = loadGoalId(deps.db, input.taskId);
+    if (goalId !== null) {
+      const activated = activateGoalForWorkerAttempt(deps.db, input.taskId, now);
+      if (!activated) {
+        throw new Error(
+          `goal ${goalId} for task ${input.taskId} cannot be activated; goal token budget is exhausted`,
+        );
+      }
+    }
 
     const attempt = deps.db
       .query<
         { attempt_id: number },
-        [string, number, number, number, string]
+        [string, number, number, number, string, string | null]
       >(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, template_id, reason, consumed_budget
-         ) VALUES (?, ?, ?, ?, ?, 0)
+           task_id, attempt_number, preamble_id, template_id, reason, consumed_budget, goal_id
+         ) VALUES (?, ?, ?, ?, ?, 0, ?)
          RETURNING attempt_id`,
       )
       .get(
@@ -197,6 +227,7 @@ export function scheduleNonBudgetRespawn(
         preambleId,
         template.template_id,
         input.reason,
+        goalId,
       );
     if (!attempt) throw new Error("non-budget respawn attempt insert returned no row");
 
@@ -204,15 +235,14 @@ export function scheduleNonBudgetRespawn(
       taskId: input.taskId,
       attemptId: attempt.attempt_id,
       kind: "brief",
-      content: retryBrief,
+      content: composed.brief,
       extension: "md",
     });
-    const preamble = loadPreambleBody(deps.db, preambleId);
     deps.artifactStore.writeArtifact({
       taskId: input.taskId,
       attemptId: attempt.attempt_id,
       kind: "final_prompt",
-      content: `${preamble}\n\n${retryBrief}`,
+      content: composed.finalPrompt,
       extension: "md",
     });
 
@@ -343,46 +373,4 @@ function ensureNonBudgetTemplate(
     .get(reason, DEFAULT_NON_BUDGET_TEMPLATES[reason], clock.nowISO());
   if (!inserted) throw new Error("retry template insert returned no row");
   return inserted;
-}
-
-function loadMostRecentBrief(db: DB, taskId: string): string {
-  const row = db
-    .query<{ file_path: string }, [string]>(
-      `SELECT ar.file_path
-         FROM artifacts ar
-         JOIN attempts a ON a.attempt_id = ar.attempt_id
-        WHERE ar.task_id = ?
-          AND ar.kind = 'brief'
-          AND a.reason <> 'review_only'
-        ORDER BY ar.artifact_id DESC
-        LIMIT 1`,
-    )
-    .get(taskId);
-  if (!row) return "(No prior brief artifact was recorded.)";
-  try {
-    return readFileSync(row.file_path, "utf8");
-  } catch {
-    return "(Prior brief artifact file was missing or unreadable.)";
-  }
-}
-
-function composeNonBudgetBrief(input: {
-  reason: NonBudgetReason;
-  templateBody: string;
-  diagnostics: string;
-  priorBrief: string;
-}): string {
-  return [
-    `# Quay non-budget respawn: ${input.reason}`,
-    "",
-    input.templateBody,
-    "",
-    "## Observed context",
-    "",
-    input.diagnostics,
-    "",
-    "## Most recent brief",
-    "",
-    input.priorBrief,
-  ].join("\n");
 }

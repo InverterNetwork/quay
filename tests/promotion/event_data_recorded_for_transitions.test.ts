@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertRepo, insertRunningTask } from "../support/fixtures.ts";
+import { insertRepo, insertRunningTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
 let h: Harness | null = null;
@@ -42,6 +42,7 @@ test("crashed event_data captures exit info and progress predicate state", async
     remoteShaAtSpawn: null,
     prExistedAtSpawn: 0,
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.markDead(t.sessionName!);
@@ -77,6 +78,7 @@ test("no_progress event_data flags PR-existed-at-spawn with unchanged remote", a
     remoteShaAtSpawn: "abc1234",
     prExistedAtSpawn: 1,
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.markDead(t.sessionName!);
@@ -105,6 +107,7 @@ test("blocker_ingested event_data captures blocker hash and bytes", async () => 
     remoteShaAtSpawn: null,
     prExistedAtSpawn: 0,
   });
+  seedTaskObjective(h, t.taskId);
 
   const blockerContent = "Need decision: A vs B before continuing.\n";
   writeFileSync(join(t.worktreePath, ".quay-blocked.md"), blockerContent);
@@ -140,6 +143,7 @@ test("wall_clock_exceeded event_data carries intent and spawn-age", async () => 
     worktreesRoot: join(h.dataDir, "worktrees"),
     spawnedAt: "2026-05-10T13:03:00.000Z", // 2h ago
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.liveSessions.add(t.sessionName!);
@@ -167,6 +171,7 @@ test("spawned event_data carries planned tmux session, worktree, and agent ident
   );
   const repoId = insertRepo(h.db, "repo-event-spawned");
   const taskId = insertTask(h.db, { taskId: "task-event-spawned", repoId });
+  seedTaskObjective(h, taskId);
   const attemptId = insertAttempt(h.db, {
     taskId,
     attemptNumber: 1,
@@ -209,6 +214,7 @@ test("pr_opened event_data carries head SHA, exit info, and predicate state", as
     remoteShaAtSpawn: "spawn-sha-1",
     prExistedAtSpawn: 0,
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.markDead(t.sessionName!);
@@ -238,6 +244,7 @@ test("stale_detected event_data includes last_log_at alongside spawn-age", async
     worktreesRoot: join(h.dataDir, "worktrees"),
     spawnedAt: "2026-05-10T15:00:00.000Z", // 20 min ago, under wall-clock cap
   });
+  seedTaskObjective(h, t.taskId);
 
   const built = buildTickDeps(h);
   built.tmux.liveSessions.add(t.sessionName!);

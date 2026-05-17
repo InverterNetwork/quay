@@ -49,6 +49,12 @@ const AdaptersConfigSchema = z
   })
   .strict();
 
+const ContextConfigSchema = z
+  .object({
+    reference_repos_root: z.string().min(1).optional(),
+  })
+  .strict();
+
 const ReviewerConfigSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -112,6 +118,7 @@ export const ConfigSchema = z
     tick_lock_path: z.string().min(1).optional(),
     supervisor_lock_stale_seconds: positiveInt.optional(),
     adapters: AdaptersConfigSchema.optional(),
+    context: ContextConfigSchema.optional(),
     reviewer: ReviewerConfigSchema.optional(),
   })
   .strict();
@@ -196,6 +203,9 @@ export function tickOptionsFromConfig(config: QuayConfig): TickOptions {
   }
   if (config.max_non_budget_respawns !== undefined) {
     opts.maxNonBudgetRespawns = config.max_non_budget_respawns;
+  }
+  if (config.context?.reference_repos_root !== undefined) {
+    opts.referenceReposRoot = config.context.reference_repos_root;
   }
   return opts;
 }

@@ -24,6 +24,7 @@ export interface EnqueueLinearIssueArgs {
   repoId: string | null;
   identifier: string;
   cliTags: string[];
+  baseBranch: string | null;
   workerAgent: string | null;
   workerModel: string | null;
   reviewerAgent: string | null;
@@ -103,6 +104,7 @@ export async function handleEnqueueLinearIssue(
   // This precedence lets operators override the target for one-off runs
   // without editing the ticket.
   const resolvedRepoId = args.repoId ?? ctx.repo;
+  const resolvedBaseBranch = args.baseBranch ?? ctx.base_branch;
 
   // Deferred idempotency check for the ticket-repo path (no --repo given).
   if (args.repoId === null) {
@@ -124,7 +126,12 @@ export async function handleEnqueueLinearIssue(
   // bypass the schema's charset rule and land in `tasks` raw.
   const mergedTags = mergeNormalizedTags(ctx.tags, args.cliTags);
 
-  const validatorPayload = buildValidatorPayload(ctx, issue, mergedTags);
+  const validatorPayload = buildValidatorPayload(
+    ctx,
+    issue,
+    mergedTags,
+    resolvedBaseBranch,
+  );
 
   let validation;
   try {
@@ -153,6 +160,8 @@ export async function handleEnqueueLinearIssue(
       ticket_snapshot: ctx.ticket_snapshot,
       slack_thread_ref: ctx.slack_thread_ref,
       tags: mergedTags,
+      worker_execution: ctx.worker_execution,
+      base_branch: resolvedBaseBranch ?? undefined,
       authors_json: authorsJson,
       worker_agent: args.workerAgent,
       worker_model: args.workerModel,
@@ -196,6 +205,7 @@ export function buildValidatorPayload(
   ctx: TicketContext,
   issue: LinearIssue,
   mergedTags: string[],
+  baseBranch: string | null = ctx.base_branch,
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     body: issue.body,
@@ -203,7 +213,11 @@ export function buildValidatorPayload(
     tags: mergedTags,
     authors: ctx.authors,
     external_ref: ctx.external_ref,
+    worker_execution: ctx.worker_execution,
   };
+  if (baseBranch !== null) {
+    payload.base_branch = baseBranch;
+  }
   if (ctx.slack_thread_ref !== null) {
     payload.slack_thread = ctx.slack_thread_ref;
   }

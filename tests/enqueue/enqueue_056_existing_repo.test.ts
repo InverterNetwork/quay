@@ -54,3 +54,60 @@ test("test_056_enqueue_with_present_bare_clone_queues_task", () => {
     .get(result.task_id);
   expect(taskState!.state).toBe("queued");
 });
+
+test("enqueue uses task-level base_branch override for fetch, worktree, and task row", () => {
+  h = createHarness();
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+  repos.add({ ...REPO });
+
+  const built = buildEnqueueDeps(h);
+  built.git.seedBareClone(REPO.repo_id);
+
+  h.ids.push("22222222aaaaaaaaaaaaaaaaaaaaaaaa");
+  const result = enqueue(built.deps, {
+    repo_id: REPO.repo_id,
+    external_ref: "ITRY-902",
+    brief: "Brief content",
+    ticket_snapshot: "Ticket body",
+    base_branch: "dev",
+  });
+
+  expect(built.git.calls.find((c) => c.op === "fetch")?.args).toEqual({
+    repoId: REPO.repo_id,
+    ref: "dev",
+  });
+  expect(built.git.calls.find((c) => c.op === "worktreeAdd")?.args).toMatchObject({
+    repoId: REPO.repo_id,
+    baseRef: "origin/dev",
+  });
+
+  const row = h.db
+    .query<{ task_base: string; repo_base: string }, [string]>(
+      `SELECT t.base_branch AS task_base, r.base_branch AS repo_base
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        WHERE t.task_id = ?`,
+    )
+    .get(result.task_id);
+  expect(row).toEqual({ task_base: "dev", repo_base: "main" });
+});
+
+test("enqueue rejects unsafe task-level base_branch override", () => {
+  h = createHarness();
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+  repos.add({ ...REPO });
+
+  const built = buildEnqueueDeps(h);
+  built.git.seedBareClone(REPO.repo_id);
+
+  expect(() =>
+    enqueue(built.deps, {
+      repo_id: REPO.repo_id,
+      external_ref: "ITRY-903",
+      brief: "Brief content",
+      ticket_snapshot: "Ticket body",
+      base_branch: "../main",
+    }),
+  ).toThrow(/base_branch/);
+
+  expect(built.git.countCalls("fetch")).toBe(0);
+});

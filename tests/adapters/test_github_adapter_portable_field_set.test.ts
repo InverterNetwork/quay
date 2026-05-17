@@ -48,6 +48,7 @@ test("fetchPrView requests number/url/baseRefName but never baseRefOid", () => {
             state: "OPEN",
             headRefOid: "head-sha-xyz",
             baseRefName: "main",
+            isDraft: true,
             mergeable: "MERGEABLE",
             reviewDecision: "NONE",
             latestReviews: [],
@@ -84,6 +85,7 @@ test("fetchPrView requests number/url/baseRefName but never baseRefOid", () => {
   expect(snap!.prNumber).toBe(12);
   expect(snap!.prUrl).toBe("https://github.com/example/repo/pull/12");
   expect(snap!.baseRef).toBe("main");
+  expect(snap!.isDraft).toBe(true);
 
   // Cross-check the recorded calls: the rich snapshot view must request
   // portable fields and never baseRefOid.
@@ -102,6 +104,7 @@ test("fetchPrView requests number/url/baseRefName but never baseRefOid", () => {
   expect(fields.has("baseRefName")).toBe(true);
   expect(fields.has("number")).toBe(true);
   expect(fields.has("url")).toBe(true);
+  expect(fields.has("isDraft")).toBe(true);
   expect(fields.has("headRefOid")).toBe(true);
 
   // The merge-base call carried the right operands.

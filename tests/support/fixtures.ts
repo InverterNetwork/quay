@@ -111,6 +111,30 @@ export function insertFinalPromptArtifact(
   }).artifactId;
 }
 
+// Seeds the kind='task_objective' artifact that loadOriginalTaskObjective
+// requires. Real enqueue writes this once per task; tests that bypass enqueue
+// (any test that uses insertTask + retries/respawn/submit_brief) must call
+// this helper explicitly.
+export function seedTaskObjective(
+  h: { db: DB; artifactRoot: string; clock: Clock },
+  taskId: string,
+  body = "Original task objective.",
+): { artifactId: number; filePath: string } {
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  const result = store.writeArtifact({
+    taskId,
+    attemptId: null,
+    kind: "task_objective",
+    content: body,
+    extension: "md",
+  });
+  return { artifactId: result.artifactId, filePath: result.filePath };
+}
+
 export interface InsertRunningOptions {
   taskId?: string;
   repoId?: string;

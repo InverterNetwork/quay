@@ -41,6 +41,9 @@ enabled = true
 bot_token_env = "SLACK_TOKEN"
 max_thread_messages = 200
 
+[context]
+reference_repos_root = "/home/hermes/.hermes/code"
+
 [reviewer]
 enabled = false
 gate_quay_owned_done = false
@@ -79,6 +82,7 @@ reviewer = "claude --permission-mode bypassPermissions --output-format json < {p
 | `max_non_budget_respawns` | `20` | Review/conflict respawns before `non_budget_loop`. |
 | `tick_lock_path` | `${data_dir}/tick.lock` | Supervisor lock path. |
 | `supervisor_lock_stale_seconds` | `30` | Stale lock grace window. |
+| `[context].reference_repos_root` | unset | Optional root containing read-only working-tree mirrors. Immediate child repos are listed in worker and reviewer prompts. |
 
 ## Reviewer
 
@@ -179,8 +183,8 @@ reviewer = "claude"
 reviewer_model = "claude-opus-4-1"
 
 [agents.invocations.codex]
-worker = "codex exec {prompt_file}"
-reviewer = "codex exec {prompt_file}"
+worker = "codex exec --json --dangerously-bypass-approvals-and-sandbox < {prompt_file} > .quay-tool-trace.log"
+reviewer = "codex exec --json --dangerously-bypass-approvals-and-sandbox < {prompt_file} > .quay-tool-trace.log"
 
 [agents.invocations.claude]
 worker = "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json"
@@ -196,10 +200,13 @@ per-attempt artifacts:
   json`. Captured as the `usage` artifact (`quay artifact get <task_id> usage`).
 - `.quay-tool-trace.log` — the debug stream from `--debug --debug-file`.
   Captured as the `tool_trace` artifact (`quay artifact get <task_id> tool_trace`).
+  When the file contains Codex `--json` JSONL events, Quay also synthesizes a
+  normalized `usage` artifact from any model/token totals in that stream.
 
 If you replace the default with a different agent runtime, write the same two
 filenames (or omit the redirects to skip those captures). Quay reads the files
-by name, not by runtime.
+by name, not by runtime. A valid `.quay-usage.json` remains authoritative; the
+Codex JSONL normalizer only runs when that direct usage envelope is absent.
 
 ## Repos Root Behavior
 
@@ -207,6 +214,13 @@ When `repos_root` is omitted, Quay creates `${data_dir}/repos`.
 
 When `repos_root` is set explicitly, Quay does not create it. A missing explicit
 path fails with `repos_root_missing`. This catches typos before enqueueing work.
+
+## Reference Repos Context
+
+When `[context].reference_repos_root` is set, Quay looks for immediate child
+directories that contain `.git` and adds them to generated worker and reviewer
+prompts as read-only context. Missing, unreadable, or empty roots do not block
+enqueue or review; empty roots render an explicit `(none discovered)` list.
 
 ## Environment Variables
 

@@ -239,6 +239,31 @@ test("test_validate_ticket_optional_field_present_is_validated", () => {
   expect(patternErr).toBeDefined();
 });
 
+test("validate_ticket_accepts_safe_optional_base_branch", () => {
+  const { io, run } = pipeJson({
+    ...VALID_DRAFT,
+    base_branch: "release/2026.05",
+  });
+  const result = run();
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(io.out().trim())).toEqual({ valid: true });
+});
+
+test("validate_ticket_rejects_unsafe_optional_base_branch", () => {
+  const { io, run } = pipeJson({
+    ...VALID_DRAFT,
+    base_branch: "../main",
+  });
+  const result = run();
+  expect(result.exitCode).toBe(1);
+  const out = JSON.parse(io.out().trim());
+  const patternErr = out.errors.find(
+    (e: { field: string; code: string }) =>
+      e.field === "base_branch" && e.code === "PATTERN",
+  );
+  expect(patternErr).toBeDefined();
+});
+
 test("test_validate_ticket_unknown_field_is_silently_ignored", () => {
   const { io, run } = pipeJson({
     ...VALID_DRAFT,
@@ -526,7 +551,7 @@ test("shipped default schema parses and matches §6 field set", () => {
     ["authors", "body", "repo", "tags"],
   );
   expect(Object.keys(schema.optional).sort()).toEqual(
-    ["external_ref", "slack_thread"],
+    ["base_branch", "external_ref", "slack_thread", "worker_execution"],
   );
 });
 

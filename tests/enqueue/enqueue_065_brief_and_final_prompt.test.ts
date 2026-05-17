@@ -72,7 +72,21 @@ test("test_065_initial_attempt_has_brief_and_final_prompt", () => {
   expect(ticketRow).not.toBeNull();
   expect(ticketRow!.attempt_id).toBeNull();
 
-  // final_prompt content is preamble + "\n\n" + brief.
+  // task_objective is task-level and contains the raw original brief.
+  const objectiveRow = h.db
+    .query<
+      { attempt_id: number | null; file_path: string; artifact_id: number },
+      [string]
+    >(
+      `SELECT attempt_id, file_path, artifact_id FROM artifacts
+         WHERE task_id = ? AND kind = 'task_objective'`,
+    )
+    .get(result.task_id);
+  expect(objectiveRow).not.toBeNull();
+  expect(objectiveRow!.attempt_id).toBeNull();
+  expect(readFileSync(objectiveRow!.file_path, "utf8")).toBe("Do the thing");
+
+  // final_prompt starts with the preamble and embeds the structured body.
   const preambleId = h.db
     .query<{ preamble_id: number }, [number]>(
       `SELECT preamble_id FROM attempts WHERE attempt_id = ?`,
@@ -81,8 +95,21 @@ test("test_065_initial_attempt_has_brief_and_final_prompt", () => {
   const preambleBody = loadPreambleBody(h.db, preambleId);
 
   const finalContent = readFileSync(finalRows[0]!.file_path, "utf8");
-  expect(finalContent).toBe(`${preambleBody}\n\nDo the thing`);
-
+  expect(finalContent.startsWith(`${preambleBody}\n\n`)).toBe(true);
   const briefContent = readFileSync(briefRows[0]!.file_path, "utf8");
-  expect(briefContent).toBe("Do the thing");
+  expect(finalContent).toBe(`${preambleBody}\n\n${briefContent}`);
+
+  // Brief is the structured composed body. The original objective is wrapped
+  // in a tagged section pointing at the task_objective artifact; the initial
+  // attempt guidance is its own tagged section.
+  expect(briefContent).toContain(
+    `<quay-task-objective artifact-id="${objectiveRow!.artifact_id}"`,
+  );
+  expect(briefContent).toContain('truncated="false"');
+  expect(briefContent).toContain("Do the thing");
+  expect(briefContent).toContain('<quay-pr-target base-branch="main">');
+  expect(briefContent).toContain("Open or update the pull request against base branch main.");
+  expect(briefContent).toContain(
+    '<quay-current-attempt-guidance reason="initial">',
+  );
 });

@@ -12,9 +12,19 @@ import {
   computeTmuxId,
   taskIdShort,
 } from "./branch_slug.ts";
+import { baseBranchNameSchema } from "./base_branch.ts";
 import type { AgentResolver } from "./agents.ts";
 import { QuayError } from "./errors.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import {
+  composeWorkerPrompt,
+  INITIAL_ATTEMPT_GUIDANCE,
+} from "./worker_prompt.ts";
+import {
+  insertTaskGoal,
+  parseWorkerExecution,
+  type WorkerExecution,
+} from "./goals.ts";
 
 export const DEFAULT_RETRY_BUDGET = 5;
 
@@ -34,6 +44,7 @@ export interface EnqueueDeps {
   paths: EnqueuePaths;
   retryBudget?: number;
   agentResolver?: AgentResolver;
+  referenceReposRoot?: string | undefined;
 }
 
 export const enqueueInputSchema = z
@@ -53,6 +64,8 @@ export const enqueueInputSchema = z
     worker_model: z.string().min(1).nullable().optional(),
     reviewer_agent: z.string().min(1).nullable().optional(),
     reviewer_model: z.string().min(1).nullable().optional(),
+    worker_execution: z.enum(["oneshot", "goal"]).optional(),
+    base_branch: baseBranchNameSchema.optional(),
   })
   .strict();
 
@@ -100,6 +113,11 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   }
 
   const taskId = deps.ids.next();
+  const effectiveBaseBranch = input.base_branch ?? repo.base_branch;
+  const workerExecution: WorkerExecution = parseWorkerExecution(
+    input.worker_execution,
+  );
+  const goalId = workerExecution === "goal" ? deps.ids.next() : null;
   const shortId = taskIdShort(taskId);
   const tmuxId = computeTmuxId(input.external_ref, shortId);
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
@@ -164,8 +182,9 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       );
     }
 
-    // Step 2: fetch base branch.
-    deps.git.fetch(repo.repo_id, repo.base_branch);
+    // Step 2: fetch the effective base branch. A task-level override does
+    // not mutate the repo default; it is copied onto the task row below.
+    deps.git.fetch(repo.repo_id, effectiveBaseBranch);
 
     // Step 3: branch resolution + collision check. Returns the bare slug;
     // the local/remote branch is `quay/<slug>` per spec §13. We carry the
@@ -185,7 +204,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       repo.repo_id,
       worktreePath,
       fullBranchName,
-      `origin/${repo.base_branch}`,
+      `origin/${effectiveBaseBranch}`,
     );
     worktreeCreated = true;
     branchCreated = true;
@@ -213,7 +232,6 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       "initial",
     );
     const preambleBody = loadPreambleBody(deps.db, preambleId);
-    const finalPrompt = `${preambleBody}\n\n${input.brief}`;
     const now = deps.clock.nowISO();
 
     deps.db.exec("BEGIN");
@@ -222,22 +240,24 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       deps.db
         .query(
           `INSERT INTO tasks (
-             task_id, repo_id, external_ref, state, branch_name, tmux_id, worktree_path,
-             retry_budget, slack_thread_ref, authors_json,
+             task_id, repo_id, external_ref, state, branch_name, base_branch, tmux_id, worktree_path,
+             retry_budget, slack_thread_ref, authors_json, worker_execution,
              worker_agent, worker_model, reviewer_agent, reviewer_model,
              created_at, updated_at
-           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
           repo.repo_id,
           input.external_ref ?? null,
           fullBranchName,
+          effectiveBaseBranch,
           tmuxId,
           worktreePath,
           retryBudget,
           input.slack_thread_ref ?? null,
           input.authors_json ?? null,
+          workerExecution,
           agentSnapshot.worker_agent,
           agentSnapshot.worker_model,
           agentSnapshot.reviewer_agent,
@@ -262,13 +282,16 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       }
 
       const attemptRow = deps.db
-        .query<{ attempt_id: number }, [string, number, number, string, number]>(
+        .query<
+          { attempt_id: number },
+          [string, number, number, string, number, string | null]
+        >(
           `INSERT INTO attempts (
-             task_id, attempt_number, preamble_id, reason, consumed_budget
-           ) VALUES (?, ?, ?, ?, ?)
+             task_id, attempt_number, preamble_id, reason, consumed_budget, goal_id
+           ) VALUES (?, ?, ?, ?, ?, ?)
            RETURNING attempt_id`,
         )
-        .get(taskId, 1, preambleId, "initial", 1);
+        .get(taskId, 1, preambleId, "initial", 1, goalId);
       if (!attemptRow) throw new Error("attempt insert returned no row");
       attemptId = attemptRow.attempt_id;
 
@@ -283,11 +306,60 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         writtenArtifactPaths.push(t.filePath);
       }
 
+      // Stable task objective: one task-level artifact that every later
+      // code-worker attempt loads via loadOriginalTaskObjective().
+      const objectiveArtifact = deps.artifactStore.writeArtifact({
+        taskId,
+        attemptId: null,
+        kind: "task_objective",
+        content: input.brief,
+        extension: "md",
+      });
+      writtenArtifactPaths.push(objectiveArtifact.filePath);
+
+      if (workerExecution === "goal") {
+        if (goalId === null) throw new Error("goal_id missing for goal task");
+        insertTaskGoal(deps.db, {
+          taskId,
+          goalId,
+          objective: input.brief,
+          createdAt: now,
+        });
+      }
+
+      const composed = composeWorkerPrompt({
+        preambleBody,
+        taskObjective: {
+          body: input.brief,
+          artifactId: objectiveArtifact.artifactId,
+          filePath: objectiveArtifact.filePath,
+        },
+        prBaseBranch: effectiveBaseBranch,
+        referenceReposRoot: deps.referenceReposRoot,
+        goalContext:
+          workerExecution === "goal" && goalId !== null
+            ? {
+                goalId,
+                status: "active",
+                objective: input.brief,
+                objectiveArtifactId: objectiveArtifact.artifactId,
+                objectiveFilePath: objectiveArtifact.filePath,
+                tokensUsed: 0,
+                tokenBudget: null,
+                timeUsedSeconds: 0,
+              }
+            : undefined,
+        attemptGuidance: {
+          reason: "initial",
+          body: INITIAL_ATTEMPT_GUIDANCE,
+        },
+      });
+
       const briefArtifact = deps.artifactStore.writeArtifact({
         taskId,
         attemptId,
         kind: "brief",
-        content: input.brief,
+        content: composed.brief,
         extension: "md",
       });
       writtenArtifactPaths.push(briefArtifact.filePath);
@@ -296,7 +368,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         taskId,
         attemptId,
         kind: "final_prompt",
-        content: finalPrompt,
+        content: composed.finalPrompt,
         extension: "md",
       });
       writtenArtifactPaths.push(finalArtifact.filePath);

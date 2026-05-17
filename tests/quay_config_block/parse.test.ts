@@ -119,8 +119,63 @@ test("test_quay_config_block_ignores_unknown_keys", () => {
   expect(parsed!.authors).toEqual([{ name: "A", slack_id: "U001" }]);
   // The block type does not surface unknown keys.
   expect(Object.keys(parsed!).sort()).toEqual(
-    ["authors", "repo", "slack_thread_ref", "tags"].sort(),
+    [
+      "authors",
+      "base_branch",
+      "repo",
+      "slack_thread_ref",
+      "tags",
+      "worker_execution",
+    ].sort(),
   );
+});
+
+test("test_quay_config_block_parses_base_branch_override", () => {
+  const body = block(
+    [
+      "repo: test-repo",
+      "base_branch: dev/release-2026.05",
+      "tags:",
+      "  - foo",
+      "authors:",
+      "  - name: A",
+      "    slack_id: U001",
+    ].join("\n"),
+  );
+  const parsed = parseQuayConfigBlock(body);
+  expect(parsed!.base_branch).toBe("dev/release-2026.05");
+});
+
+test("test_quay_config_block_rejects_unsafe_base_branch_override", () => {
+  const body = block(
+    [
+      "repo: test-repo",
+      "base_branch: ../../main",
+      "tags:",
+      "  - foo",
+      "authors:",
+      "  - name: A",
+      "    slack_id: U001",
+    ].join("\n"),
+  );
+  const err = expectBlockInvalid(() => parseQuayConfigBlock(body));
+  expect(err.details?.detail).toMatch(/base_branch/);
+});
+
+test("test_quay_config_block_parses_worker_execution_goal", () => {
+  const body = block(
+    [
+      "repo: test-repo",
+      "worker_execution: goal",
+      "tags:",
+      "  - foo",
+      "authors:",
+      "  - name: A",
+      "    slack_id: U001",
+    ].join("\n"),
+  );
+  const parsed = parseQuayConfigBlock(body);
+  expect(parsed!.worker_execution).toBe("goal");
 });
 
 test("test_quay_config_block_decodes_slack_p_format_correctly", () => {
