@@ -229,6 +229,73 @@ test("validateAgentSelection flags a registered entry that's missing the chosen 
   ).toThrow(/reviewer/);
 });
 
+test("resolver leaves hermes invocations untouched when a model is configured", () => {
+  // Hermes-backed Codex selects the model through Hermes' own YAML
+  // config; appending `--model <x>` would be passed as a hermes CLI
+  // flag and fail. The resolved model still rides on the attempt row
+  // for attribution.
+  h = createHarness();
+  insertRepo(h.db, "repo-hermes");
+
+  const resolver = createAgentResolver({
+    db: h.db,
+    config: {
+      agents: {
+        worker: "hermes_codex",
+        worker_model: "gpt-5.1-codex",
+        invocations: {
+          hermes_codex: {
+            worker:
+              "hermes chat --quiet --query-file {prompt_file} --toolsets file,terminal",
+          },
+        },
+      },
+    },
+  });
+
+  const resolved = resolver.resolve("repo-hermes", "worker");
+  expect(resolved.agent).toBe("hermes_codex");
+  expect(resolved.model).toBe("gpt-5.1-codex");
+  expect(resolved.invocation).toBe(
+    "hermes chat --quiet --query-file {prompt_file} --toolsets file,terminal",
+  );
+});
+
+test("resolver treats any hermes_-prefixed agent as model-flag-skipping", () => {
+  // The browser variant is a separate registered invocation but should
+  // follow the same "Hermes owns model selection" rule.
+  h = createHarness();
+  insertRepo(h.db, "repo-hermes-browser");
+  h.db
+    .query(`UPDATE repos SET agent_worker = ? WHERE repo_id = ?`)
+    .run("hermes_codex_browser", "repo-hermes-browser");
+
+  const resolver = createAgentResolver({
+    db: h.db,
+    config: {
+      agents: {
+        worker: "claude",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          hermes_codex_browser: {
+            worker:
+              "hermes chat --quiet --query-file {prompt_file} --toolsets file,terminal,browser,vision",
+          },
+        },
+      },
+    },
+  });
+
+  const resolved = resolver.resolve("repo-hermes-browser", "worker", {
+    agent: "hermes_codex_browser",
+    model: "gpt-5.1-codex",
+  });
+  expect(resolved.agent).toBe("hermes_codex_browser");
+  expect(resolved.invocation).toBe(
+    "hermes chat --quiet --query-file {prompt_file} --toolsets file,terminal,browser,vision",
+  );
+});
+
 test("registeredAgents lists every entry under [agents.invocations] plus the seeded claude", () => {
   h = createHarness();
   const resolver = createAgentResolver({
