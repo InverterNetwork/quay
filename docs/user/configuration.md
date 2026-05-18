@@ -73,7 +73,7 @@ reviewer = "claude --permission-mode bypassPermissions --output-format json < {p
 | `retry_budget` | `5` | Copied onto new tasks at enqueue time. |
 | `agent_invocation` | unset | Legacy shorthand for `[agents.invocations.claude].worker` and `.reviewer`. Prefer `[agents]` for new deployments. |
 | `[agents].worker` / `[agents].reviewer` | `claude` | Global role defaults. Each value names an entry under `[agents.invocations]`. |
-| `[agents].worker_model` / `[agents].reviewer_model` | unset | Optional global role model defaults. Quay injects these as `--model <value>` for supported runtimes (`claude`, `codex`). |
+| `[agents].worker_model` / `[agents].reviewer_model` | unset | Optional global role model defaults. Quay injects these as `--model <value>` for supported runtimes (`claude`, `codex`). For `hermes_*` runtimes the model is selected through Hermes' own YAML config; Quay records the value on the attempt row but does not append `--model`. |
 | `max_attempt_duration_seconds` | `3600` | Live worker wall-clock kill threshold. |
 | `staleness_threshold_seconds` | `600` | Live worker no-fresh-log kill threshold. |
 | `max_spawn_failures` | `3` | Repeated spawn failures before `worktree_error`. |
@@ -207,6 +207,65 @@ If you replace the default with a different agent runtime, write the same two
 filenames (or omit the redirects to skip those captures). Quay reads the files
 by name, not by runtime. A valid `.quay-usage.json` remains authoritative; the
 Codex JSONL normalizer only runs when that direct usage envelope is absent.
+
+### Hermes-Backed Codex
+
+Quay can run Codex through Hermes' app-server runtime instead of invoking
+`codex exec` directly. The advantage is that Hermes owns the Codex runtime
+plumbing (JSONL parsing, noninteractive behaviour, future Codex changes) and
+can expose extra tools — including a browser toolset — back into Codex via
+MCP. Quay still owns task lifecycle, prompt composition, and artifact capture.
+
+```toml
+[agents]
+worker = "hermes_codex"
+reviewer = "hermes_codex"
+
+[agents.invocations.hermes_codex]
+worker = "hermes chat --quiet --query-file {prompt_file} --toolsets file,terminal"
+reviewer = "hermes chat --quiet --query-file {prompt_file} --toolsets file,terminal"
+
+[agents.invocations.hermes_codex_browser]
+worker = "hermes chat --quiet --query-file {prompt_file} --toolsets file,terminal,browser,vision"
+```
+
+Hermes' stdout under `--quiet` lands in `.quay-session.log` via tmux
+pipe-pane and is available as the `pane_log` artifact. If your Hermes
+build can emit Codex's structured JSONL stream to a worktree file,
+redirect or tee it to `.quay-tool-trace.log` and Quay will normalize
+model + token totals into the `usage` artifact via the same code path used
+for direct `codex exec`. Without that redirect, the final response and tool
+flow are still recoverable from the pane log; only the normalized usage
+envelope is missing.
+
+The browser variant is registered as a separate invocation so an operator can
+opt repos or individual tasks into browser tooling without flipping it on
+globally. Select it per-repo with `quay repo update --agent-worker
+hermes_codex_browser` or per-task with `quay enqueue --worker-agent
+hermes_codex_browser`.
+
+Hermes selects the Codex model through its own YAML (`model.openai_runtime:
+codex_app_server` plus the chosen `model:` entry), so `worker_model` /
+`reviewer_model` on the `[agents]` block are recorded on the attempt row for
+attribution but never appended to the invocation as `--model`. The runtime
+model the agent actually used is also backfilled from the Codex JSONL trace
+into `attempts.agent_model` when not set explicitly.
+
+**Tradeoff: direct `codex exec` vs `hermes_codex`.** Direct `codex exec`
+keeps Quay's substrate minimal and avoids the Hermes dependency; pick it
+when Hermes is not deployed alongside Quay or when you want to debug Codex
+behaviour without an extra runtime in the loop. `hermes_codex` is preferred
+when you want browser tooling, Hermes' MCP tool exposure, or a single
+upgrade path as Codex's runtime evolves. Both invocation types can coexist:
+register both blocks and select per-repo or per-task.
+
+**Failure modes.** Hermes is treated as an external prerequisite — Quay does
+not bootstrap it. A missing `hermes` binary, an unreadable Hermes config, or
+a misconfigured app-server runtime surfaces in the pane log
+(`.quay-session.log`) and on `.quay-exit-code`; the dead-worker classifier
+records the exit and the operator follows up with `hermes config show` or
+similar. Browser-toolset configuration (local Chromium, Browser Use,
+Browserbase credentials) lives on the Hermes side; Quay does not validate it.
 
 ## Repos Root Behavior
 
