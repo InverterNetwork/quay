@@ -232,7 +232,9 @@ type PrTerminalFromState =
   | "waiting_human"
   | "non_budget_loop"
   | "worktree_error"
-  | "orchestrator_loop";
+  | "orchestrator_loop"
+  | "queued"
+  | "running";
 
 interface ParkedPrTerminalTaskRow {
   task_id: string;
@@ -242,6 +244,24 @@ interface ParkedPrTerminalTaskRow {
   worktree_path: string;
   pr_number: number | null;
   cancel_requested_at: string | null;
+}
+
+// Queued / running tasks with a Quay-owned PR don't poll PR state via any
+// per-state handler — `processRunningTask` looks at the worker pane, and
+// `promoteAndSpawn` only checks cancel intent. If a human closes the PR
+// unmerged while the task is in one of these states (typical repro: the
+// task bounced from pr-review back to queued via CHANGES_REQUESTED, then
+// the human closed the PR before the next worker attempt), tick will keep
+// spawning workers that push to the same branch and open replacement PRs.
+// The closed-unmerged sweep runs before promotion / dead-worker
+// classification and finalises any such task to `closed_unmerged`.
+interface ClosedUnmergedCandidateRow {
+  task_id: string;
+  repo_id: string;
+  state: "queued" | "running";
+  branch_name: string;
+  worktree_path: string;
+  pr_number: number;
 }
 
 interface ReviewAttemptTaskRow {
@@ -379,12 +399,32 @@ export async function tick_once(
       }
     }
 
+    // Closed-unmerged sweep for queued + running tasks. Other states
+    // (pr-open, done, pr-review, synthetic, parked) already short-circuit
+    // to terminal in their per-state handlers; queued + running are the gap
+    // — neither processRunningTask nor promoteAndSpawn polls PR state, so
+    // a human closing the PR while the task is mid-respawn would otherwise
+    // let the next worker push and open a replacement PR.
+    const closedUnmergedIds = new Set<string>();
+    for (const task of readClosedUnmergedCandidates(deps.db)) {
+      if (cancelledIds.has(task.task_id)) continue;
+      try {
+        const result = processClosedUnmergedQuayPr(deps, task);
+        if (result !== null) {
+          results.push(result);
+          closedUnmergedIds.add(task.task_id);
+        }
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
     // Snapshot active tasks once per tick (spec §5 "for each task in active
     // states"). Processing running first lets dead-worker classification run,
     // but tasks that transition through `queued` mid-tick are not promoted
     // until the next tick — the retry latency budget is one tick interval.
     const runningSnapshot = readRunning(deps.db).filter(
-      (t) => !cancelledIds.has(t.task_id),
+      (t) => !cancelledIds.has(t.task_id) && !closedUnmergedIds.has(t.task_id),
     );
     const syntheticReviewLifecycleSnapshot = readSyntheticReviewLifecycle(
       deps.db,
@@ -416,7 +456,7 @@ export async function tick_once(
       (t) => !cancelledIds.has(t.task_id),
     );
     const queuedSnapshot = readQueued(deps.db).filter(
-      (t) => !cancelledIds.has(t.task_id),
+      (t) => !cancelledIds.has(t.task_id) && !closedUnmergedIds.has(t.task_id),
     );
 
     for (const task of runningSnapshot) {
@@ -767,6 +807,21 @@ function readPrReview(db: DB): PrReviewTaskRow[] {
          FROM tasks
         WHERE state = 'pr-review'
         ORDER BY created_at, task_id`,
+    )
+    .all();
+}
+
+function readClosedUnmergedCandidates(
+  db: DB,
+): ClosedUnmergedCandidateRow[] {
+  return db
+    .query<ClosedUnmergedCandidateRow, []>(
+      `SELECT task_id, repo_id, state, branch_name, worktree_path, pr_number
+         FROM tasks
+        WHERE state IN ('queued', 'running')
+          AND pr_number IS NOT NULL
+          AND cancel_requested_at IS NULL
+        ORDER BY task_id`,
     )
     .all();
 }
@@ -1344,6 +1399,37 @@ function processPrReviewTerminal(
     return null;
   }
   return finalizePrTerminal(deps, task, attempt, snapshot.state, "pr-review");
+}
+
+function processClosedUnmergedQuayPr(
+  deps: TickDeps,
+  task: ClosedUnmergedCandidateRow,
+): TickTaskResult | null {
+  // Probe the specific PR Quay opened (pr_number), not the branch. A
+  // human-opened replacement PR on the same branch would resolve via
+  // `prSnapshot(branch)` and mask the original closure; addressing by
+  // number keeps the invariant scoped to "the PR we own".
+  const snapshot = deps.github.prSnapshotByNumber(task.repo_id, task.pr_number);
+  if (snapshot === null) return null;
+  if (snapshot.state !== "closed_unmerged") return null;
+
+  const attempt = loadLatestAttempt(deps.db, task.task_id);
+  if (!attempt) return null;
+
+  // For a running task, kill the worker pane before the terminal commit so
+  // we don't race the worker pushing a fresh commit and `gh pr create`-ing
+  // a replacement PR between this snapshot and the cleanup matrix.
+  if (
+    task.state === "running" &&
+    attempt.tmux_session !== null &&
+    deps.tmux.isAlive(attempt.tmux_session)
+  ) {
+    try {
+      deps.tmux.kill(attempt.tmux_session);
+    } catch {}
+  }
+
+  return finalizePrTerminal(deps, task, attempt, "closed_unmerged", task.state);
 }
 
 function processParkedPrTerminal(
