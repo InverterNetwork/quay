@@ -163,21 +163,28 @@ function collectCodexJsonlUsageArtifact(
   }
   if (raw.length === 0) return {};
 
-  const usage = normalizeCodexJsonlUsage(raw);
-  if (usage === null) return {};
+  const scan = scanCodexJsonl(raw);
+  if (scan === null) return {};
 
-  try {
-    deps.artifactStore.writeArtifact({
-      taskId,
-      attemptId,
-      kind: "usage",
-      content: JSON.stringify(usage),
-      extension: "json",
-    });
-  } catch {
-    // Same best-effort/idempotent behaviour as direct usage capture.
+  if (scan.usage !== null) {
+    try {
+      deps.artifactStore.writeArtifact({
+        taskId,
+        attemptId,
+        kind: "usage",
+        content: JSON.stringify(scan.usage),
+        extension: "json",
+      });
+    } catch {
+      // Same best-effort/idempotent behaviour as direct usage capture.
+    }
   }
-  return usage.model !== undefined ? { resolvedModel: usage.model } : {};
+  // Backfill the model whether or not the trace carried token totals — early
+  // crashes, cancellations, and kill-window exits can flush
+  // `turn_context.payload.model` to the trace without ever emitting a
+  // `token_count` event, and the resolved model is still the right answer
+  // for operator-facing attribution.
+  return scan.model !== undefined ? { resolvedModel: scan.model } : {};
 }
 
 export interface NormalizedCodexUsage {
@@ -207,9 +214,18 @@ interface UsageCandidate {
 
 type TokenValue = number | null | undefined;
 
-export function normalizeCodexJsonlUsage(
-  jsonl: string,
-): NormalizedCodexUsage | null {
+// Single-pass scan of a Codex tool-trace JSONL stream. Returns the resolved
+// model (when any event carried one) and the best-scoring token totals
+// (`usage`) — or null when the trace is malformed (any non-JSON line, any
+// non-object payload). Decoupling the two means an early-exit attempt that
+// only flushed `turn_context.payload.model` before dying can still backfill
+// `attempts.agent_model`, even though no `token_count` event ever fired.
+interface CodexJsonlScanResult {
+  model?: string;
+  usage: NormalizedCodexUsage | null;
+}
+
+function scanCodexJsonl(jsonl: string): CodexJsonlScanResult | null {
   let model: string | undefined;
   let best: (UsageCandidate & { index: number }) | null = null;
   let parsedAnyLine = false;
@@ -243,9 +259,17 @@ export function normalizeCodexJsonlUsage(
     }
   }
 
-  if (!parsedAnyLine || best === null) return null;
+  if (!parsedAnyLine) return null;
 
-  const totals = { ...best.totals };
+  const usage = best === null ? null : finalizeNormalizedUsage(best.totals, model);
+  return model !== undefined ? { model, usage } : { usage };
+}
+
+function finalizeNormalizedUsage(
+  source: TokenTotals,
+  model: string | undefined,
+): NormalizedCodexUsage | null {
+  const totals = { ...source };
   if (
     totals.total_tokens === undefined &&
     typeof totals.input_tokens === "number" &&
@@ -264,6 +288,15 @@ export function normalizeCodexJsonlUsage(
   copyToken(normalized, "total_tokens", totals.total_tokens);
 
   return hasNumericToken(normalized) ? normalized : null;
+}
+
+// Public wrapper retained for tests and external callers that just want the
+// normalized usage envelope without the model-only backfill branch.
+export function normalizeCodexJsonlUsage(
+  jsonl: string,
+): NormalizedCodexUsage | null {
+  const scan = scanCodexJsonl(jsonl);
+  return scan?.usage ?? null;
 }
 
 function collectUsageCandidates(value: unknown, path: string[] = []): UsageCandidate[] {

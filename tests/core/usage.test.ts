@@ -333,6 +333,36 @@ test("returns resolved model from Codex turn_context.payload.model", () => {
   expect(result.resolvedModel).toBe("gpt-5.5");
 });
 
+test("backfills model from Codex trace that never emitted token_count", () => {
+  h = createHarness();
+  const { taskId, attemptId } = setupAttempt();
+
+  // Early crash / cancel-window kill: turn_context lands but the worker
+  // dies before any token_count event. Today this leaves agent_model NULL;
+  // the resolved-model backfill must still fire.
+  const trace = [
+    JSON.stringify({
+      type: "turn_context",
+      payload: { model: "gpt-5.5", cwd: "/tmp" },
+    }),
+  ].join("\n");
+  writeFileSync(join(h.dataDir, ".quay-tool-trace.log"), `${trace}\n`);
+
+  const result = collectUsageArtifact(deps(), taskId, attemptId, h.dataDir);
+
+  expect(result.resolvedModel).toBe("gpt-5.5");
+  const usageCount = h.db
+    .query<{ n: number }, [string, number]>(
+      `SELECT COUNT(*) AS n FROM artifacts
+         WHERE task_id = ? AND attempt_id = ? AND kind = 'usage'`,
+    )
+    .get(taskId, attemptId);
+  expect(usageCount!.n).toBe(0);
+
+  persistResolvedAttemptModel(h.db, attemptId, result.resolvedModel);
+  expect(attemptModel(attemptId)).toBe("gpt-5.5");
+});
+
 test("direct usage envelope reports no resolved model", () => {
   h = createHarness();
   const { taskId, attemptId } = setupAttempt();
