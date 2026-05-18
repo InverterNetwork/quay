@@ -129,8 +129,8 @@ Flag:        budget_exhausted (set on awaiting-next-brief; orchestrator reads vi
 
 | State | Meaning | Worker alive? | Tick activity |
 |---|---|---|---|
-| `queued` | Registered, waiting for a concurrent slot. | No | Capacity check; spawn when slot opens. |
-| `running` | Worker session active. | Yes (or recently) | Liveness, staleness, dead-with-PR, dead-with-signal, crash detection. |
+| `queued` | Registered, waiting for a concurrent slot. | No | Closed-unmerged sweep first (if the task's Quay-owned PR was closed by a human between this tick and the last, finalize → `closed_unmerged` before any spawn); otherwise capacity check and spawn when slot opens. |
+| `running` | Worker session active. | Yes (or recently) | Closed-unmerged sweep first (kill the worker pane — or the canonical session name in the spawn window — and finalize → `closed_unmerged` so the worker can't push a fresh commit and `gh pr create` a replacement PR); otherwise liveness, staleness, dead-with-PR, dead-with-signal, crash detection. |
 | `pr-open` | PR opened by worker; awaiting CI. | No (worker exits after PR) | Poll PR state (merged / closed transitions to terminal); poll `mergeable`; poll CI. |
 | `done` | CI passed; awaiting human review/merge. **Not terminal.** | No | Poll PR state, review decision, `mergeable`. |
 | `awaiting-next-brief` | Blocker ingested, human reply ingested, or retry budget exhausted; awaiting orchestrator pickup. | No | Terminal PR sweep first: if the associated PR is merged or closed, cleanup and transition terminal. Otherwise inert; orchestrator pulls + claims. |
@@ -248,6 +248,28 @@ for each task in active states:
       cancel any pending or claimed orchestrator handoffs
       transition → closed_unmerged
       continue to next task
+
+  # Queued/running closed-unmerged sweep. pr-open / done / pr-review /
+  # synthetic-review handlers all short-circuit to terminal when their PR
+  # snapshot reports merged or closed_unmerged. queued and running are the
+  # gap — neither promote-to-running nor dead-worker classification polls
+  # PR state. A human closing the PR mid-respawn (typical: pr-review →
+  # queued via CHANGES_REQUESTED) would otherwise let the next worker push
+  # and open a replacement PR on the same branch.
+  if task.state IN (queued, running) AND task.pr_number IS NOT NULL:
+    pr = gh pr view task.pr_number
+    if pr.state == closed_unmerged:
+      if task.state == running:
+        kill attempts.tmux_session (or quay-task-{tmux_id}-{attempt_number}
+          when tmux_session is NULL — spawn-window orphan) before cleanup,
+          so the worker can't race the matrix and gh pr create a replacement
+      cleanup per closed_unmerged terminal rules
+      transition → closed_unmerged
+      continue to next task
+    # Probe failures (transient gh / GitHub errors) record tick_error and
+    # exclude the task from this tick's spawn snapshot. The next tick
+    # re-probes. Falling through to spawn here would re-introduce the
+    # exact regression this sweep is meant to prevent.
 
   switch task.state:
 
@@ -657,7 +679,7 @@ The preamble tells the worker **eight things and nothing else**:
 1. **Blocker contract.** If you cannot make progress, write `.quay-blocked.md` containing prose explaining what happened, then exit cleanly.
 2. **Exit expectations.** Exit when (a) you've opened a PR, (b) you've written a blocker file, or (c) you've decided you cannot complete the task. Do not loop indefinitely. Do not sleep waiting for input — there is no input channel.
 3. **Workspace boundary.** Work inside `<worktree path>`. `.quay-*` files are reserved for orchestrator ↔ worker communication, with two exceptions: you may **write** `.quay-blocked.md` (per rule 1), and you may **read but not modify** `.quay-prompt.md` (your own input). Do not touch any other `.quay-*` file. Do not push to branches other than the one you are on.
-4. **PR contract (idempotent).** When done, push the branch. Then check whether a PR already exists for this branch (e.g. `gh pr list --head <branch_name>`). If none exists, open one via `gh pr create` against `<base branch>` and include the ticket reference in the title or body. **If a PR already exists, do NOT create a duplicate — your push has already updated it.** Exit after the push (and PR creation, if applicable).
+4. **PR contract (idempotent).** When done, push the branch. Then check whether a PR already exists for this branch (e.g. `gh pr list --head <branch_name>`). If none exists, open one via `gh pr create` against `<base branch>`. **If a PR already exists, do NOT create a duplicate — your push has already updated it.** A respawn may run `gh pr edit --title` only when its work materially changed the PR's scope and the existing title no longer fits. PR titles must start with a conventional-commit prefix — `feat:` for new user-visible behavior, `fix:` for repairing broken or incorrect behavior, `chore:` for everything else (refactors, docs, build/CI, dependency bumps); when in doubt between `feat` and `chore`, pick `chore` unless the change adds behavior the user can observe. The ticket reference goes in the PR body or relies on the branch name; it does not lead the title. Exit after the push (and PR creation, if applicable).
 5. **Repo conventions pointer.** Follow the repo's contribution guide at `<contribution_guide_path>` if present.
 6. **No interactive prompts.** Do not call any tool requiring interactive input (no editor opens, no `gh auth login`, no shell `read`).
 7. **Tooling environment.** Dependencies are already installed by Quay. Do not re-run install commands.

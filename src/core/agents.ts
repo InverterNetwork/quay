@@ -203,6 +203,13 @@ function applyAgentModel(agent: string, invocation: string, model: string | null
   if (model === null) return invocation;
   if (agent === "codex") return `${invocation} --model ${shellQuote(model)}`;
   if (agent === "claude") return `${invocation} --model ${shellQuote(model)}`;
+  // Hermes-backed runtimes (e.g. `hermes_codex`, `hermes_codex_browser`)
+  // select the model through Hermes' own YAML config, not a CLI flag, so
+  // Quay must not append `--model <x>` here. The resolved model is still
+  // recorded on `attempts.agent_model` for attribution; the runtime
+  // model the agent actually used backfills from the Codex JSONL trace
+  // via `scanCodexJsonl` in usage.ts.
+  if (agent.startsWith("hermes")) return invocation;
   throw new Error(
     `agent "${agent}" does not support configured model "${model}"`,
   );

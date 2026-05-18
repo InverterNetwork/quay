@@ -36,16 +36,49 @@ export interface UsageDeps {
   artifactStore: ArtifactStore;
 }
 
+// Carries metadata derived from the captured envelope that callers may want to
+// persist outside the artifact bytes. Today only `resolvedModel` is surfaced
+// (Codex JSONL `turn_context.payload.model` and friends) so callers can fill
+// in `attempts.agent_model` when the intended model was never set.
+export interface UsageCollectionResult {
+  resolvedModel?: string;
+}
+
 export function collectUsageArtifact(
   deps: UsageDeps,
   taskId: string,
   attemptId: number,
   worktreePath: string,
-): void {
+): UsageCollectionResult {
   if (collectDirectUsageArtifact(deps, taskId, attemptId, worktreePath) !== "missing") {
-    return;
+    return {};
   }
-  collectCodexJsonlUsageArtifact(deps, taskId, attemptId, worktreePath);
+  return collectCodexJsonlUsageArtifact(deps, taskId, attemptId, worktreePath);
+}
+
+// Fills in `attempts.agent_model` from a resolved runtime model (typically the
+// Codex JSONL session model) when the column is currently NULL. Never
+// overwrites an explicitly recorded model: the intended-model snapshot taken
+// at spawn time wins by definition.
+export function persistResolvedAttemptModel(
+  db: DB,
+  attemptId: number,
+  resolvedModel: string | undefined,
+): void {
+  if (resolvedModel === undefined) return;
+  const trimmed = resolvedModel.trim();
+  if (trimmed.length === 0) return;
+  try {
+    db.query(
+      `UPDATE attempts
+          SET agent_model = ?
+        WHERE attempt_id = ?
+          AND agent_model IS NULL`,
+    ).run(trimmed, attemptId);
+  } catch {
+    // Best-effort, mirroring the rest of usage capture: never block the
+    // terminal transition because of a metadata backfill.
+  }
 }
 
 type DirectUsageResult = "captured" | "missing" | "present_unusable";
@@ -106,16 +139,16 @@ function collectCodexJsonlUsageArtifact(
   taskId: string,
   attemptId: number,
   worktreePath: string,
-): void {
+): UsageCollectionResult {
   const path = join(worktreePath, TOOL_TRACE_FILE);
   let stats;
   try {
     stats = statSync(path);
   } catch {
-    return;
+    return {};
   }
-  if (!stats.isFile()) return;
-  if (stats.size === 0) return;
+  if (!stats.isFile()) return {};
+  if (stats.size === 0) return {};
 
   let raw: string;
   try {
@@ -126,24 +159,32 @@ function collectCodexJsonlUsageArtifact(
             tailRead(path, stats.size, MAX_CODEX_JSONL_BYTES),
           );
   } catch {
-    return;
+    return {};
   }
-  if (raw.length === 0) return;
+  if (raw.length === 0) return {};
 
-  const usage = normalizeCodexJsonlUsage(raw);
-  if (usage === null) return;
+  const scan = scanCodexJsonl(raw);
+  if (scan === null) return {};
 
-  try {
-    deps.artifactStore.writeArtifact({
-      taskId,
-      attemptId,
-      kind: "usage",
-      content: JSON.stringify(usage),
-      extension: "json",
-    });
-  } catch {
-    // Same best-effort/idempotent behaviour as direct usage capture.
+  if (scan.usage !== null) {
+    try {
+      deps.artifactStore.writeArtifact({
+        taskId,
+        attemptId,
+        kind: "usage",
+        content: JSON.stringify(scan.usage),
+        extension: "json",
+      });
+    } catch {
+      // Same best-effort/idempotent behaviour as direct usage capture.
+    }
   }
+  // Backfill the model whether or not the trace carried token totals — early
+  // crashes, cancellations, and kill-window exits can flush
+  // `turn_context.payload.model` to the trace without ever emitting a
+  // `token_count` event, and the resolved model is still the right answer
+  // for operator-facing attribution.
+  return scan.model !== undefined ? { resolvedModel: scan.model } : {};
 }
 
 export interface NormalizedCodexUsage {
@@ -173,9 +214,18 @@ interface UsageCandidate {
 
 type TokenValue = number | null | undefined;
 
-export function normalizeCodexJsonlUsage(
-  jsonl: string,
-): NormalizedCodexUsage | null {
+// Single-pass scan of a Codex tool-trace JSONL stream. Returns the resolved
+// model (when any event carried one) and the best-scoring token totals
+// (`usage`) — or null when the trace is malformed (any non-JSON line, any
+// non-object payload). Decoupling the two means an early-exit attempt that
+// only flushed `turn_context.payload.model` before dying can still backfill
+// `attempts.agent_model`, even though no `token_count` event ever fired.
+interface CodexJsonlScanResult {
+  model?: string;
+  usage: NormalizedCodexUsage | null;
+}
+
+function scanCodexJsonl(jsonl: string): CodexJsonlScanResult | null {
   let model: string | undefined;
   let best: (UsageCandidate & { index: number }) | null = null;
   let parsedAnyLine = false;
@@ -209,9 +259,17 @@ export function normalizeCodexJsonlUsage(
     }
   }
 
-  if (!parsedAnyLine || best === null) return null;
+  if (!parsedAnyLine) return null;
 
-  const totals = { ...best.totals };
+  const usage = best === null ? null : finalizeNormalizedUsage(best.totals, model);
+  return model !== undefined ? { model, usage } : { usage };
+}
+
+function finalizeNormalizedUsage(
+  source: TokenTotals,
+  model: string | undefined,
+): NormalizedCodexUsage | null {
+  const totals = { ...source };
   if (
     totals.total_tokens === undefined &&
     typeof totals.input_tokens === "number" &&
@@ -230,6 +288,15 @@ export function normalizeCodexJsonlUsage(
   copyToken(normalized, "total_tokens", totals.total_tokens);
 
   return hasNumericToken(normalized) ? normalized : null;
+}
+
+// Public wrapper retained for tests and external callers that just want the
+// normalized usage envelope without the model-only backfill branch.
+export function normalizeCodexJsonlUsage(
+  jsonl: string,
+): NormalizedCodexUsage | null {
+  const scan = scanCodexJsonl(jsonl);
+  return scan?.usage ?? null;
 }
 
 function collectUsageCandidates(value: unknown, path: string[] = []): UsageCandidate[] {

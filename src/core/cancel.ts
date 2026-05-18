@@ -33,7 +33,7 @@ import {
 } from "./linear_state_sync.ts";
 import { cancelOpenOrchestratorHandoffs } from "./orchestrator_handoffs.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
-import { collectUsageArtifact } from "./usage.ts";
+import { collectUsageArtifact, persistResolvedAttemptModel } from "./usage.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
 
 export type CancelErrorCode = "unknown_task" | "wrong_state";
@@ -340,7 +340,13 @@ export async function runCancelFinalizer(
         }
       }
     } catch {}
-    collectUsageArtifact(deps, taskId, latest.attempt_id, row.worktree_path);
+    const usageResult = collectUsageArtifact(
+      deps,
+      taskId,
+      latest.attempt_id,
+      row.worktree_path,
+    );
+    persistResolvedAttemptModel(deps.db, latest.attempt_id, usageResult.resolvedModel);
     collectToolTraceArtifact(deps, taskId, latest.attempt_id, row.worktree_path);
   }
 
