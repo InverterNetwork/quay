@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
 import { collectToolTraceArtifact } from "../../src/core/tool_trace.ts";
-import { collectUsageArtifact } from "../../src/core/usage.ts";
+import {
+  collectUsageArtifact,
+  persistResolvedAttemptModel,
+} from "../../src/core/usage.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import {
   insertAttempt,
@@ -24,16 +27,29 @@ interface UsageRow {
   file_path: string;
 }
 
-function setupAttempt(): { taskId: string; attemptId: number } {
+function setupAttempt(reason: string = "initial"): {
+  taskId: string;
+  attemptId: number;
+} {
   const repoId = insertRepo(h!.db, "repo-usage");
   const taskId = insertTask(h!.db, { taskId: "task-usage", repoId });
   const attemptId = insertAttempt(h!.db, {
     taskId,
     attemptNumber: 1,
-    reason: "initial",
+    reason,
     consumedBudget: 1,
   });
   return { taskId, attemptId };
+}
+
+function attemptModel(attemptId: number): string | null {
+  const row = h!.db
+    .query<{ agent_model: string | null }, [number]>(
+      `SELECT agent_model FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(row).not.toBeNull();
+  return row!.agent_model;
 }
 
 function deps() {
@@ -287,4 +303,88 @@ test("skips when the file contains malformed JSON", () => {
     )
     .get();
   expect(count!.n).toBe(0);
+});
+
+test("returns resolved model from Codex turn_context.payload.model", () => {
+  h = createHarness();
+  h.clock.set("2026-05-18T08:00:00.000Z");
+  const { taskId, attemptId } = setupAttempt();
+
+  const trace = [
+    JSON.stringify({
+      type: "turn_context",
+      payload: { model: "gpt-5.5", cwd: "/tmp" },
+    }),
+    JSON.stringify({
+      type: "token_count",
+      info: {
+        total_token_usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          total_tokens: 150,
+        },
+      },
+    }),
+  ].join("\n");
+  writeFileSync(join(h.dataDir, ".quay-tool-trace.log"), `${trace}\n`);
+
+  const result = collectUsageArtifact(deps(), taskId, attemptId, h.dataDir);
+
+  expect(result.resolvedModel).toBe("gpt-5.5");
+});
+
+test("direct usage envelope reports no resolved model", () => {
+  h = createHarness();
+  const { taskId, attemptId } = setupAttempt();
+  writeFileSync(
+    join(h.dataDir, ".quay-usage.json"),
+    JSON.stringify({ input_tokens: 1, output_tokens: 1 }),
+  );
+
+  const result = collectUsageArtifact(deps(), taskId, attemptId, h.dataDir);
+
+  expect(result.resolvedModel).toBeUndefined();
+});
+
+test("persists resolved model on a worker attempt when agent_model is null", () => {
+  h = createHarness();
+  const { attemptId } = setupAttempt();
+
+  persistResolvedAttemptModel(h.db, attemptId, "gpt-5.5");
+
+  expect(attemptModel(attemptId)).toBe("gpt-5.5");
+});
+
+test("persists resolved model on a reviewer attempt", () => {
+  h = createHarness();
+  const { attemptId } = setupAttempt("review_only");
+
+  persistResolvedAttemptModel(h.db, attemptId, "gpt-5.5");
+
+  expect(attemptModel(attemptId)).toBe("gpt-5.5");
+});
+
+test("does not overwrite an explicitly recorded agent_model", () => {
+  h = createHarness();
+  const { attemptId } = setupAttempt();
+  h.db
+    .query<unknown, [string, number]>(
+      `UPDATE attempts SET agent_model = ? WHERE attempt_id = ?`,
+    )
+    .run("gpt-5.5-codex", attemptId);
+
+  persistResolvedAttemptModel(h.db, attemptId, "claude-opus-4-7");
+
+  expect(attemptModel(attemptId)).toBe("gpt-5.5-codex");
+});
+
+test("ignores empty or whitespace-only resolved models", () => {
+  h = createHarness();
+  const { attemptId } = setupAttempt();
+
+  persistResolvedAttemptModel(h.db, attemptId, undefined);
+  persistResolvedAttemptModel(h.db, attemptId, "");
+  persistResolvedAttemptModel(h.db, attemptId, "   ");
+
+  expect(attemptModel(attemptId)).toBeNull();
 });

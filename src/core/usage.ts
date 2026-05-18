@@ -36,16 +36,49 @@ export interface UsageDeps {
   artifactStore: ArtifactStore;
 }
 
+// Carries metadata derived from the captured envelope that callers may want to
+// persist outside the artifact bytes. Today only `resolvedModel` is surfaced
+// (Codex JSONL `turn_context.payload.model` and friends) so callers can fill
+// in `attempts.agent_model` when the intended model was never set.
+export interface UsageCollectionResult {
+  resolvedModel?: string;
+}
+
 export function collectUsageArtifact(
   deps: UsageDeps,
   taskId: string,
   attemptId: number,
   worktreePath: string,
-): void {
+): UsageCollectionResult {
   if (collectDirectUsageArtifact(deps, taskId, attemptId, worktreePath) !== "missing") {
-    return;
+    return {};
   }
-  collectCodexJsonlUsageArtifact(deps, taskId, attemptId, worktreePath);
+  return collectCodexJsonlUsageArtifact(deps, taskId, attemptId, worktreePath);
+}
+
+// Fills in `attempts.agent_model` from a resolved runtime model (typically the
+// Codex JSONL session model) when the column is currently NULL. Never
+// overwrites an explicitly recorded model: the intended-model snapshot taken
+// at spawn time wins by definition.
+export function persistResolvedAttemptModel(
+  db: DB,
+  attemptId: number,
+  resolvedModel: string | undefined,
+): void {
+  if (resolvedModel === undefined) return;
+  const trimmed = resolvedModel.trim();
+  if (trimmed.length === 0) return;
+  try {
+    db.query(
+      `UPDATE attempts
+          SET agent_model = ?
+        WHERE attempt_id = ?
+          AND agent_model IS NULL`,
+    ).run(trimmed, attemptId);
+  } catch {
+    // Best-effort, mirroring the rest of usage capture: never block the
+    // terminal transition because of a metadata backfill.
+  }
 }
 
 type DirectUsageResult = "captured" | "missing" | "present_unusable";
@@ -106,16 +139,16 @@ function collectCodexJsonlUsageArtifact(
   taskId: string,
   attemptId: number,
   worktreePath: string,
-): void {
+): UsageCollectionResult {
   const path = join(worktreePath, TOOL_TRACE_FILE);
   let stats;
   try {
     stats = statSync(path);
   } catch {
-    return;
+    return {};
   }
-  if (!stats.isFile()) return;
-  if (stats.size === 0) return;
+  if (!stats.isFile()) return {};
+  if (stats.size === 0) return {};
 
   let raw: string;
   try {
@@ -126,12 +159,12 @@ function collectCodexJsonlUsageArtifact(
             tailRead(path, stats.size, MAX_CODEX_JSONL_BYTES),
           );
   } catch {
-    return;
+    return {};
   }
-  if (raw.length === 0) return;
+  if (raw.length === 0) return {};
 
   const usage = normalizeCodexJsonlUsage(raw);
-  if (usage === null) return;
+  if (usage === null) return {};
 
   try {
     deps.artifactStore.writeArtifact({
@@ -144,6 +177,7 @@ function collectCodexJsonlUsageArtifact(
   } catch {
     // Same best-effort/idempotent behaviour as direct usage capture.
   }
+  return usage.model !== undefined ? { resolvedModel: usage.model } : {};
 }
 
 export interface NormalizedCodexUsage {
