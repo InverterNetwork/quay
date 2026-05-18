@@ -24,15 +24,19 @@ without doing work.
 Each cycle:
 
 1. Finalizes tasks with `cancel_requested_at`.
-2. Observes `running` workers.
-3. Polls `pr-open` tasks for PR state, conflicts, and CI.
-4. Polls `done` tasks for PR state, conflicts, and review feedback.
-5. Releases stale orchestrator claims.
-6. Handles claimless legacy `waiting_human` rows, either through the old Slack
+2. Sweeps `queued` / `running` tasks with a known Quay-owned PR: if the PR was
+   closed unmerged (typically a human closing it mid-respawn), kills any live
+   worker session and finalizes to `closed_unmerged` before promotion or
+   dead-worker classification can spawn another attempt.
+3. Observes `running` workers.
+4. Polls `pr-open` tasks for PR state, conflicts, and CI.
+5. Polls `done` tasks for PR state, conflicts, and review feedback.
+6. Releases stale orchestrator claims.
+7. Handles claimless legacy `waiting_human` rows, either through the old Slack
    path or by requeueing rows that have no thread.
-7. Reaps and spawns `pr-review` reviewer attempts up to
+8. Reaps and spawns `pr-review` reviewer attempts up to
    `max_concurrent_reviewers` when `[reviewer].enabled = true`.
-8. Promotes `queued` tasks to `running` up to `max_concurrent`.
+9. Promotes `queued` tasks to `running` up to `max_concurrent`.
 
 Tasks that become `queued` during a tick are not promoted until a later tick.
 
