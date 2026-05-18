@@ -260,6 +260,7 @@ interface ClosedUnmergedCandidateRow {
   repo_id: string;
   state: "queued" | "running";
   branch_name: string;
+  tmux_id: string;
   worktree_path: string;
   pr_number: number;
 }
@@ -405,6 +406,12 @@ export async function tick_once(
     // — neither processRunningTask nor promoteAndSpawn polls PR state, so
     // a human closing the PR while the task is mid-respawn would otherwise
     // let the next worker push and open a replacement PR.
+    // `closedUnmergedIds` excludes a candidate from this tick's per-state
+    // processing whether the sweep succeeded OR errored. A probe failure
+    // (transient GitHub error, malformed snapshot) must NOT fall through to
+    // promoteAndSpawn / processRunningTask — that's the exact regression
+    // path the sweep exists to prevent. The next tick re-probes and either
+    // succeeds or records another tick_error.
     const closedUnmergedIds = new Set<string>();
     for (const task of readClosedUnmergedCandidates(deps.db)) {
       if (cancelledIds.has(task.task_id)) continue;
@@ -416,6 +423,7 @@ export async function tick_once(
         }
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
+        closedUnmergedIds.add(task.task_id);
       }
     }
 
@@ -816,7 +824,8 @@ function readClosedUnmergedCandidates(
 ): ClosedUnmergedCandidateRow[] {
   return db
     .query<ClosedUnmergedCandidateRow, []>(
-      `SELECT task_id, repo_id, state, branch_name, worktree_path, pr_number
+      `SELECT task_id, repo_id, state, branch_name, tmux_id,
+              worktree_path, pr_number
          FROM tasks
         WHERE state IN ('queued', 'running')
           AND pr_number IS NOT NULL
@@ -1417,15 +1426,19 @@ function processClosedUnmergedQuayPr(
   if (!attempt) return null;
 
   // For a running task, kill the worker pane before the terminal commit so
-  // we don't race the worker pushing a fresh commit and `gh pr create`-ing
-  // a replacement PR between this snapshot and the cleanup matrix.
-  if (
-    task.state === "running" &&
-    attempt.tmux_session !== null &&
-    deps.tmux.isAlive(attempt.tmux_session)
-  ) {
+  // it can't race the cleanup matrix by pushing a fresh commit and
+  // `gh pr create`-ing a replacement PR. In the spawn-window state
+  // (`tmux_session IS NULL`) the canonical session may still be alive but
+  // the column hasn't been populated yet — fall back to the canonical name,
+  // mirroring cancel.ts's killRunningTmux and processRunningTask's
+  // spawn-window recovery. tmux.kill is idempotent on missing sessions, so
+  // we issue it unconditionally rather than gating on isAlive.
+  if (task.state === "running") {
+    const session =
+      attempt.tmux_session ??
+      `quay-task-${task.tmux_id}-${attempt.attempt_number}`;
     try {
-      deps.tmux.kill(attempt.tmux_session);
+      deps.tmux.kill(session);
     } catch {}
   }
 
