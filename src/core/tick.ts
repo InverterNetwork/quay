@@ -29,7 +29,7 @@ import {
   reopenClaimedOrchestratorHandoffs,
 } from "./orchestrator_handoffs.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
-import { collectUsageArtifact } from "./usage.ts";
+import { collectUsageArtifact, persistResolvedAttemptModel } from "./usage.ts";
 import {
   classifyAndApply,
   type ClassifyContextAttempt,
@@ -1606,12 +1606,13 @@ function collectReviewAttemptArtifactsForRows(
   attempts: ActiveReviewerAttemptRow[],
 ): void {
   for (const attempt of attempts) {
-    collectUsageArtifact(
+    const usageResult = collectUsageArtifact(
       deps,
       task.task_id,
       attempt.attempt_id,
       task.worktree_path,
     );
+    persistResolvedAttemptModel(deps.db, attempt.attempt_id, usageResult.resolvedModel);
     collectToolTraceArtifact(
       deps,
       task.task_id,
@@ -2552,7 +2553,13 @@ function collectReviewAttemptArtifacts(
   deps: TickDeps,
   task: ReviewAttemptTaskRow,
 ): void {
-  collectUsageArtifact(deps, task.task_id, task.attempt_id, task.worktree_path);
+  const usageResult = collectUsageArtifact(
+    deps,
+    task.task_id,
+    task.attempt_id,
+    task.worktree_path,
+  );
+  persistResolvedAttemptModel(deps.db, task.attempt_id, usageResult.resolvedModel);
   collectToolTraceArtifact(
     deps,
     task.task_id,
@@ -3297,7 +3304,13 @@ function finalizeKillIntent(
   // has whatever events landed before the kill — so even killed
   // attempts usually produce a useful tool_trace. Clean exits racing
   // with a kill window produce a complete envelope and trace.
-  collectUsageArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
+  const usageResult = collectUsageArtifact(
+    deps,
+    task.task_id,
+    attempt.attempt_id,
+    task.worktree_path,
+  );
+  persistResolvedAttemptModel(deps.db, attempt.attempt_id, usageResult.resolvedModel);
   collectToolTraceArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
 
   const now = deps.clock.nowISO();

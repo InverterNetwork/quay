@@ -20,7 +20,7 @@ import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
 import { enqueueOrchestratorHandoff } from "./orchestrator_handoffs.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
-import { collectUsageArtifact } from "./usage.ts";
+import { collectUsageArtifact, persistResolvedAttemptModel } from "./usage.ts";
 import {
   scheduleDeterministicRetry,
   writeBlockerBudgetExhausted,
@@ -137,7 +137,13 @@ export function classifyAndApply(
   // emits a structured stdout (claude `--output-format json`, similar
   // for Codex / Cursor). Idempotent via the same content_hash unique
   // index that protects session_log.
-  collectUsageArtifact(deps, task.task_id, attempt.attempt_id, task.worktree_path);
+  const usageResult = collectUsageArtifact(
+    deps,
+    task.task_id,
+    attempt.attempt_id,
+    task.worktree_path,
+  );
+  persistResolvedAttemptModel(deps.db, attempt.attempt_id, usageResult.resolvedModel);
 
   // Step 1c: best-effort tool-trace capture (claude
   // `--debug --debug-file .quay-tool-trace.log`, equivalent for other
