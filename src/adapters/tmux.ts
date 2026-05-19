@@ -15,8 +15,12 @@
 // pipe, every long-running task gets stale-killed past the staleness
 // threshold even when actively producing output.
 import {
+  accessSync,
+  chmodSync,
   closeSync,
+  constants,
   existsSync,
+  mkdirSync,
   openSync,
   readFileSync,
   readSync,
@@ -31,6 +35,8 @@ import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 
 const PROMPT_FILE = ".quay-prompt.md";
 const SESSION_LOG_FILE = ".quay-session.log";
+const GH_WRAPPER_DIR = ".quay-bin";
+const GH_TOKEN_FILE = ".quay-gh-token";
 // Tool-call trace produced by the agent's debug stream when the operator
 // uses `--debug-file`. With the default agent invocation routing stdout
 // to `.quay-usage.json` and debug output to this file, the pane log can
@@ -53,7 +59,6 @@ const MAX_LOG_BYTES = 4 * 1024 * 1024;
 
 export class TmuxAdapter implements TmuxPort {
   spawn(input: TmuxSpawnInput): void {
-    const tmuxEnv = buildSpawnEnv(input.env);
     // Spawn preflight: sweep direct children of the worktree whose names
     // start with `.quay-`. A leftover `.quay-blocked.md` from a previous
     // attempt would otherwise be ingested as the new attempt's blocker on
@@ -63,6 +68,8 @@ export class TmuxAdapter implements TmuxPort {
     // tight — only direct children, only the `.quay-` prefix — so we never
     // touch anything the worker wrote under nested directories.
     sweepQuayState(input.worktreePath);
+    const tmuxEnv = buildSpawnEnv(input.env);
+    installGhWrapperIfTokened(input, tmuxEnv);
 
     const promptFile = join(input.worktreePath, PROMPT_FILE);
     writeFileSync(promptFile, input.promptContent);
@@ -362,6 +369,84 @@ function buildSpawnEnv(
     }
   }
   return env;
+}
+
+function installGhWrapperIfTokened(
+  input: TmuxSpawnInput,
+  env: NodeJS.ProcessEnv,
+): void {
+  const tokenFile = resolveGhTokenFile(input, env);
+  if (tokenFile === null) return;
+
+  const binDir = join(input.worktreePath, GH_WRAPPER_DIR);
+  mkdirSync(binDir, { recursive: true, mode: 0o700 });
+  chmodSync(binDir, 0o700);
+
+  const ghPath = join(binDir, "gh");
+  const realGh = resolveCommandOnPath("gh", env.PATH);
+  const body =
+    realGh === null
+      ? [
+          "#!/bin/sh",
+          'echo "quay: gh wrapper could not find gh on PATH before wrapper install" >&2',
+          "exit 127",
+          "",
+        ].join("\n")
+      : [
+          "#!/bin/sh",
+          `token="$(cat ${shellQuote(tokenFile)})"`,
+          'if [ -z "$token" ]; then echo "quay: gh token file is missing or empty" >&2; exit 75; fi',
+          `exec env GH_TOKEN="$token" GITHUB_TOKEN= ${shellQuote(realGh)} "$@"`,
+          "",
+        ].join("\n");
+  writeFileSync(ghPath, body, { mode: 0o700 });
+  chmodSync(ghPath, 0o700);
+
+  env.PATH = env.PATH ? `${binDir}:${env.PATH}` : binDir;
+}
+
+function resolveGhTokenFile(
+  input: TmuxSpawnInput,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const fromEnvFile = input.envFiles?.find((entry) => entry.name === "GH_TOKEN");
+  if (fromEnvFile !== undefined) return fromEnvFile.path;
+
+  const token = nonEmpty(env.GH_TOKEN) ?? nonEmpty(env.GITHUB_TOKEN);
+  if (token === null) return null;
+
+  const path = join(input.worktreePath, GH_TOKEN_FILE);
+  writeFileSync(path, `${token}\n`, { mode: 0o600 });
+  chmodSync(path, 0o600);
+  return path;
+}
+
+function nonEmpty(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function resolveCommandOnPath(
+  command: string,
+  pathValue: string | undefined,
+): string | null {
+  if (command.includes("/")) return isExecutable(command) ? command : null;
+  for (const dir of (pathValue ?? "").split(":")) {
+    if (dir.length === 0) continue;
+    const candidate = join(dir, command);
+    if (isExecutable(candidate)) return candidate;
+  }
+  return null;
+}
+
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Build a POSIX-shell prefix that reads each envFile inline and exports

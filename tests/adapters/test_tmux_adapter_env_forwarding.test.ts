@@ -5,6 +5,7 @@
 // setting a var post-startup, having the agent read it, and checking
 // the value landed in the pane log.
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   rmSync,
@@ -220,4 +221,58 @@ t("env overrides replace GH_TOKEN and remove reviewer source env", async () => {
   const log = adapter.collectLog(sessionName, worktreePath);
   expect(log).not.toBeNull();
   expect(log!).toContain("GH=[ghs_reviewer_for_pane] GITHUB=[] SRC=[]");
+});
+
+t("gh wrapper makes Quay token win over stale pane token variables", async () => {
+  const adapter = new TmuxAdapter();
+  const worktreePath = tempWorktree();
+  const fakeBin = tempWorktree();
+  const sessionName = uniqueSession("gh-wrapper");
+  const logPath = join(worktreePath, ".quay-session.log");
+  const fakeGh = join(fakeBin, "gh");
+  writeFileSync(
+    fakeGh,
+    [
+      "#!/bin/sh",
+      'printf "FAKE_GH GH=[%s] GITHUB=[%s] ARGS=[%s]\\n" "$GH_TOKEN" "$GITHUB_TOKEN" "$*"',
+      "",
+    ].join("\n"),
+  );
+  chmodSync(fakeGh, 0o700);
+
+  const oldPath = process.env.PATH;
+  process.env.PATH = oldPath ? `${fakeBin}:${oldPath}` : fakeBin;
+  cleanups.push(() => {
+    if (oldPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = oldPath;
+    }
+  });
+
+  adapter.spawn({
+    sessionName,
+    worktreePath,
+    promptContent: "ignored",
+    agentInvocation:
+      'GH_TOKEN=stale_from_codex_snapshot GITHUB_TOKEN=stale_github gh pr list --head demo; sleep 1',
+    env: {
+      GH_TOKEN: "ghs_fresh_quay_token",
+      GITHUB_TOKEN: undefined,
+    },
+  });
+
+  const wrote = await waitFor(
+    () => existsSync(logPath) && statSync(logPath).size > 0,
+    3000,
+  );
+  expect(wrote).toBe(true);
+
+  const log = adapter.collectLog(sessionName, worktreePath);
+  expect(log).not.toBeNull();
+  expect(log!).toContain(
+    "FAKE_GH GH=[ghs_fresh_quay_token] GITHUB=[] ARGS=[pr list --head demo]",
+  );
+  expect(log!).not.toContain("stale_from_codex_snapshot");
+  expect(log!).not.toContain("stale_github");
 });
