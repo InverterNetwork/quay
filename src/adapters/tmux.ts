@@ -14,12 +14,15 @@
 // (or one that died before tmux noticed) has an old mtime. Without this
 // pipe, every long-running task gets stale-killed past the staleness
 // threshold even when actively producing output.
+import { createHash } from "node:crypto";
 import {
   accessSync,
   chmodSync,
   closeSync,
   constants,
+  cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -27,16 +30,17 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { decodePaneStatus, EXIT_INFO_NONE } from "../core/exit_status.ts";
 import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 
 const PROMPT_FILE = ".quay-prompt.md";
 const SESSION_LOG_FILE = ".quay-session.log";
-const GH_WRAPPER_DIR = ".quay-bin";
-const GH_TOKEN_FILE = ".quay-gh-token";
+const SPAWN_ADMIN_DIR = ".quay-spawn";
+const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Tool-call trace produced by the agent's debug stream when the operator
 // uses `--debug-file`. With the default agent invocation routing stdout
 // to `.quay-usage.json` and debug output to this file, the pane log can
@@ -69,6 +73,7 @@ export class TmuxAdapter implements TmuxPort {
     // touch anything the worker wrote under nested directories.
     sweepQuayState(input.worktreePath);
     const tmuxEnv = buildSpawnEnv(input.env);
+    prepareCodexHome(tmuxEnv);
     installGhWrapperIfTokened(input, tmuxEnv);
 
     const promptFile = join(input.worktreePath, PROMPT_FILE);
@@ -378,7 +383,8 @@ function installGhWrapperIfTokened(
   const tokenFile = resolveGhTokenFile(input, env);
   if (tokenFile === null) return;
 
-  const binDir = join(input.worktreePath, GH_WRAPPER_DIR);
+  const adminDir = spawnAdminDir(input);
+  const binDir = join(adminDir, "bin");
   mkdirSync(binDir, { recursive: true, mode: 0o700 });
   chmodSync(binDir, 0o700);
 
@@ -415,10 +421,73 @@ function resolveGhTokenFile(
   const token = nonEmpty(env.GH_TOKEN) ?? nonEmpty(env.GITHUB_TOKEN);
   if (token === null) return null;
 
-  const path = join(input.worktreePath, GH_TOKEN_FILE);
+  const adminDir = spawnAdminDir(input);
+  mkdirSync(adminDir, { recursive: true, mode: 0o700 });
+  chmodSync(adminDir, 0o700);
+  const path = join(adminDir, "gh-token");
   writeFileSync(path, `${token}\n`, { mode: 0o600 });
   chmodSync(path, 0o600);
   return path;
+}
+
+function spawnAdminDir(input: TmuxSpawnInput): string {
+  const hash = createHash("sha256")
+    .update(input.sessionName)
+    .update("\0")
+    .update(input.worktreePath)
+    .digest("hex");
+  return join(dirname(input.worktreePath), SPAWN_ADMIN_DIR, hash);
+}
+
+function prepareCodexHome(env: NodeJS.ProcessEnv): void {
+  if (env[CODEX_SOURCE_HOME_ENV] === undefined) return;
+  const codexHome = nonEmpty(env.CODEX_HOME);
+  if (codexHome === null) {
+    delete env[CODEX_SOURCE_HOME_ENV];
+    return;
+  }
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  chmodSync(codexHome, 0o700);
+
+  const sourceHome = nonEmpty(env[CODEX_SOURCE_HOME_ENV]);
+  delete env[CODEX_SOURCE_HOME_ENV];
+  if (sourceHome !== null && sourceHome !== codexHome && existsSync(sourceHome)) {
+    seedCodexHome(sourceHome, codexHome);
+  }
+  mkdirSync(join(codexHome, "shell_snapshots"), { recursive: true, mode: 0o700 });
+  chmodSync(join(codexHome, "shell_snapshots"), 0o700);
+}
+
+function seedCodexHome(sourceHome: string, codexHome: string): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(sourceHome);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (name === "shell_snapshots") continue;
+    const sourcePath = join(sourceHome, name);
+    const targetPath = join(codexHome, name);
+    if (existsSync(targetPath)) continue;
+    try {
+      symlinkSync(sourcePath, targetPath);
+    } catch {
+      copyCodexHomeEntry(sourcePath, targetPath);
+    }
+  }
+}
+
+function copyCodexHomeEntry(sourcePath: string, targetPath: string): void {
+  try {
+    const stat = lstatSync(sourcePath);
+    cpSync(sourcePath, targetPath, {
+      recursive: stat.isDirectory(),
+      force: false,
+      errorOnExist: false,
+      verbatimSymlinks: true,
+    });
+  } catch {}
 }
 
 function nonEmpty(value: string | undefined): string | null {

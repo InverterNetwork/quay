@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
@@ -62,6 +62,7 @@ export const DEFAULT_CLAIM_TIMEOUT_SECONDS = 1800;
 export const DEFAULT_MAX_CLAIM_EXPIRATIONS = 3;
 export const DEFAULT_MAX_NON_BUDGET_RESPAWNS = 20;
 export const REVIEWER_GH_TOKEN_ENV = "QUAY_REVIEWER_GH_TOKEN";
+const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Canonical claude worker template, kept here as a named re-export so
 // callers that imported it from `tick.ts` before the agent-resolver
 // refactor (and tests that still pass `agentInvocation: "..."` as a
@@ -3604,8 +3605,10 @@ function promoteAndSpawn(
   const spawnEnv = addCodexLaunchIsolation(
     githubToken.env,
     task.worktree_path,
+    task.task_id,
     agentName,
     agentInvocation,
+    options.env ?? process.env,
   ) ?? {};
 
   const promoted = runPromotionTransaction(deps.db, {
@@ -3722,14 +3725,31 @@ function resolveWorkerGithubToken(options: TickOptions): {
 function addCodexLaunchIsolation(
   env: TmuxSpawnInput["env"],
   worktreePath: string,
+  taskId: string,
   agentName: string,
   agentInvocation: string,
+  sourceEnv: NodeJS.ProcessEnv,
 ): TmuxSpawnInput["env"] {
   if (!usesCodexRuntime(agentName, agentInvocation)) return env;
+  const sourceHome = codexSourceHome(sourceEnv);
   return {
     ...(env ?? {}),
-    CODEX_HOME: join(worktreePath, ".quay-codex-home"),
+    CODEX_HOME: isolatedCodexHome(worktreePath, taskId),
+    [CODEX_SOURCE_HOME_ENV]: sourceHome ?? "",
   };
+}
+
+function isolatedCodexHome(worktreePath: string, taskId: string): string {
+  const digest = createHash("sha256").update(taskId).digest("hex");
+  return join(dirname(worktreePath), ".quay-codex-home", digest);
+}
+
+function codexSourceHome(env: NodeJS.ProcessEnv): string | null {
+  const configured = env.CODEX_HOME?.trim();
+  if (configured !== undefined && configured.length > 0) return configured;
+  const home = env.HOME?.trim();
+  if (home === undefined || home.length === 0) return null;
+  return join(home, ".codex");
 }
 
 function usesCodexRuntime(agentName: string, agentInvocation: string): boolean {
@@ -3940,8 +3960,10 @@ function promoteAndSpawnReviewer(
     const reviewerEnv = addCodexLaunchIsolation(
       tokenPreflight.env,
       task.worktree_path,
+      task.task_id,
       agentName,
       agentInvocation,
+      options.env ?? process.env,
     );
     deps.tmux.spawn({
       sessionName,

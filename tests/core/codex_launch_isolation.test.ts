@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { createAgentResolver } from "../../src/core/agents.ts";
@@ -67,8 +68,15 @@ test("codex worker spawn gets isolated CODEX_HOME and canonical fresh GH_TOKEN",
     GH_TOKEN: "ghs_fresh_worker_token",
     GITHUB_TOKEN: undefined,
     [REVIEWER_GH_TOKEN_ENV]: undefined,
-    CODEX_HOME: join(call.worktreePath, ".quay-codex-home"),
+    QUAY_CODEX_SOURCE_HOME: "",
+    CODEX_HOME: join(
+      call.worktreePath,
+      "..",
+      ".quay-codex-home",
+      createHash("sha256").update(taskId).digest("hex"),
+    ),
   });
+  expect(call.env!.CODEX_HOME!.startsWith(call.worktreePath)).toBe(false);
   expect(call.envFiles).toBeUndefined();
   expect(spawnedTokenSource(h, taskId)).toBe("env:GH_TOKEN");
 });

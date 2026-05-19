@@ -135,11 +135,12 @@ exec quay tick
 
 Worker panes keep using `GH_TOKEN`. When only `GITHUB_TOKEN` is set, Quay
 promotes that value to pane-local `GH_TOKEN` and clears `GITHUB_TOKEN` so
-GitHub CLI calls have one canonical token source. Quay also places a
-worktree-local `gh` wrapper first on `PATH`; the wrapper reads Quay's fresh
-token source and runs the real `gh` with `GH_TOKEN` set and `GITHUB_TOKEN`
-cleared, so stale token variables sourced later inside an agent shell cannot
-poison `gh pr list/create`.
+GitHub CLI calls have one canonical token source. Quay also places a per-spawn
+`gh` wrapper first on `PATH`; the wrapper lives outside the git checkout, reads
+Quay's fresh token source from an outside-worktree file, and runs the real `gh`
+with `GH_TOKEN` set and `GITHUB_TOKEN` cleared. Stale token variables sourced
+later inside an agent shell cannot poison `gh pr list/create`, and `git add .`
+from the worker cannot stage the generated credential file.
 
 Reviewer panes receive `QUAY_REVIEWER_GH_TOKEN` as their pane-local
 `GH_TOKEN`, and Quay removes the source variable from the pane environment
@@ -179,9 +180,11 @@ agent. If your command uses `{prompt_file}`, Quay replaces it with a
 shell-quoted prompt path.
 
 For Codex-backed agents (`codex` and `hermes_codex*`), Quay sets `CODEX_HOME`
-to `<worktree>/.quay-codex-home` for each spawn. This keeps Codex shell
-snapshots and other runtime state scoped to the task worktree instead of the
-operator's long-lived `~/.codex` directory.
+to an outside-worktree per-task directory next to the checkout root. Quay seeds
+that isolated home from the operator's configured Codex home (`$CODEX_HOME`, or
+`$HOME/.codex` when unset) but deliberately skips `shell_snapshots`. Existing
+Codex auth/config stays available while stale shell snapshots are scoped away
+from future tasks.
 
 Examples:
 
