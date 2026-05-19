@@ -41,6 +41,10 @@ import {
   type GoalReport,
   type GoalReportProbe,
 } from "./goal_report.ts";
+import {
+  captureGoalEvidenceArtifacts,
+  type CapturedGoalEvidence,
+} from "./goal_audit.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 import {
   composeWorkerPrompt,
@@ -50,10 +54,12 @@ import {
 
 const BLOCKER_FILENAME = ".quay-blocked.md";
 const BLOCKER_MAX_BYTES = 64 * 1024;
+const MAX_GOAL_PROTOCOL_REPAIR_ATTEMPTS = 2;
 
 export type ClassifyOutcome =
   | "blocker_written"
   | "goal_continuation_scheduled"
+  | "goal_completion_pending"
   | "goal_budget_limited"
   | "goal_report_processed"
   | "malformed_signal"
@@ -444,6 +450,12 @@ function ingestValidGoalReport(
   if (!goalReportCanMutate(deps, task, attempt)) {
     return null;
   }
+  const evidence = captureGoalEvidenceArtifacts(deps, {
+    taskId: task.task_id,
+    attemptId: attempt.attempt_id,
+    worktreePath: task.worktree_path,
+    report: probe.report,
+  });
   const delivery = inspectGoalPrDelivery(deps, task);
   deps.git.fetchBranchIfExists(task.repo_id, task.branch_name);
   const remoteShaAtExit = deps.git.remoteHeadSha(task.repo_id, task.branch_name);
@@ -458,6 +470,7 @@ function ingestValidGoalReport(
       delivery,
       exitInfo,
       probe.warnings,
+      evidence,
     );
   }
   if (probe.report.status === "blocked") {
@@ -469,6 +482,7 @@ function ingestValidGoalReport(
       artifactId,
       remoteShaAtExit,
       exitInfo,
+      evidence,
     );
   }
   return ingestCompleteGoalReport(
@@ -480,6 +494,7 @@ function ingestValidGoalReport(
     remoteShaAtExit,
     delivery,
     exitInfo,
+    evidence,
   );
 }
 
@@ -512,6 +527,8 @@ function scheduleMalformedGoalReportRetry(
     return { outcome: "goal_report_processed" };
   }
   const now = deps.clock.nowISO();
+  const diagnostics = `Worker wrote a malformed ${GOAL_REPORT_FILENAME}: ${probe.diagnostics}. The raw malformed bytes were persisted as malformed_goal_report artifact #${artifactId}.`;
+  const repairsUsed = countGoalProtocolRepairAttempts(deps.db, task.task_id);
   deps.db.exec("BEGIN");
   try {
     const taskUpd = deps.db
@@ -533,7 +550,7 @@ function scheduleMalformedGoalReportRetry(
     deps.db
       .query(
         `UPDATE attempts
-            SET exit_kind = 'crashed',
+            SET exit_kind = 'malformed_goal_report',
                 ended_at = ?,
                 exit_code = ?,
                 exit_signal = ?,
@@ -548,52 +565,49 @@ function scheduleMalformedGoalReportRetry(
         now,
         attempt.attempt_id,
       );
-    const diagnostics = `Worker wrote a malformed ${GOAL_REPORT_FILENAME}: ${probe.diagnostics}. The raw malformed bytes were persisted as malformed_goal_report artifact #${artifactId}.`;
-    const goalLimit = accountGoalFailureAndMaybeLimit(deps, {
-      taskId: task.task_id,
-      attemptId: attempt.attempt_id,
-      goalId: attempt.goal_id,
-      spawnedAt: attempt.spawned_at,
-      endedAt: now,
-      fromState: "running",
-      diagnostics,
-      payloadArtifactId: artifactId,
-    });
-    if (goalLimit.budgetLimited) {
+
+    if (repairsUsed >= MAX_GOAL_PROTOCOL_REPAIR_ATTEMPTS) {
+      transitionGoalProtocolRepairExhaustedInOpenTxn(
+        deps,
+        task,
+        attempt,
+        diagnostics,
+        artifactId,
+        now,
+        repairsUsed,
+      );
       deps.db.exec("COMMIT");
       try {
         rmSync(probe.path, { force: true });
       } catch {}
-      return { outcome: "goal_budget_limited" };
+      return { outcome: "blocker_written" };
     }
-    const retry = scheduleDeterministicRetry(deps, {
-      taskId: task.task_id,
-      prevAttempt: attempt,
-      reason: "malformed_goal_report",
+
+    const nextAttemptId = scheduleGoalProtocolRepairInOpenTxn(
+      deps,
+      task,
+      attempt,
       diagnostics,
-      fromState: "running",
-    });
-    if (!retry.scheduled) {
-      deps.db.exec("COMMIT");
-      try {
-        rmSync(probe.path, { force: true });
-      } catch {}
-      return { outcome: "malformed_signal" };
-    }
+      now,
+    );
     deps.db
       .query(
         `INSERT INTO events (
            task_id, attempt_id, event_type,
            from_state, to_state, payload_artifact_id, occurred_at, event_data
-         ) VALUES (?, ?, 'malformed_goal_report_ingested', 'running', (SELECT state FROM tasks WHERE task_id = ?), ?, ?, ?)`,
+         ) VALUES (?, ?, 'malformed_goal_report_ingested', 'running', 'queued', ?, ?, ?)`,
       )
       .run(
         task.task_id,
         attempt.attempt_id,
-        task.task_id,
         artifactId,
         now,
-        JSON.stringify({ diagnostics: probe.diagnostics }),
+        JSON.stringify({
+          diagnostics: probe.diagnostics,
+          next_attempt_id: nextAttemptId,
+          repairs_used: repairsUsed + 1,
+          max_repairs: MAX_GOAL_PROTOCOL_REPAIR_ATTEMPTS,
+        }),
       );
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -608,6 +622,197 @@ function scheduleMalformedGoalReportRetry(
   return { outcome: "malformed_signal" };
 }
 
+function countGoalProtocolRepairAttempts(db: DB, taskId: string): number {
+  const row = db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM attempts
+        WHERE task_id = ? AND reason = 'malformed_goal_report'`,
+    )
+    .get(taskId);
+  return row?.n ?? 0;
+}
+
+function scheduleGoalProtocolRepairInOpenTxn(
+  deps: ClassifierDeps,
+  task: ClassifyContextTask,
+  attempt: ClassifyContextAttempt,
+  diagnostics: string,
+  now: string,
+): number {
+  const preambleId = ensurePreambleIdForAttemptReason(
+    deps.db,
+    deps.clock,
+    "malformed_goal_report",
+  );
+  const objective = loadOriginalTaskObjective(deps.db, task.task_id);
+  const goalContext = loadGoalPromptContext(deps.db, task.task_id);
+  const prBaseBranch = loadTaskPrBaseBranch(deps.db, task.task_id);
+  const preambleBody = loadPreambleBody(deps.db, preambleId);
+  const guidance = [
+    "The previous goal-mode worker wrote an invalid .quay-goal-report.json.",
+    "Repair the protocol error before continuing normal work.",
+    "",
+    "Required actions:",
+    "- Inspect the malformed_goal_report artifact named in diagnostics.",
+    "- Write a valid .quay-goal-report.json before exiting.",
+    "- Do not open a duplicate PR.",
+  ].join("\n");
+  const composed = composeWorkerPrompt({
+    preambleBody,
+    taskObjective: objective,
+    prBaseBranch,
+    goalContext,
+    referenceReposRoot: deps.referenceReposRoot,
+    attemptGuidance: {
+      reason: "malformed_goal_report",
+      body: guidance,
+    },
+    diagnostics: {
+      kind: "malformed_goal_report_details",
+      body: diagnostics,
+    },
+  });
+
+  const attemptRow = deps.db
+    .query<
+      { attempt_id: number },
+      [string, number, number, string | null]
+    >(
+      `INSERT INTO attempts (
+         task_id, attempt_number, preamble_id, reason, consumed_budget, goal_id
+       ) VALUES (?, ?, ?, 'malformed_goal_report', 0, ?)
+       RETURNING attempt_id`,
+    )
+    .get(
+      task.task_id,
+      attempt.attempt_number + 1,
+      preambleId,
+      attempt.goal_id,
+    );
+  if (!attemptRow) throw new Error("goal protocol repair attempt insert returned no row");
+  deps.artifactStore.writeArtifact({
+    taskId: task.task_id,
+    attemptId: attemptRow.attempt_id,
+    kind: "brief",
+    content: composed.brief,
+    extension: "md",
+  });
+  deps.artifactStore.writeArtifact({
+    taskId: task.task_id,
+    attemptId: attemptRow.attempt_id,
+    kind: "final_prompt",
+    content: composed.finalPrompt,
+    extension: "md",
+  });
+  deps.db
+    .query(
+      `UPDATE task_goals
+          SET status = 'active',
+              last_attempt_id = ?,
+              updated_at = ?
+        WHERE task_id = ? AND goal_id = ?`,
+    )
+    .run(attempt.attempt_id, now, task.task_id, attempt.goal_id);
+  deps.db
+    .query(
+      `UPDATE tasks
+          SET state = 'queued',
+              tick_error = NULL,
+              updated_at = ?
+        WHERE task_id = ? AND state = 'running'
+          AND cancel_requested_at IS NULL`,
+    )
+    .run(now, task.task_id);
+  return attemptRow.attempt_id;
+}
+
+function transitionGoalProtocolRepairExhaustedInOpenTxn(
+  deps: ClassifierDeps,
+  task: ClassifyContextTask,
+  attempt: ClassifyContextAttempt,
+  diagnostics: string,
+  artifactId: number,
+  now: string,
+  repairsUsed: number,
+): void {
+  supersedeCurrentGoalHandoff(deps, task.task_id);
+  const blocker = [
+    "Goal worker repeatedly wrote malformed .quay-goal-report.json.",
+    "",
+    `Protocol repair attempts used: ${repairsUsed}`,
+    "",
+    diagnostics,
+  ].join("\n");
+  const blockerArtifact = deps.artifactStore.writeArtifact({
+    taskId: task.task_id,
+    attemptId: attempt.attempt_id,
+    kind: "blocker",
+    content: blocker,
+    extension: "md",
+  });
+  deps.db
+    .query(
+      `UPDATE task_goals
+          SET status = 'blocked',
+              last_attempt_id = ?,
+              current_handoff_id = NULL,
+              updated_at = ?
+        WHERE task_id = ? AND goal_id = ?`,
+    )
+    .run(attempt.attempt_id, now, task.task_id, attempt.goal_id);
+  deps.db
+    .query(
+      `UPDATE tasks
+          SET state = 'awaiting-next-brief',
+              tick_error = NULL,
+              updated_at = ?
+        WHERE task_id = ? AND state = 'running'
+          AND cancel_requested_at IS NULL`,
+    )
+    .run(now, task.task_id);
+  const eventRow = deps.db
+    .query<{ event_id: number }, [string, number, number, string, string]>(
+      `INSERT INTO events (
+         task_id, attempt_id, event_type, from_state, to_state,
+         payload_artifact_id, occurred_at, event_data
+       ) VALUES (?, ?, 'malformed_goal_report_repair_exhausted', 'running', 'awaiting-next-brief', ?, ?, ?)
+       RETURNING event_id`,
+    )
+    .get(
+      task.task_id,
+      attempt.attempt_id,
+      blockerArtifact.artifactId,
+      now,
+      JSON.stringify({
+        malformed_goal_report_artifact_id: artifactId,
+        repairs_used: repairsUsed,
+        max_repairs: MAX_GOAL_PROTOCOL_REPAIR_ATTEMPTS,
+      }),
+    );
+  if (!eventRow) {
+    throw new Error("malformed_goal_report_repair_exhausted event insert returned no row");
+  }
+  const handoffId = enqueueOrchestratorHandoff(deps, {
+    taskId: task.task_id,
+    reason: "worker_blocker",
+    stateEventId: eventRow.event_id,
+    payload: {
+      goal_id: attempt.goal_id,
+      attempt_id: attempt.attempt_id,
+      artifact_id: blockerArtifact.artifactId,
+      malformed_goal_report_artifact_id: artifactId,
+      repairs_used: repairsUsed,
+      max_repairs: MAX_GOAL_PROTOCOL_REPAIR_ATTEMPTS,
+    },
+  });
+  deps.db
+    .query(
+      `UPDATE task_goals SET current_handoff_id = ?, updated_at = ?
+        WHERE task_id = ? AND goal_id = ?`,
+    )
+    .run(handoffId, now, task.task_id, attempt.goal_id);
+}
+
 function ingestActiveGoalReport(
   deps: ClassifierDeps,
   task: ClassifyContextTask,
@@ -618,6 +823,7 @@ function ingestActiveGoalReport(
   delivery: GoalPrDelivery,
   exitInfo: PaneExitInfo,
   warnings: string[],
+  evidence: CapturedGoalEvidence,
 ): ClassifyResult {
   const now = deps.clock.nowISO();
   const prCreatedDuringAttempt =
@@ -797,6 +1003,7 @@ function ingestActiveGoalReport(
           remote_progress: remoteProgress,
           pr_created_during_attempt: prCreatedDuringAttempt,
           no_progress_active_count: nextNoProgress,
+          evidence_manifest_artifact_id: evidence.manifestArtifactId,
         }),
       );
     deps.db.exec("COMMIT");
@@ -1060,6 +1267,7 @@ function ingestBlockedGoalReport(
   reportArtifactId: number,
   remoteShaAtExit: string | null,
   exitInfo: PaneExitInfo,
+  evidence: CapturedGoalEvidence,
 ): ClassifyResult {
   const blocker = report.blocker ?? "";
   const blockerArtifact = deps.artifactStore.writeArtifact({
@@ -1132,7 +1340,10 @@ function ingestBlockedGoalReport(
         attempt.attempt_id,
         blockerArtifact.artifactId,
         now,
-        JSON.stringify({ goal_report_artifact_id: reportArtifactId }),
+        JSON.stringify({
+          goal_report_artifact_id: reportArtifactId,
+          evidence_manifest_artifact_id: evidence.manifestArtifactId,
+        }),
       );
     if (!eventRow) throw new Error("blocker_ingested event insert returned no row");
     const handoffId = enqueueOrchestratorHandoff(deps, {
@@ -1144,6 +1355,7 @@ function ingestBlockedGoalReport(
         attempt_id: attempt.attempt_id,
         artifact_id: blockerArtifact.artifactId,
         goal_report_artifact_id: reportArtifactId,
+        evidence_manifest_artifact_id: evidence.manifestArtifactId,
       },
     });
     deps.db
@@ -1175,19 +1387,8 @@ function ingestCompleteGoalReport(
   remoteShaAtExit: string | null,
   delivery: GoalPrDelivery,
   exitInfo: PaneExitInfo,
+  evidence: CapturedGoalEvidence,
 ): ClassifyResult {
-  if (!delivery.deliveredPrExists) {
-    return scheduleCompleteWithoutDeliveryRetry(
-      deps,
-      task,
-      attempt,
-      report,
-      reportArtifactId,
-      remoteShaAtExit,
-      exitInfo,
-      delivery,
-    );
-  }
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");
   try {
@@ -1200,19 +1401,19 @@ function ingestCompleteGoalReport(
     deps.db
       .query(
         `UPDATE task_goals
-            SET status = 'complete',
+            SET status = 'completion_pending',
                 last_attempt_id = ?,
                 no_progress_active_count = 0,
                 current_handoff_id = NULL,
-                completed_at = ?,
+                completed_at = NULL,
                 updated_at = ?
           WHERE task_id = ? AND goal_id = ? AND status = 'active'`,
       )
-      .run(attempt.attempt_id, now, now, task.task_id, attempt.goal_id);
+      .run(attempt.attempt_id, now, task.task_id, attempt.goal_id);
     const taskUpd = deps.db
       .query(
         `UPDATE tasks
-            SET state = 'pr-open',
+            SET state = 'goal-completion-pending',
                 spawn_failures_consecutive = 0,
                 tick_error = NULL,
                 updated_at = ?
@@ -1223,12 +1424,12 @@ function ingestCompleteGoalReport(
     const changes = (taskUpd as { changes?: number }).changes ?? 0;
     if (changes === 0) {
       deps.db.exec("ROLLBACK");
-      return { outcome: "pr_opened" };
+      return { outcome: "goal_completion_pending" };
     }
     deps.db
       .query(
         `UPDATE attempts
-            SET exit_kind = 'pr_opened',
+            SET exit_kind = 'goal_completion_pending',
                 ended_at = ?,
                 remote_sha_at_exit = ?,
                 exit_code = ?,
@@ -1249,7 +1450,7 @@ function ingestCompleteGoalReport(
         `INSERT INTO events (
            task_id, attempt_id, event_type, from_state, to_state,
            payload_artifact_id, occurred_at, event_data
-         ) VALUES (?, ?, 'pr_opened', 'running', 'pr-open', ?, ?, ?)`,
+         ) VALUES (?, ?, 'goal_completion_pending', 'running', 'goal-completion-pending', ?, ?, ?)`,
       )
       .run(
         task.task_id,
@@ -1259,7 +1460,11 @@ function ingestCompleteGoalReport(
         JSON.stringify({
           goal_id: attempt.goal_id,
           goal_report_status: report.status,
+          evidence_manifest_artifact_id: evidence.manifestArtifactId,
           pr_number: delivery.prNumber,
+          pr_exists_at_exit: delivery.prExistsAtExit,
+          reviewable_pr_exists: delivery.reviewablePrExists,
+          terminal_pr_state: delivery.terminalPrState,
           head_sha: remoteShaAtExit,
         }),
       );
@@ -1275,7 +1480,7 @@ function ingestCompleteGoalReport(
     rmSync(join(task.worktree_path, GOAL_REPORT_FILENAME), { force: true });
     rmSync(join(task.worktree_path, BLOCKER_FILENAME), { force: true });
   } catch {}
-  return { outcome: "pr_opened" };
+  return { outcome: "goal_completion_pending" };
 }
 
 function scheduleCompleteWithoutDeliveryRetry(

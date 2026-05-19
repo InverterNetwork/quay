@@ -93,7 +93,18 @@ normal worker attempts until the worker reports one of three statuses through
 {
   "status": "active",
   "summary": "What changed or was learned in this attempt.",
-  "evidence": ["Concrete evidence inspected or produced."],
+  "evidence": [
+    {
+      "kind": "file",
+      "path": "test-output.txt",
+      "summary": "Command output showing the relevant verification passed."
+    },
+    {
+      "kind": "url",
+      "url": "https://github.com/owner/repo/pull/123",
+      "summary": "Reviewable PR URL."
+    }
+  ],
   "blocker": null,
   "next_steps": ["Concrete next step for the next worker attempt."]
 }
@@ -104,9 +115,25 @@ normal worker attempts until the worker reports one of three statuses through
 - `active`: Quay records usage/time and schedules a `goal_continue` attempt.
   This is productive continuation and does not consume regular retry budget.
 - `blocked`: Quay creates a blocker artifact and an orchestrator handoff.
-- `complete`: Quay only enters normal `pr-open` flow when a non-draft PR is
-  ready for review, or when the PR has already reached a terminal merged/closed
-  state. Draft PRs do not count as delivery.
+- `complete`: Quay first moves the task to `goal-completion-pending`, captures
+  cited evidence artifacts, and audits the completion claim. Only an accepted
+  audit enters normal `pr-open` flow. Draft PRs, missing evidence, notes-only
+  evidence, invalid file paths, or evidence saying required verification could
+  not run are returned to the worker with a non-budget correction attempt.
+
+Evidence entries use one of four shapes:
+
+- `file`: a path inside the worktree. Quay captures the file as an attempt
+  artifact.
+- `url`: an HTTP(S) URL that remains queryable from task history.
+- `artifact`: a prior Quay artifact id from the same task.
+- `note`: context only. Notes are useful for active/blocked reports, but notes
+  alone are not enough for `complete`.
+
+Malformed goal reports are protocol errors. Quay preserves the malformed bytes
+as `malformed_goal_report`, schedules bounded repair attempts with
+`consumed_budget = 0`, and only parks for human input after those protocol
+repairs are exhausted.
 
 If a goal hits its token budget, Quay moves the task to `awaiting-next-brief`
 with a `budget_exhausted` handoff. Resuming a budget-limited goal requires an

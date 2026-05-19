@@ -6,10 +6,31 @@ export const GOAL_REPORT_MAX_BYTES = 256 * 1024;
 
 export type GoalReportStatus = "active" | "blocked" | "complete";
 
+export type GoalEvidence =
+  | {
+      kind: "note";
+      summary: string;
+    }
+  | {
+      kind: "file";
+      summary: string;
+      path: string;
+    }
+  | {
+      kind: "url";
+      summary: string;
+      url: string;
+    }
+  | {
+      kind: "artifact";
+      summary: string;
+      artifact_id: number;
+    };
+
 export interface GoalReport {
   status: GoalReportStatus;
   summary: string;
-  evidence: string[];
+  evidence: GoalEvidence[];
   blocker: string | null;
   next_steps: string[];
 }
@@ -137,9 +158,7 @@ function validateGoalReport(value: unknown): ValidationResult {
     errors.push("evidence must be an array");
   } else {
     for (let i = 0; i < obj.evidence.length; i++) {
-      if (typeof obj.evidence[i] !== "string") {
-        errors.push(`evidence[${i}] must be a string`);
-      }
+      validateEvidenceEntry(obj.evidence[i], i, errors);
     }
   }
   if (!Array.isArray(obj.next_steps)) {
@@ -180,9 +199,66 @@ function validateGoalReport(value: unknown): ValidationResult {
     report: {
       status: status as GoalReportStatus,
       summary: obj.summary as string,
-      evidence: obj.evidence as string[],
+      evidence: obj.evidence as GoalEvidence[],
       blocker: obj.blocker as string | null,
       next_steps: obj.next_steps as string[],
     },
   };
+}
+
+function validateEvidenceEntry(
+  value: unknown,
+  index: number,
+  errors: string[],
+): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(`evidence[${index}] must be an object`);
+    return;
+  }
+  const entry = value as Record<string, unknown>;
+  const kind = entry.kind;
+  if (kind !== "note" && kind !== "file" && kind !== "url" && kind !== "artifact") {
+    errors.push(`evidence[${index}].kind must be note, file, url, or artifact`);
+    return;
+  }
+
+  const allowed = new Set(["kind", "summary"]);
+  if (kind === "file") allowed.add("path");
+  if (kind === "url") allowed.add("url");
+  if (kind === "artifact") allowed.add("artifact_id");
+  for (const key of Object.keys(entry)) {
+    if (!allowed.has(key)) {
+      errors.push(`evidence[${index}] has unknown field "${key}"`);
+    }
+  }
+
+  if (typeof entry.summary !== "string" || entry.summary.trim().length === 0) {
+    errors.push(`evidence[${index}].summary must be a non-empty string`);
+  }
+  if (kind === "file") {
+    if (typeof entry.path !== "string" || entry.path.trim().length === 0) {
+      errors.push(`evidence[${index}].path must be a non-empty string`);
+    }
+  } else if (kind === "url") {
+    if (typeof entry.url !== "string" || entry.url.trim().length === 0) {
+      errors.push(`evidence[${index}].url must be a non-empty string`);
+    } else {
+      try {
+        const url = new URL(entry.url);
+        if (url.protocol !== "http:" && url.protocol !== "https:") {
+          errors.push(`evidence[${index}].url must be http or https`);
+        }
+      } catch {
+        errors.push(`evidence[${index}].url must be a valid URL`);
+      }
+    }
+  } else if (kind === "artifact") {
+    if (
+      typeof entry.artifact_id !== "number" ||
+      !Number.isInteger(entry.artifact_id) ||
+      entry.artifact_id <= 0
+    ) {
+      errors.push(`evidence[${index}].artifact_id must be a positive integer`);
+    }
+  }
 }

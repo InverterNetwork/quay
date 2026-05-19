@@ -5,9 +5,15 @@ import type { Clock } from "../ports/clock.ts";
 import { enqueueOrchestratorHandoff } from "./orchestrator_handoffs.ts";
 
 export type WorkerExecution = "oneshot" | "goal";
-export type TaskGoalStatus = "active" | "blocked" | "budget_limited" | "complete";
+export type TaskGoalStatus =
+  | "active"
+  | "blocked"
+  | "budget_limited"
+  | "completion_pending"
+  | "complete";
 
 export const GOAL_CONTINUE_ATTEMPT_REASON = "goal_continue";
+export const GOAL_AUDIT_REJECTED_ATTEMPT_REASON = "goal_audit_rejected";
 export const NO_PROGRESS_ACTIVE_LIMIT = 3;
 
 export interface TaskGoalRow {
@@ -179,7 +185,29 @@ export function renderGoalContext(ctx: GoalPromptContext): string {
     "- Before reporting status `complete`, ensure there is a non-draft PR ready for review.",
     "- If more work remains, write `.quay-goal-report.json` with status `active`.",
     "- If blocked, write `.quay-goal-report.json` with status `blocked`.",
-    "- If complete, write `.quay-goal-report.json` with status `complete` and provide evidence.",
+    "- If complete, write `.quay-goal-report.json` with status `complete` and cite durable evidence.",
+    "",
+    "Goal report schema:",
+    "```json",
+    "{",
+    '  "status": "active | blocked | complete",',
+    '  "summary": "What changed or was learned in this attempt.",',
+    '  "evidence": [',
+    '    { "kind": "file", "path": "relative/path.txt", "summary": "What this file proves." },',
+    '    { "kind": "url", "url": "https://example.invalid/result", "summary": "What this URL proves." },',
+    '    { "kind": "artifact", "artifact_id": 123, "summary": "What this prior artifact proves." },',
+    '    { "kind": "note", "summary": "Context only; notes alone are not enough for complete." }',
+    "  ],",
+    '  "blocker": null,',
+    '  "next_steps": ["Concrete next step for the next worker attempt."]',
+    "}",
+    "```",
+    "",
+    "Completion evidence rules:",
+    "- Complete reports are independently audited before PR lifecycle begins.",
+    "- Complete evidence must include at least one durable file, URL, or artifact entry.",
+    "- If required verification could not run, report `active` or `blocked`, not `complete`.",
+    "- File evidence paths must be inside the worktree; Quay captures them as attempt artifacts.",
     "</goal_context>",
   ].join("\n");
 }

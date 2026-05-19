@@ -14,23 +14,33 @@
 // (or one that died before tmux noticed) has an old mtime. Without this
 // pipe, every long-running task gets stale-killed past the staleness
 // threshold even when actively producing output.
+import { createHash } from "node:crypto";
 import {
+  accessSync,
+  chmodSync,
   closeSync,
+  constants,
+  cpSync,
   existsSync,
+  lstatSync,
+  mkdirSync,
   openSync,
   readFileSync,
   readSync,
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { decodePaneStatus, EXIT_INFO_NONE } from "../core/exit_status.ts";
 import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 
 const PROMPT_FILE = ".quay-prompt.md";
 const SESSION_LOG_FILE = ".quay-session.log";
+const SPAWN_ADMIN_DIR = ".quay-spawn";
+const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Tool-call trace produced by the agent's debug stream when the operator
 // uses `--debug-file`. With the default agent invocation routing stdout
 // to `.quay-usage.json` and debug output to this file, the pane log can
@@ -53,7 +63,6 @@ const MAX_LOG_BYTES = 4 * 1024 * 1024;
 
 export class TmuxAdapter implements TmuxPort {
   spawn(input: TmuxSpawnInput): void {
-    const tmuxEnv = buildSpawnEnv(input.env);
     // Spawn preflight: sweep direct children of the worktree whose names
     // start with `.quay-`. A leftover `.quay-blocked.md` from a previous
     // attempt would otherwise be ingested as the new attempt's blocker on
@@ -63,6 +72,9 @@ export class TmuxAdapter implements TmuxPort {
     // tight — only direct children, only the `.quay-` prefix — so we never
     // touch anything the worker wrote under nested directories.
     sweepQuayState(input.worktreePath);
+    const tmuxEnv = buildSpawnEnv(input.env);
+    prepareCodexHome(tmuxEnv);
+    installGhWrapperIfTokened(input, tmuxEnv);
 
     const promptFile = join(input.worktreePath, PROMPT_FILE);
     writeFileSync(promptFile, input.promptContent);
@@ -362,6 +374,148 @@ function buildSpawnEnv(
     }
   }
   return env;
+}
+
+function installGhWrapperIfTokened(
+  input: TmuxSpawnInput,
+  env: NodeJS.ProcessEnv,
+): void {
+  const tokenFile = resolveGhTokenFile(input, env);
+  if (tokenFile === null) return;
+
+  const adminDir = spawnAdminDir(input);
+  const binDir = join(adminDir, "bin");
+  mkdirSync(binDir, { recursive: true, mode: 0o700 });
+  chmodSync(binDir, 0o700);
+
+  const ghPath = join(binDir, "gh");
+  const realGh = resolveCommandOnPath("gh", env.PATH);
+  const body =
+    realGh === null
+      ? [
+          "#!/bin/sh",
+          'echo "quay: gh wrapper could not find gh on PATH before wrapper install" >&2',
+          "exit 127",
+          "",
+        ].join("\n")
+      : [
+          "#!/bin/sh",
+          `token="$(cat ${shellQuote(tokenFile)})"`,
+          'if [ -z "$token" ]; then echo "quay: gh token file is missing or empty" >&2; exit 75; fi',
+          `exec env GH_TOKEN="$token" GITHUB_TOKEN= ${shellQuote(realGh)} "$@"`,
+          "",
+        ].join("\n");
+  writeFileSync(ghPath, body, { mode: 0o700 });
+  chmodSync(ghPath, 0o700);
+
+  env.PATH = env.PATH ? `${binDir}:${env.PATH}` : binDir;
+}
+
+function resolveGhTokenFile(
+  input: TmuxSpawnInput,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const fromEnvFile = input.envFiles?.find((entry) => entry.name === "GH_TOKEN");
+  if (fromEnvFile !== undefined) return fromEnvFile.path;
+
+  const token = nonEmpty(env.GH_TOKEN) ?? nonEmpty(env.GITHUB_TOKEN);
+  if (token === null) return null;
+
+  const adminDir = spawnAdminDir(input);
+  mkdirSync(adminDir, { recursive: true, mode: 0o700 });
+  chmodSync(adminDir, 0o700);
+  const path = join(adminDir, "gh-token");
+  writeFileSync(path, `${token}\n`, { mode: 0o600 });
+  chmodSync(path, 0o600);
+  return path;
+}
+
+function spawnAdminDir(input: TmuxSpawnInput): string {
+  const hash = createHash("sha256")
+    .update(input.sessionName)
+    .update("\0")
+    .update(input.worktreePath)
+    .digest("hex");
+  return join(dirname(input.worktreePath), SPAWN_ADMIN_DIR, hash);
+}
+
+function prepareCodexHome(env: NodeJS.ProcessEnv): void {
+  if (env[CODEX_SOURCE_HOME_ENV] === undefined) return;
+  const codexHome = nonEmpty(env.CODEX_HOME);
+  if (codexHome === null) {
+    delete env[CODEX_SOURCE_HOME_ENV];
+    return;
+  }
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  chmodSync(codexHome, 0o700);
+
+  const sourceHome = nonEmpty(env[CODEX_SOURCE_HOME_ENV]);
+  delete env[CODEX_SOURCE_HOME_ENV];
+  if (sourceHome !== null && sourceHome !== codexHome && existsSync(sourceHome)) {
+    seedCodexHome(sourceHome, codexHome);
+  }
+  mkdirSync(join(codexHome, "shell_snapshots"), { recursive: true, mode: 0o700 });
+  chmodSync(join(codexHome, "shell_snapshots"), 0o700);
+}
+
+function seedCodexHome(sourceHome: string, codexHome: string): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(sourceHome);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (name === "shell_snapshots") continue;
+    const sourcePath = join(sourceHome, name);
+    const targetPath = join(codexHome, name);
+    if (existsSync(targetPath)) continue;
+    try {
+      symlinkSync(sourcePath, targetPath);
+    } catch {
+      copyCodexHomeEntry(sourcePath, targetPath);
+    }
+  }
+}
+
+function copyCodexHomeEntry(sourcePath: string, targetPath: string): void {
+  try {
+    const stat = lstatSync(sourcePath);
+    cpSync(sourcePath, targetPath, {
+      recursive: stat.isDirectory(),
+      force: false,
+      errorOnExist: false,
+      verbatimSymlinks: true,
+    });
+  } catch {}
+}
+
+function nonEmpty(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function resolveCommandOnPath(
+  command: string,
+  pathValue: string | undefined,
+): string | null {
+  if (command.includes("/")) return isExecutable(command) ? command : null;
+  for (const dir of (pathValue ?? "").split(":")) {
+    if (dir.length === 0) continue;
+    const candidate = join(dir, command);
+    if (isExecutable(candidate)) return candidate;
+  }
+  return null;
+}
+
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Build a POSIX-shell prefix that reads each envFile inline and exports

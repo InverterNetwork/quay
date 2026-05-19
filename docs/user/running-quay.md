@@ -49,10 +49,13 @@ tmux session. The worker should:
 - Push the `quay/<slug>` branch.
 - Open a PR if one does not already exist.
 - Exit after opening/updating the PR.
+- In goal mode, write `.quay-goal-report.json` instead of opening a PR when
+  reporting `complete`, `active`, or `blocked`.
 - If blocked, write a non-empty UTF-8 `.quay-blocked.md` and exit.
 - Avoid interactive tools.
 
-Quay reserves `.quay-*` files except for `.quay-blocked.md`.
+Quay reserves `.quay-*` files except for `.quay-blocked.md` and, in goal mode,
+`.quay-goal-report.json`.
 
 ## Running State Outcomes
 
@@ -61,6 +64,12 @@ When the worker dies, tick collects the session log and checks:
 - Valid `.quay-blocked.md`: stores `blocker`, transitions to
   `awaiting-next-brief`.
 - Malformed `.quay-blocked.md`: stores `malformed_signal`, schedules a retry.
+- Valid goal report with `status: "complete"`: captures cited evidence and
+  transitions to `goal-completion-pending`; the next tick audits the report
+  before allowing PR lifecycle states.
+- Malformed goal report: stores `malformed_goal_report`, schedules a
+  non-budget protocol repair retry, and blocks after repeated malformed
+  reports.
 - PR exists and progress was made: transitions to `pr-open`.
 - Existing PR but no trackable progress: schedules a crash retry.
 - No PR and no blocker: schedules a crash retry.

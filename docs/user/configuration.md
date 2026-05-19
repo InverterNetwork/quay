@@ -133,13 +133,21 @@ export QUAY_REVIEWER_GH_TOKEN="<reviewer-app-token>"
 exec quay tick
 ```
 
-Worker panes keep using `GH_TOKEN`. Reviewer panes receive
-`QUAY_REVIEWER_GH_TOKEN` as their pane-local `GH_TOKEN`, and Quay removes the
-source variable from the pane environment before launching the agent. The
-reviewer token is probed against the target repository before the review
-attempt is promoted. Invalid, expired, empty, missing, or repo-inaccessible
-tokens fail as `spawn_substrate_failed` and stay out of the reviewer
-`review_infra_failed` retry accounting.
+Worker panes keep using `GH_TOKEN`. When only `GITHUB_TOKEN` is set, Quay
+promotes that value to pane-local `GH_TOKEN` and clears `GITHUB_TOKEN` so
+GitHub CLI calls have one canonical token source. Quay also places a per-spawn
+`gh` wrapper first on `PATH`; the wrapper lives outside the git checkout, reads
+Quay's fresh token source from an outside-worktree file, and runs the real `gh`
+with `GH_TOKEN` set and `GITHUB_TOKEN` cleared. Stale token variables sourced
+later inside an agent shell cannot poison `gh pr list/create`, and `git add .`
+from the worker cannot stage the generated credential file.
+
+Reviewer panes receive `QUAY_REVIEWER_GH_TOKEN` as their pane-local
+`GH_TOKEN`, and Quay removes the source variable from the pane environment
+before launching the agent. The reviewer token is probed against the target
+repository before the review attempt is promoted. Invalid, expired, empty,
+missing, or repo-inaccessible tokens fail as `spawn_substrate_failed` and stay
+out of the reviewer `review_infra_failed` retry accounting.
 
 `gh_token_file` is a migration fallback used only when
 `QUAY_REVIEWER_GH_TOKEN` is unset. The file is expected mode `0600`, read fresh
@@ -170,6 +178,13 @@ already-queued tasks. Successful spawns record the resolved `agent_name` and
 Quay writes the final prompt to `<worktree>/.quay-prompt.md` before spawning an
 agent. If your command uses `{prompt_file}`, Quay replaces it with a
 shell-quoted prompt path.
+
+For Codex-backed agents (`codex` and `hermes_codex*`), Quay sets `CODEX_HOME`
+to an outside-worktree per-task directory next to the checkout root. Quay seeds
+that isolated home from the operator's configured Codex home (`$CODEX_HOME`, or
+`$HOME/.codex` when unset) but deliberately skips `shell_snapshots`. Existing
+Codex auth/config stays available while stale shell snapshots are scoped away
+from future tasks.
 
 Examples:
 
