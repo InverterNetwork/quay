@@ -64,6 +64,7 @@ const SELECT_REPO_COLUMNS = `
 const ACTIVE_TASK_STATES = [
   "queued",
   "running",
+  "goal-completion-pending",
   "pr-open",
   "done",
   "awaiting-next-brief",

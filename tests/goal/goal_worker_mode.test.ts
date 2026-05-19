@@ -713,6 +713,50 @@ test("complete report with missing contradictory evidence is audit-rejected", as
   expect(audit.reasons.join("\n")).toContain("does not cite any captured file");
 });
 
+test("complete report with contradictory file evidence is audit-rejected", async () => {
+  h = createHarness();
+  const t = setupRunningGoalTask();
+  writeGoalReport(t.worktreePath, {
+    status: "complete",
+    summary: "Implemented the change and opened the PR.",
+    evidence: [
+      fileEvidence(
+        t.worktreePath,
+        "verification-output.txt",
+        "Automated verification output.",
+        "bun test failed\n",
+      ),
+    ],
+    blocker: null,
+    next_steps: [],
+  });
+
+  const built = buildTickDeps(h);
+  built.tmux.markDead(t.sessionName!);
+  built.git.setRemoteHeadSha(t.repoId, t.branchName, "head-file-evidence");
+  built.github.setPrSnapshot(t.repoId, t.branchName, makeSnapshot());
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([
+    { task_id: t.taskId, action: "goal_completion_pending" },
+  ]);
+  const audited = await tick_once(built.deps);
+  expect(audited).toEqual([
+    { task_id: t.taskId, action: "goal_completion_rejected" },
+  ]);
+
+  const auditPath = h.db
+    .query<{ file_path: string }, [string]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND kind = 'goal_completion_audit'
+        ORDER BY artifact_id DESC LIMIT 1`,
+    )
+    .get(t.taskId)!.file_path;
+  const audit = JSON.parse(readFileSync(auditPath, "utf8"));
+  expect(audit.decision).toBe("rejected");
+  expect(audit.reasons.join("\n")).toContain("required verification could not run");
+});
+
 test("complete goal report with draft PR budget-limits after accounting usage", async () => {
   h = createHarness();
   const t = setupRunningGoalTask();

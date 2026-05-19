@@ -75,3 +75,26 @@ test("test_repo_remove_rejects_active_tasks", () => {
   expect((caught as QuayError).code).toBe("repo_has_active_tasks");
   expect(repos.get(REQUIRED_FIELDS.repo_id)!.archived_at).toBeNull();
 });
+
+test("repo remove rejects goal completion pending tasks", () => {
+  h = createHarness();
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+
+  repos.add({ ...REQUIRED_FIELDS });
+  insertTask(h.db, {
+    repoId: REQUIRED_FIELDS.repo_id,
+    taskId: "task-goal-completion-pending",
+    state: "goal-completion-pending",
+  });
+
+  let caught: unknown = null;
+  try {
+    repos.remove(REQUIRED_FIELDS.repo_id);
+  } catch (err) {
+    caught = err;
+  }
+
+  expect(caught).toBeInstanceOf(QuayError);
+  expect((caught as QuayError).code).toBe("repo_has_active_tasks");
+  expect(repos.get(REQUIRED_FIELDS.repo_id)!.archived_at).toBeNull();
+});

@@ -161,6 +161,7 @@ export function processGoalCompletionAudit(
   }
 
   const decision = evaluateGoalCompletion({
+    db: deps.db,
     report,
     manifest,
     snapshot,
@@ -394,6 +395,7 @@ function evidenceItem(
 }
 
 function evaluateGoalCompletion(input: {
+  db: DB;
   report: GoalReport;
   manifest: GoalEvidenceManifest;
   snapshot: PrSnapshot | null;
@@ -425,7 +427,7 @@ function evaluateGoalCompletion(input: {
     feedback.push("Add durable evidence such as a test log, screenshot file, command-output file, PR URL, or prior artifact reference.");
   }
 
-  if (completionEvidenceContradictsClaim(input.report, input.manifest)) {
+  if (completionEvidenceContradictsClaim(input.report, input.manifest, input.db)) {
     reasons.push("The cited evidence says required verification could not run or failed.");
     feedback.push("Run the missing verification or report active/blocked with next steps instead of complete.");
   }
@@ -451,11 +453,13 @@ function evaluateGoalCompletion(input: {
 function completionEvidenceContradictsClaim(
   report: GoalReport,
   manifest: GoalEvidenceManifest,
+  db: DB,
 ): boolean {
   const text = [
     report.summary,
     ...report.evidence.map((e) => e.summary),
     ...manifest.items.map((item) => item.error ?? ""),
+    ...readEvidenceArtifactTextForAudit(db, manifest),
   ]
     .join("\n")
     .toLowerCase();
@@ -468,6 +472,40 @@ function completionEvidenceContradictsClaim(
       text,
     );
   return failure && verification;
+}
+
+function readEvidenceArtifactTextForAudit(
+  db: DB,
+  manifest: GoalEvidenceManifest,
+): string[] {
+  const artifactIds = new Set<number>();
+  for (const item of manifest.items) {
+    if (item.artifact_id !== null) artifactIds.add(item.artifact_id);
+    if (item.kind === "artifact" && typeof item.source === "number") {
+      artifactIds.add(item.source);
+    }
+  }
+
+  const texts: string[] = [];
+  for (const artifactId of artifactIds) {
+    const text = readArtifactTextForAudit(db, artifactId);
+    if (text !== null) texts.push(text);
+  }
+  return texts;
+}
+
+function readArtifactTextForAudit(db: DB, artifactId: number): string | null {
+  const row = db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts WHERE artifact_id = ?`,
+    )
+    .get(artifactId);
+  if (!row) return null;
+  try {
+    return new TextDecoder("utf-8").decode(readFileSync(row.file_path));
+  } catch {
+    return null;
+  }
 }
 
 function writeGoalCompletionAuditArtifact(
