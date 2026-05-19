@@ -144,8 +144,10 @@ quay enqueue \
 Task-level agent/model overrides are snapshotted onto the queued task and take
 precedence over repo and deployment role defaults. On the manual brief path,
 `--worker-execution` defaults to `oneshot`; `goal` enables durable goal mode
-and requires the worker to write `.quay-goal-report.json` before exit. On the
-Linear path, set `worker_execution: goal` in the ticket's `quay-config` block.
+and requires the worker to write `.quay-goal-report.json` before exit. Complete
+goal reports are audited against captured evidence before Quay enters the PR
+lifecycle. On the Linear path, set `worker_execution: goal` in the ticket's
+`quay-config` block.
 `--base-branch` overrides the repo default for one task on either enqueue path;
 Linear tickets can also set `base_branch` in `quay-config`.
 `--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,

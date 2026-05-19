@@ -41,6 +41,10 @@ import { fireFailpoint } from "./failpoints.ts";
 import { scheduleNonBudgetRespawn } from "./non_budget_respawn.ts";
 import { enterReview, isSyntheticTaskId } from "./pr_review.ts";
 import {
+  processGoalCompletionAudit,
+  type GoalCompletionPendingTask,
+} from "./goal_audit.ts";
+import {
   scheduleCleanSpawnRetry,
   scheduleDeterministicRetry,
   type BudgetRetryReason,
@@ -139,6 +143,9 @@ export type TickAction =
   | "spawn_substrate_failed"
   | "blocker_ingested"
   | "goal_continuation_scheduled"
+  | "goal_completion_pending"
+  | "goal_completion_accepted"
+  | "goal_completion_rejected"
   | "goal_budget_limited"
   | "malformed_signal"
   | "pr_opened"
@@ -434,6 +441,9 @@ export async function tick_once(
     const runningSnapshot = readRunning(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id) && !closedUnmergedIds.has(t.task_id),
     );
+    const goalCompletionPendingSnapshot = readGoalCompletionPending(
+      deps.db,
+    ).filter((t) => !cancelledIds.has(t.task_id));
     const syntheticReviewLifecycleSnapshot = readSyntheticReviewLifecycle(
       deps.db,
     ).filter((t) => !cancelledIds.has(t.task_id));
@@ -470,6 +480,15 @@ export async function tick_once(
     for (const task of runningSnapshot) {
       try {
         const result = processRunningTask(deps, task, options);
+        if (result !== null) results.push(result);
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
+    for (const task of goalCompletionPendingSnapshot) {
+      try {
+        const result = processGoalCompletionAudit(deps, task);
         if (result !== null) results.push(result);
       } catch (err) {
         results.push(recordTickError(deps, task.task_id, err));
@@ -729,6 +748,17 @@ function readRunning(db: DB): RunningTaskRow[] {
          FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
         WHERE t.state = 'running'
         ORDER BY t.created_at, t.task_id`,
+    )
+    .all();
+}
+
+function readGoalCompletionPending(db: DB): GoalCompletionPendingTask[] {
+  return db
+    .query<GoalCompletionPendingTask, []>(
+      `SELECT task_id, repo_id, branch_name, worktree_path, cancel_requested_at
+         FROM tasks
+        WHERE state = 'goal-completion-pending'
+        ORDER BY created_at, task_id`,
     )
     .all();
 }
@@ -1111,6 +1141,8 @@ function outcomeToResult(
       };
     case "goal_continuation_scheduled":
       return { task_id: taskId, action: "goal_continuation_scheduled" };
+    case "goal_completion_pending":
+      return { task_id: taskId, action: "goal_completion_pending" };
     case "goal_budget_limited":
       return { task_id: taskId, action: "goal_budget_limited" };
     case "goal_report_processed":

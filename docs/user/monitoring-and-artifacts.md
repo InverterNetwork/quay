@@ -90,6 +90,11 @@ binary and invalid UTF-8 artifacts such as `malformed_signal`.
 | `tool_trace` | Raw tool-call/debug stream or Codex JSONL from `.quay-tool-trace.log`, captured per attempt with a 4 MiB tail. |
 | `blocker` | Valid `.quay-blocked.md` written by a worker. |
 | `malformed_signal` | Invalid blocker signal bytes. |
+| `goal_report` | Valid `.quay-goal-report.json` captured from a goal-mode worker. |
+| `malformed_goal_report` | Invalid goal report bytes captured for bounded protocol repair. |
+| `goal_evidence` | File, URL, artifact-reference, or note evidence cited by a goal report. |
+| `goal_evidence_manifest` | Manifest linking each cited evidence entry to its captured artifact or validation error. |
+| `goal_completion_audit` | Durable audit decision for a complete goal report, including reasons and follow-up feedback. |
 | `ci_failure_excerpt` | CI failure details captured from GitHub checks. |
 | `review_comments` | Snapshot of posted review body and inline comments. Used for review respawns and synthetic review forensics. |
 | `review_blocker` | Reviewer blocker or infrastructure-failure diagnostic. |

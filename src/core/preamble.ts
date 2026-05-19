@@ -5,7 +5,7 @@ export const DEFAULT_PREAMBLE_BODY = `Quay protocol preamble (v1)
 
 1. If you cannot make progress, write .quay-blocked.md containing prose explaining what happened, then exit cleanly.
 2. Exit when (a) you have opened a PR, (b) you have written a blocker file, or (c) you have decided you cannot complete the task. Do not loop indefinitely. Do not sleep waiting for input.
-3. Work inside the worktree. .quay-* files are reserved; you may write .quay-blocked.md and read .quay-prompt.md, but do not touch other .quay-* files.
+3. Work inside the worktree. .quay-* files are reserved; you may write .quay-blocked.md, write .quay-goal-report.json when goal mode asks for it, and read .quay-prompt.md, but do not touch other .quay-* files.
 4. When done, push the branch. Then check whether a PR already exists for this branch (e.g. \`gh pr list --head <branch>\`). If none exists, open one via \`gh pr create\` against the configured base branch. If a PR already exists, do NOT create a duplicate; you may run \`gh pr edit --title\` only if your work materially changed the PR's scope and the existing title no longer fits. PR titles must start with a conventional-commit prefix: \`feat:\` for new user-visible behavior, \`fix:\` for repairing broken or incorrect behavior, \`chore:\` for everything else (refactors, docs, build/CI, dependency bumps). When in doubt between \`feat\` and \`chore\`, pick \`chore\` unless the change adds behavior the user can observe. Put the ticket reference in the PR body or rely on the branch name; do not lead the title with it.
 5. Follow the repo's contribution guide if one is configured.
 6. Do not call any tool requiring interactive input.
