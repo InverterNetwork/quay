@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
@@ -9,7 +9,7 @@ import type { GitHubPort, PostedReview, PrSnapshot } from "../ports/github.ts";
 import type { LinearPort } from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
-import { probeAgentIdentity } from "./agent_identity.ts";
+import { parseAgentBinary, probeAgentIdentity } from "./agent_identity.ts";
 import {
   DEFAULT_AGENT_NAME,
   DEFAULT_CLAUDE_WORKER_INVOCATION,
@@ -62,6 +62,7 @@ export const DEFAULT_CLAIM_TIMEOUT_SECONDS = 1800;
 export const DEFAULT_MAX_CLAIM_EXPIRATIONS = 3;
 export const DEFAULT_MAX_NON_BUDGET_RESPAWNS = 20;
 export const REVIEWER_GH_TOKEN_ENV = "QUAY_REVIEWER_GH_TOKEN";
+const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Canonical claude worker template, kept here as a named re-export so
 // callers that imported it from `tick.ts` before the agent-resolver
 // refactor (and tests that still pass `agentInvocation: "..."` as a
@@ -3601,6 +3602,14 @@ function promoteAndSpawn(
   const sessionName = `quay-task-${task.tmux_id}-${pending.attempt_number}`;
   const agentIdentity = probeAgentIdentity(agentInvocation);
   const githubToken = resolveWorkerGithubToken(options);
+  const spawnEnv = addCodexLaunchIsolation(
+    githubToken.env,
+    task.worktree_path,
+    task.task_id,
+    agentName,
+    agentInvocation,
+    options.env ?? process.env,
+  ) ?? {};
 
   const promoted = runPromotionTransaction(deps.db, {
     taskId: task.task_id,
@@ -3631,7 +3640,7 @@ function promoteAndSpawn(
       worktreePath: task.worktree_path,
       promptContent,
       agentInvocation,
-      env: githubToken.env,
+      env: spawnEnv,
     });
   } catch (err) {
     return {
@@ -3687,23 +3696,71 @@ function resolveWorkerGithubToken(options: TickOptions): {
 } {
   const env = options.env ?? process.env;
   const overrides: NonNullable<TmuxSpawnInput["env"]> = {
+    GH_TOKEN: undefined,
+    GITHUB_TOKEN: undefined,
     [REVIEWER_GH_TOKEN_ENV]: undefined,
   };
-  const token = env.GH_TOKEN;
-  if (token !== undefined) {
+  const token = env.GH_TOKEN?.trim();
+  if (token !== undefined && token.length > 0) {
     overrides.GH_TOKEN = token;
+    return {
+      env: overrides,
+      source: "env:GH_TOKEN",
+    };
   }
-  const githubToken = env.GITHUB_TOKEN;
-  const source =
-    token !== undefined && token.length > 0
-      ? "env:GH_TOKEN"
-      : githubToken !== undefined && githubToken.length > 0
-        ? "env:GITHUB_TOKEN"
-        : "ambient_gh_auth";
+  const githubToken = env.GITHUB_TOKEN?.trim();
+  if (githubToken !== undefined && githubToken.length > 0) {
+    overrides.GH_TOKEN = githubToken;
+    return {
+      env: overrides,
+      source: "env:GITHUB_TOKEN",
+    };
+  }
   return {
     env: overrides,
-    source,
+    source: "ambient_gh_auth",
   };
+}
+
+function addCodexLaunchIsolation(
+  env: TmuxSpawnInput["env"],
+  worktreePath: string,
+  taskId: string,
+  agentName: string,
+  agentInvocation: string,
+  sourceEnv: NodeJS.ProcessEnv,
+): TmuxSpawnInput["env"] {
+  if (!usesCodexRuntime(agentName, agentInvocation)) return env;
+  const sourceHome = codexSourceHome(sourceEnv);
+  return {
+    ...(env ?? {}),
+    CODEX_HOME: isolatedCodexHome(worktreePath, taskId),
+    [CODEX_SOURCE_HOME_ENV]: sourceHome ?? "",
+  };
+}
+
+function isolatedCodexHome(worktreePath: string, taskId: string): string {
+  const digest = createHash("sha256").update(taskId).digest("hex");
+  return join(dirname(worktreePath), ".quay-codex-home", digest);
+}
+
+function codexSourceHome(env: NodeJS.ProcessEnv): string | null {
+  const configured = env.CODEX_HOME?.trim();
+  if (configured !== undefined && configured.length > 0) return configured;
+  const home = env.HOME?.trim();
+  if (home === undefined || home.length === 0) return null;
+  return join(home, ".codex");
+}
+
+function usesCodexRuntime(agentName: string, agentInvocation: string): boolean {
+  const normalizedAgent = agentName.toLowerCase();
+  if (normalizedAgent === "codex") return true;
+  if (normalizedAgent.startsWith("hermes_codex")) return true;
+  const binary = parseAgentBinary(agentInvocation);
+  if (binary === null) return false;
+  const slash = binary.lastIndexOf("/");
+  const basename = slash === -1 ? binary : binary.slice(slash + 1);
+  return basename.toLowerCase() === "codex";
 }
 
 function preflightReviewerGhToken(
@@ -3900,12 +3957,20 @@ function promoteAndSpawnReviewer(
   }
 
   try {
+    const reviewerEnv = addCodexLaunchIsolation(
+      tokenPreflight.env,
+      task.worktree_path,
+      task.task_id,
+      agentName,
+      agentInvocation,
+      options.env ?? process.env,
+    );
     deps.tmux.spawn({
       sessionName,
       worktreePath: task.worktree_path,
       promptContent,
       agentInvocation,
-      ...(tokenPreflight.env !== undefined ? { env: tokenPreflight.env } : {}),
+      ...(reviewerEnv !== undefined ? { env: reviewerEnv } : {}),
       ...(tokenPreflight.envFiles !== undefined
         ? { envFiles: tokenPreflight.envFiles }
         : {}),
