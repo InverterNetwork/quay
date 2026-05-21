@@ -25,6 +25,7 @@ import {
   type AgentRole,
   type ResolvedAgent,
 } from "./agents.ts";
+import { QUAY_BRANCH_PREFIX } from "./branch_slug.ts";
 import { runCancelFinalizer } from "./cancel.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
 import {
@@ -508,7 +509,7 @@ class TickGithubCache implements GitHubPort {
         this.prSnapshotByNumberCache.set(numberKey, snapshot);
       }
     }
-    if (selector.startsWith("quay/")) {
+    if (selector.startsWith(QUAY_BRANCH_PREFIX)) {
       const branchKey = `${repoId}\0${selector}`;
       if (lightweight) {
         if (!this.lightweightByBranch.has(branchKey)) {
