@@ -463,6 +463,28 @@ async function handleEnqueue(
   io: CliIO,
 ): Promise<DispatchResult> {
   if (wantsHelp(argv)) return printHelp(io, ["enqueue"]);
+  const validation = validateFlags(argv, {
+    boolean: ["--request-pr-screenshots"],
+    valued: [
+      "--input",
+      "--repo",
+      "--brief-file",
+      "--base-branch",
+      "--ticket-snapshot-file",
+      "--external-ref",
+      "--slack-thread-ref",
+      "--worker-execution",
+      "--worker-agent",
+      "--worker-model",
+      "--reviewer-agent",
+      "--reviewer-model",
+      "--linear-issue",
+      "--tag",
+    ],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
   // --linear-issue routes to the adapter-driven flow (spec §8). Mutually
   // exclusive flags are rejected before any adapter / DB call so a bad
   // invocation (e.g. caller passes both forms) costs nothing.

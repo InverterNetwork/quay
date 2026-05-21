@@ -262,6 +262,32 @@ test("enqueue linear issue forwards PR screenshot request flag", async () => {
   );
 });
 
+test("enqueue linear issue rejects value-bearing PR screenshot boolean flag before adapter calls", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--linear-issue",
+      "ENG-145",
+      "--request-pr-screenshots=true",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  const parsed = JSON.parse(io.err());
+  expect(parsed.error).toBe("usage_error");
+  expect(parsed.message).toContain(
+    "--request-pr-screenshots is a boolean flag and does not take a value",
+  );
+  expect(built.linear.getIssueCalls).toHaveLength(0);
+});
+
 test("enqueue linear issue preserves task-level base_branch override", async () => {
   h = createHarness();
   const built = buildCliDeps(h);

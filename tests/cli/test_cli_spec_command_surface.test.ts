@@ -164,6 +164,26 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
   );
 });
 
+test("enqueue rejects value-bearing PR screenshot boolean flag", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--request-pr-screenshots=true"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  const parsed = JSON.parse(io.err());
+  expect(parsed.error).toBe("usage_error");
+  expect(parsed.message).toContain(
+    "--request-pr-screenshots is a boolean flag and does not take a value",
+  );
+});
+
 test("task claim returns claim_id, then submit-brief flag form succeeds", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
