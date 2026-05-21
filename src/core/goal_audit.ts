@@ -18,6 +18,7 @@ import {
   composeWorkerPrompt,
   loadOriginalTaskObjective,
   loadTaskPrBaseBranch,
+  loadTaskPrScreenshotsRequired,
   loadTaskPrScreenshotsRequested,
 } from "./worker_prompt.ts";
 
@@ -696,6 +697,10 @@ function rejectGoalCompletion(
       deps.db,
       input.task.task_id,
     );
+    const prScreenshotsRequired = loadTaskPrScreenshotsRequired(
+      deps.db,
+      input.task.task_id,
+    );
     const preambleBody = loadPreambleBody(deps.db, preambleId);
     const guidance = [
       "The goal completion audit rejected the previous complete report.",
@@ -713,6 +718,7 @@ function rejectGoalCompletion(
       taskObjective: objective,
       prBaseBranch,
       prScreenshotsRequested,
+      prScreenshotsRequired,
       goalContext,
       referenceReposRoot: deps.referenceReposRoot,
       attemptGuidance: {

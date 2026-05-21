@@ -51,6 +51,48 @@ test("explicit [agents.invocations.claude] wins over legacy agent_invocation per
   expect(sel.invocations.claude!.reviewer).toBe("claude --legacy");
 });
 
+test("claude capability metadata survives legacy and default invocation fills", () => {
+  const sel = buildAgentSelection({
+    agent_invocation: "claude --legacy",
+    agents: {
+      invocations: {
+        claude: {
+          worker: "claude --explicit-worker",
+          capabilities: ["browser"],
+          worker_capabilities: ["screenshots"],
+          reviewer_capabilities: ["pr-review"],
+        },
+      },
+    },
+  });
+  expect(sel.invocations.claude!.worker).toBe("claude --explicit-worker");
+  expect(sel.invocations.claude!.reviewer).toBe("claude --legacy");
+  expect(sel.invocations.claude!.workerCapabilities).toEqual([
+    "browser",
+    "screenshots",
+  ]);
+  expect(sel.invocations.claude!.reviewerCapabilities).toEqual([
+    "browser",
+    "pr-review",
+  ]);
+
+  const defaultFill = buildAgentSelection({
+    agents: {
+      invocations: {
+        claude: {
+          capabilities: ["screenshots"],
+        },
+      },
+    },
+  });
+  expect(defaultFill.invocations.claude!.worker).toBe(
+    DEFAULT_CLAUDE_WORKER_INVOCATION,
+  );
+  expect(defaultFill.invocations.claude!.workerCapabilities).toEqual([
+    "screenshots",
+  ]);
+});
+
 test("resolver uses repo override over deployment default for worker only", () => {
   h = createHarness();
   insertRepo(h.db, "repo-codex-worker");
@@ -140,6 +182,41 @@ test("resolver uses repo model over global model when task snapshot is empty", (
   expect(resolved.agent).toBe("claude");
   expect(resolved.model).toBe("repo-reviewer-model");
   expect(resolved.invocation).toBe("claude --r --model 'repo-reviewer-model'");
+});
+
+test("resolver exposes declarative capabilities for the selected role", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-capabilities");
+
+  const resolver = createAgentResolver({
+    db: h.db,
+    config: {
+      agents: {
+        worker: "hermes_codex_browser",
+        reviewer: "claude",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          hermes_codex_browser: {
+            worker: "hermes chat --toolsets file,terminal,browser,vision",
+            reviewer: "hermes review --toolsets file,terminal,browser",
+            capabilities: ["browser"],
+            worker_capabilities: ["screenshots"],
+            reviewer_capabilities: ["pr-review"],
+          },
+        },
+      },
+    },
+  });
+
+  const worker = resolver.resolve("repo-capabilities", "worker");
+  expect(worker.agent).toBe("hermes_codex_browser");
+  expect(worker.capabilities).toEqual(["browser", "screenshots"]);
+
+  const reviewer = resolver.resolve("repo-capabilities", "reviewer", {
+    agent: "hermes_codex_browser",
+    model: null,
+  });
+  expect(reviewer.capabilities).toEqual(["browser", "pr-review"]);
 });
 
 test("resolver mix-and-match: claude worker with codex reviewer", () => {

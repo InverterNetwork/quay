@@ -76,16 +76,27 @@ const ReviewerConfigSchema = z
 // template once (under `[agents.invocations.<name>].worker` /
 // `.reviewer`) and choose one as the global default for each role via
 // `[agents].worker` / `[agents].reviewer`. Per-repo overrides on the
-// `repos` row pick a different registered agent for either role.
+// `repos` row pick a different registered agent for either role. Capability
+// metadata is declarative operator-provided metadata; Quay uses it for hard
+// gates like `--require-pr-screenshots`, not for granting tools.
 //
 // Legacy compatibility: a top-level `agent_invocation = "..."` continues
 // to work and is treated as `[agents.invocations.claude].worker` with
 // `[agents].worker = "claude"`. The downstream resolver folds the two
 // representations together.
+const AgentCapabilitySchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/, {
+  message: "capability must match [A-Za-z0-9._-]+",
+});
+
+const AgentCapabilityListSchema = z.array(AgentCapabilitySchema);
+
 const AgentInvocationSchema = z
   .object({
     worker: z.string().min(1).optional(),
     reviewer: z.string().min(1).optional(),
+    capabilities: AgentCapabilityListSchema.optional(),
+    worker_capabilities: AgentCapabilityListSchema.optional(),
+    reviewer_capabilities: AgentCapabilityListSchema.optional(),
   })
   .strict();
 

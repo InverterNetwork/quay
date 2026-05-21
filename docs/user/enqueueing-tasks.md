@@ -33,6 +33,9 @@ Optional:
 - `--request-pr-screenshots`: persist a soft request that code workers include
   screenshots in the PR when the task affects UI and their runtime can capture
   and attach or link them.
+- `--require-pr-screenshots`: hard mode for UI work where screenshots are
+  mandatory. Enqueue fails before task creation unless the resolved worker
+  agent advertises the `screenshots` capability.
 
 Output:
 
@@ -53,7 +56,7 @@ Output:
 quay enqueue \
   --repo myrepo \
   --linear-issue ENG-1234 \
-  --request-pr-screenshots \
+  --require-pr-screenshots \
   --tag backend \
   --tag auth
 ```
@@ -71,8 +74,9 @@ enters the same enqueue path as manual briefs.
 
 The adapter derives those from the ticket. Goal mode for Linear-backed tasks is
 selected inside the ticket's `quay-config` block with `worker_execution: goal`.
-`--request-pr-screenshots` is accepted on this path too and is forwarded to the
-same task-level prompt request used by manual briefs.
+`--request-pr-screenshots` and `--require-pr-screenshots` are accepted on this
+path too and are forwarded to the same task-level prompt modes used by manual
+briefs.
 
 Calling the same Linear issue twice for the same repo returns the existing task
 instead of creating a duplicate.

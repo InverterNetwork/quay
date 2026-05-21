@@ -179,6 +179,8 @@ reviewer = "claude --r < {prompt_file}"
 [agents.invocations.codex]
 worker = "codex exec < {prompt_file}"
 reviewer = "codex exec --review < {prompt_file}"
+capabilities = ["browser"]
+worker_capabilities = ["screenshots"]
 `,
   );
   const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
@@ -192,6 +194,12 @@ reviewer = "codex exec --review < {prompt_file}"
   expect(result.config.agents?.invocations?.codex?.reviewer).toBe(
     "codex exec --review < {prompt_file}",
   );
+  expect(result.config.agents?.invocations?.codex?.capabilities).toEqual([
+    "browser",
+  ]);
+  expect(result.config.agents?.invocations?.codex?.worker_capabilities).toEqual([
+    "screenshots",
+  ]);
 });
 
 test("rejects an unknown key under [agents] (strict schema, no silent typos)", () => {
@@ -218,6 +226,21 @@ worker = ""
 `,
   );
   expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow();
+});
+
+test("rejects malformed agent capabilities", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[agents.invocations.codex]
+worker = "codex exec < {prompt_file}"
+capabilities = [""]
+`,
+  );
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /capabilities|capability/i,
+  );
 });
 
 test("rejects an unknown key (typo'd config refuses to silently fall back)", () => {

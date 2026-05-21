@@ -112,7 +112,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   enqueue: {
     path: "enqueue",
     synopsis:
-      "quay enqueue --repo <id> --brief-file <path> [--base-branch <b>] [--request-pr-screenshots] [--worker-execution oneshot|goal] [--ticket-snapshot-file <p>] [--external-ref <r>] [--slack-thread-ref <r>] [--worker-agent <a>] [--worker-model <m>] [--reviewer-agent <a>] [--reviewer-model <m>] [--tag <name>]...",
+      "quay enqueue --repo <id> --brief-file <path> [--base-branch <b>] [--request-pr-screenshots|--require-pr-screenshots] [--worker-execution oneshot|goal] [--ticket-snapshot-file <p>] [--external-ref <r>] [--slack-thread-ref <r>] [--worker-agent <a>] [--worker-model <m>] [--reviewer-agent <a>] [--reviewer-model <m>] [--tag <name>]...",
     summary: "Enqueue a new task from a brief file (or a Linear issue).",
     details:
       "Pass --linear-issue <id> instead of --brief-file to derive the task from a Linear ticket via the configured adapter.",
@@ -121,6 +121,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--brief-file <path>", desc: "Path to the brief markdown file (required)." },
       { flag: "--base-branch <b>", desc: "Task-level base branch override for branch-from and PR-into." },
       { flag: "--request-pr-screenshots", desc: "Soft request that workers include UI screenshots in the PR when possible." },
+      { flag: "--require-pr-screenshots", desc: "Hard requirement; enqueue fails unless the resolved worker advertises screenshots." },
       { flag: "--ticket-snapshot-file <p>", desc: "Optional ticket-snapshot file." },
       { flag: "--external-ref <ref>", desc: "Optional ticket reference (e.g., ITRY-900)." },
       { flag: "--slack-thread-ref <ref>", desc: "Optional Slack thread reference." },

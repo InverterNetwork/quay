@@ -117,6 +117,7 @@ quay enqueue \
   --brief-file <path> \
   [--base-branch <branch>] \
   [--request-pr-screenshots] \
+  [--require-pr-screenshots] \
   [--ticket-snapshot-file <path>] \
   [--external-ref <ref>] \
   [--slack-thread-ref <channel:ts>] \
@@ -135,6 +136,7 @@ quay enqueue \
   --linear-issue <identifier> \
   [--base-branch <branch>] \
   [--request-pr-screenshots] \
+  [--require-pr-screenshots] \
   [--worker-agent <name>] \
   [--worker-model <model>] \
   [--reviewer-agent <name>] \
@@ -156,6 +158,10 @@ Linear tickets can also set `base_branch` in `quay-config`.
 code-worker prompt asks the worker to capture UI screenshots when the task
 affects UI, attach or link them in the PR when the runtime supports that, and
 state the limitation in the PR if screenshots cannot be captured or attached.
+`--require-pr-screenshots` is the hard mode. Enqueue resolves the effective
+worker agent, requires it to advertise the `screenshots` capability, persists
+the hard prompt mode, and fails before task creation if the capability is
+missing.
 `--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,
 and `--slack-thread-ref`.
 
