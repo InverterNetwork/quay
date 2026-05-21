@@ -228,6 +228,48 @@ test("test_023_retry_brief_uses_stable_task_objective_not_prior_brief", async ()
   expect(retryBrief).not.toContain("initial composed brief body");
 });
 
+test("retry brief preserves task-level PR screenshot request", async () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-screenshot-retry");
+  const taskId = insertTask(h.db, {
+    taskId: "task-screenshot-retry",
+    repoId,
+    state: "pr-open",
+  });
+  h.db
+    .query(`UPDATE tasks SET pr_screenshots_requested = 1 WHERE task_id = ?`)
+    .run(taskId);
+  seedTaskObjective(h, taskId, "Update the billing UI.");
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-04-28T08:00:00.000Z",
+  });
+
+  const built = buildTickDeps(h);
+  built.github.setPrCheckStatus(repoId, `quay/${taskId}`, {
+    state: "fail",
+    excerpt: "visual regression check failed",
+  });
+
+  await tick_once(built.deps);
+  const pending = h.db
+    .query<{ attempt_id: number }, [string]>(
+      `SELECT attempt_id FROM attempts WHERE task_id = ? AND spawned_at IS NULL`,
+    )
+    .get(taskId)!;
+  const briefPath = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts WHERE attempt_id = ? AND kind = 'brief'`,
+    )
+    .get(pending.attempt_id)!.file_path;
+  const retryBrief = readFileSync(briefPath, "utf8");
+  expect(retryBrief).toContain("<quay-pr-screenshot-request");
+  expect(retryBrief).toContain(
+    "Attach or link the screenshot(s) in the PR body or a PR comment",
+  );
+});
+
 function artifactStore() {
   if (!h) throw new Error("missing harness");
   return createArtifactStore({ db: h.db, artifactRoot: h.artifactRoot, clock: h.clock });

@@ -67,6 +67,7 @@ export const enqueueInputSchema = z
     reviewer_model: z.string().min(1).nullable().optional(),
     worker_execution: z.enum(["oneshot", "goal"]).optional(),
     base_branch: baseBranchNameSchema.optional(),
+    request_pr_screenshots: z.boolean().optional(),
   })
   .strict();
 
@@ -115,6 +116,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
 
   const taskId = deps.ids.next();
   const effectiveBaseBranch = input.base_branch ?? repo.base_branch;
+  const prScreenshotsRequested = input.request_pr_screenshots === true;
   const workerExecution: WorkerExecution = parseWorkerExecution(
     input.worker_execution,
   );
@@ -242,10 +244,10 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         .query(
           `INSERT INTO tasks (
              task_id, repo_id, external_ref, state, branch_name, base_branch, tmux_id, worktree_path,
-             retry_budget, slack_thread_ref, authors_json, worker_execution,
+             retry_budget, slack_thread_ref, authors_json, worker_execution, pr_screenshots_requested,
              worker_agent, worker_model, reviewer_agent, reviewer_model,
              created_at, updated_at
-           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
@@ -259,6 +261,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           input.slack_thread_ref ?? null,
           input.authors_json ?? null,
           workerExecution,
+          prScreenshotsRequested ? 1 : 0,
           agentSnapshot.worker_agent,
           agentSnapshot.worker_model,
           agentSnapshot.reviewer_agent,
@@ -336,6 +339,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           filePath: objectiveArtifact.filePath,
         },
         prBaseBranch: effectiveBaseBranch,
+        prScreenshotsRequested,
         referenceReposRoot: deps.referenceReposRoot,
         goalContext:
           workerExecution === "goal" && goalId !== null

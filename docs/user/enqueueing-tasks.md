@@ -12,7 +12,8 @@ quay enqueue \
   --external-ref ENG-1234 \
   --ticket-snapshot-file ./ticket.md \
   --slack-thread-ref C123456:1712345678.901234 \
-  --worker-execution oneshot
+  --worker-execution oneshot \
+  --request-pr-screenshots
 ```
 
 Required:
@@ -29,6 +30,9 @@ Optional:
 - `--worker-execution <oneshot|goal>`: defaults to `oneshot`. Use `goal` for
   long-running tasks that should continue across worker attempts until the
   worker reports active, blocked, or complete goal status.
+- `--request-pr-screenshots`: persist a soft request that code workers include
+  screenshots in the PR when the task affects UI and their runtime can capture
+  and attach or link them.
 
 Output:
 
@@ -49,6 +53,7 @@ Output:
 quay enqueue \
   --repo myrepo \
   --linear-issue ENG-1234 \
+  --request-pr-screenshots \
   --tag backend \
   --tag auth
 ```
@@ -66,6 +71,8 @@ enters the same enqueue path as manual briefs.
 
 The adapter derives those from the ticket. Goal mode for Linear-backed tasks is
 selected inside the ticket's `quay-config` block with `worker_execution: goal`.
+`--request-pr-screenshots` is accepted on this path too and is forwarded to the
+same task-level prompt request used by manual briefs.
 
 Calling the same Linear issue twice for the same repo returns the existing task
 instead of creating a duplicate.

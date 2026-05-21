@@ -132,6 +132,7 @@ test("quay enqueue --help and quay cancel --help reach stdout, exit 0", async ()
   expect(enq.exitCode).toBe(0);
   expect(ioEnq.out()).toContain("quay enqueue");
   expect(ioEnq.out()).toContain("--brief-file");
+  expect(ioEnq.out()).toContain("--request-pr-screenshots");
 
   const ioCancel = bufferIO();
   const cancel = await dispatch(["cancel", "--help"], built.deps, ioCancel);

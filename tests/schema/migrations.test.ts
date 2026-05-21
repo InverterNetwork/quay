@@ -39,3 +39,15 @@ test("tasks table has effective base_branch column", () => {
     .map((r) => r.name);
   expect(cols).toContain("base_branch");
 });
+
+test("tasks table has PR screenshot request flag with default off", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string; dflt_value: string | null }, []>(
+      `PRAGMA table_info(tasks)`,
+    )
+    .all();
+  const col = cols.find((r) => r.name === "pr_screenshots_requested");
+  expect(col).toBeDefined();
+  expect(col?.dflt_value).toBe("0");
+});

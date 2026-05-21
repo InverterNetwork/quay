@@ -712,6 +712,7 @@ The preamble is stored in SQL in a `preambles` table. A change is a new row, app
 ### PR contract
 
 - The worker pushes its branch and opens a PR via `gh pr create` against the task's effective `base_branch` (task override when present, otherwise the repo default).
+- If `tasks.pr_screenshots_requested = 1`, every code-worker brief includes a dedicated soft screenshot-request section. When the task affects UI, the worker should capture one or more screenshots and attach or link them in the PR body or a PR comment when its runtime supports that. If the runtime cannot capture or attach/link screenshots, the worker should state that limitation in the PR body or comment. This request is advisory; enqueue does not reject workers that lack screenshot capability.
 - Quay does not approve, merge, or close PRs autonomously. The PR's terminal state (merged, closed-unmerged) is decided externally by humans.
 - Force-push and rebase on the PR branch are supported — the next tick's CI poll picks up the most recent run.
 
@@ -860,6 +861,7 @@ CREATE TABLE tasks (
   attempts_consumed INTEGER NOT NULL DEFAULT 0,
   retry_budget INTEGER NOT NULL,      -- copied from config at enqueue
   budget_exhausted INTEGER NOT NULL DEFAULT 0,  -- 0/1 flag
+  pr_screenshots_requested INTEGER NOT NULL DEFAULT 0, -- 0/1 soft request rendered into every code-worker prompt for the task
   tick_error TEXT,                    -- transient; cleared on next successful tick
   slack_thread_ref TEXT,              -- optional channel + ts metadata for human escalation; may be NULL when the orchestrator uses fallback routing outside Quay.
   claimed_at TEXT,                    -- set on quay task claim; cleared on submit-brief / release-claim / claim timeout / terminal transition.
@@ -1451,6 +1453,7 @@ Collisions across distinct `external_ref` values that slug to the same branch ar
 | **Substrate spawn failures don't consume budget — only on the no-evidence path** | tmux create errors and DB write failures during spawn that produce *no worker evidence* (no signal file, no remote progress, no PR opened during this attempt) roll back the budget increment and re-queue. The recovery's evidence-first classifier (see "Spawn-failure recovery is evidence-first") detects when a worker actually started and made observable progress despite a substrate or DB hiccup, in which case the attempt is treated as the equivalent dead-worker outcome (`pr_opened` / `blocker_written` / `no_progress` / `crashed`) and budget is **not** rolled back — those are real attempts. After `max_spawn_failures` *consecutive* no-evidence failures, parked in `worktree_error`. The counter resets on any successful spawn or any evidence-found recovery. |
 | **Slack reply cursor** | Tick ingests Slack replies with `ts > lower_bound`, where `lower_bound = slack_recovered_post_ts` when set (the actual bot-post ts, recovered from Slack via the per-escalation nonce) and `slack_pre_post_fence_ts` as a fallback until recovery succeeds. Pre-existing thread chatter is excluded by the fence; chatter that lands between fence-read and bot-post visibility is excluded by the recovered ts. |
 | **Every attempt has one brief and one final_prompt artifact** | Whether composed by the orchestrator (`initial`, `blocker_resolved`, `advice_answered`) or by Quay (deterministic templates). Initial attempt is created at enqueue with `tmux_session = NULL`; tick fills it in on promotion. |
+| **PR screenshot requests are task-level and soft** | `quay enqueue --request-pr-screenshots` sets `tasks.pr_screenshots_requested = 1`. The request is rendered into every code-worker prompt for that task, including retries, non-budget respawns, orchestrator-submitted briefs, goal continuations, and goal-audit correction attempts. It asks for PR screenshots when UI changes are involved but does not enforce worker capability or require screenshot files to be committed. |
 | **CI status semantics** | Defined precisely in §5 "CI status rules": stale-SHA filtering, any reported failure blocks, no reported checks = pass, unparseable = pending. |
 | **Read commands return JSON** | Collections → JSON array. Single records → JSON object. NDJSON only for `quay tick`. No `--json` flag. |
 | **Idempotent PR contract** | The worker creates a PR only if none exists for its branch; otherwise it pushes updates to the existing PR. Tick uses per-attempt `remote_sha_at_spawn` vs. `remote_sha_at_exit` (the **remote** branch SHA, fetched fresh) to detect "no progress." It also snapshots `pr_existed_at_spawn` at promotion: if no PR existed at spawn but one exists at exit, the attempt counts as progress even when the remote SHA didn't change during *this* attempt (handles the case where attempt N pushed but crashed before `gh pr create`, and attempt N+1 only opens the PR). Local-only commits do not count as progress; the PR is only updated by a successful push. |
@@ -1618,6 +1621,7 @@ The v1 test suite must cover the following cases. Each is a state-machine integr
 ### Brief / final_prompt artifact invariant
 
 65. **Every attempt has exactly one brief and one final_prompt artifact.** Across initial spawn and 3 retry paths (CI-fail, review feedback, blocker_resolved). Asserts: `SELECT COUNT(*) FROM artifacts WHERE attempt_id = X AND kind = 'brief'` is 1 for every attempt, ditto `final_prompt`.
+65a. **PR screenshot request persists into worker prompts.** Enqueue with `--request-pr-screenshots` sets `tasks.pr_screenshots_requested = 1`; the initial `brief` and `final_prompt` include the screenshot-request section. A later retry or respawn for the same task includes the same section. Enqueue without the flag leaves the column at 0 and omits the section.
 
 ### CI status rules
 

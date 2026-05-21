@@ -78,6 +78,37 @@ test("PR target section renders effective base branch when supplied", () => {
   );
 });
 
+test("PR screenshot request section renders only when requested", () => {
+  const omitted = composeWorkerPrompt({
+    preambleBody: PREAMBLE,
+    taskObjective: SAFE_OBJECTIVE,
+    prBaseBranch: "main",
+    attemptGuidance: { reason: "initial", body: "guidance" },
+  });
+  expect(omitted.brief).not.toContain("<quay-pr-screenshot-request");
+
+  const requested = composeWorkerPrompt({
+    preambleBody: PREAMBLE,
+    taskObjective: SAFE_OBJECTIVE,
+    prBaseBranch: "main",
+    prScreenshotsRequested: true,
+    attemptGuidance: { reason: "initial", body: "guidance" },
+  });
+  const targetIndex = requested.brief.indexOf("<quay-pr-target");
+  const screenshotIndex = requested.brief.indexOf(
+    "<quay-pr-screenshot-request",
+  );
+  expect(targetIndex).toBeGreaterThanOrEqual(0);
+  expect(screenshotIndex).toBeGreaterThan(targetIndex);
+  expect(requested.brief).toContain(
+    "capture one or more screenshots of the changed UI state",
+  );
+  expect(requested.brief).toContain(
+    "state that limitation plainly in the PR body or PR comment",
+  );
+  expect(requested.brief).toContain("Do not block for interactive input");
+});
+
 test("diagnostics section appears when provided and tags reason kind", () => {
   const composed = composeWorkerPrompt({
     preambleBody: PREAMBLE,
