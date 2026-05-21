@@ -7,6 +7,7 @@ export type QuayErrorCode =
   | "branch_collision_unresolvable"
   | "bare_clone_missing"
   | "bootstrap_failed"
+  | "missing_agent_capability"
   | "ticket_block_invalid"
   | "ticket_not_actionable"
   | "ticket_not_found"

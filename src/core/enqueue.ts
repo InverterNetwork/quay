@@ -68,6 +68,7 @@ export const enqueueInputSchema = z
     worker_execution: z.enum(["oneshot", "goal"]).optional(),
     base_branch: baseBranchNameSchema.optional(),
     request_pr_screenshots: z.boolean().optional(),
+    require_pr_screenshots: z.boolean().optional(),
   })
   .strict();
 
@@ -97,6 +98,11 @@ interface TaskAgentSnapshot {
   reviewer_model: string | null;
 }
 
+interface ResolvedTaskAgentSnapshot extends TaskAgentSnapshot {
+  workerCapabilities: string[];
+  reviewerCapabilities: string[];
+}
+
 export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const input = parseInput(rawInput);
 
@@ -114,23 +120,40 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     );
   }
 
-  const taskId = deps.ids.next();
   const effectiveBaseBranch = input.base_branch ?? repo.base_branch;
-  const prScreenshotsRequested = input.request_pr_screenshots === true;
+  const prScreenshotsRequired = input.require_pr_screenshots === true;
+  const prScreenshotsRequested =
+    input.request_pr_screenshots === true || prScreenshotsRequired;
   const workerExecution: WorkerExecution = parseWorkerExecution(
     input.worker_execution,
   );
-  const goalId = workerExecution === "goal" ? deps.ids.next() : null;
-  const shortId = taskIdShort(taskId);
-  const tmuxId = computeTmuxId(input.external_ref, shortId);
-  const worktreePath = join(deps.paths.worktreesRoot, taskId);
-  const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
   const agentSnapshot = resolveTaskAgentSnapshot(deps, repo.repo_id, {
     worker_agent: input.worker_agent ?? null,
     worker_model: input.worker_model ?? null,
     reviewer_agent: input.reviewer_agent ?? null,
     reviewer_model: input.reviewer_model ?? null,
   });
+  if (
+    prScreenshotsRequired &&
+    !agentSnapshot.workerCapabilities.includes("screenshots")
+  ) {
+    throw new QuayError(
+      "missing_agent_capability",
+      `--require-pr-screenshots requires worker agent "${agentSnapshot.worker_agent ?? "<unresolved>"}" to advertise capability "screenshots"`,
+      {
+        agent: agentSnapshot.worker_agent,
+        capability: "screenshots",
+        worker_capabilities: agentSnapshot.workerCapabilities,
+      },
+    );
+  }
+
+  const taskId = deps.ids.next();
+  const goalId = workerExecution === "goal" ? deps.ids.next() : null;
+  const shortId = taskIdShort(taskId);
+  const tmuxId = computeTmuxId(input.external_ref, shortId);
+  const worktreePath = join(deps.paths.worktreesRoot, taskId);
+  const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
 
   // Track substrate side effects so rollback knows what to undo.
   let worktreeCreated = false;
@@ -244,10 +267,11 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         .query(
           `INSERT INTO tasks (
              task_id, repo_id, external_ref, state, branch_name, base_branch, tmux_id, worktree_path,
-             retry_budget, slack_thread_ref, authors_json, worker_execution, pr_screenshots_requested,
+             retry_budget, slack_thread_ref, authors_json, worker_execution,
+             pr_screenshots_requested, pr_screenshots_required,
              worker_agent, worker_model, reviewer_agent, reviewer_model,
              created_at, updated_at
-           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
@@ -262,6 +286,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           input.authors_json ?? null,
           workerExecution,
           prScreenshotsRequested ? 1 : 0,
+          prScreenshotsRequired ? 1 : 0,
           agentSnapshot.worker_agent,
           agentSnapshot.worker_model,
           agentSnapshot.reviewer_agent,
@@ -340,6 +365,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         },
         prBaseBranch: effectiveBaseBranch,
         prScreenshotsRequested,
+        prScreenshotsRequired,
         referenceReposRoot: deps.referenceReposRoot,
         goalContext:
           workerExecution === "goal" && goalId !== null
@@ -405,8 +431,14 @@ function resolveTaskAgentSnapshot(
   deps: EnqueueDeps,
   repoId: string,
   overrides: TaskAgentSnapshot,
-): TaskAgentSnapshot {
-  if (deps.agentResolver === undefined) return overrides;
+): ResolvedTaskAgentSnapshot {
+  if (deps.agentResolver === undefined) {
+    return {
+      ...overrides,
+      workerCapabilities: [],
+      reviewerCapabilities: [],
+    };
+  }
   const worker = deps.agentResolver.resolve(repoId, "worker", {
     agent: overrides.worker_agent,
     model: overrides.worker_model,
@@ -420,6 +452,8 @@ function resolveTaskAgentSnapshot(
     worker_model: worker.model,
     reviewer_agent: reviewer.agent,
     reviewer_model: reviewer.model,
+    workerCapabilities: worker.capabilities,
+    reviewerCapabilities: reviewer.capabilities,
   };
 }
 

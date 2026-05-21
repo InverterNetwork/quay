@@ -168,12 +168,12 @@ tasks against a repo, two things have to happen:
 
 ```bash
 quay tick                                  # one supervisor pass over the queue
-quay enqueue --repo <id> --brief-file <p> [--request-pr-screenshots]
+quay enqueue --repo <id> --brief-file <p> [--request-pr-screenshots|--require-pr-screenshots]
                                            # legacy enqueue (operator-composed brief)
 quay enqueue --linear-issue <ENG-1234>     # Linear-adapter enqueue (target repo
                                            # comes from the ticket's `repo:` field;
                                            # `--repo <id>` is an optional override;
-                                           # accepts --request-pr-screenshots)
+                                           # accepts screenshot request/require flags)
 quay review-pr --pr <owner/repo>:<num>     # enroll/poke synthetic/Quay PR review
 quay validate-ticket [--ticket-json <p|->] [--schema-file <p>] [--quiet]
                                            # standalone validator: JSON in, JSON out

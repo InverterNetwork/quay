@@ -59,6 +59,11 @@ reviewer = "claude"
 [agents.invocations.claude]
 worker = "claude --permission-mode bypassPermissions --output-format json --debug --debug-file .quay-tool-trace.log < {prompt_file} > .quay-usage.json"
 reviewer = "claude --permission-mode bypassPermissions --output-format json < {prompt_file} > .quay-usage.json"
+capabilities = []
+
+[agents.invocations.hermes_codex_browser]
+worker = "hermes chat --quiet --query-file {prompt_file} --toolsets file,terminal,browser,vision"
+capabilities = ["browser", "screenshots"]
 ```
 
 ## Keys
@@ -74,6 +79,8 @@ reviewer = "claude --permission-mode bypassPermissions --output-format json < {p
 | `agent_invocation` | unset | Legacy shorthand for `[agents.invocations.claude].worker` and `.reviewer`. Prefer `[agents]` for new deployments. |
 | `[agents].worker` / `[agents].reviewer` | `claude` | Global role defaults. Each value names an entry under `[agents.invocations]`. |
 | `[agents].worker_model` / `[agents].reviewer_model` | unset | Optional global role model defaults. Quay injects these as `--model <value>` for supported runtimes (`claude`, `codex`). For `hermes_*` runtimes the model is selected through Hermes' own YAML config; Quay records the value on the attempt row but does not append `--model`. |
+| `[agents.invocations.<name>].capabilities` | `[]` | Declarative metadata for capabilities common to both roles. Use `screenshots` to allow `quay enqueue --require-pr-screenshots` for that worker. |
+| `[agents.invocations.<name>].worker_capabilities` / `.reviewer_capabilities` | `[]` | Role-specific capability additions. Use these when one invocation exposes different tools by role. |
 | `max_attempt_duration_seconds` | `3600` | Live worker wall-clock kill threshold. |
 | `staleness_threshold_seconds` | `600` | Live worker no-fresh-log kill threshold. |
 | `max_spawn_failures` | `3` | Repeated spawn failures before `worktree_error`. |

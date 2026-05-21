@@ -109,6 +109,25 @@ test("PR screenshot request section renders only when requested", () => {
   expect(requested.brief).toContain("Do not block for interactive input");
 });
 
+test("PR screenshot requirement section renders hard mode", () => {
+  const required = composeWorkerPrompt({
+    preambleBody: PREAMBLE,
+    taskObjective: SAFE_OBJECTIVE,
+    prBaseBranch: "main",
+    prScreenshotsRequired: true,
+    attemptGuidance: { reason: "initial", body: "guidance" },
+  });
+  expect(required.brief).toContain(
+    '<quay-pr-screenshot-request requested="true" required="true">',
+  );
+  expect(required.brief).toContain(
+    "Screenshots are required for this task.",
+  );
+  expect(required.brief).toContain(
+    "stop with a blocker instead of opening or updating the PR as complete",
+  );
+});
+
 test("diagnostics section appears when provided and tags reason kind", () => {
   const composed = composeWorkerPrompt({
     preambleBody: PREAMBLE,

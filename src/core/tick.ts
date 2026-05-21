@@ -4566,6 +4566,7 @@ function resolveTickAgentResolver(options: TickOptions): AgentResolver {
     agent: DEFAULT_AGENT_NAME,
     model: null,
     invocation,
+    capabilities: [],
   };
   return {
     resolve: (_repoId: string, _role: AgentRole) => resolved,

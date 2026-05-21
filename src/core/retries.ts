@@ -7,6 +7,7 @@ import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.t
 import {
   composeWorkerPrompt,
   loadTaskPrBaseBranch,
+  loadTaskPrScreenshotsRequired,
   loadTaskPrScreenshotsRequested,
   loadOriginalTaskObjective,
 } from "./worker_prompt.ts";
@@ -98,12 +99,17 @@ export function scheduleDeterministicRetry(
     deps.db,
     input.taskId,
   );
+  const prScreenshotsRequired = loadTaskPrScreenshotsRequired(
+    deps.db,
+    input.taskId,
+  );
   const preambleBody = loadPreambleBody(deps.db, preambleId);
   const composed = composeWorkerPrompt({
     preambleBody,
     taskObjective: objective,
     prBaseBranch,
     prScreenshotsRequested,
+    prScreenshotsRequired,
     goalContext,
     referenceReposRoot: deps.referenceReposRoot,
     attemptGuidance: { reason: input.reason, body: template.body },
