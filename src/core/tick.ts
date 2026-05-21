@@ -527,6 +527,10 @@ interface GithubBackoffRow {
   repo_id: string | null;
 }
 
+interface GithubBackoffState {
+  active: GithubBackoffRow | null;
+}
+
 function readActiveGithubGraphqlBackoff(
   db: DB,
   nowISO: string,
@@ -545,32 +549,33 @@ function readActiveGithubGraphqlBackoff(
 }
 
 function githubBackoffSkipResult(
-  deps: TickDeps,
+  backoff: GithubBackoffState,
   taskId: string,
 ): TickTaskResult | null {
-  const backoff = readActiveGithubGraphqlBackoff(deps.db, deps.clock.nowISO());
-  if (backoff === null) return null;
+  if (backoff.active === null) return null;
   return {
     task_id: taskId,
     action: "github_backoff_skipped",
-    error: `GitHub GraphQL polling paused until ${backoff.pause_until}: ${backoff.reason}`,
+    error: `GitHub GraphQL polling paused until ${backoff.active.pause_until}: ${backoff.active.reason}`,
   };
 }
 
 function recordTickErrorWithGithubBackoff(
   deps: TickDeps,
+  backoff: GithubBackoffState,
   taskId: string,
   err: unknown,
   repoId?: string,
 ): TickTaskResult {
-  const backoff = maybeRecordGithubGraphqlBackoff(deps, err, repoId);
-  if (backoff === null) return recordTickError(deps, taskId, err);
+  const recorded = maybeRecordGithubGraphqlBackoff(deps, err, repoId);
+  if (recorded === null) return recordTickError(deps, taskId, err);
+  backoff.active = recorded;
   const message = err instanceof Error ? err.message : String(err);
   return recordTickError(
     deps,
     taskId,
     new Error(
-      `${message}; GitHub GraphQL polling paused until ${backoff.pause_until}`,
+      `${message}; GitHub GraphQL polling paused until ${recorded.pause_until}`,
     ),
   );
 }
@@ -714,10 +719,13 @@ export async function tick_once(
   const attempt = await deps.supervisorLock.tryRun(async () => {
     const results: TickTaskResult[] = [];
     const nowISO = deps.clock.nowISO();
+    const githubBackoff: GithubBackoffState = {
+      active: readActiveGithubGraphqlBackoff(deps.db, nowISO),
+    };
 
     if (options.reviewerEnabled === true) {
       for (const req of readPendingReviewRequests(deps.db)) {
-        const skipped = githubBackoffSkipResult(deps, req.task_id);
+        const skipped = githubBackoffSkipResult(githubBackoff, req.task_id);
         if (skipped !== null) {
           results.push(skipped);
           continue;
@@ -727,7 +735,13 @@ export async function tick_once(
           if (result !== null) results.push(result);
         } catch (err) {
           results.push(
-            recordTickErrorWithGithubBackoff(deps, req.task_id, err, req.repo_id),
+            recordTickErrorWithGithubBackoff(
+              deps,
+              githubBackoff,
+              req.task_id,
+              err,
+              req.repo_id,
+            ),
           );
         }
       }
@@ -758,18 +772,22 @@ export async function tick_once(
     // a human closing the PR while the task is mid-respawn would otherwise
     // let the next worker push and open a replacement PR.
     // `closedUnmergedIds` excludes a candidate from this tick's per-state
-    // processing whether the sweep succeeded OR errored. A probe failure
+    // processing when the sweep succeeded or errored. A probe failure
     // (transient GitHub error, malformed snapshot) must NOT fall through to
     // promoteAndSpawn / processRunningTask — that's the exact regression
-    // path the sweep exists to prevent. The next tick re-probes and either
-    // succeeds or records another tick_error.
+    // path the sweep exists to prevent. The one exception is an active
+    // GraphQL backoff for a running task: the GitHub probe is skipped, but
+    // the tmux-local watchdog still needs to enforce kill_intent, wall-clock,
+    // and stale-log handling.
     const closedUnmergedIds = new Set<string>();
     for (const task of readClosedUnmergedCandidates(deps.db)) {
       if (cancelledIds.has(task.task_id)) continue;
-      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
       if (skipped !== null) {
-        results.push(skipped);
-        closedUnmergedIds.add(task.task_id);
+        if (task.state === "queued") {
+          results.push(skipped);
+          closedUnmergedIds.add(task.task_id);
+        }
         continue;
       }
       try {
@@ -780,7 +798,13 @@ export async function tick_once(
         }
       } catch (err) {
         results.push(
-          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          recordTickErrorWithGithubBackoff(
+            deps,
+            githubBackoff,
+            task.task_id,
+            err,
+            task.repo_id,
+          ),
         );
         closedUnmergedIds.add(task.task_id);
       }
@@ -842,17 +866,23 @@ export async function tick_once(
 
     for (const task of runningSnapshot) {
       try {
-        const result = processRunningTask(deps, task, options);
+        const result = processRunningTask(deps, task, options, githubBackoff);
         if (result !== null) results.push(result);
       } catch (err) {
         results.push(
-          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          recordTickErrorWithGithubBackoff(
+            deps,
+            githubBackoff,
+            task.task_id,
+            err,
+            task.repo_id,
+          ),
         );
       }
     }
 
     for (const task of goalCompletionPendingSnapshot) {
-      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
       if (skipped !== null) {
         results.push(skipped);
         continue;
@@ -863,13 +893,19 @@ export async function tick_once(
         if (result !== null) results.push(result);
       } catch (err) {
         results.push(
-          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          recordTickErrorWithGithubBackoff(
+            deps,
+            githubBackoff,
+            task.task_id,
+            err,
+            task.repo_id,
+          ),
         );
       }
     }
 
     for (const task of prOpenSnapshot) {
-      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
       if (skipped !== null) {
         results.push(skipped);
         continue;
@@ -879,13 +915,19 @@ export async function tick_once(
         if (result !== null) results.push(result);
       } catch (err) {
         results.push(
-          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          recordTickErrorWithGithubBackoff(
+            deps,
+            githubBackoff,
+            task.task_id,
+            err,
+            task.repo_id,
+          ),
         );
       }
     }
 
     for (const task of doneSnapshot) {
-      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
       if (skipped !== null) {
         results.push(skipped);
         continue;
@@ -895,7 +937,13 @@ export async function tick_once(
         if (result !== null) results.push(result);
       } catch (err) {
         results.push(
-          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          recordTickErrorWithGithubBackoff(
+            deps,
+            githubBackoff,
+            task.task_id,
+            err,
+            task.repo_id,
+          ),
         );
       }
     }
@@ -911,7 +959,7 @@ export async function tick_once(
       ) {
         continue;
       }
-      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
       if (skipped !== null) {
         results.push(skipped);
         syntheticReviewAttemptSkipIds.add(task.task_id);
@@ -931,14 +979,20 @@ export async function tick_once(
         }
       } catch (err) {
         results.push(
-          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          recordTickErrorWithGithubBackoff(
+            deps,
+            githubBackoff,
+            task.task_id,
+            err,
+            task.repo_id,
+          ),
         );
       }
     }
 
     const terminalParkedIds = new Set<string>();
     for (const task of parkedPrTerminalSnapshot) {
-      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
       if (skipped !== null) {
         results.push(skipped);
         continue;
@@ -951,7 +1005,13 @@ export async function tick_once(
         }
       } catch (err) {
         results.push(
-          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          recordTickErrorWithGithubBackoff(
+            deps,
+            githubBackoff,
+            task.task_id,
+            err,
+            task.repo_id,
+          ),
         );
       }
     }
@@ -1005,7 +1065,7 @@ export async function tick_once(
         ) {
           continue;
         }
-        const skipped = githubBackoffSkipResult(deps, task.task_id);
+        const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
         if (skipped !== null) {
           results.push(skipped);
           terminalReviewIds.add(task.task_id);
@@ -1019,7 +1079,13 @@ export async function tick_once(
           }
         } catch (err) {
           results.push(
-            recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+            recordTickErrorWithGithubBackoff(
+              deps,
+              githubBackoff,
+              task.task_id,
+              err,
+              task.repo_id,
+            ),
           );
         }
       }
@@ -1027,7 +1093,7 @@ export async function tick_once(
       for (const task of runningReviewSnapshot) {
         if (syntheticReviewAttemptSkipIds.has(task.task_id)) continue;
         if (terminalReviewIds.has(task.task_id)) continue;
-        const skipped = githubBackoffSkipResult(deps, task.task_id);
+        const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
         if (skipped !== null) {
           results.push(skipped);
           continue;
@@ -1037,7 +1103,13 @@ export async function tick_once(
           if (result !== null) results.push(result);
         } catch (err) {
           results.push(
-            recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+            recordTickErrorWithGithubBackoff(
+              deps,
+              githubBackoff,
+              task.task_id,
+              err,
+              task.repo_id,
+            ),
           );
         }
       }
@@ -1052,16 +1124,17 @@ export async function tick_once(
           results.push({ task_id: task.task_id, action: "skipped_capacity" });
           continue;
         }
-        const skipped = githubBackoffSkipResult(deps, task.task_id);
-        if (skipped !== null) {
-          results.push(skipped);
-          continue;
-        }
         try {
           results.push(promoteAndSpawnReviewer(deps, task, agentResolver, options));
         } catch (err) {
           results.push(
-            recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+            recordTickErrorWithGithubBackoff(
+              deps,
+              githubBackoff,
+              task.task_id,
+              err,
+              task.repo_id,
+            ),
           );
         }
         reviewerRunningCount = countRunningReviewers(deps.db);
@@ -1074,7 +1147,7 @@ export async function tick_once(
         results.push({ task_id: task.task_id, action: "skipped_capacity" });
         continue;
       }
-      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
       if (skipped !== null) {
         results.push(skipped);
         continue;
@@ -1085,7 +1158,13 @@ export async function tick_once(
         );
       } catch (err) {
         results.push(
-          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          recordTickErrorWithGithubBackoff(
+            deps,
+            githubBackoff,
+            task.task_id,
+            err,
+            task.repo_id,
+          ),
         );
       }
       // Re-read running count from the DB so terminal/non-promotion outcomes
@@ -1400,6 +1479,7 @@ function processRunningTask(
   deps: TickDeps,
   task: RunningTaskRow,
   options: TickOptions,
+  githubBackoff: GithubBackoffState,
 ): TickTaskResult | null {
   // Cancel intent is the slice-7 finalizer's responsibility; skip cleanly.
   if (task.cancel_requested_at !== null) return null;
@@ -1439,7 +1519,7 @@ function processRunningTask(
     try {
       deps.tmux.kill(canonical);
     } catch {}
-    const skipped = githubBackoffSkipResult(deps, task.task_id);
+    const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
     if (skipped !== null) return skipped;
     const res = classifyAndApply(deps, ctxTask, ctxAttempt, {
       sessionName: canonical,
@@ -1482,7 +1562,7 @@ function processRunningTask(
     };
   }
 
-  const skipped = githubBackoffSkipResult(deps, task.task_id);
+  const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
   if (skipped !== null) return skipped;
 
   const res = classifyAndApply(

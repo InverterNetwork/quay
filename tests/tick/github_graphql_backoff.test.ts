@@ -1,7 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
+import { join } from "node:path";
 import { tick_once } from "../../src/core/tick.ts";
 import type { PrSnapshot } from "../../src/ports/github.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import {
+  insertAttempt,
+  insertRepo,
+  insertRunningTask,
+  insertTask,
+} from "../support/fixtures.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 
@@ -133,6 +139,49 @@ test("synthetic review lifecycle polling uses lightweight PR probe", async () =>
     { repoId, prNumber: 42 },
   ]);
   expect(built.github.snapshotByNumberCalls).toEqual([]);
+});
+
+test("github backoff skips closed-pr sweep but still watchdogs live running tasks", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-21T12:00:00.000Z");
+  const repoId = insertRepo(h.db, "repo-running-watchdog");
+  const task = insertRunningTask(h.db, {
+    taskId: "task-running-watchdog",
+    repoId,
+    worktreesRoot: join(h.dataDir, "worktrees"),
+    spawnedAt: "2026-05-21T11:00:00.000Z",
+  });
+  h.db
+    .query(`UPDATE tasks SET pr_number = ? WHERE task_id = ?`)
+    .run(123, task.taskId);
+  h.db
+    .query(
+      `INSERT INTO github_backoffs (scope, pause_until, reason, observed_at, repo_id)
+       VALUES ('graphql', ?, ?, ?, ?)`,
+    )
+    .run(
+      "2026-05-21T12:15:00.000Z",
+      "GraphQL quota exhausted",
+      "2026-05-21T11:59:00.000Z",
+      repoId,
+    );
+
+  const built = buildTickDeps(h);
+  built.tmux.liveSessions.add(task.sessionName!);
+  built.tmux.setLogFreshness(task.sessionName!, "2026-05-21T11:59:00.000Z");
+
+  const results = await tick_once(built.deps, { maxAttemptDurationSeconds: 60 });
+  expect(results).toEqual([
+    { task_id: task.taskId, action: "kill_intent_set" },
+  ]);
+  expect(built.github.lightweightSnapshotByNumberCalls).toEqual([]);
+  expect(built.tmux.killCalls).toEqual([task.sessionName!]);
+  const attempt = h.db
+    .query<{ kill_intent: string | null }, [number]>(
+      `SELECT kill_intent FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(task.attemptId);
+  expect(attempt).toEqual({ kill_intent: "wall_clock" });
 });
 
 function openPendingSnapshot(branch: string): PrSnapshot {
