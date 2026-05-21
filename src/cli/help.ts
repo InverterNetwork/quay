@@ -99,12 +99,14 @@ const COMMANDS: Record<string, CommandSpec> = {
   },
   "handoff list": {
     path: "handoff list",
-    synopsis: "quay handoff list [--status <s>] [--task <task_id>]",
+    synopsis:
+      "quay handoff list [--status <s>] [--task <task_id>] [--include-ineligible]",
     summary:
       "List orchestrator handoffs. Defaults to pending rows and outputs a JSON array.",
     flags: [
       { flag: "--status <s>", desc: "Filter by status: pending, claimed, completed, cancelled. Defaults to pending." },
       { flag: "--task <task_id>", desc: "Filter by task_id." },
+      { flag: "--include-ineligible", desc: "Include pending handoffs whose next_eligible_at is still in the future." },
     ],
   },
   enqueue: {

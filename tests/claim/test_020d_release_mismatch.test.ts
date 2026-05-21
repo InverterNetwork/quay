@@ -3,6 +3,7 @@ import { createArtifactStore } from "../../src/artifacts/store.ts";
 import {
   claim_task,
   escalate_human,
+  HUMAN_REPLY_TIMEOUT_HANDOFF_COOLDOWN_SECONDS,
   release_claim,
 } from "../../src/core/claims.ts";
 import { enqueueOrchestratorHandoff } from "../../src/core/orchestrator_handoffs.ts";
@@ -134,6 +135,10 @@ test("release_claim from waiting_human reopens the claimed handoff", async () =>
   expect(singleHandoff(taskId)).toMatchObject({
     status: "pending",
     claim_id: null,
+    next_eligible_at: new Date(
+      Date.parse("2026-05-14T10:00:00.000Z") +
+        HUMAN_REPLY_TIMEOUT_HANDOFF_COOLDOWN_SECONDS * 1000,
+    ).toISOString(),
   });
 
   const releaseEvent = h.db
@@ -168,8 +173,8 @@ function insertAwaitingEvent(taskId: string, eventType: string): number {
 function singleHandoff(taskId: string) {
   if (!h) throw new Error("missing harness");
   const rows = h.db
-    .query<{ status: string; claim_id: string | null }, [string]>(
-      `SELECT status, claim_id
+    .query<{ status: string; claim_id: string | null; next_eligible_at: string | null }, [string]>(
+      `SELECT status, claim_id, next_eligible_at
          FROM orchestrator_handoffs
         WHERE task_id = ?
         ORDER BY handoff_id`,

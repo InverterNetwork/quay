@@ -2,6 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
 import {
   claim_task,
+  escalate_human,
+  HUMAN_REPLY_TIMEOUT_HANDOFF_COOLDOWN_SECONDS,
   release_claim,
   submit_brief,
 } from "../../src/core/claims.ts";
@@ -119,6 +121,92 @@ test("task claim, release, and submit advance handoff status", async () => {
     status: "completed",
     claim_id: claim2.value.claim_id,
   });
+});
+
+test("human timeout release makes older handoff ineligible so newer handoff drains", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-21T20:00:00.000Z");
+  const repoId = insertRepo(h.db, "repo-handoff-human-timeout");
+  const olderTaskId = insertTask(h.db, {
+    taskId: "task-handoff-human-timeout-old",
+    repoId,
+    state: "awaiting-next-brief",
+  });
+  insertAttempt(h.db, {
+    taskId: olderTaskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-05-21T19:00:00.000Z",
+  });
+  const olderEventId = insertAwaitingEvent(olderTaskId, "blocker_ingested");
+  const olderHandoffId = enqueueOrchestratorHandoff(
+    { db: h.db, clock: h.clock },
+    { taskId: olderTaskId, reason: "worker_blocker", stateEventId: olderEventId },
+  );
+
+  h.clock.advanceMs(1000);
+  const newerTaskId = insertTask(h.db, {
+    taskId: "task-handoff-human-timeout-new",
+    repoId,
+    state: "awaiting-next-brief",
+  });
+  const newerEventId = insertAwaitingEvent(newerTaskId, "blocker_ingested");
+  const newerHandoffId = enqueueOrchestratorHandoff(
+    { db: h.db, clock: h.clock },
+    { taskId: newerTaskId, reason: "worker_blocker", stateEventId: newerEventId },
+  );
+
+  const claim = claim_task({ db: h.db, clock: h.clock }, { taskId: olderTaskId });
+  if (!claim.ok) throw new Error("expected older handoff claim");
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  h.ids.push("ast149a");
+  const escalation = await escalate_human(
+    { db: h.db, clock: h.clock, artifactStore: store, ids: h.ids },
+    {
+      taskId: olderTaskId,
+      claimId: claim.value.claim_id,
+      questionBody: "Need human input before this task can continue.",
+    },
+  );
+  if (!escalation.ok) throw new Error("expected human escalation");
+
+  const released = release_claim(
+    { db: h.db, clock: h.clock },
+    { taskId: olderTaskId, claimId: claim.value.claim_id },
+  );
+  if (!released.ok) throw new Error("expected release");
+
+  const drainable = listOrchestratorHandoffs(h.db, {
+    status: "pending",
+    eligibleAtOrBefore: h.clock.nowISO(),
+  });
+  expect(drainable.map((row) => row.handoff_id)).toEqual([newerHandoffId]);
+
+  const allPending = listOrchestratorHandoffs(h.db, {
+    status: "pending",
+    eligibleAtOrBefore: h.clock.nowISO(),
+    includeIneligible: true,
+  });
+  expect(allPending.map((row) => row.handoff_id)).toEqual([
+    olderHandoffId,
+    newerHandoffId,
+  ]);
+  expect(allPending[0]!.next_eligible_at).toBe(
+    "2026-05-21T20:30:01.000Z",
+  );
+
+  h.clock.advanceMs(HUMAN_REPLY_TIMEOUT_HANDOFF_COOLDOWN_SECONDS * 1000);
+  const afterCooldown = listOrchestratorHandoffs(h.db, {
+    status: "pending",
+    eligibleAtOrBefore: h.clock.nowISO(),
+  });
+  expect(afterCooldown.map((row) => row.handoff_id)).toEqual([
+    olderHandoffId,
+    newerHandoffId,
+  ]);
 });
 
 function insertAwaitingEvent(taskId: string, eventType: string): number {
