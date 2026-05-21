@@ -178,12 +178,10 @@ export function listOrchestratorHandoffs(
   filters: {
     status?: OrchestratorHandoffStatus;
     taskId?: string;
-    eligibleAtOrBefore?: string;
+    eligibleAtOrBefore: string;
     includeIneligible?: boolean;
-  } = {},
+  },
 ): OrchestratorHandoffRow[] {
-  const eligibleAtOrBefore =
-    filters.eligibleAtOrBefore ?? new Date().toISOString();
   const includeIneligible = filters.includeIneligible === true ? 1 : 0;
   return db
     .query<
@@ -217,6 +215,6 @@ export function listOrchestratorHandoffs(
       filters.taskId ?? null,
       filters.taskId ?? null,
       includeIneligible,
-      eligibleAtOrBefore,
+      filters.eligibleAtOrBefore,
     );
 }

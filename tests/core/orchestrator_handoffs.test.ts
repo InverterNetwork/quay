@@ -51,7 +51,10 @@ test("orchestrator handoff enqueue is idempotent by task event and reason", () =
   );
 
   expect(second).toBe(first);
-  const rows = listOrchestratorHandoffs(h.db, { status: "pending" });
+  const rows = listOrchestratorHandoffs(h.db, {
+    status: "pending",
+    eligibleAtOrBefore: h.clock.nowISO(),
+  });
   expect(rows).toHaveLength(1);
   expect(rows[0]).toMatchObject({
     handoff_id: first,
