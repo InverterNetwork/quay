@@ -6,6 +6,8 @@
 
 const GIT_REF_INVALID = /[\x00-\x1f\x7f ~^:?*[\\]/;
 
+export const QUAY_BRANCH_PREFIX = "quay/";
+
 export function taskIdShort(taskId: string): string {
   const stripped = taskId.replace(/-/g, "");
   return stripped.slice(0, 8);
@@ -68,7 +70,7 @@ export function computeBranchSlug(
   // Step 6: empty fallback.
   if (s === "") return fallback;
   // Step 7: final ref-format gate.
-  if (!isValidGitRef(`quay/${s}`)) return fallback;
+  if (!isValidGitRef(`${QUAY_BRANCH_PREFIX}${s}`)) return fallback;
   return s;
 }
 

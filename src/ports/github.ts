@@ -41,6 +41,16 @@ export interface GitHubPort {
   // `quay-review/<num>` — not a real GitHub ref — so a branch-keyed lookup
   // would always return null and miss external merges/closes.
   prSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null;
+  // Cheaper PR read for code paths that only need terminal/open state plus
+  // identifying metadata. Implementations should avoid check/review reads.
+  prLightweightSnapshot(repoId: string, branch: string): PrSnapshot | null;
+  prLightweightSnapshotByNumber(
+    repoId: string,
+    prNumber: number,
+  ): PrSnapshot | null;
+  // Best-effort observability for GraphQL quota burn. Returning null means
+  // telemetry was unavailable and must not block the caller.
+  getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null;
   prView(repoId: string, prNumber: number): PullRequestView | null;
   // `expectedLogin` overrides the adapter's auto-probed identity when the
   // reviewer worker posts under a different gh login than the tick process.
@@ -56,6 +66,13 @@ export interface GitHubPort {
   // target repository. Kept repo-scoped so GitHub App installation tokens are
   // supported; installation tokens cannot use the authenticated-user endpoint.
   probeTokenAccess(repoId: string, token: string): void;
+}
+
+export interface GitHubGraphqlRateLimit {
+  limit: number | null;
+  used: number | null;
+  remaining: number | null;
+  resetAt: string | null;
 }
 
 export type PrCheckState = "pass" | "fail" | "pending";

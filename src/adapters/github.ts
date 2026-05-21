@@ -36,6 +36,7 @@
 import { join, resolve } from "node:path";
 import type {
   GitHubPort,
+  GitHubGraphqlRateLimit,
   OpenBranchPr,
   PrCheck,
   PrCheckBucket,
@@ -146,6 +147,41 @@ export class GitHubCliAdapter implements GitHubPort {
     return this.prSnapshotBySelector(repoId, String(prNumber));
   }
 
+  prLightweightSnapshot(repoId: string, branch: string): PrSnapshot | null {
+    return this.prLightweightSnapshotBySelector(repoId, branch);
+  }
+
+  prLightweightSnapshotByNumber(
+    repoId: string,
+    prNumber: number,
+  ): PrSnapshot | null {
+    return this.prLightweightSnapshotBySelector(repoId, String(prNumber));
+  }
+
+  getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null {
+    const result = this.run(repoId, ["gh", "api", "rate_limit"]);
+    if (result.exitCode !== 0) return null;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    const resources = (parsed.resources ?? {}) as Record<string, unknown>;
+    const graphql = (resources.graphql ?? {}) as Record<string, unknown>;
+    const resetRaw = graphql.reset;
+    const resetAt =
+      typeof resetRaw === "number" && Number.isFinite(resetRaw)
+        ? new Date(resetRaw * 1000).toISOString()
+        : null;
+    return {
+      limit: toFiniteIntegerOrNull(graphql.limit),
+      used: toFiniteIntegerOrNull(graphql.used),
+      remaining: toFiniteIntegerOrNull(graphql.remaining),
+      resetAt,
+    };
+  }
+
   private prSnapshotBySelector(
     repoId: string,
     selector: string,
@@ -191,6 +227,36 @@ export class GitHubCliAdapter implements GitHubPort {
     }
     if (view.isDraft !== undefined) {
       snapshot.isDraft = view.isDraft;
+    }
+    if (view.prNumber !== null && view.prNumber !== undefined) {
+      snapshot.prNumber = view.prNumber;
+    }
+    if (view.prUrl !== null && view.prUrl !== undefined) {
+      snapshot.prUrl = view.prUrl;
+    }
+    return snapshot;
+  }
+
+  private prLightweightSnapshotBySelector(
+    repoId: string,
+    selector: string,
+  ): PrSnapshot | null {
+    const view = this.fetchLightweightPrView(repoId, selector);
+    if (view === null) return null;
+    const snapshot: PrSnapshot = {
+      state: view.state,
+      prNumber: view.prNumber ?? null,
+      headSha: view.headSha,
+      baseSha: view.baseSha,
+      mergeable: "unknown",
+      latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+      checks: { checkSha: null, items: [] },
+    };
+    if (view.baseRef !== null && view.baseRef !== undefined) {
+      snapshot.baseRef = view.baseRef;
+    }
+    if (view.baseTipSha !== null && view.baseTipSha !== undefined) {
+      snapshot.baseTipSha = view.baseTipSha;
     }
     if (view.prNumber !== null && view.prNumber !== undefined) {
       snapshot.prNumber = view.prNumber;
@@ -481,6 +547,83 @@ export class GitHubCliAdapter implements GitHubPort {
       baseSha,
       mergeable: mapMergeable(parsed.mergeable),
       latestReview,
+    };
+    if (baseRef !== null) view.baseRef = baseRef;
+    if (baseTipSha !== null) view.baseTipSha = baseTipSha;
+    if (prNumber !== null) view.prNumber = prNumber;
+    if (prUrl !== null) view.prUrl = prUrl;
+    return view;
+  }
+
+  private fetchLightweightPrView(
+    repoId: string,
+    selector: string,
+  ):
+    | (Pick<
+        PrSnapshot,
+        "state" | "headSha" | "baseSha" | "prNumber" | "prUrl" | "baseRef" | "baseTipSha"
+      >)
+    | null {
+    const fields = [
+      "number",
+      "url",
+      "state",
+      "headRefOid",
+      "baseRefName",
+    ].join(",");
+    const result = this.run(repoId, [
+      "gh",
+      "pr",
+      "view",
+      selector,
+      "--json",
+      fields,
+    ]);
+    if (result.exitCode !== 0) {
+      const lower = result.stderr.toLowerCase();
+      if (
+        lower.includes("no pull request") ||
+        lower.includes("no pull requests")
+      ) {
+        return null;
+      }
+      throw new Error(
+        `gh pr view ${selector} (lightweight) failed: ${result.stderr.trim()}`,
+      );
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+    } catch (err) {
+      throw new Error(
+        `gh pr view returned unparseable lightweight JSON for ${selector}: ${(err as Error).message}`,
+      );
+    }
+    const headSha = String(parsed.headRefOid ?? "");
+    const baseRef =
+      parsed.baseRefName !== null && parsed.baseRefName !== undefined
+        ? String(parsed.baseRefName)
+        : null;
+    const baseSha =
+      baseRef !== null && headSha !== ""
+        ? this.computeMergeBaseSha(repoId, `origin/${baseRef}`, headSha)
+        : null;
+    const baseTipSha =
+      baseRef !== null
+        ? this.computeRefTipSha(repoId, `origin/${baseRef}`)
+        : null;
+    const prNumber = toFiniteIntegerOrNull(parsed.number);
+    const prUrl =
+      typeof parsed.url === "string" && parsed.url.length > 0
+        ? parsed.url
+        : null;
+    const view: Pick<
+      PrSnapshot,
+      "state" | "headSha" | "baseSha" | "prNumber" | "prUrl" | "baseRef" | "baseTipSha"
+    > = {
+      state: mapPrState(parsed.state),
+      headSha,
+      baseSha,
     };
     if (baseRef !== null) view.baseRef = baseRef;
     if (baseTipSha !== null) view.baseTipSha = baseTipSha;

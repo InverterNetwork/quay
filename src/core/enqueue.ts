@@ -10,6 +10,7 @@ import type { IdGenerator } from "../ports/id_generator.ts";
 import {
   computeBranchSlug,
   computeTmuxId,
+  QUAY_BRANCH_PREFIX,
   taskIdShort,
 } from "./branch_slug.ts";
 import { baseBranchNameSchema } from "./base_branch.ts";
@@ -197,7 +198,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       input.external_ref ?? null,
       shortId,
     );
-    fullBranchName = `quay/${resolvedSlug}`;
+    fullBranchName = `${QUAY_BRANCH_PREFIX}${resolvedSlug}`;
 
     // Step 4: worktree add. This both creates the directory and registers the local branch.
     deps.git.worktreeAdd(
@@ -441,7 +442,7 @@ function lookupRepo(db: DB, repoId: string): RepoRow | null {
 }
 
 function isBranchTaken(git: GitPort, repoId: string, slug: string): boolean {
-  const branch = `quay/${slug}`;
+  const branch = `${QUAY_BRANCH_PREFIX}${slug}`;
   if (git.hasLocalBranch(repoId, branch)) return true;
   if (git.hasRemoteBranch(repoId, branch)) return true;
   if (git.hasOpenPullRequestForBranch(repoId, branch)) return true;
@@ -467,9 +468,10 @@ function resolveBranchName(
   // overall length might trip a check; safeBranchSlug is the single arbiter.
   const disambiguated = git.safeBranchSlug(`${preferred}-${shortId}`, shortId);
   if (!isBranchTaken(git, repoId, disambiguated)) return disambiguated;
+  const branch = `${QUAY_BRANCH_PREFIX}${disambiguated}`;
   throw new QuayError(
     "branch_collision_unresolvable",
-    `branch quay/${disambiguated} is already taken`,
-    { branch: `quay/${disambiguated}` },
+    `branch ${branch} is already taken`,
+    { branch },
   );
 }

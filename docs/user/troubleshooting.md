@@ -174,3 +174,20 @@ quay task events <task_id>
 Many tick errors clear automatically after the next successful observation.
 Persistent tick errors usually point to adapter auth, GitHub CLI setup, missing
 tmux, or repo/worktree state.
+
+## Tick Shows `github_backoff_skipped`
+
+`github_backoff_skipped` means Quay has paused background GitHub GraphQL polling
+after seeing a GitHub rate-limit exhaustion error. This is a global circuit
+breaker for the tick process's GitHub identity, so tasks can skip PR polling
+without recording a per-task `tick_error`.
+
+Inspect the current pause window directly:
+
+```bash
+sqlite3 "$QUAY_DATA_DIR/quay.db" \
+  "SELECT scope, pause_until, reason, observed_at, repo_id FROM github_backoffs;"
+```
+
+Active workers are still supervised locally by tmux. PR status updates and
+other GitHub-backed background observations resume after `pause_until`.
