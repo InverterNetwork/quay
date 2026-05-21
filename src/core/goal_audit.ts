@@ -18,6 +18,7 @@ import {
   composeWorkerPrompt,
   loadOriginalTaskObjective,
   loadTaskPrBaseBranch,
+  loadTaskPrScreenshotsRequested,
 } from "./worker_prompt.ts";
 
 export const MAX_GOAL_EVIDENCE_FILE_BYTES = 4 * 1024 * 1024;
@@ -691,6 +692,10 @@ function rejectGoalCompletion(
     const objective = loadOriginalTaskObjective(deps.db, input.task.task_id);
     const goalContext = loadGoalPromptContext(deps.db, input.task.task_id);
     const prBaseBranch = loadTaskPrBaseBranch(deps.db, input.task.task_id);
+    const prScreenshotsRequested = loadTaskPrScreenshotsRequested(
+      deps.db,
+      input.task.task_id,
+    );
     const preambleBody = loadPreambleBody(deps.db, preambleId);
     const guidance = [
       "The goal completion audit rejected the previous complete report.",
@@ -707,6 +712,7 @@ function rejectGoalCompletion(
       preambleBody,
       taskObjective: objective,
       prBaseBranch,
+      prScreenshotsRequested,
       goalContext,
       referenceReposRoot: deps.referenceReposRoot,
       attemptGuidance: {

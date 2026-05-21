@@ -25,6 +25,7 @@ export interface EnqueueLinearIssueArgs {
   identifier: string;
   cliTags: string[];
   baseBranch: string | null;
+  requestPrScreenshots: boolean;
   workerAgent: string | null;
   workerModel: string | null;
   reviewerAgent: string | null;
@@ -162,6 +163,7 @@ export async function handleEnqueueLinearIssue(
       tags: mergedTags,
       worker_execution: ctx.worker_execution,
       base_branch: resolvedBaseBranch ?? undefined,
+      request_pr_screenshots: args.requestPrScreenshots,
       authors_json: authorsJson,
       worker_agent: args.workerAgent,
       worker_model: args.workerModel,

@@ -5,7 +5,7 @@
 // Each scenario drives one spec command, checks exit code + stdout/stderr
 // shape, and asserts the resulting durable state matches the contract.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
@@ -121,6 +121,7 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
       "ITRY-900",
       "--slack-thread-ref",
       "C123:1700000000.0001",
+      "--request-pr-screenshots",
     ],
     built.deps,
     io,
@@ -138,15 +139,17 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
       {
         base_branch: string | null;
         external_ref: string | null;
+        pr_screenshots_requested: number;
         slack_thread_ref: string | null;
       },
       [string]
     >(
-      "SELECT base_branch, external_ref, slack_thread_ref FROM tasks WHERE task_id = ?",
+      "SELECT base_branch, external_ref, pr_screenshots_requested, slack_thread_ref FROM tasks WHERE task_id = ?",
     )
     .get(enqueueResult.task_id);
   expect(row?.base_branch).toBe("dev");
   expect(row?.external_ref).toBe("ITRY-900");
+  expect(row?.pr_screenshots_requested).toBe(1);
   expect(row?.slack_thread_ref).toBe("C123:1700000000.0001");
 
   // The brief artifact was captured from the file contents.
@@ -156,6 +159,9 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
     )
     .get(enqueueResult.task_id);
   expect(brief).not.toBeNull();
+  expect(readFileSync(brief!.file_path, "utf8")).toContain(
+    "<quay-pr-screenshot-request",
+  );
 });
 
 test("task claim returns claim_id, then submit-brief flag form succeeds", async () => {

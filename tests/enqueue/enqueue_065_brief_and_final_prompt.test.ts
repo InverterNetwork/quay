@@ -34,6 +34,7 @@ test("test_065_initial_attempt_has_brief_and_final_prompt", () => {
     external_ref: "ITRY-65",
     brief: "Do the thing",
     ticket_snapshot: "Ticket text 65",
+    request_pr_screenshots: true,
   });
 
   // Exactly one brief artifact for attempt 1.
@@ -109,7 +110,18 @@ test("test_065_initial_attempt_has_brief_and_final_prompt", () => {
   expect(briefContent).toContain("Do the thing");
   expect(briefContent).toContain('<quay-pr-target base-branch="main">');
   expect(briefContent).toContain("Open or update the pull request against base branch main.");
+  expect(briefContent).toContain("<quay-pr-screenshot-request");
+  expect(briefContent).toContain(
+    "state that limitation plainly in the PR body or PR comment",
+  );
   expect(briefContent).toContain(
     '<quay-current-attempt-guidance reason="initial">',
   );
+
+  const taskRow = h.db
+    .query<{ pr_screenshots_requested: number }, [string]>(
+      `SELECT pr_screenshots_requested FROM tasks WHERE task_id = ?`,
+    )
+    .get(result.task_id);
+  expect(taskRow?.pr_screenshots_requested).toBe(1);
 });

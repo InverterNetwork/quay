@@ -495,6 +495,7 @@ async function handleEnqueue(
     const reviewerModel = readFlag(argv, "--reviewer-model");
     const workerExecution = readFlag(argv, "--worker-execution");
     const baseBranch = readFlag(argv, "--base-branch");
+    const requestPrScreenshots = argv.includes("--request-pr-screenshots");
     const tags = collectFlagValues(argv, "--tag");
     const briefRead = tryReadFile(briefPath);
     if (!briefRead.ok) return writeError(io, "usage_error", briefRead.message);
@@ -507,6 +508,7 @@ async function handleEnqueue(
     if (externalRef !== null) input.external_ref = externalRef;
     if (slackThreadRef !== null) input.slack_thread_ref = slackThreadRef;
     if (baseBranch !== null) input.base_branch = baseBranch;
+    if (requestPrScreenshots) input.request_pr_screenshots = true;
     const agentErr = validateTaskSelectionOverrides(
       {
         worker_agent: workerAgent,
@@ -728,6 +730,7 @@ async function handleEnqueueLinearIssueFlow(
       identifier,
       cliTags,
       baseBranch,
+      requestPrScreenshots: argv.includes("--request-pr-screenshots"),
       workerAgent: readFlag(argv, "--worker-agent"),
       workerModel: readFlag(argv, "--worker-model"),
       reviewerAgent: readFlag(argv, "--reviewer-agent"),

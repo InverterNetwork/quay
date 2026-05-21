@@ -39,6 +39,7 @@ import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.t
 import {
   composeWorkerPrompt,
   loadTaskPrBaseBranch,
+  loadTaskPrScreenshotsRequested,
   loadOriginalTaskObjective,
 } from "./worker_prompt.ts";
 import {
@@ -495,6 +496,10 @@ export async function submit_brief(
   const preambleBody = loadPreambleBody(deps.db, preambleId);
   const objective = loadOriginalTaskObjective(deps.db, input.taskId);
   const prBaseBranch = loadTaskPrBaseBranch(deps.db, input.taskId);
+  const prScreenshotsRequested = loadTaskPrScreenshotsRequested(
+    deps.db,
+    input.taskId,
+  );
   const goalContext = loadGoalPromptContext(deps.db, input.taskId);
   if (goalContext !== undefined && input.goalTokenBudget !== undefined) {
     goalContext.tokenBudget = input.goalTokenBudget;
@@ -503,6 +508,7 @@ export async function submit_brief(
     preambleBody,
     taskObjective: objective,
     prBaseBranch,
+    prScreenshotsRequested,
     goalContext,
     referenceReposRoot: deps.referenceReposRoot,
     attemptGuidance: { reason: input.reason, body: input.brief },

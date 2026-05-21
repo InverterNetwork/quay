@@ -49,6 +49,7 @@ import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.t
 import {
   composeWorkerPrompt,
   loadTaskPrBaseBranch,
+  loadTaskPrScreenshotsRequested,
   loadOriginalTaskObjective,
 } from "./worker_prompt.ts";
 
@@ -660,6 +661,10 @@ function scheduleGoalProtocolRepairInOpenTxn(
   const objective = loadOriginalTaskObjective(deps.db, task.task_id);
   const goalContext = loadGoalPromptContext(deps.db, task.task_id);
   const prBaseBranch = loadTaskPrBaseBranch(deps.db, task.task_id);
+  const prScreenshotsRequested = loadTaskPrScreenshotsRequested(
+    deps.db,
+    task.task_id,
+  );
   const preambleBody = loadPreambleBody(deps.db, preambleId);
   const guidance = [
     "The previous goal-mode worker wrote an invalid .quay-goal-report.json.",
@@ -674,6 +679,7 @@ function scheduleGoalProtocolRepairInOpenTxn(
     preambleBody,
     taskObjective: objective,
     prBaseBranch,
+    prScreenshotsRequested,
     goalContext,
     referenceReposRoot: deps.referenceReposRoot,
     attemptGuidance: {
@@ -904,12 +910,17 @@ function ingestActiveGoalReport(
     const objective = loadOriginalTaskObjective(deps.db, task.task_id);
     const goalContext = loadGoalPromptContext(deps.db, task.task_id);
     const prBaseBranch = loadTaskPrBaseBranch(deps.db, task.task_id);
+    const prScreenshotsRequested = loadTaskPrScreenshotsRequested(
+      deps.db,
+      task.task_id,
+    );
     const preambleBody = loadPreambleBody(deps.db, preambleId);
     const guidance = composeGoalContinuationGuidance(report, warnings);
     const composed = composeWorkerPrompt({
       preambleBody,
       taskObjective: objective,
       prBaseBranch,
+      prScreenshotsRequested,
       goalContext,
       referenceReposRoot: deps.referenceReposRoot,
       attemptGuidance: {

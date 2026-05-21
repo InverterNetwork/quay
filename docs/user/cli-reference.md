@@ -116,6 +116,7 @@ quay enqueue \
   --repo <repo_id> \
   --brief-file <path> \
   [--base-branch <branch>] \
+  [--request-pr-screenshots] \
   [--ticket-snapshot-file <path>] \
   [--external-ref <ref>] \
   [--slack-thread-ref <channel:ts>] \
@@ -133,6 +134,7 @@ quay enqueue \
   --repo <repo_id> \
   --linear-issue <identifier> \
   [--base-branch <branch>] \
+  [--request-pr-screenshots] \
   [--worker-agent <name>] \
   [--worker-model <model>] \
   [--reviewer-agent <name>] \
@@ -150,6 +152,10 @@ lifecycle. On the Linear path, set `worker_execution: goal` in the ticket's
 `quay-config` block.
 `--base-branch` overrides the repo default for one task on either enqueue path;
 Linear tickets can also set `base_branch` in `quay-config`.
+`--request-pr-screenshots` is a soft task-level request. When present, every
+code-worker prompt asks the worker to capture UI screenshots when the task
+affects UI, attach or link them in the PR when the runtime supports that, and
+state the limitation in the PR if screenshots cannot be captured or attached.
 `--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,
 and `--slack-thread-ref`.
 
