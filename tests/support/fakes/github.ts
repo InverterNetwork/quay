@@ -1,5 +1,6 @@
 import type {
   GitHubPort,
+  GitHubGraphqlRateLimit,
   OpenBranchPr,
   PostedReview,
   PrCheckStatus,
@@ -9,6 +10,13 @@ import type {
 
 export class FakeGitHub implements GitHubPort {
   readonly calls: { repoId: string; branch: string }[] = [];
+  readonly snapshotCalls: { repoId: string; branch: string }[] = [];
+  readonly snapshotByNumberCalls: { repoId: string; prNumber: number }[] = [];
+  readonly lightweightSnapshotCalls: { repoId: string; branch: string }[] = [];
+  readonly lightweightSnapshotByNumberCalls: {
+    repoId: string;
+    prNumber: number;
+  }[] = [];
   readonly closePrCalls: { repoId: string; branch: string }[] = [];
   readonly prExisting = new Map<string, boolean>(); // key = `${repoId}\0${branch}`
   readonly openPrsByBranchBase = new Map<string, OpenBranchPr[]>();
@@ -18,9 +26,15 @@ export class FakeGitHub implements GitHubPort {
   // `setPrCheckStatus`-derived synthesis.
   readonly snapshots = new Map<string, PrSnapshot | null>();
   readonly snapshotsByNumber = new Map<string, PrSnapshot | null>();
+  readonly lightweightSnapshots = new Map<string, PrSnapshot | null>();
+  readonly lightweightSnapshotsByNumber = new Map<string, PrSnapshot | null>();
   readonly prViews = new Map<string, PullRequestView | null>();
   readonly postedReviews = new Map<string, PostedReview | null>();
   readonly tokenAccessCalls: { repoId: string; token: string }[] = [];
+  private graphqlRateLimit: GitHubGraphqlRateLimit | null = null;
+  private prSnapshotHandler:
+    | ((repoId: string, branch: string) => PrSnapshot | null)
+    | null = null;
   private tokenAccessHandler: (repoId: string, token: string) => void = () => {};
 
   prExistsForBranch(repoId: string, branch: string): boolean {
@@ -74,6 +88,10 @@ export class FakeGitHub implements GitHubPort {
   }
 
   prSnapshot(repoId: string, branch: string): PrSnapshot | null {
+    this.snapshotCalls.push({ repoId, branch });
+    if (this.prSnapshotHandler !== null) {
+      return this.prSnapshotHandler(repoId, branch);
+    }
     const key = `${repoId}\0${branch}`;
     if (this.snapshots.has(key)) return this.snapshots.get(key) ?? null;
     const cs = this.checkStatuses.get(key);
@@ -85,7 +103,14 @@ export class FakeGitHub implements GitHubPort {
     this.snapshots.set(`${repoId}\0${branch}`, snapshot);
   }
 
+  setPrSnapshotHandler(
+    handler: ((repoId: string, branch: string) => PrSnapshot | null) | null,
+  ): void {
+    this.prSnapshotHandler = handler;
+  }
+
   prSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null {
+    this.snapshotByNumberCalls.push({ repoId, prNumber });
     const key = `${repoId}\0${prNumber}`;
     return this.snapshotsByNumber.get(key) ?? null;
   }
@@ -96,6 +121,52 @@ export class FakeGitHub implements GitHubPort {
     snapshot: PrSnapshot | null,
   ): void {
     this.snapshotsByNumber.set(`${repoId}\0${prNumber}`, snapshot);
+  }
+
+  prLightweightSnapshot(repoId: string, branch: string): PrSnapshot | null {
+    this.lightweightSnapshotCalls.push({ repoId, branch });
+    const key = `${repoId}\0${branch}`;
+    if (this.lightweightSnapshots.has(key)) {
+      return this.lightweightSnapshots.get(key) ?? null;
+    }
+    return this.prSnapshot(repoId, branch);
+  }
+
+  setPrLightweightSnapshot(
+    repoId: string,
+    branch: string,
+    snapshot: PrSnapshot | null,
+  ): void {
+    this.lightweightSnapshots.set(`${repoId}\0${branch}`, snapshot);
+  }
+
+  prLightweightSnapshotByNumber(
+    repoId: string,
+    prNumber: number,
+  ): PrSnapshot | null {
+    this.lightweightSnapshotByNumberCalls.push({ repoId, prNumber });
+    const key = `${repoId}\0${prNumber}`;
+    if (this.lightweightSnapshotsByNumber.has(key)) {
+      return this.lightweightSnapshotsByNumber.get(key) ?? null;
+    }
+    return this.prSnapshotByNumber(repoId, prNumber);
+  }
+
+  setPrLightweightSnapshotByNumber(
+    repoId: string,
+    prNumber: number,
+    snapshot: PrSnapshot | null,
+  ): void {
+    this.lightweightSnapshotsByNumber.set(`${repoId}\0${prNumber}`, snapshot);
+  }
+
+  getGraphqlRateLimit(_repoId: string): GitHubGraphqlRateLimit | null {
+    return this.graphqlRateLimit === null ? null : { ...this.graphqlRateLimit };
+  }
+
+  setGraphqlRateLimit(rateLimit: GitHubGraphqlRateLimit | null): void {
+    this.graphqlRateLimit =
+      rateLimit === null ? null : { ...rateLimit };
   }
 
   prView(repoId: string, prNumber: number): PullRequestView | null {

@@ -5,7 +5,15 @@ import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
-import type { GitHubPort, PostedReview, PrSnapshot } from "../ports/github.ts";
+import type {
+  GitHubGraphqlRateLimit,
+  GitHubPort,
+  OpenBranchPr,
+  PostedReview,
+  PrCheckStatus,
+  PrSnapshot,
+  PullRequestView,
+} from "../ports/github.ts";
 import type { LinearPort } from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
@@ -61,6 +69,9 @@ export const DEFAULT_MAX_SPAWN_FAILURES = 3;
 export const DEFAULT_CLAIM_TIMEOUT_SECONDS = 1800;
 export const DEFAULT_MAX_CLAIM_EXPIRATIONS = 3;
 export const DEFAULT_MAX_NON_BUDGET_RESPAWNS = 20;
+export const DEFAULT_LOW_PRIORITY_PR_POLL_INTERVAL_MINUTES = 5;
+export const DEFAULT_PARKED_PR_POLL_INTERVAL_MINUTES = 15;
+export const DEFAULT_GITHUB_GRAPHQL_BACKOFF_MINUTES = 10;
 export const REVIEWER_GH_TOKEN_ENV = "QUAY_REVIEWER_GH_TOKEN";
 const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Canonical claude worker template, kept here as a named re-export so
@@ -180,6 +191,7 @@ export type TickAction =
   | "slack_reply_ingested"
   | "waiting_human_requeued"
   | "slack_skipped"
+  | "github_backoff_skipped"
   | "tick_error";
 
 export interface TickTaskResult {
@@ -221,6 +233,7 @@ interface PrOpenTaskRow {
   cancel_requested_at: string | null;
   last_review_id_acted_on: string | null;
   last_conflict_observation: string | null;
+  github_pr_polled_at: string | null;
 }
 
 interface PrReviewTaskRow {
@@ -230,6 +243,7 @@ interface PrReviewTaskRow {
   worktree_path: string;
   pr_number: number | null;
   cancel_requested_at: string | null;
+  github_pr_polled_at: string | null;
 }
 
 type PrTerminalFromState =
@@ -254,6 +268,7 @@ interface ParkedPrTerminalTaskRow {
   worktree_path: string;
   pr_number: number | null;
   cancel_requested_at: string | null;
+  github_pr_polled_at: string | null;
 }
 
 // Queued / running tasks with a Quay-owned PR don't poll PR state via any
@@ -305,6 +320,7 @@ interface DoneTaskRow {
   cancel_requested_at: string | null;
   last_review_id_acted_on: string | null;
   last_conflict_observation: string | null;
+  github_pr_polled_at: string | null;
 }
 
 type SyntheticReviewLifecycleState =
@@ -320,6 +336,7 @@ interface SyntheticReviewLifecycleTaskRow {
   worktree_path: string;
   pr_number: number | null;
   cancel_requested_at: string | null;
+  github_pr_polled_at: string | null;
 }
 
 interface ClaimedTaskRow {
@@ -360,6 +377,321 @@ interface CurrentAttemptRow {
   goal_report_processed_at: string | null;
 }
 
+class TickGithubCache implements GitHubPort {
+  private readonly prSnapshotByBranch = new Map<string, PrSnapshot | null>();
+  private readonly prSnapshotByNumberCache = new Map<string, PrSnapshot | null>();
+  private readonly lightweightByBranch = new Map<string, PrSnapshot | null>();
+  private readonly lightweightByNumber = new Map<string, PrSnapshot | null>();
+  private readonly prViews = new Map<string, PullRequestView | null>();
+  private readonly postedReviews = new Map<string, PostedReview | null>();
+  private readonly graphqlRateLimits = new Map<string, GitHubGraphqlRateLimit | null>();
+
+  constructor(private readonly inner: GitHubPort) {}
+
+  prExistsForBranch(repoId: string, branch: string): boolean {
+    return this.inner.prExistsForBranch(repoId, branch);
+  }
+
+  openPrsForBranchBase(
+    repoId: string,
+    branch: string,
+    baseBranch: string,
+  ): OpenBranchPr[] {
+    return this.inner.openPrsForBranchBase(repoId, branch, baseBranch);
+  }
+
+  prCheckStatus(repoId: string, branch: string): PrCheckStatus {
+    return this.inner.prCheckStatus(repoId, branch);
+  }
+
+  prIsOpen(repoId: string, branch: string): boolean {
+    return this.inner.prIsOpen(repoId, branch);
+  }
+
+  closePr(repoId: string, branch: string): void {
+    this.inner.closePr(repoId, branch);
+  }
+
+  prSnapshot(repoId: string, branch: string): PrSnapshot | null {
+    const key = `${repoId}\0${branch}`;
+    if (!this.prSnapshotByBranch.has(key)) {
+      const snapshot = this.inner.prSnapshot(repoId, branch);
+      this.prSnapshotByBranch.set(key, snapshot);
+      this.rememberSnapshotAliases(repoId, branch, snapshot, false);
+    }
+    return this.prSnapshotByBranch.get(key) ?? null;
+  }
+
+  prSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null {
+    const key = `${repoId}\0${prNumber}`;
+    if (!this.prSnapshotByNumberCache.has(key)) {
+      const snapshot = this.inner.prSnapshotByNumber(repoId, prNumber);
+      this.prSnapshotByNumberCache.set(key, snapshot);
+      this.rememberSnapshotAliases(repoId, String(prNumber), snapshot, false);
+    }
+    return this.prSnapshotByNumberCache.get(key) ?? null;
+  }
+
+  prLightweightSnapshot(repoId: string, branch: string): PrSnapshot | null {
+    const key = `${repoId}\0${branch}`;
+    if (!this.lightweightByBranch.has(key)) {
+      const snapshot = this.inner.prLightweightSnapshot(repoId, branch);
+      this.lightweightByBranch.set(key, snapshot);
+      this.rememberSnapshotAliases(repoId, branch, snapshot, true);
+    }
+    return this.lightweightByBranch.get(key) ?? null;
+  }
+
+  prLightweightSnapshotByNumber(
+    repoId: string,
+    prNumber: number,
+  ): PrSnapshot | null {
+    const key = `${repoId}\0${prNumber}`;
+    if (!this.lightweightByNumber.has(key)) {
+      const snapshot = this.inner.prLightweightSnapshotByNumber(repoId, prNumber);
+      this.lightweightByNumber.set(key, snapshot);
+      this.rememberSnapshotAliases(repoId, String(prNumber), snapshot, true);
+    }
+    return this.lightweightByNumber.get(key) ?? null;
+  }
+
+  getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null {
+    if (!this.graphqlRateLimits.has(repoId)) {
+      this.graphqlRateLimits.set(repoId, this.inner.getGraphqlRateLimit(repoId));
+    }
+    const value = this.graphqlRateLimits.get(repoId) ?? null;
+    return value === null ? null : { ...value };
+  }
+
+  prView(repoId: string, prNumber: number): PullRequestView | null {
+    const key = `${repoId}\0${prNumber}`;
+    if (!this.prViews.has(key)) {
+      this.prViews.set(key, this.inner.prView(repoId, prNumber));
+    }
+    return this.prViews.get(key) ?? null;
+  }
+
+  fetchPostedReview(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+    expectedLogin?: string,
+  ): PostedReview | null {
+    const key = `${repoId}\0${prNumber}\0${headSha}\0${expectedLogin ?? ""}`;
+    if (!this.postedReviews.has(key)) {
+      this.postedReviews.set(
+        key,
+        this.inner.fetchPostedReview(repoId, prNumber, headSha, expectedLogin),
+      );
+    }
+    return this.postedReviews.get(key) ?? null;
+  }
+
+  probeTokenAccess(repoId: string, token: string): void {
+    this.inner.probeTokenAccess(repoId, token);
+  }
+
+  private rememberSnapshotAliases(
+    repoId: string,
+    selector: string,
+    snapshot: PrSnapshot | null,
+    lightweight: boolean,
+  ): void {
+    if (snapshot === null) return;
+    if (snapshot.prNumber !== undefined && snapshot.prNumber !== null) {
+      const numberKey = `${repoId}\0${snapshot.prNumber}`;
+      if (lightweight) {
+        if (!this.lightweightByNumber.has(numberKey)) {
+          this.lightweightByNumber.set(numberKey, snapshot);
+        }
+      } else if (!this.prSnapshotByNumberCache.has(numberKey)) {
+        this.prSnapshotByNumberCache.set(numberKey, snapshot);
+      }
+    }
+    if (selector.startsWith("quay/")) {
+      const branchKey = `${repoId}\0${selector}`;
+      if (lightweight) {
+        if (!this.lightweightByBranch.has(branchKey)) {
+          this.lightweightByBranch.set(branchKey, snapshot);
+        }
+      } else if (!this.prSnapshotByBranch.has(branchKey)) {
+        this.prSnapshotByBranch.set(branchKey, snapshot);
+      }
+    }
+  }
+}
+
+interface GithubBackoffRow {
+  pause_until: string;
+  reason: string;
+  repo_id: string | null;
+}
+
+function readActiveGithubGraphqlBackoff(
+  db: DB,
+  nowISO: string,
+): GithubBackoffRow | null {
+  return (
+    db
+      .query<GithubBackoffRow, [string]>(
+        `SELECT pause_until, reason, repo_id
+           FROM github_backoffs
+          WHERE scope = 'graphql'
+            AND pause_until > ?
+          LIMIT 1`,
+      )
+      .get(nowISO) ?? null
+  );
+}
+
+function githubBackoffSkipResult(
+  deps: TickDeps,
+  taskId: string,
+): TickTaskResult | null {
+  const backoff = readActiveGithubGraphqlBackoff(deps.db, deps.clock.nowISO());
+  if (backoff === null) return null;
+  return {
+    task_id: taskId,
+    action: "github_backoff_skipped",
+    error: `GitHub GraphQL polling paused until ${backoff.pause_until}: ${backoff.reason}`,
+  };
+}
+
+function recordTickErrorWithGithubBackoff(
+  deps: TickDeps,
+  taskId: string,
+  err: unknown,
+  repoId?: string,
+): TickTaskResult {
+  const backoff = maybeRecordGithubGraphqlBackoff(deps, err, repoId);
+  if (backoff === null) return recordTickError(deps, taskId, err);
+  const message = err instanceof Error ? err.message : String(err);
+  return recordTickError(
+    deps,
+    taskId,
+    new Error(
+      `${message}; GitHub GraphQL polling paused until ${backoff.pause_until}`,
+    ),
+  );
+}
+
+function maybeRecordGithubGraphqlBackoff(
+  deps: TickDeps,
+  err: unknown,
+  repoId?: string,
+): GithubBackoffRow | null {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!isGithubRateLimitError(message)) return null;
+  const nowISO = deps.clock.nowISO();
+  const rateLimit =
+    repoId === undefined ? null : safeGraphqlRateLimit(deps.github, repoId);
+  const pauseUntil = resolveGithubBackoffPauseUntil(nowISO, message, rateLimit);
+  const reason = formatGithubBackoffReason(message, rateLimit);
+  deps.db
+    .query(
+      `INSERT INTO github_backoffs (scope, pause_until, reason, observed_at, repo_id)
+       VALUES ('graphql', ?, ?, ?, ?)
+       ON CONFLICT(scope) DO UPDATE SET
+         pause_until = excluded.pause_until,
+         reason = excluded.reason,
+         observed_at = excluded.observed_at,
+         repo_id = excluded.repo_id`,
+    )
+    .run(pauseUntil, reason, nowISO, repoId ?? null);
+  return { pause_until: pauseUntil, reason, repo_id: repoId ?? null };
+}
+
+function isGithubRateLimitError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("rate limit") &&
+    (lower.includes("github") ||
+      lower.includes("graphql") ||
+      lower.includes("gh pr") ||
+      lower.includes("gh api") ||
+      lower.includes("api rate limit"))
+  );
+}
+
+function safeGraphqlRateLimit(
+  github: GitHubPort,
+  repoId: string,
+): GitHubGraphqlRateLimit | null {
+  try {
+    return github.getGraphqlRateLimit(repoId);
+  } catch {
+    return null;
+  }
+}
+
+function resolveGithubBackoffPauseUntil(
+  nowISO: string,
+  message: string,
+  rateLimit: GitHubGraphqlRateLimit | null,
+): string {
+  const nowMs = Date.parse(nowISO);
+  const fallback = new Date(
+    nowMs + DEFAULT_GITHUB_GRAPHQL_BACKOFF_MINUTES * 60_000,
+  ).toISOString();
+  const resetAt =
+    rateLimit?.resetAt ?? parseGithubResetTimeFromMessage(message, nowISO);
+  if (resetAt === null) return fallback;
+  const resetMs = Date.parse(resetAt);
+  if (!Number.isFinite(resetMs) || resetMs <= nowMs) return fallback;
+  return new Date(resetMs + 30_000).toISOString();
+}
+
+function parseGithubResetTimeFromMessage(
+  message: string,
+  nowISO: string,
+): string | null {
+  const iso = message.match(
+    /reset(?:s|ting)?\s+(?:at|on)\s+([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+-]+Z?)/i,
+  )?.[1];
+  if (iso !== undefined) {
+    const ms = Date.parse(iso);
+    if (Number.isFinite(ms)) return new Date(ms).toISOString();
+  }
+  const retrySeconds = message.match(/retry[- ]after[:=]?\s*(\d+)/i)?.[1];
+  if (retrySeconds !== undefined) {
+    const seconds = Number(retrySeconds);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return new Date(Date.parse(nowISO) + seconds * 1000).toISOString();
+    }
+  }
+  return null;
+}
+
+function formatGithubBackoffReason(
+  message: string,
+  rateLimit: GitHubGraphqlRateLimit | null,
+): string {
+  const compact = message.replace(/\s+/g, " ").trim();
+  const suffix =
+    rateLimit === null
+      ? ""
+      : ` (graphql remaining=${rateLimit.remaining ?? "unknown"}, used=${rateLimit.used ?? "unknown"}, reset=${rateLimit.resetAt ?? "unknown"})`;
+  return `${compact}${suffix}`;
+}
+
+function shouldPollLowPriorityPr(
+  githubPrPolledAt: string | null,
+  nowISO: string,
+  intervalMinutes: number,
+): boolean {
+  if (githubPrPolledAt === null) return true;
+  const lastMs = Date.parse(githubPrPolledAt);
+  const nowMs = Date.parse(nowISO);
+  if (!Number.isFinite(lastMs) || !Number.isFinite(nowMs)) return true;
+  return nowMs - lastMs >= intervalMinutes * 60_000;
+}
+
+function markGithubPrPolled(deps: TickDeps, taskId: string): void {
+  deps.db
+    .query(`UPDATE tasks SET github_pr_polled_at = ? WHERE task_id = ?`)
+    .run(deps.clock.nowISO(), taskId);
+}
+
 export async function tick_once(
   deps: TickDeps,
   options: TickOptions = {},
@@ -367,6 +699,7 @@ export async function tick_once(
   if (options.referenceReposRoot !== undefined) {
     deps = { ...deps, referenceReposRoot: options.referenceReposRoot };
   }
+  deps = { ...deps, github: new TickGithubCache(deps.github) };
   const max = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const agentResolver = resolveTickAgentResolver(options);
   // Linear writebacks are scheduled inside the lock but drained after it
@@ -380,14 +713,22 @@ export async function tick_once(
   // observes a clean exit.
   const attempt = await deps.supervisorLock.tryRun(async () => {
     const results: TickTaskResult[] = [];
+    const nowISO = deps.clock.nowISO();
 
     if (options.reviewerEnabled === true) {
       for (const req of readPendingReviewRequests(deps.db)) {
+        const skipped = githubBackoffSkipResult(deps, req.task_id);
+        if (skipped !== null) {
+          results.push(skipped);
+          continue;
+        }
         try {
           const result = processPendingReviewRequest(deps, req);
           if (result !== null) results.push(result);
         } catch (err) {
-          results.push(recordTickError(deps, req.task_id, err));
+          results.push(
+            recordTickErrorWithGithubBackoff(deps, req.task_id, err, req.repo_id),
+          );
         }
       }
     }
@@ -425,6 +766,12 @@ export async function tick_once(
     const closedUnmergedIds = new Set<string>();
     for (const task of readClosedUnmergedCandidates(deps.db)) {
       if (cancelledIds.has(task.task_id)) continue;
+      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      if (skipped !== null) {
+        results.push(skipped);
+        closedUnmergedIds.add(task.task_id);
+        continue;
+      }
       try {
         const result = processClosedUnmergedQuayPr(deps, task);
         if (result !== null) {
@@ -432,7 +779,9 @@ export async function tick_once(
           closedUnmergedIds.add(task.task_id);
         }
       } catch (err) {
-        results.push(recordTickError(deps, task.task_id, err));
+        results.push(
+          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+        );
         closedUnmergedIds.add(task.task_id);
       }
     }
@@ -459,10 +808,21 @@ export async function tick_once(
     const doneSnapshot = readDone(deps.db).filter(
       (t) =>
         !cancelledIds.has(t.task_id) &&
-        !syntheticReviewLifecycleIds.has(t.task_id),
+        !syntheticReviewLifecycleIds.has(t.task_id) &&
+        shouldPollLowPriorityPr(
+          t.github_pr_polled_at,
+          nowISO,
+          DEFAULT_LOW_PRIORITY_PR_POLL_INTERVAL_MINUTES,
+        ),
     );
     const parkedPrTerminalSnapshot = readParkedPrTerminal(deps.db).filter(
-      (t) => !cancelledIds.has(t.task_id),
+      (t) =>
+        !cancelledIds.has(t.task_id) &&
+        shouldPollLowPriorityPr(
+          t.github_pr_polled_at,
+          nowISO,
+          DEFAULT_PARKED_PR_POLL_INTERVAL_MINUTES,
+        ),
     );
     const claimedSnapshot = readClaimed(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
@@ -485,39 +845,78 @@ export async function tick_once(
         const result = processRunningTask(deps, task, options);
         if (result !== null) results.push(result);
       } catch (err) {
-        results.push(recordTickError(deps, task.task_id, err));
+        results.push(
+          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+        );
       }
     }
 
     for (const task of goalCompletionPendingSnapshot) {
+      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      if (skipped !== null) {
+        results.push(skipped);
+        continue;
+      }
       try {
+        markGithubPrPolled(deps, task.task_id);
         const result = processGoalCompletionAudit(deps, task);
         if (result !== null) results.push(result);
       } catch (err) {
-        results.push(recordTickError(deps, task.task_id, err));
+        results.push(
+          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+        );
       }
     }
 
     for (const task of prOpenSnapshot) {
+      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      if (skipped !== null) {
+        results.push(skipped);
+        continue;
+      }
       try {
         const result = processPrOpenTask(deps, task, options);
         if (result !== null) results.push(result);
       } catch (err) {
-        results.push(recordTickError(deps, task.task_id, err));
+        results.push(
+          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+        );
       }
     }
 
     for (const task of doneSnapshot) {
+      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      if (skipped !== null) {
+        results.push(skipped);
+        continue;
+      }
       try {
         const result = processDoneTask(deps, task, options);
         if (result !== null) results.push(result);
       } catch (err) {
-        results.push(recordTickError(deps, task.task_id, err));
+        results.push(
+          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+        );
       }
     }
 
     const syntheticReviewAttemptSkipIds = new Set<string>();
     for (const task of syntheticReviewLifecycleSnapshot) {
+      if (
+        !shouldPollLowPriorityPr(
+          task.github_pr_polled_at,
+          nowISO,
+          DEFAULT_LOW_PRIORITY_PR_POLL_INTERVAL_MINUTES,
+        )
+      ) {
+        continue;
+      }
+      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      if (skipped !== null) {
+        results.push(skipped);
+        syntheticReviewAttemptSkipIds.add(task.task_id);
+        continue;
+      }
       try {
         const result = processSyntheticReviewLifecycle(deps, task, options);
         if (result !== null) {
@@ -531,12 +930,19 @@ export async function tick_once(
           }
         }
       } catch (err) {
-        results.push(recordTickError(deps, task.task_id, err));
+        results.push(
+          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+        );
       }
     }
 
     const terminalParkedIds = new Set<string>();
     for (const task of parkedPrTerminalSnapshot) {
+      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      if (skipped !== null) {
+        results.push(skipped);
+        continue;
+      }
       try {
         const result = processParkedPrTerminal(deps, task);
         if (result !== null) {
@@ -544,7 +950,9 @@ export async function tick_once(
           terminalParkedIds.add(task.task_id);
         }
       } catch (err) {
-        results.push(recordTickError(deps, task.task_id, err));
+        results.push(
+          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+        );
       }
     }
 
@@ -588,6 +996,21 @@ export async function tick_once(
       );
       const terminalReviewIds = new Set<string>();
       for (const task of prReviewSnapshot) {
+        if (
+          !shouldPollLowPriorityPr(
+            task.github_pr_polled_at,
+            nowISO,
+            DEFAULT_LOW_PRIORITY_PR_POLL_INTERVAL_MINUTES,
+          )
+        ) {
+          continue;
+        }
+        const skipped = githubBackoffSkipResult(deps, task.task_id);
+        if (skipped !== null) {
+          results.push(skipped);
+          terminalReviewIds.add(task.task_id);
+          continue;
+        }
         try {
           const result = processPrReviewTerminal(deps, task);
           if (result !== null) {
@@ -595,18 +1018,27 @@ export async function tick_once(
             terminalReviewIds.add(task.task_id);
           }
         } catch (err) {
-          results.push(recordTickError(deps, task.task_id, err));
+          results.push(
+            recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          );
         }
       }
 
       for (const task of runningReviewSnapshot) {
         if (syntheticReviewAttemptSkipIds.has(task.task_id)) continue;
         if (terminalReviewIds.has(task.task_id)) continue;
+        const skipped = githubBackoffSkipResult(deps, task.task_id);
+        if (skipped !== null) {
+          results.push(skipped);
+          continue;
+        }
         try {
           const result = processRunningReviewAttempt(deps, task, options);
           if (result !== null) results.push(result);
         } catch (err) {
-          results.push(recordTickError(deps, task.task_id, err));
+          results.push(
+            recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          );
         }
       }
 
@@ -620,10 +1052,17 @@ export async function tick_once(
           results.push({ task_id: task.task_id, action: "skipped_capacity" });
           continue;
         }
+        const skipped = githubBackoffSkipResult(deps, task.task_id);
+        if (skipped !== null) {
+          results.push(skipped);
+          continue;
+        }
         try {
           results.push(promoteAndSpawnReviewer(deps, task, agentResolver, options));
         } catch (err) {
-          results.push(recordTickError(deps, task.task_id, err));
+          results.push(
+            recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+          );
         }
         reviewerRunningCount = countRunningReviewers(deps.db);
       }
@@ -635,12 +1074,19 @@ export async function tick_once(
         results.push({ task_id: task.task_id, action: "skipped_capacity" });
         continue;
       }
+      const skipped = githubBackoffSkipResult(deps, task.task_id);
+      if (skipped !== null) {
+        results.push(skipped);
+        continue;
+      }
       try {
         results.push(
           promoteAndSpawn(deps, task, agentResolver, linearSyncs, options),
         );
       } catch (err) {
-        results.push(recordTickError(deps, task.task_id, err));
+        results.push(
+          recordTickErrorWithGithubBackoff(deps, task.task_id, err, task.repo_id),
+        );
       }
       // Re-read running count from the DB so terminal/non-promotion outcomes
       // don't drift the cap.
@@ -674,7 +1120,11 @@ function processPendingReviewRequest(
   deps: TickDeps,
   req: PendingReviewRequestRow,
 ): TickTaskResult | null {
-  const snapshot = deps.github.prSnapshotByNumber(req.repo_id, req.pr_number);
+  markGithubPrPolled(deps, req.task_id);
+  const snapshot = deps.github.prLightweightSnapshotByNumber(
+    req.repo_id,
+    req.pr_number,
+  );
   if (snapshot === null) return null;
   if (snapshot.state === "merged" || snapshot.state === "closed_unmerged") {
     deps.db
@@ -804,7 +1254,7 @@ function readPrOpen(db: DB): PrOpenTaskRow[] {
     .query<PrOpenTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
               cancel_requested_at, last_review_id_acted_on,
-              last_conflict_observation
+              last_conflict_observation, github_pr_polled_at
          FROM tasks
         WHERE state = 'pr-open'
         ORDER BY created_at, task_id`,
@@ -817,7 +1267,7 @@ function readDone(db: DB): DoneTaskRow[] {
     .query<DoneTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
               pr_number, cancel_requested_at, last_review_id_acted_on,
-              last_conflict_observation
+              last_conflict_observation, github_pr_polled_at
          FROM tasks
         WHERE state = 'done'
         ORDER BY created_at, task_id`,
@@ -831,7 +1281,7 @@ function readSyntheticReviewLifecycle(
   return db
     .query<SyntheticReviewLifecycleTaskRow, []>(
       `SELECT task_id, repo_id, state, branch_name, worktree_path,
-              pr_number, cancel_requested_at
+              pr_number, cancel_requested_at, github_pr_polled_at
          FROM tasks
         WHERE task_id LIKE 'pr-review-%'
           AND state IN ('pr-review', 'done', 'waiting_external_changes')
@@ -844,7 +1294,7 @@ function readPrReview(db: DB): PrReviewTaskRow[] {
   return db
     .query<PrReviewTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
-              pr_number, cancel_requested_at
+              pr_number, cancel_requested_at, github_pr_polled_at
          FROM tasks
         WHERE state = 'pr-review'
         ORDER BY created_at, task_id`,
@@ -872,7 +1322,7 @@ function readParkedPrTerminal(db: DB): ParkedPrTerminalTaskRow[] {
   return db
     .query<ParkedPrTerminalTaskRow, []>(
       `SELECT task_id, repo_id, state, branch_name, worktree_path,
-              pr_number, cancel_requested_at
+              pr_number, cancel_requested_at, github_pr_polled_at
          FROM tasks
         WHERE state IN (
           'awaiting-next-brief',
@@ -989,6 +1439,8 @@ function processRunningTask(
     try {
       deps.tmux.kill(canonical);
     } catch {}
+    const skipped = githubBackoffSkipResult(deps, task.task_id);
+    if (skipped !== null) return skipped;
     const res = classifyAndApply(deps, ctxTask, ctxAttempt, {
       sessionName: canonical,
       spawnWindow: true,
@@ -1029,6 +1481,9 @@ function processRunningTask(
       action: retryReason === "wall_clock" ? "wall_clock_killed" : "stale_killed",
     };
   }
+
+  const skipped = githubBackoffSkipResult(deps, task.task_id);
+  if (skipped !== null) return skipped;
 
   const res = classifyAndApply(
     { ...deps, artifactStore: deps.artifactStore },
@@ -1175,6 +1630,7 @@ function processPrOpenTask(
   const attempt = loadLatestAttempt(deps.db, task.task_id);
   if (!attempt) return null;
 
+  markGithubPrPolled(deps, task.task_id);
   const snapshot = deps.github.prSnapshot(task.repo_id, task.branch_name);
   if (snapshot === null) {
     return recordTickError(
@@ -1287,6 +1743,7 @@ function processDoneTask(
   const attempt = loadLatestAttempt(deps.db, task.task_id);
   if (!attempt) return null;
 
+  markGithubPrPolled(deps, task.task_id);
   const snapshot = deps.github.prSnapshot(task.repo_id, task.branch_name);
   if (snapshot === null) {
     return recordTickError(
@@ -1374,7 +1831,11 @@ function processSyntheticReviewLifecycle(
   const attempt = loadLatestAttempt(deps.db, task.task_id);
   if (!attempt) return null;
 
-  const snapshot = deps.github.prSnapshotByNumber(task.repo_id, task.pr_number);
+  markGithubPrPolled(deps, task.task_id);
+  const snapshot = deps.github.prLightweightSnapshotByNumber(
+    task.repo_id,
+    task.pr_number,
+  );
   if (snapshot === null) return null;
   persistPrMetadata(deps, task.task_id, snapshot);
 
@@ -1437,10 +1898,11 @@ function processPrReviewTerminal(
   // internal placeholder that has no GitHub ref — so a branch-keyed
   // `prSnapshot` would always return null and miss the external merge /
   // close. For those, probe by PR number instead.
+  markGithubPrPolled(deps, task.task_id);
   const snapshot =
     isSyntheticTaskId(task.task_id) && task.pr_number !== null
-      ? deps.github.prSnapshotByNumber(task.repo_id, task.pr_number)
-      : deps.github.prSnapshot(task.repo_id, task.branch_name);
+      ? deps.github.prLightweightSnapshotByNumber(task.repo_id, task.pr_number)
+      : deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
   if (snapshot === null) return null;
   if (snapshot.state !== "merged" && snapshot.state !== "closed_unmerged") {
     return null;
@@ -1456,7 +1918,11 @@ function processClosedUnmergedQuayPr(
   // human-opened replacement PR on the same branch would resolve via
   // `prSnapshot(branch)` and mask the original closure; addressing by
   // number keeps the invariant scoped to "the PR we own".
-  const snapshot = deps.github.prSnapshotByNumber(task.repo_id, task.pr_number);
+  markGithubPrPolled(deps, task.task_id);
+  const snapshot = deps.github.prLightweightSnapshotByNumber(
+    task.repo_id,
+    task.pr_number,
+  );
   if (snapshot === null) return null;
   if (snapshot.state !== "closed_unmerged") return null;
 
@@ -1491,6 +1957,7 @@ function processParkedPrTerminal(
   const attempt = loadLatestAttempt(deps.db, task.task_id);
   if (!attempt) return null;
 
+  markGithubPrPolled(deps, task.task_id);
   const snapshot = loadParkedPrSnapshot(deps, task);
   if (snapshot === null) return null;
   if (snapshot.state !== "merged" && snapshot.state !== "closed_unmerged") {
@@ -1506,10 +1973,13 @@ function loadParkedPrSnapshot(
   task: Pick<ParkedPrTerminalTaskRow, "repo_id" | "branch_name" | "pr_number">,
 ): PrSnapshot | null {
   if (task.pr_number !== null) {
-    const byNumber = deps.github.prSnapshotByNumber(task.repo_id, task.pr_number);
+    const byNumber = deps.github.prLightweightSnapshotByNumber(
+      task.repo_id,
+      task.pr_number,
+    );
     if (byNumber !== null) return byNumber;
   }
-  return deps.github.prSnapshot(task.repo_id, task.branch_name);
+  return deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
 }
 
 function finalizePrTerminal(
