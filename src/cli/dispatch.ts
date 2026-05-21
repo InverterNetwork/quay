@@ -271,7 +271,10 @@ function handleHandoffList(
   deps: CliDeps,
   io: CliIO,
 ): DispatchResult {
-  const validation = validateFlags(argv, { valued: ["--status", "--task"] });
+  const validation = validateFlags(argv, {
+    valued: ["--status", "--task"],
+    boolean: ["--include-ineligible"],
+  });
   if (!validation.ok) {
     return writeError(io, "usage_error", validation.message, validation.details);
   }
@@ -284,8 +287,15 @@ function handleHandoffList(
       { status: rawStatus },
     );
   }
-  const filters: { status: OrchestratorHandoffStatus; taskId?: string } = {
+  const filters: {
+    status: OrchestratorHandoffStatus;
+    taskId?: string;
+    eligibleAtOrBefore: string;
+    includeIneligible: boolean;
+  } = {
     status: rawStatus,
+    eligibleAtOrBefore: deps.clock.nowISO(),
+    includeIneligible: argv.includes("--include-ineligible"),
   };
   const taskId = readFlag(argv, "--task");
   if (taskId !== null) filters.taskId = taskId;

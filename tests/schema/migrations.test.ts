@@ -51,3 +51,12 @@ test("tasks table has PR screenshot request flag with default off", () => {
   expect(col).toBeDefined();
   expect(col?.dflt_value).toBe("0");
 });
+
+test("orchestrator handoffs carry next eligibility timestamp", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(orchestrator_handoffs)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toContain("next_eligible_at");
+});

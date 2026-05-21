@@ -156,6 +156,8 @@ export interface RecordHumanReplyInput {
   author?: string | null;
 }
 
+export const HUMAN_REPLY_TIMEOUT_HANDOFF_COOLDOWN_SECONDS = 30 * 60;
+
 interface TaskRow {
   task_id: string;
   state: string;
@@ -189,6 +191,10 @@ function loadTask(db: DB, taskId: string): TaskRow | null {
       )
       .get(taskId) ?? null
   );
+}
+
+function isoAfterSeconds(nowISO: string, seconds: number): string {
+  return new Date(Date.parse(nowISO) + seconds * 1000).toISOString();
 }
 
 export function claim_task(
@@ -286,6 +292,9 @@ export function release_claim(
   }
 
   const now = deps.clock.nowISO();
+  const nextEligibleAt = row.state === "waiting_human"
+    ? isoAfterSeconds(now, HUMAN_REPLY_TIMEOUT_HANDOFF_COOLDOWN_SECONDS)
+    : null;
   deps.db.exec("BEGIN IMMEDIATE");
   try {
     const upd = deps.db
@@ -350,6 +359,7 @@ export function release_claim(
     reopenClaimedOrchestratorHandoffs(deps, {
       taskId: input.taskId,
       claimId: input.claimId,
+      nextEligibleAt,
     });
     deps.db.exec("COMMIT");
   } catch (err) {
