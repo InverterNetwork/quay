@@ -148,6 +148,17 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--tag <name>", desc: "Repeatable. Attach tags to synthetic review tasks." },
     ],
   },
+  "adopt-pr": {
+    path: "adopt-pr",
+    synopsis: "quay adopt-pr --pr <repo>:<num>",
+    summary:
+      "Adopt an existing same-repo human PR and schedule a Quay code worker on its branch.",
+    details:
+      "The PR must be open and same-repo. Quay reuses or creates the synthetic review task, checks out the PR head branch mutably, and instructs the worker to update the existing PR instead of creating another one.",
+    flags: [
+      { flag: "--pr <repo>:<num>", desc: "Pull request identifier, e.g. owner/repo:47." },
+    ],
+  },
   repo: {
     path: "repo",
     synopsis: "quay repo <subcommand> [options]",
@@ -433,6 +444,7 @@ const TOP_LEVEL_ORDER: string[] = [
   "handoff",
   "enqueue",
   "review-pr",
+  "adopt-pr",
   "repo",
   "tags",
   "cancel",

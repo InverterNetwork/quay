@@ -167,6 +167,8 @@ export interface PullRequestView {
   url: string | null;
   headRefName: string;
   headSha: string;
+  baseRef?: string | null;
+  isCrossRepository?: boolean | null;
 }
 
 export interface PostedReview {

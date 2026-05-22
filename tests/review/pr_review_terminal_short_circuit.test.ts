@@ -224,6 +224,68 @@ test("pr-review task with externally-closed PR transitions to closed_unmerged an
   expect(built.tmux.killCalls).toContain(sessionName);
 });
 
+test("adopted pr-review task closed_unmerged preserves human-owned remote branch", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-13T08:15:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-review-adopted-closed");
+  const taskId = "pr-review-repo-review-adopted-closed-7";
+  const branchName = "feature/human-owned";
+  const worktreePath = `${h.dataDir}/worktrees/review-adopted-closed`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id,
+         worktree_path, pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'adopted_external_pr', ?, ?, ?, 71, 'sha-71', 1, ?, ?)`,
+    )
+    .run(
+      taskId,
+      repoId,
+      branchName,
+      "quay-review-adopted-closed-71",
+      worktreePath,
+      h.clock.nowISO(),
+      h.clock.nowISO(),
+    );
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-71', tmux_session = 'quay-review-adopted-closed'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+
+  const built = buildTickDeps(h);
+  built.git.setLocalBranches(repoId, [branchName]);
+  built.git.setRemoteBranches(repoId, [branchName]);
+  built.github.setPrLightweightSnapshotByNumber(repoId, 71, {
+    prNumber: 71,
+    state: "closed_unmerged",
+    headSha: "sha-71",
+    baseSha: "base-71",
+    mergeable: "unknown",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: {
+      checkSha: "sha-71",
+      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+    },
+  });
+
+  const results = await tick_once(built.deps, { reviewerEnabled: true });
+
+  expect(results).toEqual([{ task_id: taskId, action: "pr_closed_unmerged" }]);
+  expect(built.git.localBranches.get(repoId)?.has(branchName)).toBeFalsy();
+  expect(built.git.remoteBranches.get(repoId)?.has(branchName)).toBe(true);
+});
+
 test("synthetic pr-review task probes by pr_number and short-circuits on external merge", async () => {
   // Synthetic review tasks store `branch_name = quay-review/<num>`, an
   // internal placeholder that has no GitHub ref. A branch-keyed prSnapshot

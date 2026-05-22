@@ -54,6 +54,12 @@ const CANCEL_FROM_STATES = [
 export const TASK_TRANSITIONS = [
   transition("queued", "running", ["spawned"], "worker attempt spawned"),
   transition(
+    "queued",
+    "queued",
+    ["pr_adopted"],
+    "existing external PR adopted for code-worker ownership",
+  ),
+  transition(
     "running",
     "queued",
     [
@@ -131,6 +137,12 @@ export const TASK_TRANSITIONS = [
     "external PR changes are ready for another synthetic review",
   ),
   transition(
+    "waiting_external_changes",
+    "queued",
+    ["pr_adopted"],
+    "external PR adopted for code-worker ownership",
+  ),
+  transition(
     "pr-review",
     "pr-open",
     ["ci_failed", "review_approved", "review_superseded"],
@@ -157,7 +169,12 @@ export const TASK_TRANSITIONS = [
   transition(
     "done",
     "queued",
-    ["ci_failed", "conflict_respawn_scheduled", "review_respawn_scheduled"],
+    [
+      "ci_failed",
+      "conflict_respawn_scheduled",
+      "pr_adopted",
+      "review_respawn_scheduled",
+    ],
     "post-ready evidence required another worker pass",
   ),
   transition(
@@ -169,7 +186,7 @@ export const TASK_TRANSITIONS = [
   transition(
     "pr-review",
     "queued",
-    ["ci_failed", "review_respawn_scheduled"],
+    ["ci_failed", "pr_adopted", "review_respawn_scheduled"],
     "review evidence required another worker pass",
   ),
   transition(

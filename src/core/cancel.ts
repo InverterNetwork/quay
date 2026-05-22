@@ -76,6 +76,7 @@ export interface CancelTaskInput {
 interface TaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: string;
   state: string;
   branch_name: string;
   tmux_id: string;
@@ -102,7 +103,7 @@ function loadTaskRow(db: DB, taskId: string): TaskRow | null {
   return (
     db
       .query<TaskRow, [string]>(
-        `SELECT task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+        `SELECT task_id, repo_id, authoring_mode, state, branch_name, tmux_id, worktree_path,
                 cancel_requested_at, cancel_close_pr, cancel_keep_worktree,
                 claim_id, external_ref
            FROM tasks WHERE task_id = ?`,
@@ -381,7 +382,9 @@ function applyCleanupMatrix(deps: CancelDeps, row: TaskRow): void {
   // delete. Otherwise retain only when a PR is currently open (preserves the
   // human's option to take over the work — spec §5 cleanup matrix).
   let deleteRemote = true;
-  if (!closePr) {
+  if (!closePr && row.authoring_mode === "adopted_external_pr") {
+    deleteRemote = false;
+  } else if (!closePr) {
     try {
       const open = deps.github.prIsOpen(row.repo_id, row.branch_name);
       if (open) deleteRemote = false;
