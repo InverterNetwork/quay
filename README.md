@@ -168,12 +168,12 @@ tasks against a repo, two things have to happen:
 
 ```bash
 quay tick                                  # one supervisor pass over the queue
-quay enqueue --repo <id> --brief-file <p> [--request-pr-screenshots]
+quay enqueue --repo <id> --brief-file <p> [--request-pr-screenshots|--require-pr-screenshots]
                                            # legacy enqueue (operator-composed brief)
 quay enqueue --linear-issue <ENG-1234>     # Linear-adapter enqueue (target repo
                                            # comes from the ticket's `repo:` field;
                                            # `--repo <id>` is an optional override;
-                                           # accepts --request-pr-screenshots)
+                                           # accepts screenshot request/require flags)
 quay review-pr --pr <owner/repo>:<num>     # enroll/poke synthetic/Quay PR review
 quay validate-ticket [--ticket-json <p|->] [--schema-file <p>] [--quiet]
                                            # standalone validator: JSON in, JSON out
@@ -189,18 +189,21 @@ quay tags apply-deployment --from <path|->
 quay tags import --from <path> [--force]                   # bootstrap from TOML
 quay tags list --repo <repo_id>                            # merged vocab + enforced flag
 
-quay handoff list [--status <s>] [--task <id>] # durable awaiting-next-brief handoffs
-                                               # (JSON; default status is pending)
+quay handoff list [--status <s>] [--task <id>] [--include-ineligible]
+                                               # durable awaiting-next-brief handoffs
+                                               # (JSON; default status is eligible pending)
 quay task get <task_id> | task list        # read commands (deterministic JSON)
 quay submit-brief | escalate-human | record-human-reply | cancel
 quay artifact get <task_id> <kind>         # raw bytes to stdout
 ```
 
 `quay handoff list` is the pull-based orchestrator handoff surface. It defaults
-to `--status pending`; accepted statuses are `pending`, `claimed`, `completed`,
-and `cancelled`. Rows are JSON objects with `handoff_id`, `task_id`, `reason`,
-`status`, claim metadata, timestamps, `state_event_id`, `idempotency_key`, and
-`payload_json`.
+to `--status pending` and hides pending rows whose `next_eligible_at` is still
+in the future; pass `--include-ineligible` to include cooled-down rows for
+inspection. Accepted statuses are `pending`, `claimed`, `completed`, and
+`cancelled`. Rows are JSON objects with `handoff_id`, `task_id`, `reason`,
+`status`, claim metadata, timestamps, `next_eligible_at`, `state_event_id`,
+`idempotency_key`, and `payload_json`.
 
 `quay validate-ticket` skips the dispatcher's adapter wiring for fast
 spawns. It opens the Quay DB lazily — and only when a ticket payload's

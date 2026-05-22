@@ -25,6 +25,7 @@ import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.t
 import {
   composeWorkerPrompt,
   loadTaskPrBaseBranch,
+  loadTaskPrScreenshotsRequired,
   loadTaskPrScreenshotsRequested,
   loadOriginalTaskObjective,
 } from "./worker_prompt.ts";
@@ -190,6 +191,10 @@ export function scheduleNonBudgetRespawn(
       deps.db,
       input.taskId,
     );
+    const prScreenshotsRequired = loadTaskPrScreenshotsRequired(
+      deps.db,
+      input.taskId,
+    );
     const goalContext = loadGoalPromptContext(deps.db, input.taskId);
     const preambleBody = loadPreambleBody(deps.db, preambleId);
     const composed = composeWorkerPrompt({
@@ -197,6 +202,7 @@ export function scheduleNonBudgetRespawn(
       taskObjective: objective,
       prBaseBranch,
       prScreenshotsRequested,
+      prScreenshotsRequired,
       goalContext,
       referenceReposRoot: deps.referenceReposRoot,
       attemptGuidance: { reason: input.reason, body: template.body },

@@ -25,6 +25,7 @@ export interface OrchestratorHandoffRow {
   claim_id: string | null;
   claimed_at: string | null;
   completed_at: string | null;
+  next_eligible_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -95,6 +96,7 @@ export function claimPendingOrchestratorHandoffs(
           SET status = 'claimed',
               claim_id = ?,
               claimed_at = ?,
+              next_eligible_at = NULL,
               updated_at = ?
         WHERE task_id = ?
           AND status = 'pending'`,
@@ -105,7 +107,11 @@ export function claimPendingOrchestratorHandoffs(
 
 export function reopenClaimedOrchestratorHandoffs(
   deps: HandoffDeps,
-  input: { taskId: string; claimId?: string | null },
+  input: {
+    taskId: string;
+    claimId?: string | null;
+    nextEligibleAt?: string | null;
+  },
 ): number {
   const now = deps.clock.nowISO();
   const res = deps.db
@@ -114,12 +120,19 @@ export function reopenClaimedOrchestratorHandoffs(
           SET status = 'pending',
               claim_id = NULL,
               claimed_at = NULL,
+              next_eligible_at = ?,
               updated_at = ?
         WHERE task_id = ?
           AND status = 'claimed'
           AND (? IS NULL OR claim_id = ?)`,
     )
-    .run(now, input.taskId, input.claimId ?? null, input.claimId ?? null);
+    .run(
+      input.nextEligibleAt ?? null,
+      now,
+      input.taskId,
+      input.claimId ?? null,
+      input.claimId ?? null,
+    );
   return (res as { changes?: number }).changes ?? 0;
 }
 
@@ -165,19 +178,35 @@ export function listOrchestratorHandoffs(
   filters: {
     status?: OrchestratorHandoffStatus;
     taskId?: string;
-  } = {},
+    eligibleAtOrBefore: string;
+    includeIneligible?: boolean;
+  },
 ): OrchestratorHandoffRow[] {
+  const includeIneligible = filters.includeIneligible === true ? 1 : 0;
   return db
     .query<
       OrchestratorHandoffRow,
-      [OrchestratorHandoffStatus | null, OrchestratorHandoffStatus | null, string | null, string | null]
+      [
+        OrchestratorHandoffStatus | null,
+        OrchestratorHandoffStatus | null,
+        string | null,
+        string | null,
+        number,
+        string,
+      ]
     >(
       `SELECT handoff_id, task_id, reason, state_event_id, idempotency_key,
               payload_json, status, claim_id, claimed_at, completed_at,
-              created_at, updated_at
+              next_eligible_at, created_at, updated_at
          FROM orchestrator_handoffs
         WHERE (? IS NULL OR status = ?)
           AND (? IS NULL OR task_id = ?)
+          AND (
+            ? = 1
+            OR status != 'pending'
+            OR next_eligible_at IS NULL
+            OR next_eligible_at <= ?
+          )
         ORDER BY created_at ASC, handoff_id ASC`,
     )
     .all(
@@ -185,5 +214,7 @@ export function listOrchestratorHandoffs(
       filters.status ?? null,
       filters.taskId ?? null,
       filters.taskId ?? null,
+      includeIneligible,
+      filters.eligibleAtOrBefore,
     );
 }

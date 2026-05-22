@@ -275,6 +275,8 @@ export class GitHubCliAdapter implements GitHubPort {
       "url",
       "headRefName",
       "headRefOid",
+      "baseRefName",
+      "isCrossRepository",
     ].join(",");
     const result = this.run(repoId, [
       "gh",
@@ -304,7 +306,7 @@ export class GitHubCliAdapter implements GitHubPort {
         `gh pr view returned unparseable JSON for PR #${prNumber}: ${(err as Error).message}`,
       );
     }
-    return {
+    const view: PullRequestView = {
       number:
         typeof parsed.number === "number" ? parsed.number : Number(prNumber),
       title: String(parsed.title ?? ""),
@@ -316,6 +318,13 @@ export class GitHubCliAdapter implements GitHubPort {
       headRefName: String(parsed.headRefName ?? ""),
       headSha: String(parsed.headRefOid ?? ""),
     };
+    if (parsed.baseRefName !== null && parsed.baseRefName !== undefined) {
+      view.baseRef = String(parsed.baseRefName);
+    }
+    if (typeof parsed.isCrossRepository === "boolean") {
+      view.isCrossRepository = parsed.isCrossRepository;
+    }
+    return view;
   }
 
   fetchPostedReview(

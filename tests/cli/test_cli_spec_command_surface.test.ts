@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
+import { createAgentResolver } from "../../src/core/agents.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
 import {
@@ -182,6 +183,74 @@ test("enqueue rejects value-bearing PR screenshot boolean flag", async () => {
   expect(parsed.message).toContain(
     "--request-pr-screenshots is a boolean flag and does not take a value",
   );
+});
+
+test("enqueue accepts hard PR screenshot requirement for capable worker", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.agentResolver = createAgentResolver({
+    db: h.db,
+    config: {
+      agents: {
+        worker: "hermes_codex_browser",
+        invocations: {
+          hermes_codex_browser: {
+            worker: "hermes chat --toolsets file,terminal,browser,vision",
+            worker_capabilities: ["screenshots"],
+          },
+        },
+      },
+    },
+  });
+  const dispatchAdd = await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "repo-enqueue-require-screenshots",
+      "--url",
+      "git@example.com:o/r.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  expect(dispatchAdd.exitCode).toBe(0);
+  built.git.seedBareClone("repo-enqueue-require-screenshots");
+
+  const briefPath = writeTemp("change a UI panel", "brief.md");
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      "repo-enqueue-require-screenshots",
+      "--brief-file",
+      briefPath,
+      "--require-pr-screenshots",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const enqueueResult = JSON.parse(io.out().trim());
+  const row = h.db
+    .query<{ pr_screenshots_requested: number; pr_screenshots_required: number }, [string]>(
+      `SELECT pr_screenshots_requested, pr_screenshots_required
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(enqueueResult.task_id);
+  expect(row).toEqual({
+    pr_screenshots_requested: 1,
+    pr_screenshots_required: 1,
+  });
 });
 
 test("task claim returns claim_id, then submit-brief flag form succeeds", async () => {

@@ -48,11 +48,15 @@ import {
 import { classifyCi } from "./ci_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
 import { scheduleNonBudgetRespawn } from "./non_budget_respawn.ts";
-import { enterReview, isSyntheticTaskId } from "./pr_review.ts";
+import {
+  enterReview,
+  type TaskAuthoringMode,
+} from "./pr_review.ts";
 import {
   processGoalCompletionAudit,
   type GoalCompletionPendingTask,
 } from "./goal_audit.ts";
+import { transitionTaskState } from "./task_state.ts";
 import {
   scheduleCleanSpawnRetry,
   scheduleDeterministicRetry,
@@ -229,6 +233,7 @@ interface RunningTaskRow {
 interface PrOpenTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
   cancel_requested_at: string | null;
@@ -240,6 +245,7 @@ interface PrOpenTaskRow {
 interface PrReviewTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
   pr_number: number | null;
@@ -264,6 +270,7 @@ type PrTerminalFromState =
 interface ParkedPrTerminalTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   state: PrTerminalFromState;
   branch_name: string;
   worktree_path: string;
@@ -284,6 +291,7 @@ interface ParkedPrTerminalTaskRow {
 interface ClosedUnmergedCandidateRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   state: "queued" | "running";
   branch_name: string;
   tmux_id: string;
@@ -294,6 +302,7 @@ interface ClosedUnmergedCandidateRow {
 interface ReviewAttemptTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   tmux_id: string;
   worktree_path: string;
@@ -315,6 +324,7 @@ interface ReviewAttemptTaskRow {
 interface DoneTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
   pr_number: number | null;
@@ -332,6 +342,7 @@ type SyntheticReviewLifecycleState =
 interface SyntheticReviewLifecycleTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   state: SyntheticReviewLifecycleState;
   branch_name: string;
   worktree_path: string;
@@ -1333,6 +1344,12 @@ function readPrOpen(db: DB): PrOpenTaskRow[] {
   return db
     .query<PrOpenTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               cancel_requested_at, last_review_id_acted_on,
               last_conflict_observation, github_pr_polled_at
          FROM tasks
@@ -1346,6 +1363,12 @@ function readDone(db: DB): DoneTaskRow[] {
   return db
     .query<DoneTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               pr_number, cancel_requested_at, last_review_id_acted_on,
               last_conflict_observation, github_pr_polled_at
          FROM tasks
@@ -1361,9 +1384,18 @@ function readSyntheticReviewLifecycle(
   return db
     .query<SyntheticReviewLifecycleTaskRow, []>(
       `SELECT task_id, repo_id, state, branch_name, worktree_path,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               pr_number, cancel_requested_at, github_pr_polled_at
          FROM tasks
-        WHERE task_id LIKE 'pr-review-%'
+        WHERE (
+              authoring_mode = 'synthetic_review'
+           OR (authoring_mode = 'quay_owned' AND task_id LIKE 'pr-review-%')
+        )
           AND state IN ('pr-review', 'done', 'waiting_external_changes')
         ORDER BY created_at, task_id`,
     )
@@ -1374,6 +1406,12 @@ function readPrReview(db: DB): PrReviewTaskRow[] {
   return db
     .query<PrReviewTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               pr_number, cancel_requested_at, github_pr_polled_at
          FROM tasks
         WHERE state = 'pr-review'
@@ -1388,6 +1426,12 @@ function readClosedUnmergedCandidates(
   return db
     .query<ClosedUnmergedCandidateRow, []>(
       `SELECT task_id, repo_id, state, branch_name, tmux_id,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               worktree_path, pr_number
          FROM tasks
         WHERE state IN ('queued', 'running')
@@ -1402,6 +1446,12 @@ function readParkedPrTerminal(db: DB): ParkedPrTerminalTaskRow[] {
   return db
     .query<ParkedPrTerminalTaskRow, []>(
       `SELECT task_id, repo_id, state, branch_name, worktree_path,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               pr_number, cancel_requested_at, github_pr_polled_at
          FROM tasks
         WHERE state IN (
@@ -1421,6 +1471,12 @@ function readRunningReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
   return db
     .query<ReviewAttemptTaskRow, []>(
       `SELECT t.task_id, t.repo_id, t.branch_name, t.tmux_id, t.worktree_path,
+              CASE
+                WHEN t.authoring_mode = 'quay_owned'
+                 AND t.task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE t.authoring_mode
+              END AS authoring_mode,
               t.pr_number, t.cancel_requested_at,
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
@@ -1442,6 +1498,12 @@ function readPendingReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
   return db
     .query<ReviewAttemptTaskRow, []>(
       `SELECT t.task_id, t.repo_id, t.branch_name, t.tmux_id, t.worktree_path,
+              CASE
+                WHEN t.authoring_mode = 'quay_owned'
+                 AND t.task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE t.authoring_mode
+              END AS authoring_mode,
               t.pr_number, t.cancel_requested_at,
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
@@ -1590,9 +1652,32 @@ function processRunningReviewAttempt(
       options,
     );
   }
-  if (deps.tmux.isAlive(task.tmux_session)) return null;
+  if (deps.tmux.isAlive(task.tmux_session)) {
+    if (task.kill_intent !== null) {
+      deps.tmux.kill(task.tmux_session);
+      return { task_id: task.task_id, action: "kill_intent_set" };
+    }
+    const intent = detectKillIntent(deps, task, task, options);
+    if (intent !== null) {
+      setKillIntent(deps, task, task, intent);
+      fireFailpoint("after_kill_intent_commit");
+      deps.tmux.kill(task.tmux_session);
+      return { task_id: task.task_id, action: "kill_intent_set" };
+    }
+    return null;
+  }
 
   const exitInfo = readExitInfo(deps, task.tmux_session, task.worktree_path);
+  if (task.kill_intent === "wall_clock" || task.kill_intent === "stale") {
+    return markReviewInfraFailure(
+      deps,
+      task,
+      reviewKillIntentDiagnostic(task.kill_intent),
+      exitInfo,
+      options,
+    );
+  }
+
   const blockerPath = join(task.worktree_path, ".quay-blocked.md");
   if (existsSync(blockerPath)) {
     let blocker = "";
@@ -1645,11 +1730,20 @@ function processRunningReviewAttempt(
       options,
     );
   }
-  if (posted.decision === "APPROVED" && !isSyntheticTaskId(task.task_id)) {
+  if (
+    posted.decision === "APPROVED" &&
+    task.authoring_mode !== "synthetic_review"
+  ) {
     const ciGate = guardApprovedReviewCi(deps, task, posted, exitInfo);
     if (ciGate !== null) return ciGate;
   }
   return finalizePostedReview(deps, task, posted, exitInfo, options);
+}
+
+function reviewKillIntentDiagnostic(intent: "wall_clock" | "stale"): string {
+  return intent === "wall_clock"
+    ? "The live reviewer exceeded max_attempt_duration_seconds and was killed."
+    : "The live reviewer stopped producing fresh logs past staleness_threshold_seconds and was killed.";
 }
 
 // Worker exit info is best-effort: a missing marker file (worker exec'd
@@ -1958,6 +2052,7 @@ function processSyntheticReviewLifecycle(
 interface PrTerminalRow {
   task_id: string;
   repo_id: string;
+  authoring_mode?: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
 }
@@ -1981,7 +2076,7 @@ function processPrReviewTerminal(
   // close. For those, probe by PR number instead.
   markGithubPrPolled(deps, task.task_id);
   const snapshot =
-    isSyntheticTaskId(task.task_id) && task.pr_number !== null
+    task.authoring_mode !== "quay_owned" && task.pr_number !== null
       ? deps.github.prLightweightSnapshotByNumber(task.repo_id, task.pr_number)
       : deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
   if (snapshot === null) return null;
@@ -2087,21 +2182,20 @@ function finalizePrTerminal(
   const reviewerSessionsToKill: string[] = [];
   deps.db.exec("BEGIN IMMEDIATE");
   try {
-    const upd = deps.db
-      .query(
-        `UPDATE tasks
-            SET state = ?,
-                claim_id = NULL,
-                claimed_at = NULL,
-                claim_expirations_consecutive = 0,
-                tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ? AND state = ?
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(terminal, now, task.task_id, fromState);
-    const changes = (upd as { changes?: number }).changes ?? 0;
-    if (changes === 0) {
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: fromState,
+      to: terminal,
+      eventType: terminal === "merged" ? "merged" : "closed",
+      attemptId: attempt.attempt_id,
+      now,
+      updates: {
+        clearClaim: true,
+        resetClaimExpirations: true,
+        clearTickError: true,
+      },
+    });
+    if (!transition.applied) {
       deps.db.exec("ROLLBACK");
       return { task_id: task.task_id, action: "skipped_predicate" };
     }
@@ -2140,14 +2234,6 @@ function finalizePrTerminal(
         )
         .run(now, attempt.attempt_id);
     }
-    const eventType = terminal === "merged" ? "merged" : "closed";
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state, occurred_at
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(task.task_id, attempt.attempt_id, eventType, fromState, terminal, now);
     cancelOpenOrchestratorHandoffs(deps, task.task_id);
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -2228,9 +2314,12 @@ function applyTerminalCleanup(
     deps.git.branchDelete(task.repo_id, task.branch_name);
   } catch {}
 
-  // Remote branch: delete only on closed_unmerged (the human chose to discard
-  // the work). On merged, GitHub's "delete branch on merge" handles it.
-  if (terminal === "closed_unmerged") {
+  // Remote branch: delete Quay-owned branches only on closed_unmerged. Adopted
+  // external PR branches are human-owned and must be retained by default.
+  if (
+    terminal === "closed_unmerged" &&
+    task.authoring_mode !== "adopted_external_pr"
+  ) {
     try {
       deps.git.deleteRemoteBranch(task.repo_id, task.branch_name);
     } catch {}
@@ -2245,26 +2334,19 @@ function transitionCiPassed(
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");
   try {
-    const upd = deps.db
-      .query(
-        `UPDATE tasks
-            SET state = 'done', tick_error = NULL, updated_at = ?
-          WHERE task_id = ? AND state = 'pr-open'
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(now, task.task_id);
-    const changes = (upd as { changes?: number }).changes ?? 0;
-    if (changes === 0) {
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: "pr-open",
+      to: "done",
+      eventType: "ci_passed",
+      attemptId: attempt.attempt_id,
+      now,
+      updates: { clearTickError: true },
+    });
+    if (!transition.applied) {
       deps.db.exec("ROLLBACK");
       return null;
     }
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state, occurred_at
-         ) VALUES (?, ?, 'ci_passed', 'pr-open', 'done', ?)`,
-      )
-      .run(task.task_id, attempt.attempt_id, now);
     deps.db.exec("COMMIT");
     return { task_id: task.task_id, action: "ci_passed" };
   } catch (err) {
@@ -2793,30 +2875,16 @@ function finalizeApprovedReviewBackToPrOpen(
       verdict,
       now,
     );
-    deps.db
-      .query(
-        `UPDATE tasks
-            SET state = 'pr-open',
-                tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ? AND state = 'pr-review'
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(now, task.task_id);
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state,
-           payload_artifact_id, occurred_at
-         ) VALUES (?, ?, ?, 'pr-review', 'pr-open', ?, ?)`,
-      )
-      .run(
-        task.task_id,
-        task.attempt_id,
-        verdict === "approved" ? "review_approved" : "review_superseded",
-        artifactId,
-        now,
-      );
+    transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: "pr-review",
+      to: "pr-open",
+      eventType: verdict === "approved" ? "review_approved" : "review_superseded",
+      attemptId: task.attempt_id,
+      payloadArtifactId: artifactId,
+      now,
+      updates: { clearTickError: true },
+    });
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -2893,7 +2961,8 @@ function finalizePostedReview(
   // insert must all commit atomically: a crash between two transactions
   // would otherwise strand the task in pr-review with no active reviewer.
   const handOffToRespawn =
-    verdict === "changes_requested" && !isSyntheticTaskId(task.task_id);
+    verdict === "changes_requested" &&
+    task.authoring_mode !== "synthetic_review";
 
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -2945,31 +3014,16 @@ function finalizePostedReview(
         verdict === "approved" ? "done" : "waiting_external_changes";
       const eventType =
         verdict === "approved" ? "review_approved" : "changes_requested";
-      deps.db
-        .query(
-          `UPDATE tasks
-              SET state = ?,
-                  tick_error = NULL,
-                  updated_at = ?
-            WHERE task_id = ? AND state = 'pr-review'
-              AND cancel_requested_at IS NULL`,
-        )
-        .run(toState, now, task.task_id);
-      deps.db
-        .query(
-          `INSERT INTO events (
-             task_id, attempt_id, event_type, from_state, to_state,
-             payload_artifact_id, occurred_at
-           ) VALUES (?, ?, ?, 'pr-review', ?, ?, ?)`,
-        )
-        .run(
-          task.task_id,
-          task.attempt_id,
-          eventType,
-          toState,
-          artifact.artifactId,
-          now,
-        );
+      transitionTaskState(deps, {
+        taskId: task.task_id,
+        from: "pr-review",
+        to: toState,
+        eventType,
+        attemptId: task.attempt_id,
+        payloadArtifactId: artifact.artifactId,
+        now,
+        updates: { clearTickError: true },
+      });
     }
 
     deps.db.exec("COMMIT");
@@ -3772,7 +3826,10 @@ function loadLatestAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
 function detectKillIntent(
   deps: TickDeps,
   task: { worktree_path: string },
-  attempt: CurrentAttemptRow,
+  attempt: {
+    spawned_at: string | null;
+    tmux_session: string | null;
+  },
   options: TickOptions,
 ): "wall_clock" | "stale" | null {
   if (attempt.spawned_at === null || attempt.tmux_session === null) return null;
@@ -3797,8 +3854,12 @@ function detectKillIntent(
 
 function setKillIntent(
   deps: TickDeps,
-  task: RunningTaskRow,
-  attempt: CurrentAttemptRow,
+  task: { task_id: string; worktree_path: string },
+  attempt: {
+    attempt_id: number;
+    spawned_at: string | null;
+    tmux_session: string | null;
+  },
   intent: "wall_clock" | "stale",
 ): void {
   const now = deps.clock.nowISO();
@@ -4447,7 +4508,7 @@ function promoteAndSpawnReviewer(
     };
   }
 
-  if (isSyntheticTaskId(task.task_id)) {
+  if (task.authoring_mode === "synthetic_review") {
     try {
       deps.git.checkoutPullRequest(
         task.repo_id,
@@ -4566,6 +4627,7 @@ function resolveTickAgentResolver(options: TickOptions): AgentResolver {
     agent: DEFAULT_AGENT_NAME,
     model: null,
     invocation,
+    capabilities: [],
   };
   return {
     resolve: (_repoId: string, _role: AgentRole) => resolved,
@@ -4631,21 +4693,41 @@ interface PromotionInput {
 function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
   db.exec("BEGIN");
   try {
-    const taskUpdate = db
-      .query(
-      `UPDATE tasks
-          SET state = 'running',
-              attempts_consumed = attempts_consumed + ?,
-              tick_error = NULL,
-              updated_at = ?
-        WHERE task_id = ?
-            AND state = 'queued'
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(p.consumedBudget, p.spawnedAt, p.taskId);
+    // event_data captures the spawn-time intent: where the worker is going
+    // to run (worktree, branch, tmux session), what we expect to invoke
+    // (agent_identity), and the spawn-time progress predicate inputs. This
+    // lets retro analysis correlate a spawn with later transitions without
+    // having to join across multiple rows.
+    const eventData = {
+      tmux_session: p.plannedSession,
+      worktree_path: p.worktreePath,
+      branch_name: p.branchName,
+      attempt_number: p.attemptNumber,
+      agent_name: p.agentName,
+      agent_model: p.agentModel,
+      agent_identity: p.agentIdentity,
+      github_token_source: p.githubTokenSource,
+      remote_sha_at_spawn: p.remoteSha,
+      pr_existed_at_spawn: p.prExisted === 1,
+    };
 
-    const taskChanges = (taskUpdate as { changes?: number }).changes ?? 0;
-    if (taskChanges === 0) {
+    const transition = transitionTaskState(
+      { db },
+      {
+        taskId: p.taskId,
+        from: "queued",
+        to: "running",
+        eventType: "spawned",
+        attemptId: p.attemptId,
+        now: p.spawnedAt,
+        updates: {
+          clearTickError: true,
+          incrementAttemptsConsumedBy: p.consumedBudget,
+        },
+        eventData,
+      },
+    );
+    if (!transition.applied) {
       db.exec("ROLLBACK");
       return false;
     }
@@ -4657,30 +4739,6 @@ function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
               pr_existed_at_spawn = ?
         WHERE attempt_id = ? AND spawned_at IS NULL`,
     ).run(p.spawnedAt, p.remoteSha, p.prExisted, p.attemptId);
-
-    // event_data captures the spawn-time intent: where the worker is going
-    // to run (worktree, branch, tmux session), what we expect to invoke
-    // (agent_identity), and the spawn-time progress predicate inputs. This
-    // lets retro analysis correlate a spawn with later transitions without
-    // having to join across multiple rows.
-    const eventData = JSON.stringify({
-      tmux_session: p.plannedSession,
-      worktree_path: p.worktreePath,
-      branch_name: p.branchName,
-      attempt_number: p.attemptNumber,
-      agent_name: p.agentName,
-      agent_model: p.agentModel,
-      agent_identity: p.agentIdentity,
-      github_token_source: p.githubTokenSource,
-      remote_sha_at_spawn: p.remoteSha,
-      pr_existed_at_spawn: p.prExisted === 1,
-    });
-
-    db.query(
-      `INSERT INTO events (
-         task_id, attempt_id, event_type, from_state, to_state, occurred_at, event_data
-       ) VALUES (?, ?, 'spawned', 'queued', 'running', ?, ?)`,
-    ).run(p.taskId, p.attemptId, p.spawnedAt, eventData);
 
     db.exec("COMMIT");
     return true;

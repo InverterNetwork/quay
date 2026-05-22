@@ -164,3 +164,56 @@ test("test_cancel_keep_worktree_detaches_before_branch_delete", async () => {
   expect(detachIndex).toBeGreaterThanOrEqual(0);
   expect(branchDeleteIndex).toBeGreaterThan(detachIndex);
 });
+
+test("cancel adopted external PR retains human-owned remote branch by default", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-28T10:00:00.000Z");
+  const repoId = insertRepo(h.db, "repo-adopt-cancel");
+  const taskId = "pr-review-repo-adopt-cancel-3";
+  const branchName = "feature/human-owned";
+  const worktreePath = join(h.dataDir, "worktrees", taskId);
+  mkdirSync(worktreePath, { recursive: true });
+
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id,
+         worktree_path, attempts_consumed, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'awaiting-next-brief', 'adopted_external_pr', ?, ?, ?, 1, 5, ?, ?)`,
+    )
+    .run(
+      taskId,
+      repoId,
+      branchName,
+      "tmux-adopt-cancel",
+      worktreePath,
+      "2026-04-28T08:00:00.000Z",
+      "2026-04-28T09:00:00.000Z",
+    );
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "adopt_pr",
+    spawnedAt: "2026-04-28T08:30:00.000Z",
+  });
+
+  const built = buildTickDeps(h);
+  built.git.setLocalBranches(repoId, [branchName]);
+  built.git.setWorktreeBranch(repoId, worktreePath, branchName);
+  built.git.setRemoteBranches(repoId, [branchName]);
+  built.github.setPrIsOpen(repoId, branchName, false);
+
+  const result = await cancel_task(built.deps, { taskId });
+  expect(result.ok).toBe(true);
+
+  expect(built.git.localBranches.get(repoId)?.has(branchName) ?? false).toBe(
+    false,
+  );
+  expect(built.git.remoteBranches.get(repoId)?.has(branchName) ?? false).toBe(
+    true,
+  );
+  const remoteDeleteCalls = built.git.calls.filter(
+    (c) => c.op === "deleteRemoteBranch",
+  );
+  expect(remoteDeleteCalls).toHaveLength(0);
+});

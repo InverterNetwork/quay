@@ -1,17 +1,26 @@
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
+import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PullRequestView } from "../ports/github.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
 import type { AgentResolver } from "./agents.ts";
+import { baseBranchNameSchema } from "./base_branch.ts";
 import { classifyCi } from "./ci_status.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 import { renderReferenceReposPrompt } from "./reference_repos.ts";
+import { assertTaskState, transitionTaskState } from "./task_state.ts";
+import { composeWorkerPrompt } from "./worker_prompt.ts";
 
 export const SYNTHETIC_PR_REVIEW_PREFIX = "pr-review-";
+
+export type TaskAuthoringMode =
+  | "quay_owned"
+  | "synthetic_review"
+  | "adopted_external_pr";
 
 export type ReviewVerdict = "approved" | "changes_requested" | "errored" | "superseded";
 
@@ -71,9 +80,54 @@ export interface EnterReviewResult {
   skipped_reason: EnterReviewSkippedReason | null;
 }
 
+export type AdoptPrErrorKind =
+  | "pr_not_found"
+  | "pr_not_open"
+  | "fork_pr_unsupported"
+  | "unsafe_head_branch"
+  | "repo_not_ready"
+  | "already_quay_owned"
+  | "terminal_task"
+  | "active_review_attempt_exists";
+
+export class AdoptPrError extends Error {
+  readonly kind: AdoptPrErrorKind;
+  constructor(kind: AdoptPrErrorKind, message: string) {
+    super(message);
+    this.kind = kind;
+    this.name = "AdoptPrError";
+  }
+}
+
+export interface AdoptPrDeps {
+  db: DB;
+  clock: Clock;
+  github: GitHubPort;
+  git: GitPort;
+  artifactStore: ArtifactStore;
+  paths: { reposRoot: string; worktreesRoot: string; artifactsRoot: string };
+  agentResolver?: AgentResolver;
+  referenceReposRoot?: string | undefined;
+}
+
+export interface AdoptPrInput {
+  repoId: string;
+  prNumber: number;
+}
+
+export interface AdoptPrResult {
+  task_id: string;
+  attempt_id: number | null;
+  state: string;
+  adopted: boolean;
+  scheduled: boolean;
+  skipped_reason: "active_code_attempt_exists" | null;
+}
+
 interface TaskLookupRow {
   task_id: string;
   state: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
   tmux_id: string;
@@ -99,6 +153,12 @@ interface InsertAttemptRow {
 
 interface ReviewRequestRow {
   request_id: number;
+}
+
+interface RepoRow {
+  repo_id: string;
+  base_branch: string;
+  archived_at: string | null;
 }
 
 interface LatestCodeAttemptRow {
@@ -137,7 +197,8 @@ export function enterReview(
   const existing =
     findTaskByPr(deps.db, input.repoId, input.prNumber) ??
     findTaskByBranch(deps.db, input.repoId, pr.headRefName);
-  const isQuayOwned = existing !== null && !isSyntheticTaskId(existing.task_id);
+  const isQuayOwned =
+    existing !== null && existing.authoring_mode === "quay_owned";
   if (isQuayOwned && !input.gateQuayOwnedDone) {
     return {
       task_id: existing.task_id,
@@ -156,7 +217,7 @@ export function enterReview(
       reviewerAgent: input.reviewerAgent ?? null,
       reviewerModel: input.reviewerModel ?? null,
     });
-  const synthetic = isSyntheticTaskId(task.task_id);
+  const synthetic = task.authoring_mode === "synthetic_review";
   const tags = dedupeTags(input.tags ?? []);
   const preambleId = ensurePreambleIdForAttemptReason(
     deps.db,
@@ -386,27 +447,38 @@ export function enterReview(
       extension: "md",
     });
 
-    deps.db
-      .query(
-        `UPDATE tasks
-            SET state = 'pr-review',
-                pr_number = COALESCE(pr_number, ?),
-                pr_url = COALESCE(pr_url, ?),
-                head_sha = ?,
-                tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ?
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(input.prNumber, pr.url, headSha, now, task.task_id);
-
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state, occurred_at
-         ) VALUES (?, ?, 'review_requested', ?, 'pr-review', ?)`,
-      )
-      .run(task.task_id, attempt.attempt_id, task.state, now);
+    assertTaskState(task.state);
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: task.state,
+      to: "pr-review",
+      eventType: "review_requested",
+      attemptId: attempt.attempt_id,
+      now,
+      updates: {
+        pr: {
+          number: input.prNumber,
+          numberCoalesce: "existing",
+          url: pr.url,
+          urlCoalesce: "existing",
+          headSha,
+        },
+        clearTickError: true,
+      },
+    });
+    if (!transition.applied) {
+      deps.db.exec("ROLLBACK");
+      killSupersededWorkers(deps.tmux, supersededSessions);
+      return {
+        task_id: task.task_id,
+        attempt_id: null,
+        state: transition.currentState ?? task.state,
+        review_verdict: null,
+        scheduled: false,
+        pending_ci: false,
+        skipped_reason: null,
+      };
+    }
     deps.db
       .query(
         `UPDATE review_requests
@@ -436,6 +508,160 @@ export function enterReview(
     } catch {}
     throw err;
   }
+}
+
+export function adoptPr(
+  deps: AdoptPrDeps,
+  input: AdoptPrInput,
+): AdoptPrResult {
+  const repo = lookupRepo(deps.db, input.repoId);
+  if (repo === null || repo.archived_at !== null) {
+    throw new AdoptPrError(
+      "repo_not_ready",
+      `repo "${input.repoId}" is not configured for adoption`,
+    );
+  }
+  if (!deps.git.bareCloneExists(repo.repo_id)) {
+    throw new AdoptPrError(
+      "repo_not_ready",
+      `bare clone for repo "${repo.repo_id}" is not present under ${deps.paths.reposRoot}`,
+    );
+  }
+
+  const pr = deps.github.prView(input.repoId, input.prNumber);
+  if (pr === null || pr.headSha.trim() === "") {
+    throw new AdoptPrError(
+      "pr_not_found",
+      `PR ${input.repoId}:${input.prNumber} not found`,
+    );
+  }
+  if (pr.isCrossRepository === true) {
+    throw new AdoptPrError(
+      "fork_pr_unsupported",
+      `PR ${input.repoId}:${input.prNumber} uses a fork head; only same-repo PR adoption is supported`,
+    );
+  }
+  const headBranch = pr.headRefName.trim();
+  if (!baseBranchNameSchema.safeParse(headBranch).success) {
+    throw new AdoptPrError(
+      "unsafe_head_branch",
+      `PR ${input.repoId}:${input.prNumber} has an unsafe head branch name`,
+    );
+  }
+
+  const snapshot = deps.github.prLightweightSnapshotByNumber(
+    input.repoId,
+    input.prNumber,
+  );
+  if (snapshot === null) {
+    throw new AdoptPrError(
+      "pr_not_found",
+      `PR ${input.repoId}:${input.prNumber} not found`,
+    );
+  }
+  if (snapshot.state !== "open") {
+    throw new AdoptPrError(
+      "pr_not_open",
+      `PR ${input.repoId}:${input.prNumber} is ${snapshot.state}; only open PRs can be adopted`,
+    );
+  }
+  const baseBranch =
+    snapshot.baseRef?.trim() || pr.baseRef?.trim() || repo.base_branch;
+
+  const now = deps.clock.nowISO();
+  const task =
+    findTaskByPr(deps.db, input.repoId, input.prNumber) ??
+    findTaskByBranch(deps.db, input.repoId, headBranch) ??
+    createSyntheticTask(deps, input.repoId, input.prNumber, pr, now, {
+      reviewerAgent: null,
+      reviewerModel: null,
+    });
+
+  if (task.authoring_mode === "quay_owned") {
+    throw new AdoptPrError(
+      "already_quay_owned",
+      `PR ${input.repoId}:${input.prNumber} is already attached to a Quay-owned task`,
+    );
+  }
+  if (
+    task.state === "merged" ||
+    task.state === "closed_unmerged" ||
+    task.state === "cancelled"
+  ) {
+    throw new AdoptPrError(
+      "terminal_task",
+      `task ${task.task_id} is terminal (${task.state}) and cannot adopt PR ${input.prNumber}`,
+    );
+  }
+  if (hasSpawnedActiveReviewAttempt(deps.db, task.task_id)) {
+    throw new AdoptPrError(
+      "active_review_attempt_exists",
+      `task ${task.task_id} has an active reviewer attempt; wait for it to finish or cancel it before adoption`,
+    );
+  }
+
+  const activeCodeAttempt = findActiveCodeAttempt(deps.db, task.task_id);
+  if (activeCodeAttempt !== null) {
+    ensureAdoptionMetadata(deps.db, {
+      taskId: task.task_id,
+      branchName: headBranch,
+      baseBranch,
+      pr,
+      headSha: pr.headSha,
+      now,
+    });
+    return {
+      task_id: task.task_id,
+      attempt_id: activeCodeAttempt.attempt_id,
+      state: readTaskState(deps.db, task.task_id) ?? task.state,
+      adopted: true,
+      scheduled: false,
+      skipped_reason: "active_code_attempt_exists",
+    };
+  }
+
+  let worktreePrepared = false;
+  try {
+    deps.git.fetch(repo.repo_id, headBranch);
+    if (existsSync(task.worktree_path)) {
+      deps.git.worktreeRemove(task.worktree_path);
+    }
+    deps.git.worktreeAddExistingBranch(
+      repo.repo_id,
+      task.worktree_path,
+      headBranch,
+      `origin/${headBranch}`,
+    );
+    worktreePrepared = true;
+  } catch (err) {
+    if (worktreePrepared) {
+      try {
+        deps.git.worktreeRemove(task.worktree_path);
+      } catch {
+        try {
+          rmSync(task.worktree_path, { recursive: true, force: true });
+        } catch {}
+      }
+    }
+    throw err;
+  }
+
+  const attempt = scheduleAdoptedWorkerAttempt(deps, {
+    task,
+    pr,
+    headBranch,
+    baseBranch,
+    headSha: pr.headSha,
+    now,
+  });
+  return {
+    task_id: task.task_id,
+    attempt_id: attempt.attempt_id,
+    state: "queued",
+    adopted: true,
+    scheduled: true,
+    skipped_reason: null,
+  };
 }
 
 // Reaps tmux sessions for review-only attempts that were marked superseded
@@ -468,7 +694,11 @@ export function slugRepoId(repoId: string): string {
 }
 
 function createSyntheticTask(
-  deps: EnterReviewDeps,
+  deps: {
+    db: DB;
+    paths?: { worktreesRoot: string };
+    agentResolver?: AgentResolver;
+  },
   repoId: string,
   prNumber: number,
   pr: PullRequestView,
@@ -511,11 +741,11 @@ function createSyntheticTask(
   deps.db
     .query(
       `INSERT OR IGNORE INTO tasks (
-         task_id, repo_id, external_ref, state, branch_name, tmux_id,
+         task_id, repo_id, external_ref, state, authoring_mode, branch_name, tmux_id,
          worktree_path, pr_number, pr_url, head_sha, retry_budget,
          worker_agent, worker_model, reviewer_agent, reviewer_model,
          created_at, updated_at
-       ) VALUES (?, ?, NULL, 'pr-review', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, NULL, 'pr-review', 'synthetic_review', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       taskId,
@@ -551,6 +781,12 @@ function findTaskByPr(
     db
       .query<TaskLookupRow, [string, number]>(
         `SELECT t.task_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
+                CASE
+                  WHEN t.authoring_mode = 'quay_owned'
+                   AND t.task_id LIKE 'pr-review-%'
+                  THEN 'synthetic_review'
+                  ELSE t.authoring_mode
+                END AS authoring_mode,
                 t.pr_number, COALESCE(t.base_branch, r.base_branch) AS base_branch,
                 t.base_sha,
                 review_infra_failures_consecutive,
@@ -577,6 +813,12 @@ function findTaskByBranch(
     db
       .query<TaskLookupRow, [string, string]>(
         `SELECT t.task_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
+                CASE
+                  WHEN t.authoring_mode = 'quay_owned'
+                   AND t.task_id LIKE 'pr-review-%'
+                  THEN 'synthetic_review'
+                  ELSE t.authoring_mode
+                END AS authoring_mode,
                 t.pr_number, COALESCE(t.base_branch, r.base_branch) AS base_branch,
                 t.base_sha,
                 review_infra_failures_consecutive,
@@ -595,6 +837,12 @@ function findTaskById(db: DB, taskId: string): TaskLookupRow | null {
     db
       .query<TaskLookupRow, [string]>(
         `SELECT t.task_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
+                CASE
+                  WHEN t.authoring_mode = 'quay_owned'
+                   AND t.task_id LIKE 'pr-review-%'
+                  THEN 'synthetic_review'
+                  ELSE t.authoring_mode
+                END AS authoring_mode,
                 t.pr_number, COALESCE(t.base_branch, r.base_branch) AS base_branch,
                 t.base_sha,
                 review_infra_failures_consecutive,
@@ -622,6 +870,325 @@ function nextAttemptNumberForTask(db: DB, taskId: string): number {
     )
     .get(taskId);
   return (row?.n ?? 0) + 1;
+}
+
+function lookupRepo(db: DB, repoId: string): RepoRow | null {
+  return (
+    db
+      .query<RepoRow, [string]>(
+        `SELECT repo_id, base_branch, archived_at
+           FROM repos
+          WHERE repo_id = ?`,
+      )
+      .get(repoId) ?? null
+  );
+}
+
+function hasSpawnedActiveReviewAttempt(db: DB, taskId: string): boolean {
+  const row = db
+    .query<{ attempt_id: number }, [string]>(
+      `SELECT attempt_id
+         FROM attempts
+        WHERE task_id = ?
+          AND reason = 'review_only'
+          AND spawned_at IS NOT NULL
+          AND ended_at IS NULL
+        LIMIT 1`,
+    )
+    .get(taskId);
+  return row !== null && row !== undefined;
+}
+
+function findActiveCodeAttempt(
+  db: DB,
+  taskId: string,
+): { attempt_id: number } | null {
+  return (
+    db
+      .query<{ attempt_id: number }, [string]>(
+        `SELECT attempt_id
+           FROM attempts
+          WHERE task_id = ?
+            AND reason <> 'review_only'
+            AND ended_at IS NULL
+          ORDER BY attempt_id DESC
+          LIMIT 1`,
+      )
+      .get(taskId) ?? null
+  );
+}
+
+function ensureAdoptionMetadata(
+  db: DB,
+  input: {
+    taskId: string;
+    branchName: string;
+    baseBranch: string;
+    pr: PullRequestView;
+    headSha: string;
+    now: string;
+  },
+): void {
+  db.query(
+    `UPDATE tasks
+        SET authoring_mode = 'adopted_external_pr',
+            branch_name = ?,
+            base_branch = ?,
+            pr_number = ?,
+            pr_url = ?,
+            head_sha = ?,
+            tick_error = NULL,
+            updated_at = ?
+      WHERE task_id = ?`,
+  ).run(
+    input.branchName,
+    input.baseBranch,
+    input.pr.number,
+    input.pr.url,
+    input.headSha,
+    input.now,
+    input.taskId,
+  );
+}
+
+function scheduleAdoptedWorkerAttempt(
+  deps: AdoptPrDeps,
+  input: {
+    task: TaskLookupRow;
+    pr: PullRequestView;
+    headBranch: string;
+    baseBranch: string;
+    headSha: string;
+    now: string;
+  },
+): { attempt_id: number } {
+  const preambleId = ensurePreambleIdForAttemptReason(
+    deps.db,
+    deps.clock,
+    "adopt_pr",
+  );
+  const preambleBody = loadPreambleBody(deps.db, preambleId);
+  const nextAttemptNumber = nextAttemptNumberForTask(
+    deps.db,
+    input.task.task_id,
+  );
+
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    ensureAdoptionMetadata(deps.db, {
+      taskId: input.task.task_id,
+      branchName: input.headBranch,
+      baseBranch: input.baseBranch,
+      pr: input.pr,
+      headSha: input.headSha,
+      now: input.now,
+    });
+
+    deps.db
+      .query(
+        `UPDATE attempts
+            SET ended_at = ?,
+                review_verdict = 'superseded',
+                kill_intent = COALESCE(kill_intent, 'superseded')
+          WHERE task_id = ?
+            AND reason = 'review_only'
+            AND spawned_at IS NULL
+            AND ended_at IS NULL`,
+      )
+      .run(input.now, input.task.task_id);
+    deps.db
+      .query(
+        `UPDATE review_requests
+            SET status = 'superseded',
+                updated_at = ?
+          WHERE task_id = ?
+            AND status IN ('pending_ci', 'scheduled')`,
+      )
+      .run(input.now, input.task.task_id);
+
+    const objective = ensureTaskObjectiveArtifact(
+      deps,
+      input.task.task_id,
+      composeAdoptedTaskObjective(input.pr, input.headBranch, input.baseBranch),
+    );
+    const latestReview = loadLatestReviewCommentsForAdoption(
+      deps.db,
+      input.task.task_id,
+    );
+    const guidance = [
+      `Adopt PR #${input.pr.number} and update the existing branch ${input.headBranch}.`,
+      "Push commits to that same branch and update the existing PR.",
+      "Do not create a duplicate pull request.",
+    ].join("\n");
+    const composed = composeWorkerPrompt({
+      preambleBody,
+      taskObjective: objective,
+      prBaseBranch: input.baseBranch,
+      referenceReposRoot: deps.referenceReposRoot,
+      attemptGuidance: { reason: "adopt_pr", body: guidance },
+      diagnostics:
+        latestReview === null
+          ? undefined
+          : { kind: "review_comments", body: latestReview },
+    });
+
+    const attempt = deps.db
+      .query<{ attempt_id: number }, [string, number, number, string, number]>(
+        `INSERT INTO attempts (
+           task_id, attempt_number, preamble_id, reason, consumed_budget
+         ) VALUES (?, ?, ?, ?, ?)
+         RETURNING attempt_id`,
+      )
+      .get(input.task.task_id, nextAttemptNumber, preambleId, "adopt_pr", 1);
+    if (!attempt) throw new Error("adopted worker attempt insert returned no row");
+
+    deps.artifactStore.writeArtifact({
+      taskId: input.task.task_id,
+      attemptId: attempt.attempt_id,
+      kind: "brief",
+      content: composed.brief,
+      extension: "md",
+    });
+    deps.artifactStore.writeArtifact({
+      taskId: input.task.task_id,
+      attemptId: attempt.attempt_id,
+      kind: "final_prompt",
+      content: composed.finalPrompt,
+      extension: "md",
+    });
+
+    assertTaskState(input.task.state);
+    const transition = transitionTaskState(deps, {
+      taskId: input.task.task_id,
+      from: input.task.state,
+      to: "queued",
+      eventType: "pr_adopted",
+      attemptId: attempt.attempt_id,
+      now: input.now,
+      updates: {
+        clearTickError: true,
+        pr: {
+          number: input.pr.number,
+          numberCoalesce: "existing",
+          url: input.pr.url,
+          urlCoalesce: "existing",
+          headSha: input.headSha,
+        },
+      },
+      eventData: {
+        pr_number: input.pr.number,
+        head_branch: input.headBranch,
+        base_branch: input.baseBranch,
+      },
+    });
+    if (!transition.applied) {
+      deps.db.exec("ROLLBACK");
+      throw new Error(
+        `cannot adopt task ${input.task.task_id} from state ${transition.currentState ?? input.task.state}`,
+      );
+    }
+
+    deps.db.exec("COMMIT");
+    return attempt;
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+}
+
+function ensureTaskObjectiveArtifact(
+  deps: Pick<AdoptPrDeps, "db" | "artifactStore">,
+  taskId: string,
+  content: string,
+): { body: string; artifactId: number; filePath: string } {
+  const existing = deps.db
+    .query<{ artifact_id: number; file_path: string }, [string]>(
+      `SELECT artifact_id, file_path
+         FROM artifacts
+        WHERE task_id = ?
+          AND kind = 'task_objective'
+          AND attempt_id IS NULL
+        ORDER BY artifact_id ASC
+        LIMIT 1`,
+    )
+    .get(taskId);
+  if (existing) {
+    try {
+      return {
+        body: readFileSync(existing.file_path, "utf8"),
+        artifactId: existing.artifact_id,
+        filePath: existing.file_path,
+      };
+    } catch (err) {
+      throw new Error(
+        `task_objective artifact ${existing.artifact_id} unreadable at ${existing.file_path}: ${(err as Error).message}`,
+      );
+    }
+  }
+  const written = deps.artifactStore.writeArtifact({
+    taskId,
+    attemptId: null,
+    kind: "task_objective",
+    content,
+    extension: "md",
+  });
+  return {
+    body: content,
+    artifactId: written.artifactId,
+    filePath: written.filePath,
+  };
+}
+
+function composeAdoptedTaskObjective(
+  pr: PullRequestView,
+  headBranch: string,
+  baseBranch: string,
+): string {
+  return [
+    `# Adopt PR #${pr.number}`,
+    "",
+    "Quay has been explicitly asked to adopt this existing same-repo human PR and update it with a code worker.",
+    "",
+    "## PR",
+    "",
+    `Title: ${pr.title}`,
+    `URL: ${pr.url ?? "<unknown>"}`,
+    `Head branch: ${headBranch}`,
+    `Head SHA: ${pr.headSha}`,
+    `Base branch: ${baseBranch}`,
+    "",
+    "## Required behavior",
+    "",
+    `Update the existing PR #${pr.number}. Push commits to branch ${headBranch}. Do not create another pull request.`,
+    "",
+    "## PR body",
+    "",
+    pr.body.trim() === "" ? "(No PR body.)" : pr.body,
+  ].join("\n");
+}
+
+function loadLatestReviewCommentsForAdoption(
+  db: DB,
+  taskId: string,
+): string | null {
+  const row = db
+    .query<{ file_path: string }, [string]>(
+      `SELECT file_path
+         FROM artifacts
+        WHERE task_id = ?
+          AND kind = 'review_comments'
+        ORDER BY artifact_id DESC
+        LIMIT 1`,
+    )
+    .get(taskId);
+  if (!row) return null;
+  try {
+    return readFileSync(row.file_path, "utf8");
+  } catch {
+    return "(Prior review comments artifact file was missing or unreadable.)";
+  }
 }
 
 function composeQuayOwnedReviewBrief(

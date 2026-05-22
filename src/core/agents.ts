@@ -33,6 +33,7 @@ export interface ResolvedAgent {
   agent: string;
   model: string | null;
   invocation: string;
+  capabilities: string[];
 }
 
 export interface AgentResolverDeps {
@@ -46,7 +47,15 @@ export interface AgentResolverDeps {
 export interface AgentSelection {
   defaults: Record<AgentRole, string>;
   defaultModels?: Record<AgentRole, string | null>;
-  invocations: Record<string, { worker?: string; reviewer?: string }>;
+  invocations: Record<
+    string,
+    {
+      worker?: string;
+      reviewer?: string;
+      workerCapabilities?: string[];
+      reviewerCapabilities?: string[];
+    }
+  >;
 }
 
 export interface AgentResolver {
@@ -73,11 +82,20 @@ export interface AgentRoleSnapshot {
 }
 
 export function buildAgentSelection(config: QuayConfig): AgentSelection {
-  const invocations: Record<string, { worker?: string; reviewer?: string }> = {};
+  const invocations: AgentSelection["invocations"] = {};
   for (const [name, body] of Object.entries(config.agents?.invocations ?? {})) {
-    const entry: { worker?: string; reviewer?: string } = {};
+    const entry: AgentSelection["invocations"][string] = {};
     if (body.worker !== undefined) entry.worker = body.worker;
     if (body.reviewer !== undefined) entry.reviewer = body.reviewer;
+    const sharedCapabilities = normalizeCapabilities(body.capabilities);
+    entry.workerCapabilities = mergeCapabilities(
+      sharedCapabilities,
+      body.worker_capabilities,
+    );
+    entry.reviewerCapabilities = mergeCapabilities(
+      sharedCapabilities,
+      body.reviewer_capabilities,
+    );
     invocations[name] = entry;
   }
 
@@ -88,6 +106,7 @@ export function buildAgentSelection(config: QuayConfig): AgentSelection {
   if (config.agent_invocation !== undefined) {
     const existing = invocations[DEFAULT_AGENT_NAME] ?? {};
     invocations[DEFAULT_AGENT_NAME] = {
+      ...existing,
       worker: existing.worker ?? config.agent_invocation,
       reviewer: existing.reviewer ?? config.agent_invocation,
     };
@@ -100,6 +119,7 @@ export function buildAgentSelection(config: QuayConfig): AgentSelection {
   // seeding only fills the slots they didn't override.
   const seeded = invocations[DEFAULT_AGENT_NAME] ?? {};
   invocations[DEFAULT_AGENT_NAME] = {
+    ...seeded,
     worker: seeded.worker ?? DEFAULT_CLAUDE_WORKER_INVOCATION,
     reviewer: seeded.reviewer ?? DEFAULT_CLAUDE_REVIEWER_INVOCATION,
   };
@@ -190,6 +210,9 @@ export function createAgentResolver(deps: AgentResolverDeps): AgentResolver {
       agent: agentName,
       model,
       invocation: applyAgentModel(agentName, invocation, model),
+      capabilities: role === "worker"
+        ? [...(entry.workerCapabilities ?? [])]
+        : [...(entry.reviewerCapabilities ?? [])],
     };
   }
 
@@ -217,4 +240,16 @@ function applyAgentModel(agent: string, invocation: string, model: string | null
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function normalizeCapabilities(values: readonly string[] | undefined): string[] {
+  if (values === undefined) return [];
+  return [...new Set(values)];
+}
+
+function mergeCapabilities(
+  shared: readonly string[],
+  roleSpecific: readonly string[] | undefined,
+): string[] {
+  return [...new Set([...shared, ...(roleSpecific ?? [])])];
 }

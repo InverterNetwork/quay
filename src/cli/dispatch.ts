@@ -63,8 +63,11 @@ import {
 } from "./help.ts";
 import type { CliIO } from "./io.ts";
 import {
+  adoptPr,
+  AdoptPrError,
   enterReview,
   EnterReviewError,
+  type AdoptPrResult,
   type EnterReviewResult,
 } from "../core/pr_review.ts";
 
@@ -169,6 +172,8 @@ export async function dispatch(
         return await handleEnqueue(rest, deps, io);
       case "review-pr":
         return handleReviewPr(rest, deps, io);
+      case "adopt-pr":
+        return await handleAdoptPr(rest, deps, io);
       case "repo":
         return handleRepo(rest, deps, io);
       case "tags":
@@ -271,7 +276,10 @@ function handleHandoffList(
   deps: CliDeps,
   io: CliIO,
 ): DispatchResult {
-  const validation = validateFlags(argv, { valued: ["--status", "--task"] });
+  const validation = validateFlags(argv, {
+    valued: ["--status", "--task"],
+    boolean: ["--include-ineligible"],
+  });
   if (!validation.ok) {
     return writeError(io, "usage_error", validation.message, validation.details);
   }
@@ -284,8 +292,15 @@ function handleHandoffList(
       { status: rawStatus },
     );
   }
-  const filters: { status: OrchestratorHandoffStatus; taskId?: string } = {
+  const filters: {
+    status: OrchestratorHandoffStatus;
+    taskId?: string;
+    eligibleAtOrBefore: string;
+    includeIneligible: boolean;
+  } = {
     status: rawStatus,
+    eligibleAtOrBefore: deps.clock.nowISO(),
+    includeIneligible: argv.includes("--include-ineligible"),
   };
   const taskId = readFlag(argv, "--task");
   if (taskId !== null) filters.taskId = taskId;
@@ -464,7 +479,7 @@ async function handleEnqueue(
 ): Promise<DispatchResult> {
   if (wantsHelp(argv)) return printHelp(io, ["enqueue"]);
   const validation = validateFlags(argv, {
-    boolean: ["--request-pr-screenshots"],
+    boolean: ["--request-pr-screenshots", "--require-pr-screenshots"],
     valued: [
       "--input",
       "--repo",
@@ -518,6 +533,7 @@ async function handleEnqueue(
     const workerExecution = readFlag(argv, "--worker-execution");
     const baseBranch = readFlag(argv, "--base-branch");
     const requestPrScreenshots = argv.includes("--request-pr-screenshots");
+    const requirePrScreenshots = argv.includes("--require-pr-screenshots");
     const tags = collectFlagValues(argv, "--tag");
     const briefRead = tryReadFile(briefPath);
     if (!briefRead.ok) return writeError(io, "usage_error", briefRead.message);
@@ -531,6 +547,7 @@ async function handleEnqueue(
     if (slackThreadRef !== null) input.slack_thread_ref = slackThreadRef;
     if (baseBranch !== null) input.base_branch = baseBranch;
     if (requestPrScreenshots) input.request_pr_screenshots = true;
+    if (requirePrScreenshots) input.require_pr_screenshots = true;
     const agentErr = validateTaskSelectionOverrides(
       {
         worker_agent: workerAgent,
@@ -683,6 +700,83 @@ function handleReviewPr(
   return { exitCode: 0 };
 }
 
+async function handleAdoptPr(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  if (wantsHelp(argv)) return printHelp(io, ["adopt-pr"]);
+  const validation = validateFlags(argv, { valued: ["--pr"] });
+  if (!validation.ok) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      validation.message,
+      validation.details,
+    );
+  }
+  const prArg = readFlag(argv, "--pr");
+  if (prArg === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      "adopt-pr requires --pr <repo>:<num>",
+    );
+  }
+  const parsedPr = parsePrIdentifier(prArg);
+  if (parsedPr === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      `--pr must be <repo>:<num> (got ${prArg})`,
+      { pr: prArg },
+    );
+  }
+  const repoId = resolveRepoIdForPr(deps.db, parsedPr.repo);
+  if (repoId === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "repo_not_configured",
+      `repo "${parsedPr.repo}" is not configured`,
+      { repo: parsedPr.repo },
+    );
+  }
+
+  let result: AdoptPrResult;
+  try {
+    result = await deps.supervisorLock.run(() =>
+      adoptPr(
+        {
+          db: deps.db,
+          clock: deps.clock,
+          github: deps.github,
+          git: deps.git,
+          artifactStore: deps.artifactStore,
+          paths: deps.paths,
+          agentResolver: deps.agentResolver,
+          referenceReposRoot: deps.tickOptions?.referenceReposRoot,
+        },
+        { repoId, prNumber: parsedPr.prNumber },
+      ),
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (err instanceof AdoptPrError) {
+      if (err.kind === "pr_not_found") {
+        return writeErrorWithExit(io, 3, "pr_not_found", message, { pr: prArg });
+      }
+      return writeErrorWithExit(io, 4, err.kind, message, { pr: prArg });
+    }
+    return writeErrorWithExit(io, 4, "quay_error", message);
+  }
+  io.stdout(`${JSON.stringify(result)}\n`);
+  return { exitCode: 0 };
+}
+
 async function handleEnqueueLinearIssueFlow(
   argv: string[],
   deps: CliDeps,
@@ -753,6 +847,7 @@ async function handleEnqueueLinearIssueFlow(
       cliTags,
       baseBranch,
       requestPrScreenshots: argv.includes("--request-pr-screenshots"),
+      requirePrScreenshots: argv.includes("--require-pr-screenshots"),
       workerAgent: readFlag(argv, "--worker-agent"),
       workerModel: readFlag(argv, "--worker-model"),
       reviewerAgent: readFlag(argv, "--reviewer-agent"),

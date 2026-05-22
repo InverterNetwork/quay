@@ -117,6 +117,7 @@ quay enqueue \
   --brief-file <path> \
   [--base-branch <branch>] \
   [--request-pr-screenshots] \
+  [--require-pr-screenshots] \
   [--ticket-snapshot-file <path>] \
   [--external-ref <ref>] \
   [--slack-thread-ref <channel:ts>] \
@@ -135,6 +136,7 @@ quay enqueue \
   --linear-issue <identifier> \
   [--base-branch <branch>] \
   [--request-pr-screenshots] \
+  [--require-pr-screenshots] \
   [--worker-agent <name>] \
   [--worker-model <model>] \
   [--reviewer-agent <name>] \
@@ -156,6 +158,10 @@ Linear tickets can also set `base_branch` in `quay-config`.
 code-worker prompt asks the worker to capture UI screenshots when the task
 affects UI, attach or link them in the PR when the runtime supports that, and
 state the limitation in the PR if screenshots cannot be captured or attached.
+`--require-pr-screenshots` is the hard mode. Enqueue resolves the effective
+worker agent, requires it to advertise the `screenshots` capability, persists
+the hard prompt mode, and fails before task creation if the capability is
+missing.
 `--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,
 and `--slack-thread-ref`.
 
@@ -178,6 +184,24 @@ Reviewer overrides are snapshotted on synthetic review tasks. After a synthetic
 PR is enrolled once, tick polls it by PR number until merge/close and schedules
 new-head reviews itself; repeated CI/webhook calls remain safe latency helpers.
 
+```bash
+quay adopt-pr --pr <repo>:<num>
+```
+
+`adopt-pr` is an explicit operator opt-in that lets a normal Quay code worker
+update an existing human-authored PR. The PR must be open and its head branch
+must live in the same repository; fork PR adoption is intentionally unsupported.
+Quay reuses the synthetic review task for the PR when one exists, or creates it
+first, then checks out the PR head branch as a mutable worktree and schedules a
+pending code-worker attempt. The worker prompt tells the agent to push that
+existing branch and update the existing PR rather than opening a duplicate PR.
+
+Adopted PRs are marked as human-owned branch lifecycles. By default, cancel and
+closed-unmerged cleanup preserve the remote branch instead of deleting the
+human-created head ref; explicit close/delete options still apply where the
+command supports them. Adoption does not run the repo `install_cmd` from the
+adopted PR head before the worker is scheduled.
+
 ## Tick
 
 ```bash
@@ -189,7 +213,7 @@ No flags are currently accepted.
 ## Handoffs
 
 ```bash
-quay handoff list [--status <pending|claimed|completed|cancelled>] [--task <task_id>]
+quay handoff list [--status <pending|claimed|completed|cancelled>] [--task <task_id>] [--include-ineligible]
 ```
 
 `handoff list` is the pull surface for orchestrator loops waiting to resume
@@ -197,12 +221,15 @@ tasks in `awaiting-next-brief`. It reads the durable handoff queue populated for
 worker blockers, exhausted retry budgets, and ingested human replies. Without
 `--status`, it lists only `pending` handoffs. Use `--status claimed`,
 `--status completed`, or `--status cancelled` for recovery and forensics, and
-`--task` to narrow the result to one task.
+`--task` to narrow the result to one task. Pending rows whose
+`next_eligible_at` is still in the future are hidden by default so timed-out
+human waits do not monopolize queue drains; use `--include-ineligible` to show
+them during inspection.
 
 Output is a deterministic JSON array ordered by creation time and handoff ID.
 Each row includes `handoff_id`, `task_id`, `reason`, `state_event_id`,
 `idempotency_key`, `payload_json`, `status`, `claim_id`, `claimed_at`,
-`completed_at`, `created_at`, and `updated_at`.
+`completed_at`, `next_eligible_at`, `created_at`, and `updated_at`.
 
 ## Tasks
 

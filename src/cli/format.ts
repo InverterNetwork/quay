@@ -13,6 +13,7 @@ export interface TaskListRow {
   retry_budget: number;
   budget_exhausted: boolean;
   pr_screenshots_requested: boolean;
+  pr_screenshots_required: boolean;
   worker_execution: "oneshot" | "goal";
   worker_agent: string | null;
   worker_model: string | null;
@@ -59,7 +60,7 @@ const TASK_LIST_COLUMNS = `
   t.task_id, t.repo_id, COALESCE(t.base_branch, r.base_branch) AS base_branch,
   t.state, t.external_ref, t.branch_name,
   t.attempts_consumed, t.retry_budget, t.budget_exhausted,
-  t.pr_screenshots_requested,
+  t.pr_screenshots_requested, t.pr_screenshots_required,
   t.worker_execution,
   t.worker_agent, t.worker_model, t.reviewer_agent, t.reviewer_model,
   t.created_at, t.updated_at
@@ -76,6 +77,7 @@ interface TaskListRawRow {
   retry_budget: number;
   budget_exhausted: number;
   pr_screenshots_requested: number;
+  pr_screenshots_required: number;
   worker_execution: "oneshot" | "goal";
   worker_agent: string | null;
   worker_model: string | null;
@@ -97,6 +99,7 @@ function rowToList(r: TaskListRawRow): TaskListRow {
     retry_budget: r.retry_budget,
     budget_exhausted: r.budget_exhausted === 1,
     pr_screenshots_requested: r.pr_screenshots_requested === 1,
+    pr_screenshots_required: r.pr_screenshots_required === 1,
     worker_execution: r.worker_execution,
     worker_agent: r.worker_agent,
     worker_model: r.worker_model,

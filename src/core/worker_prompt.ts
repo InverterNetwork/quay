@@ -53,6 +53,7 @@ export interface WorkerPromptInput {
   taskObjective: TaskObjectiveRef;
   prBaseBranch?: string | undefined;
   prScreenshotsRequested?: boolean | undefined;
+  prScreenshotsRequired?: boolean | undefined;
   goalContext?: GoalPromptContext | undefined;
   referenceReposRoot?: string | undefined;
   attemptGuidance: AttemptGuidance;
@@ -75,7 +76,9 @@ export function composeWorkerPrompt(
   if (input.prBaseBranch !== undefined) {
     sections.push(renderPrTarget(input.prBaseBranch));
   }
-  if (input.prScreenshotsRequested === true) {
+  if (input.prScreenshotsRequired === true) {
+    sections.push(renderPrScreenshotRequirement());
+  } else if (input.prScreenshotsRequested === true) {
     sections.push(renderPrScreenshotRequest());
   }
   if (input.goalContext !== undefined) {
@@ -153,6 +156,17 @@ export function loadTaskPrScreenshotsRequested(db: DB, taskId: string): boolean 
   return row?.pr_screenshots_requested === 1;
 }
 
+export function loadTaskPrScreenshotsRequired(db: DB, taskId: string): boolean {
+  const row = db
+    .query<{ pr_screenshots_required: number | null }, [string]>(
+      `SELECT pr_screenshots_required
+         FROM tasks
+        WHERE task_id = ?`,
+    )
+    .get(taskId);
+  return row?.pr_screenshots_required === 1;
+}
+
 function renderTaskObjective(obj: TaskObjectiveRef, cap: number): string {
   const totalBytes = utf8ByteLength(obj.body);
   const truncated = totalBytes > cap;
@@ -182,11 +196,23 @@ function renderPrTarget(baseBranch: string): string {
 
 function renderPrScreenshotRequest(): string {
   return [
-    `<quay-pr-screenshot-request requested="true">`,
+    `<quay-pr-screenshot-request requested="true" required="false">`,
     "If this task affects UI, capture one or more screenshots of the changed UI state.",
     "Attach or link the screenshot(s) in the PR body or a PR comment when your runtime supports that.",
     "If screenshots cannot be captured or attached from this environment, state that limitation plainly in the PR body or PR comment.",
     "Do not block for interactive input while trying to satisfy this request.",
+    `</quay-pr-screenshot-request>`,
+  ].join("\n");
+}
+
+function renderPrScreenshotRequirement(): string {
+  return [
+    `<quay-pr-screenshot-request requested="true" required="true">`,
+    "Screenshots are required for this task.",
+    "If this task affects UI, capture one or more screenshots of the changed UI state.",
+    "Attach or link the screenshot(s) in the PR body or a PR comment.",
+    "If screenshots cannot be captured or attached from this environment, stop with a blocker instead of opening or updating the PR as complete.",
+    "Do not block for interactive input while trying to satisfy this requirement.",
     `</quay-pr-screenshot-request>`,
   ].join("\n");
 }

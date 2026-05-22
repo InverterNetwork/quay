@@ -214,6 +214,28 @@ export class LocalGitAdapter implements GitPort {
     }
   }
 
+  worktreeAddExistingBranch(
+    repoId: string,
+    worktreePath: string,
+    branch: string,
+    baseRef: string,
+  ): void {
+    const result = runIn(this.bareDir(repoId), [
+      "git",
+      "worktree",
+      "add",
+      "-B",
+      branch,
+      worktreePath,
+      baseRef,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `git worktree add -B ${branch} ${worktreePath} failed: ${result.stderr.trim()}`,
+      );
+    }
+  }
+
   checkoutPullRequest(
     repoId: string,
     worktreePath: string,

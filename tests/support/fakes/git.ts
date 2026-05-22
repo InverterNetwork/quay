@@ -105,6 +105,32 @@ export class FakeGit implements GitPort {
     this.worktreeBranches.set(worktreePath, { repoId, branch });
   }
 
+  worktreeAddExistingBranch(
+    repoId: string,
+    worktreePath: string,
+    branch: string,
+    baseRef: string,
+  ): void {
+    this.record("worktreeAddExistingBranch", {
+      repoId,
+      worktreePath,
+      branch,
+      baseRef,
+    });
+    if (this.fail.worktreeAdd?.(worktreePath)) {
+      throw new Error(`fake: worktreeAddExistingBranch failed for ${worktreePath}`);
+    }
+    mkdirSync(worktreePath, { recursive: true });
+    this.worktrees.add(worktreePath);
+    let set = this.localBranches.get(repoId);
+    if (!set) {
+      set = new Set<string>();
+      this.localBranches.set(repoId, set);
+    }
+    set.add(branch);
+    this.worktreeBranches.set(worktreePath, { repoId, branch });
+  }
+
   checkoutPullRequest(
     repoId: string,
     worktreePath: string,
