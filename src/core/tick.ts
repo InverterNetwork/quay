@@ -1652,9 +1652,32 @@ function processRunningReviewAttempt(
       options,
     );
   }
-  if (deps.tmux.isAlive(task.tmux_session)) return null;
+  if (deps.tmux.isAlive(task.tmux_session)) {
+    if (task.kill_intent !== null) {
+      deps.tmux.kill(task.tmux_session);
+      return { task_id: task.task_id, action: "kill_intent_set" };
+    }
+    const intent = detectKillIntent(deps, task, task, options);
+    if (intent !== null) {
+      setKillIntent(deps, task, task, intent);
+      fireFailpoint("after_kill_intent_commit");
+      deps.tmux.kill(task.tmux_session);
+      return { task_id: task.task_id, action: "kill_intent_set" };
+    }
+    return null;
+  }
 
   const exitInfo = readExitInfo(deps, task.tmux_session, task.worktree_path);
+  if (task.kill_intent === "wall_clock" || task.kill_intent === "stale") {
+    return markReviewInfraFailure(
+      deps,
+      task,
+      reviewKillIntentDiagnostic(task.kill_intent),
+      exitInfo,
+      options,
+    );
+  }
+
   const blockerPath = join(task.worktree_path, ".quay-blocked.md");
   if (existsSync(blockerPath)) {
     let blocker = "";
@@ -1715,6 +1738,12 @@ function processRunningReviewAttempt(
     if (ciGate !== null) return ciGate;
   }
   return finalizePostedReview(deps, task, posted, exitInfo, options);
+}
+
+function reviewKillIntentDiagnostic(intent: "wall_clock" | "stale"): string {
+  return intent === "wall_clock"
+    ? "The live reviewer exceeded max_attempt_duration_seconds and was killed."
+    : "The live reviewer stopped producing fresh logs past staleness_threshold_seconds and was killed.";
 }
 
 // Worker exit info is best-effort: a missing marker file (worker exec'd
@@ -3797,7 +3826,10 @@ function loadLatestAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
 function detectKillIntent(
   deps: TickDeps,
   task: { worktree_path: string },
-  attempt: CurrentAttemptRow,
+  attempt: {
+    spawned_at: string | null;
+    tmux_session: string | null;
+  },
   options: TickOptions,
 ): "wall_clock" | "stale" | null {
   if (attempt.spawned_at === null || attempt.tmux_session === null) return null;
@@ -3822,8 +3854,12 @@ function detectKillIntent(
 
 function setKillIntent(
   deps: TickDeps,
-  task: RunningTaskRow,
-  attempt: CurrentAttemptRow,
+  task: { task_id: string; worktree_path: string },
+  attempt: {
+    attempt_id: number;
+    spawned_at: string | null;
+    tmux_session: string | null;
+  },
   intent: "wall_clock" | "stale",
 ): void {
   const now = deps.clock.nowISO();
