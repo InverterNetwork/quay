@@ -32,6 +32,70 @@ function reviewerTickOptions(extra: TickOptions = {}): TickOptions {
   return { reviewerEnabled: true, env: REVIEWER_ENV, ...extra };
 }
 
+function seedRunningReviewAttempt(
+  h: Harness,
+  opts: {
+    repoId: string;
+    taskId: string;
+    prNumber: number;
+    headSha: string;
+    sessionName: string;
+    spawnedAt?: string;
+  },
+): { attemptId: number } {
+  const worktreePath = `${h.dataDir}/worktrees/${opts.taskId}`;
+  mkdirSync(worktreePath, { recursive: true });
+  const taskId = insertTask(h.db, {
+    repoId: opts.repoId,
+    taskId: opts.taskId,
+    state: "pr-review",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET pr_number = ?,
+              head_sha = ?,
+              worktree_path = ?
+        WHERE task_id = ?`,
+    )
+    .run(opts.prNumber, opts.headSha, worktreePath, taskId);
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: opts.spawnedAt ?? h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = ?,
+              tmux_session = ?
+        WHERE attempt_id = ?`,
+    )
+    .run(opts.headSha, opts.sessionName, attemptId);
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "brief",
+    content: "review brief",
+    extension: "md",
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "final_prompt",
+    content: "review prompt",
+    extension: "md",
+  });
+  return { attemptId };
+}
+
 test("CI-green pr-open task enters pr-review when reviewer gate is enabled", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
@@ -965,6 +1029,140 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
     { kind: "tool_trace", n: 1 },
     { kind: "usage", n: 1 },
   ]);
+});
+
+test("live stale reviewer is killed then retried on the same head", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-stale-live");
+  const taskId = "pr-review-repo-review-stale-live-14";
+  const sessionName = "quay-review-stale-live";
+  const { attemptId } = seedRunningReviewAttempt(h, {
+    repoId,
+    taskId,
+    prNumber: 14,
+    headSha: "sha-stale-live",
+    sessionName,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+  built.tmux.liveSessions.add(sessionName);
+  built.tmux.setLogFreshness(sessionName, "2026-01-01T00:00:00.000Z");
+  h.clock.set("2026-01-01T00:11:00.000Z");
+
+  const killResults = await tick_once(
+    built.deps,
+    reviewerTickOptions({ stalenessThresholdSeconds: 600 }),
+  );
+
+  expect(killResults).toContainEqual({
+    task_id: taskId,
+    action: "kill_intent_set",
+  });
+  expect(built.tmux.killCalls).toContain(sessionName);
+  const killedAttempt = h.db
+    .query<
+      { kill_intent: string | null; ended_at: string | null },
+      [number]
+    >(
+      `SELECT kill_intent, ended_at FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(killedAttempt).toEqual({ kill_intent: "stale", ended_at: null });
+
+  const retryResults = await tick_once(
+    built.deps,
+    reviewerTickOptions({ stalenessThresholdSeconds: 600 }),
+  );
+
+  expect(retryResults).toContainEqual({
+    task_id: taskId,
+    action: "review_retry_scheduled",
+  });
+  const prior = h.db
+    .query<
+      {
+        ended_at: string | null;
+        exit_kind: string | null;
+        review_verdict: string | null;
+        kill_intent: string | null;
+      },
+      [number]
+    >(
+      `SELECT ended_at, exit_kind, review_verdict, kill_intent
+         FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(prior?.ended_at).not.toBeNull();
+  expect(prior).toMatchObject({
+    exit_kind: "review_errored",
+    review_verdict: "errored",
+    kill_intent: "stale",
+  });
+  const retry = h.db
+    .query<
+      { head_sha: string | null; spawned_at: string | null; ended_at: string | null },
+      [string]
+    >(
+      `SELECT head_sha, spawned_at, ended_at
+         FROM attempts
+        WHERE task_id = ? AND reason = 'review_only'
+        ORDER BY attempt_id DESC
+        LIMIT 1`,
+    )
+    .get(taskId);
+  expect(retry).toEqual({
+    head_sha: "sha-stale-live",
+    spawned_at: null,
+    ended_at: null,
+  });
+  const runningReviewers = h.db
+    .query<{ n: number }, []>(
+      `SELECT COUNT(*) AS n FROM attempts
+        WHERE reason = 'review_only'
+          AND spawned_at IS NOT NULL
+          AND ended_at IS NULL`,
+    )
+    .get();
+  expect(runningReviewers?.n).toBe(0);
+});
+
+test("live reviewer over wall-clock limit gets a kill intent", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-wall-clock-live");
+  const taskId = "pr-review-repo-review-wall-clock-live-15";
+  const sessionName = "quay-review-wall-clock-live";
+  const { attemptId } = seedRunningReviewAttempt(h, {
+    repoId,
+    taskId,
+    prNumber: 15,
+    headSha: "sha-wall-clock-live",
+    sessionName,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+  built.tmux.liveSessions.add(sessionName);
+  built.tmux.setLogFreshness(sessionName, "2026-01-01T00:01:30.000Z");
+  h.clock.set("2026-01-01T00:02:01.000Z");
+
+  const results = await tick_once(
+    built.deps,
+    reviewerTickOptions({
+      maxAttemptDurationSeconds: 120,
+      stalenessThresholdSeconds: 600,
+    }),
+  );
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "kill_intent_set",
+  });
+  expect(built.tmux.killCalls).toContain(sessionName);
+  const attempt = h.db
+    .query<{ kill_intent: string | null; ended_at: string | null }, [number]>(
+      `SELECT kill_intent, ended_at FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(attempt).toEqual({ kill_intent: "wall_clock", ended_at: null });
 });
 
 test("dead reviewer leaving .quay-blocked.md retries once and records a single review_blocker artifact", async () => {
