@@ -66,7 +66,6 @@ export function enqueuePrReadyApprovedOutboxItem(
       head_sha: task.head_sha,
       review_id: review.review_id,
       review_attempt_id: review.attempt_id,
-      title: null,
       branch_name: task.branch_name,
     },
     routeHint: {

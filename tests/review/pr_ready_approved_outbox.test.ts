@@ -83,7 +83,8 @@ test("Quay-owned pr-review approval enqueues one pr_ready_approved outbox item",
     handler_class: "delivery",
     idempotency_key: `${PR_READY_APPROVED_OUTBOX_KIND}:${taskId}:head-approved:R_ready`,
   });
-  expect(JSON.parse(rows[0]!.payload_json!)).toMatchObject({
+  const payload = JSON.parse(rows[0]!.payload_json!);
+  expect(payload).toMatchObject({
     task_id: taskId,
     external_ref: "AST-152",
     repo_id: repoId,
@@ -94,6 +95,7 @@ test("Quay-owned pr-review approval enqueues one pr_ready_approved outbox item",
     review_attempt_id: attemptId,
     branch_name: `quay/${taskId}`,
   });
+  expect(payload).not.toHaveProperty("title");
   expect(JSON.parse(rows[0]!.route_hint_json!)).toEqual({
     slack_thread_ref: "C123:1700000000.000000",
     fallback: "deployment_default_slack_channel",
