@@ -18,6 +18,12 @@ export interface GitPort {
     branch: string,
     baseRef: string,
   ): void;
+  worktreeAddExistingBranch(
+    repoId: string,
+    worktreePath: string,
+    branch: string,
+    baseRef: string,
+  ): void;
   checkoutPullRequest(
     repoId: string,
     worktreePath: string,

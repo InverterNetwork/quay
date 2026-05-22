@@ -384,6 +384,84 @@ test("dead synthetic reviewer changes_requested waits for external changes", asy
   expect(task?.state).toBe("waiting_external_changes");
 });
 
+test("adopted synthetic reviewer changes_requested schedules code respawn", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-adopted");
+  const taskId = "pr-review-repo-review-adopted-9";
+  const worktreePath = `${h.dataDir}/worktrees/review-adopted-9`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id,
+         worktree_path, pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'adopted_external_pr', 'feature/human',
+                 'quay-review-repo-review-adopted-9', ?, 9, 'sha-9', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId, "Adopt and finish PR #9.");
+  const codeAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "adopt_pr",
+    consumedBudget: 1,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId: codeAttemptId,
+    kind: "brief",
+    content: "adopted worker brief",
+    extension: "md",
+  });
+  const reviewAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-9', tmux_session = 'quay-review-session-9'
+        WHERE attempt_id = ?`,
+    )
+    .run(reviewAttemptId);
+  built.github.setPostedReview(repoId, 9, "sha-9", {
+    reviewId: "R_adopted_changes",
+    decision: "CHANGES_REQUESTED",
+    body: "Please address this.",
+    comments: "Inline review comments (1):\n- src/a.ts:1 - fix this",
+  });
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "review_respawn_scheduled",
+  });
+  const task = h.db
+    .query<{ state: string; non_budget_respawns_consumed: number }, [string]>(
+      `SELECT state, non_budget_respawns_consumed FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({ state: "queued", non_budget_respawns_consumed: 1 });
+  const latest = h.db
+    .query<{ reason: string; consumed_budget: number }, [string]>(
+      `SELECT reason, consumed_budget FROM attempts
+        WHERE task_id = ? ORDER BY attempt_id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  expect(latest).toEqual({ reason: "review", consumed_budget: 0 });
+});
+
 test("Quay-owned reviewer changes_requested schedules non-budget code respawn", async () => {
   h = createHarness();
   const built = buildTickDeps(h);

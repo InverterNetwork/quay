@@ -63,8 +63,11 @@ import {
 } from "./help.ts";
 import type { CliIO } from "./io.ts";
 import {
+  adoptPr,
+  AdoptPrError,
   enterReview,
   EnterReviewError,
+  type AdoptPrResult,
   type EnterReviewResult,
 } from "../core/pr_review.ts";
 
@@ -169,6 +172,8 @@ export async function dispatch(
         return await handleEnqueue(rest, deps, io);
       case "review-pr":
         return handleReviewPr(rest, deps, io);
+      case "adopt-pr":
+        return handleAdoptPr(rest, deps, io);
       case "repo":
         return handleRepo(rest, deps, io);
       case "tags":
@@ -688,6 +693,82 @@ function handleReviewPr(
         return writeErrorWithExit(io, 2, "reviewer_disabled", message);
       }
       return writeErrorWithExit(io, 3, "pr_not_found", message, { pr: prArg });
+    }
+    return writeErrorWithExit(io, 4, "quay_error", message);
+  }
+  io.stdout(`${JSON.stringify(result)}\n`);
+  return { exitCode: 0 };
+}
+
+function handleAdoptPr(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  if (wantsHelp(argv)) return printHelp(io, ["adopt-pr"]);
+  const validation = validateFlags(argv, { valued: ["--pr"] });
+  if (!validation.ok) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      validation.message,
+      validation.details,
+    );
+  }
+  const prArg = readFlag(argv, "--pr");
+  if (prArg === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      "adopt-pr requires --pr <repo>:<num>",
+    );
+  }
+  const parsedPr = parsePrIdentifier(prArg);
+  if (parsedPr === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      `--pr must be <repo>:<num> (got ${prArg})`,
+      { pr: prArg },
+    );
+  }
+  const repoId = resolveRepoIdForPr(deps.db, parsedPr.repo);
+  if (repoId === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "repo_not_configured",
+      `repo "${parsedPr.repo}" is not configured`,
+      { repo: parsedPr.repo },
+    );
+  }
+
+  let result: AdoptPrResult;
+  try {
+    result = adoptPr(
+      {
+        db: deps.db,
+        clock: deps.clock,
+        github: deps.github,
+        git: deps.git,
+        commandRunner: deps.commandRunner,
+        artifactStore: deps.artifactStore,
+        paths: deps.paths,
+        agentResolver: deps.agentResolver,
+        referenceReposRoot: deps.tickOptions?.referenceReposRoot,
+      },
+      { repoId, prNumber: parsedPr.prNumber },
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (err instanceof AdoptPrError) {
+      if (err.kind === "pr_not_found") {
+        return writeErrorWithExit(io, 3, "pr_not_found", message, { pr: prArg });
+      }
+      return writeErrorWithExit(io, 4, err.kind, message, { pr: prArg });
     }
     return writeErrorWithExit(io, 4, "quay_error", message);
   }

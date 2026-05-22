@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { createAgentResolver } from "../../src/core/agents.ts";
+import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
 import { insertRepo, insertTask } from "../support/fixtures.ts";
@@ -85,6 +86,206 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
   expect(out2.scheduled).toBe(false);
   expect(out2.skipped_reason).toBe("active_attempt_exists");
   expect(out2.attempt_id).toBe(out.attempt_id);
+});
+
+test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "bun install",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.git.seedBareClone("quay");
+  built.github.setPrView("quay", 51, {
+    number: 51,
+    title: "Human PR to adopt",
+    body: "Please let Quay finish this.",
+    url: "https://github.com/acc/quay/pull/51",
+    headRefName: "feature/human-adopt",
+    headSha: "head-51",
+    baseRef: "dev",
+    isCrossRepository: false,
+  });
+  built.github.setPrLightweightSnapshotByNumber("quay", 51, {
+    prNumber: 51,
+    prUrl: "https://github.com/acc/quay/pull/51",
+    state: "open",
+    headSha: "head-51",
+    baseSha: "base-51",
+    baseRef: "dev",
+    mergeable: "mergeable",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: { checkSha: "head-51", items: [] },
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(["adopt-pr", "--pr", "acc/quay:51"], built.deps, io);
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const out = JSON.parse(io.out());
+  expect(out).toMatchObject({
+    task_id: "pr-review-quay-51",
+    state: "queued",
+    adopted: true,
+    scheduled: true,
+  });
+
+  const task = h.db
+    .query<
+      {
+        state: string;
+        authoring_mode: string;
+        branch_name: string;
+        base_branch: string | null;
+        pr_number: number | null;
+        head_sha: string | null;
+      },
+      [string]
+    >(
+      `SELECT state, authoring_mode, branch_name, base_branch, pr_number, head_sha
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(out.task_id);
+  expect(task).toEqual({
+    state: "queued",
+    authoring_mode: "adopted_external_pr",
+    branch_name: "feature/human-adopt",
+    base_branch: "dev",
+    pr_number: 51,
+    head_sha: "head-51",
+  });
+  const attempt = h.db
+    .query<{ reason: string; consumed_budget: number; spawned_at: string | null }, [number]>(
+      `SELECT reason, consumed_budget, spawned_at FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(out.attempt_id);
+  expect(attempt).toEqual({
+    reason: "adopt_pr",
+    consumed_budget: 1,
+    spawned_at: null,
+  });
+  expect(
+    built.git.calls.some(
+      (c) =>
+        c.op === "worktreeAddExistingBranch" &&
+        c.args.branch === "feature/human-adopt" &&
+        c.args.baseRef === "origin/feature/human-adopt",
+    ),
+  ).toBe(true);
+  expect(built.commandRunner.calls).toEqual([
+    { command: "bun install", cwd: task ? `${built.worktreesRoot}/quay-review/quay/51` : "" },
+  ]);
+
+  const promptRow = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'final_prompt'`,
+    )
+    .get(out.attempt_id);
+  expect(promptRow).toBeDefined();
+  const prompt = readFileSync(promptRow!.file_path, "utf8");
+  expect(prompt).toContain("Update the existing PR #51");
+  expect(prompt).toContain("Do not create another pull request.");
+  expect(prompt).toContain("Head branch: feature/human-adopt");
+
+  built.git.setRemoteHeadSha("quay", "feature/human-adopt", "head-51");
+  built.github.setPrExists("quay", "feature/human-adopt", true);
+  const tickResults = await tick_once(built.deps, {
+    env: { GH_TOKEN: "ghs_worker_runtime_test" },
+  });
+
+  expect(tickResults).toContainEqual({
+    task_id: out.task_id,
+    action: "spawned",
+  });
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  expect(built.tmux.spawnCalls).toHaveLength(1);
+  const spawnCall = built.tmux.spawnCalls[0];
+  expect(spawnCall).toBeDefined();
+  expect(spawnCall!.worktreePath).toBe(
+    `${built.worktreesRoot}/quay-review/quay/51`,
+  );
+  expect(built.git.worktreeBranches.get(spawnCall!.worktreePath)).toEqual({
+    repoId: "quay",
+    branch: "feature/human-adopt",
+  });
+  const spawnedAttempt = h.db
+    .query<
+      {
+        spawned_at: string | null;
+        remote_sha_at_spawn: string | null;
+        pr_existed_at_spawn: number;
+      },
+      [number]
+    >(
+      `SELECT spawned_at, remote_sha_at_spawn, pr_existed_at_spawn
+         FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(out.attempt_id);
+  expect(spawnedAttempt?.spawned_at).not.toBeNull();
+  expect(spawnedAttempt).toMatchObject({
+    remote_sha_at_spawn: "head-51",
+    pr_existed_at_spawn: 1,
+  });
+});
+
+test("adopt-pr rejects fork PRs", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.git.seedBareClone("quay");
+  built.github.setPrView("quay", 52, {
+    number: 52,
+    title: "Fork PR",
+    body: "",
+    url: "https://github.com/acc/quay/pull/52",
+    headRefName: "feature/from-fork",
+    headSha: "head-52",
+    baseRef: "main",
+    isCrossRepository: true,
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(["adopt-pr", "--pr", "acc/quay:52"], built.deps, io);
+
+  expect(result.exitCode).toBe(4);
+  expect(JSON.parse(io.err()).error).toBe("fork_pr_unsupported");
+  const taskCount = h.db
+    .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM tasks`)
+    .get();
+  expect(taskCount?.n).toBe(0);
 });
 
 test("review-pr includes read-only reference repos context in reviewer prompt", async () => {

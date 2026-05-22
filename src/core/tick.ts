@@ -48,7 +48,10 @@ import {
 import { classifyCi } from "./ci_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
 import { scheduleNonBudgetRespawn } from "./non_budget_respawn.ts";
-import { enterReview, isSyntheticTaskId } from "./pr_review.ts";
+import {
+  enterReview,
+  type TaskAuthoringMode,
+} from "./pr_review.ts";
 import {
   processGoalCompletionAudit,
   type GoalCompletionPendingTask,
@@ -230,6 +233,7 @@ interface RunningTaskRow {
 interface PrOpenTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
   cancel_requested_at: string | null;
@@ -241,6 +245,7 @@ interface PrOpenTaskRow {
 interface PrReviewTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
   pr_number: number | null;
@@ -265,6 +270,7 @@ type PrTerminalFromState =
 interface ParkedPrTerminalTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   state: PrTerminalFromState;
   branch_name: string;
   worktree_path: string;
@@ -285,6 +291,7 @@ interface ParkedPrTerminalTaskRow {
 interface ClosedUnmergedCandidateRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   state: "queued" | "running";
   branch_name: string;
   tmux_id: string;
@@ -295,6 +302,7 @@ interface ClosedUnmergedCandidateRow {
 interface ReviewAttemptTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   tmux_id: string;
   worktree_path: string;
@@ -316,6 +324,7 @@ interface ReviewAttemptTaskRow {
 interface DoneTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
   pr_number: number | null;
@@ -333,6 +342,7 @@ type SyntheticReviewLifecycleState =
 interface SyntheticReviewLifecycleTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   state: SyntheticReviewLifecycleState;
   branch_name: string;
   worktree_path: string;
@@ -1334,6 +1344,12 @@ function readPrOpen(db: DB): PrOpenTaskRow[] {
   return db
     .query<PrOpenTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               cancel_requested_at, last_review_id_acted_on,
               last_conflict_observation, github_pr_polled_at
          FROM tasks
@@ -1347,6 +1363,12 @@ function readDone(db: DB): DoneTaskRow[] {
   return db
     .query<DoneTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               pr_number, cancel_requested_at, last_review_id_acted_on,
               last_conflict_observation, github_pr_polled_at
          FROM tasks
@@ -1362,9 +1384,18 @@ function readSyntheticReviewLifecycle(
   return db
     .query<SyntheticReviewLifecycleTaskRow, []>(
       `SELECT task_id, repo_id, state, branch_name, worktree_path,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               pr_number, cancel_requested_at, github_pr_polled_at
          FROM tasks
-        WHERE task_id LIKE 'pr-review-%'
+        WHERE (
+              authoring_mode = 'synthetic_review'
+           OR (authoring_mode = 'quay_owned' AND task_id LIKE 'pr-review-%')
+        )
           AND state IN ('pr-review', 'done', 'waiting_external_changes')
         ORDER BY created_at, task_id`,
     )
@@ -1375,6 +1406,12 @@ function readPrReview(db: DB): PrReviewTaskRow[] {
   return db
     .query<PrReviewTaskRow, []>(
       `SELECT task_id, repo_id, branch_name, worktree_path,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               pr_number, cancel_requested_at, github_pr_polled_at
          FROM tasks
         WHERE state = 'pr-review'
@@ -1389,6 +1426,12 @@ function readClosedUnmergedCandidates(
   return db
     .query<ClosedUnmergedCandidateRow, []>(
       `SELECT task_id, repo_id, state, branch_name, tmux_id,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               worktree_path, pr_number
          FROM tasks
         WHERE state IN ('queued', 'running')
@@ -1403,6 +1446,12 @@ function readParkedPrTerminal(db: DB): ParkedPrTerminalTaskRow[] {
   return db
     .query<ParkedPrTerminalTaskRow, []>(
       `SELECT task_id, repo_id, state, branch_name, worktree_path,
+              CASE
+                WHEN authoring_mode = 'quay_owned'
+                 AND task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE authoring_mode
+              END AS authoring_mode,
               pr_number, cancel_requested_at, github_pr_polled_at
          FROM tasks
         WHERE state IN (
@@ -1422,6 +1471,12 @@ function readRunningReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
   return db
     .query<ReviewAttemptTaskRow, []>(
       `SELECT t.task_id, t.repo_id, t.branch_name, t.tmux_id, t.worktree_path,
+              CASE
+                WHEN t.authoring_mode = 'quay_owned'
+                 AND t.task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE t.authoring_mode
+              END AS authoring_mode,
               t.pr_number, t.cancel_requested_at,
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
@@ -1443,6 +1498,12 @@ function readPendingReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
   return db
     .query<ReviewAttemptTaskRow, []>(
       `SELECT t.task_id, t.repo_id, t.branch_name, t.tmux_id, t.worktree_path,
+              CASE
+                WHEN t.authoring_mode = 'quay_owned'
+                 AND t.task_id LIKE 'pr-review-%'
+                THEN 'synthetic_review'
+                ELSE t.authoring_mode
+              END AS authoring_mode,
               t.pr_number, t.cancel_requested_at,
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
@@ -1646,7 +1707,10 @@ function processRunningReviewAttempt(
       options,
     );
   }
-  if (posted.decision === "APPROVED" && !isSyntheticTaskId(task.task_id)) {
+  if (
+    posted.decision === "APPROVED" &&
+    task.authoring_mode !== "synthetic_review"
+  ) {
     const ciGate = guardApprovedReviewCi(deps, task, posted, exitInfo);
     if (ciGate !== null) return ciGate;
   }
@@ -1959,6 +2023,7 @@ function processSyntheticReviewLifecycle(
 interface PrTerminalRow {
   task_id: string;
   repo_id: string;
+  authoring_mode?: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
 }
@@ -1982,7 +2047,7 @@ function processPrReviewTerminal(
   // close. For those, probe by PR number instead.
   markGithubPrPolled(deps, task.task_id);
   const snapshot =
-    isSyntheticTaskId(task.task_id) && task.pr_number !== null
+    task.authoring_mode !== "quay_owned" && task.pr_number !== null
       ? deps.github.prLightweightSnapshotByNumber(task.repo_id, task.pr_number)
       : deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
   if (snapshot === null) return null;
@@ -2220,9 +2285,12 @@ function applyTerminalCleanup(
     deps.git.branchDelete(task.repo_id, task.branch_name);
   } catch {}
 
-  // Remote branch: delete only on closed_unmerged (the human chose to discard
-  // the work). On merged, GitHub's "delete branch on merge" handles it.
-  if (terminal === "closed_unmerged") {
+  // Remote branch: delete Quay-owned branches only on closed_unmerged. Adopted
+  // external PR branches are human-owned and must be retained by default.
+  if (
+    terminal === "closed_unmerged" &&
+    task.authoring_mode !== "adopted_external_pr"
+  ) {
     try {
       deps.git.deleteRemoteBranch(task.repo_id, task.branch_name);
     } catch {}
@@ -2864,7 +2932,8 @@ function finalizePostedReview(
   // insert must all commit atomically: a crash between two transactions
   // would otherwise strand the task in pr-review with no active reviewer.
   const handOffToRespawn =
-    verdict === "changes_requested" && !isSyntheticTaskId(task.task_id);
+    verdict === "changes_requested" &&
+    task.authoring_mode !== "synthetic_review";
 
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -4403,7 +4472,7 @@ function promoteAndSpawnReviewer(
     };
   }
 
-  if (isSyntheticTaskId(task.task_id)) {
+  if (task.authoring_mode === "synthetic_review") {
     try {
       deps.git.checkoutPullRequest(
         task.repo_id,
