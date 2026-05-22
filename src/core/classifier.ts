@@ -53,6 +53,7 @@ import {
   loadTaskPrScreenshotsRequested,
   loadOriginalTaskObjective,
 } from "./worker_prompt.ts";
+import { transitionTaskState } from "./task_state.ts";
 
 const BLOCKER_FILENAME = ".quay-blocked.md";
 const BLOCKER_MAX_BYTES = 64 * 1024;
@@ -1955,32 +1956,45 @@ function transitionExistingPrAttached(
   const headSha = pr.headSha === "" ? null : pr.headSha;
   deps.db.exec("BEGIN");
   try {
-    const taskUpd = deps.db
-      .query(
-        `UPDATE tasks
-            SET state = 'pr-open',
-                pr_number = ?,
-                pr_url = COALESCE(?, pr_url),
-                head_sha = COALESCE(?, head_sha),
-                base_sha = COALESCE(?, base_sha),
-                spawn_failures_consecutive = 0,
-                tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ?
-            AND state = 'running'
-            AND pr_number IS NULL
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(
-        pr.number,
-        pr.url,
-        headSha,
-        pr.baseSha,
-        now,
-        task.task_id,
-      );
-    const changes = (taskUpd as { changes?: number }).changes ?? 0;
-    if (changes === 0) {
+    const eventData = {
+      reason: "existing_open_pr_for_task_branch_base",
+      pr_number: pr.number,
+      pr_url: pr.url,
+      head_sha: headSha,
+      base_sha: pr.baseSha,
+      branch_name: task.branch_name,
+      base_branch: baseBranch,
+      pr_base_ref: pr.baseRef,
+      remote_sha_at_spawn: attempt.remote_sha_at_spawn,
+      remote_sha_at_exit: remoteShaAtExit,
+      remote_unchanged: predicate.remoteUnchanged,
+      pr_existed_at_spawn: predicate.prExistedAtSpawn,
+      pr_exists_at_exit: predicate.prExistsAtExit,
+      exit_code: exitInfo.exitCode,
+      exit_signal: exitInfo.exitSignal,
+    };
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: "running",
+      to: "pr-open",
+      eventType: "existing_pr_attached",
+      attemptId: attempt.attempt_id,
+      now,
+      updates: {
+        pr: {
+          number: pr.number,
+          url: pr.url,
+          headSha,
+          baseSha: pr.baseSha,
+          coalesce: "input",
+        },
+        resetSpawnFailures: true,
+        clearTickError: true,
+      },
+      guards: { prNumberIsNull: true },
+      eventData,
+    });
+    if (!transition.applied) {
       deps.db.exec("ROLLBACK");
       return { outcome: "existing_pr_attached" };
     }
@@ -2001,31 +2015,6 @@ function transitionExistingPrAttached(
         exitInfo.exitSignal,
         attempt.attempt_id,
       );
-    const eventData = JSON.stringify({
-      reason: "existing_open_pr_for_task_branch_base",
-      pr_number: pr.number,
-      pr_url: pr.url,
-      head_sha: headSha,
-      base_sha: pr.baseSha,
-      branch_name: task.branch_name,
-      base_branch: baseBranch,
-      pr_base_ref: pr.baseRef,
-      remote_sha_at_spawn: attempt.remote_sha_at_spawn,
-      remote_sha_at_exit: remoteShaAtExit,
-      remote_unchanged: predicate.remoteUnchanged,
-      pr_existed_at_spawn: predicate.prExistedAtSpawn,
-      pr_exists_at_exit: predicate.prExistsAtExit,
-      exit_code: exitInfo.exitCode,
-      exit_signal: exitInfo.exitSignal,
-    });
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type,
-           from_state, to_state, occurred_at, event_data
-         ) VALUES (?, ?, 'existing_pr_attached', 'running', 'pr-open', ?, ?)`,
-      )
-      .run(task.task_id, attempt.attempt_id, now, eventData);
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -2048,19 +2037,31 @@ function transitionPrOpened(
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");
   try {
-    const taskUpd = deps.db
-      .query(
-        `UPDATE tasks
-          SET state = 'pr-open',
-              spawn_failures_consecutive = 0,
-              tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ? AND state = 'running'
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(now, task.task_id);
-    const changes = (taskUpd as { changes?: number }).changes ?? 0;
-    if (changes === 0) {
+    // event_data records what the (event_type, from_state, to_state) triple
+    // can't express: what SHA actually landed, the OS-level exit info, and
+    // whether the PR existed before this attempt (distinguishes a brand-new
+    // PR from a respawn that didn't push but kept the existing PR).
+    const eventData = {
+      exit_code: exitInfo.exitCode,
+      exit_signal: exitInfo.exitSignal,
+      head_sha: remoteShaAtExit,
+      remote_sha_at_spawn: attempt.remote_sha_at_spawn,
+      pr_existed_at_spawn: attempt.pr_existed_at_spawn === 1,
+    };
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: "running",
+      to: "pr-open",
+      eventType: "pr_opened",
+      attemptId: attempt.attempt_id,
+      now,
+      updates: {
+        resetSpawnFailures: true,
+        clearTickError: true,
+      },
+      eventData,
+    });
+    if (!transition.applied) {
       deps.db.exec("ROLLBACK");
       return { outcome: "pr_opened" };
     }
@@ -2081,25 +2082,6 @@ function transitionPrOpened(
         exitInfo.exitSignal,
         attempt.attempt_id,
       );
-    // event_data records what the (event_type, from_state, to_state) triple
-    // can't express: what SHA actually landed, the OS-level exit info, and
-    // whether the PR existed before this attempt (distinguishes a brand-new
-    // PR from a respawn that didn't push but kept the existing PR).
-    const eventData = JSON.stringify({
-      exit_code: exitInfo.exitCode,
-      exit_signal: exitInfo.exitSignal,
-      head_sha: remoteShaAtExit,
-      remote_sha_at_spawn: attempt.remote_sha_at_spawn,
-      pr_existed_at_spawn: attempt.pr_existed_at_spawn === 1,
-    });
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type,
-           from_state, to_state, occurred_at, event_data
-         ) VALUES (?, ?, 'pr_opened', 'running', 'pr-open', ?, ?)`,
-      )
-      .run(task.task_id, attempt.attempt_id, now, eventData);
     deps.db.exec("COMMIT");
   } catch (err) {
     try {

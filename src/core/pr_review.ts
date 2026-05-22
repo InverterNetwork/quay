@@ -10,6 +10,7 @@ import type { AgentResolver } from "./agents.ts";
 import { classifyCi } from "./ci_status.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 import { renderReferenceReposPrompt } from "./reference_repos.ts";
+import { assertTaskState, transitionTaskState } from "./task_state.ts";
 
 export const SYNTHETIC_PR_REVIEW_PREFIX = "pr-review-";
 
@@ -386,27 +387,38 @@ export function enterReview(
       extension: "md",
     });
 
-    deps.db
-      .query(
-        `UPDATE tasks
-            SET state = 'pr-review',
-                pr_number = COALESCE(pr_number, ?),
-                pr_url = COALESCE(pr_url, ?),
-                head_sha = ?,
-                tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ?
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(input.prNumber, pr.url, headSha, now, task.task_id);
-
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state, occurred_at
-         ) VALUES (?, ?, 'review_requested', ?, 'pr-review', ?)`,
-      )
-      .run(task.task_id, attempt.attempt_id, task.state, now);
+    assertTaskState(task.state);
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: task.state,
+      to: "pr-review",
+      eventType: "review_requested",
+      attemptId: attempt.attempt_id,
+      now,
+      updates: {
+        pr: {
+          number: input.prNumber,
+          numberCoalesce: "existing",
+          url: pr.url,
+          urlCoalesce: "existing",
+          headSha,
+        },
+        clearTickError: true,
+      },
+    });
+    if (!transition.applied) {
+      deps.db.exec("ROLLBACK");
+      killSupersededWorkers(deps.tmux, supersededSessions);
+      return {
+        task_id: task.task_id,
+        attempt_id: null,
+        state: transition.currentState ?? task.state,
+        review_verdict: null,
+        scheduled: false,
+        pending_ci: false,
+        skipped_reason: null,
+      };
+    }
     deps.db
       .query(
         `UPDATE review_requests
