@@ -52,6 +52,7 @@ import {
   enterReview,
   type TaskAuthoringMode,
 } from "./pr_review.ts";
+import { enqueuePrReadyApprovedOutboxItem } from "./pr_ready_approved_outbox.ts";
 import {
   processGoalCompletionAudit,
   type GoalCompletionPendingTask,
@@ -2347,6 +2348,10 @@ function transitionCiPassed(
       deps.db.exec("ROLLBACK");
       return null;
     }
+    enqueuePrReadyApprovedOutboxItem(deps, {
+      taskId: task.task_id,
+      sourceEventId: transition.eventId,
+    });
     deps.db.exec("COMMIT");
     return { task_id: task.task_id, action: "ci_passed" };
   } catch (err) {
@@ -3014,7 +3019,7 @@ function finalizePostedReview(
         verdict === "approved" ? "done" : "waiting_external_changes";
       const eventType =
         verdict === "approved" ? "review_approved" : "changes_requested";
-      transitionTaskState(deps, {
+      const transition = transitionTaskState(deps, {
         taskId: task.task_id,
         from: "pr-review",
         to: toState,
@@ -3024,6 +3029,12 @@ function finalizePostedReview(
         now,
         updates: { clearTickError: true },
       });
+      if (transition.applied && toState === "done") {
+        enqueuePrReadyApprovedOutboxItem(deps, {
+          taskId: task.task_id,
+          sourceEventId: transition.eventId,
+        });
+      }
     }
 
     deps.db.exec("COMMIT");
