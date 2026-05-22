@@ -53,6 +53,7 @@ import {
   processGoalCompletionAudit,
   type GoalCompletionPendingTask,
 } from "./goal_audit.ts";
+import { transitionTaskState } from "./task_state.ts";
 import {
   scheduleCleanSpawnRetry,
   scheduleDeterministicRetry,
@@ -2087,21 +2088,20 @@ function finalizePrTerminal(
   const reviewerSessionsToKill: string[] = [];
   deps.db.exec("BEGIN IMMEDIATE");
   try {
-    const upd = deps.db
-      .query(
-        `UPDATE tasks
-            SET state = ?,
-                claim_id = NULL,
-                claimed_at = NULL,
-                claim_expirations_consecutive = 0,
-                tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ? AND state = ?
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(terminal, now, task.task_id, fromState);
-    const changes = (upd as { changes?: number }).changes ?? 0;
-    if (changes === 0) {
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: fromState,
+      to: terminal,
+      eventType: terminal === "merged" ? "merged" : "closed",
+      attemptId: attempt.attempt_id,
+      now,
+      updates: {
+        clearClaim: true,
+        resetClaimExpirations: true,
+        clearTickError: true,
+      },
+    });
+    if (!transition.applied) {
       deps.db.exec("ROLLBACK");
       return { task_id: task.task_id, action: "skipped_predicate" };
     }
@@ -2140,14 +2140,6 @@ function finalizePrTerminal(
         )
         .run(now, attempt.attempt_id);
     }
-    const eventType = terminal === "merged" ? "merged" : "closed";
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state, occurred_at
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(task.task_id, attempt.attempt_id, eventType, fromState, terminal, now);
     cancelOpenOrchestratorHandoffs(deps, task.task_id);
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -2245,26 +2237,19 @@ function transitionCiPassed(
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN");
   try {
-    const upd = deps.db
-      .query(
-        `UPDATE tasks
-            SET state = 'done', tick_error = NULL, updated_at = ?
-          WHERE task_id = ? AND state = 'pr-open'
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(now, task.task_id);
-    const changes = (upd as { changes?: number }).changes ?? 0;
-    if (changes === 0) {
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: "pr-open",
+      to: "done",
+      eventType: "ci_passed",
+      attemptId: attempt.attempt_id,
+      now,
+      updates: { clearTickError: true },
+    });
+    if (!transition.applied) {
       deps.db.exec("ROLLBACK");
       return null;
     }
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state, occurred_at
-         ) VALUES (?, ?, 'ci_passed', 'pr-open', 'done', ?)`,
-      )
-      .run(task.task_id, attempt.attempt_id, now);
     deps.db.exec("COMMIT");
     return { task_id: task.task_id, action: "ci_passed" };
   } catch (err) {
@@ -2793,30 +2778,16 @@ function finalizeApprovedReviewBackToPrOpen(
       verdict,
       now,
     );
-    deps.db
-      .query(
-        `UPDATE tasks
-            SET state = 'pr-open',
-                tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ? AND state = 'pr-review'
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(now, task.task_id);
-    deps.db
-      .query(
-        `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state,
-           payload_artifact_id, occurred_at
-         ) VALUES (?, ?, ?, 'pr-review', 'pr-open', ?, ?)`,
-      )
-      .run(
-        task.task_id,
-        task.attempt_id,
-        verdict === "approved" ? "review_approved" : "review_superseded",
-        artifactId,
-        now,
-      );
+    transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: "pr-review",
+      to: "pr-open",
+      eventType: verdict === "approved" ? "review_approved" : "review_superseded",
+      attemptId: task.attempt_id,
+      payloadArtifactId: artifactId,
+      now,
+      updates: { clearTickError: true },
+    });
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -2945,31 +2916,16 @@ function finalizePostedReview(
         verdict === "approved" ? "done" : "waiting_external_changes";
       const eventType =
         verdict === "approved" ? "review_approved" : "changes_requested";
-      deps.db
-        .query(
-          `UPDATE tasks
-              SET state = ?,
-                  tick_error = NULL,
-                  updated_at = ?
-            WHERE task_id = ? AND state = 'pr-review'
-              AND cancel_requested_at IS NULL`,
-        )
-        .run(toState, now, task.task_id);
-      deps.db
-        .query(
-          `INSERT INTO events (
-             task_id, attempt_id, event_type, from_state, to_state,
-             payload_artifact_id, occurred_at
-           ) VALUES (?, ?, ?, 'pr-review', ?, ?, ?)`,
-        )
-        .run(
-          task.task_id,
-          task.attempt_id,
-          eventType,
-          toState,
-          artifact.artifactId,
-          now,
-        );
+      transitionTaskState(deps, {
+        taskId: task.task_id,
+        from: "pr-review",
+        to: toState,
+        eventType,
+        attemptId: task.attempt_id,
+        payloadArtifactId: artifact.artifactId,
+        now,
+        updates: { clearTickError: true },
+      });
     }
 
     deps.db.exec("COMMIT");
@@ -4632,21 +4588,41 @@ interface PromotionInput {
 function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
   db.exec("BEGIN");
   try {
-    const taskUpdate = db
-      .query(
-      `UPDATE tasks
-          SET state = 'running',
-              attempts_consumed = attempts_consumed + ?,
-              tick_error = NULL,
-              updated_at = ?
-        WHERE task_id = ?
-            AND state = 'queued'
-            AND cancel_requested_at IS NULL`,
-      )
-      .run(p.consumedBudget, p.spawnedAt, p.taskId);
+    // event_data captures the spawn-time intent: where the worker is going
+    // to run (worktree, branch, tmux session), what we expect to invoke
+    // (agent_identity), and the spawn-time progress predicate inputs. This
+    // lets retro analysis correlate a spawn with later transitions without
+    // having to join across multiple rows.
+    const eventData = {
+      tmux_session: p.plannedSession,
+      worktree_path: p.worktreePath,
+      branch_name: p.branchName,
+      attempt_number: p.attemptNumber,
+      agent_name: p.agentName,
+      agent_model: p.agentModel,
+      agent_identity: p.agentIdentity,
+      github_token_source: p.githubTokenSource,
+      remote_sha_at_spawn: p.remoteSha,
+      pr_existed_at_spawn: p.prExisted === 1,
+    };
 
-    const taskChanges = (taskUpdate as { changes?: number }).changes ?? 0;
-    if (taskChanges === 0) {
+    const transition = transitionTaskState(
+      { db },
+      {
+        taskId: p.taskId,
+        from: "queued",
+        to: "running",
+        eventType: "spawned",
+        attemptId: p.attemptId,
+        now: p.spawnedAt,
+        updates: {
+          clearTickError: true,
+          incrementAttemptsConsumedBy: p.consumedBudget,
+        },
+        eventData,
+      },
+    );
+    if (!transition.applied) {
       db.exec("ROLLBACK");
       return false;
     }
@@ -4658,30 +4634,6 @@ function runPromotionTransaction(db: DB, p: PromotionInput): boolean {
               pr_existed_at_spawn = ?
         WHERE attempt_id = ? AND spawned_at IS NULL`,
     ).run(p.spawnedAt, p.remoteSha, p.prExisted, p.attemptId);
-
-    // event_data captures the spawn-time intent: where the worker is going
-    // to run (worktree, branch, tmux session), what we expect to invoke
-    // (agent_identity), and the spawn-time progress predicate inputs. This
-    // lets retro analysis correlate a spawn with later transitions without
-    // having to join across multiple rows.
-    const eventData = JSON.stringify({
-      tmux_session: p.plannedSession,
-      worktree_path: p.worktreePath,
-      branch_name: p.branchName,
-      attempt_number: p.attemptNumber,
-      agent_name: p.agentName,
-      agent_model: p.agentModel,
-      agent_identity: p.agentIdentity,
-      github_token_source: p.githubTokenSource,
-      remote_sha_at_spawn: p.remoteSha,
-      pr_existed_at_spawn: p.prExisted === 1,
-    });
-
-    db.query(
-      `INSERT INTO events (
-         task_id, attempt_id, event_type, from_state, to_state, occurred_at, event_data
-       ) VALUES (?, ?, 'spawned', 'queued', 'running', ?, ?)`,
-    ).run(p.taskId, p.attemptId, p.spawnedAt, eventData);
 
     db.exec("COMMIT");
     return true;
