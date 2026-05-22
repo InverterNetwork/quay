@@ -90,6 +90,36 @@ function stringifyJson(value: unknown | undefined): string | null {
   return value === undefined ? null : JSON.stringify(value);
 }
 
+function rejectWorkflowMutation(
+  row: OutboxItemRow,
+  verb: string,
+): OutboxResult<never> | null {
+  if (row.handler_class === "delivery") return null;
+  return fail(
+    "validation_error",
+    `outbox ${verb} only supports delivery items; use task claim/handoff commands for workflow_intervention items`,
+    { outbox_item_id: row.outbox_item_id, handler_class: row.handler_class },
+  );
+}
+
+function normalizeIsoInstant(
+  value: string | null | undefined,
+  fieldName: string,
+): OutboxResult<string | null> {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  const isoInstantPattern =
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+  const millis = Date.parse(value);
+  if (!isoInstantPattern.test(value) || !Number.isFinite(millis)) {
+    return fail(
+      "validation_error",
+      `${fieldName} must be an ISO-8601 instant`,
+      { [fieldName]: value },
+    );
+  }
+  return { ok: true, value: new Date(millis).toISOString() };
+}
+
 export function outboxKindForHandoff(reason: string): string {
   return `workflow_intervention.${reason}`;
 }
@@ -262,6 +292,20 @@ export function claimOutboxItem(
   const now = deps.clock.nowISO();
   deps.db.exec("BEGIN IMMEDIATE");
   try {
+    const row = loadOutboxItem(deps.db, input.outboxItemId);
+    if (!row) {
+      deps.db.exec("ROLLBACK");
+      return fail(
+        "unknown_outbox_item",
+        `outbox item ${input.outboxItemId} not found`,
+        { outbox_item_id: input.outboxItemId },
+      );
+    }
+    const classGuard = rejectWorkflowMutation(row, "claim");
+    if (classGuard !== null) {
+      deps.db.exec("ROLLBACK");
+      return classGuard;
+    }
     const upd = deps.db
       .query(
         `UPDATE outbox_items
@@ -276,15 +320,7 @@ export function claimOutboxItem(
       .run(claimId, now, now, input.outboxItemId, now);
     const changes = (upd as { changes?: number }).changes ?? 0;
     if (changes === 0) {
-      const row = loadOutboxItem(deps.db, input.outboxItemId);
       deps.db.exec("ROLLBACK");
-      if (!row) {
-        return fail(
-          "unknown_outbox_item",
-          `outbox item ${input.outboxItemId} not found`,
-          { outbox_item_id: input.outboxItemId },
-        );
-      }
       return fail(
         "wrong_state",
         `outbox item ${input.outboxItemId} is not eligible pending work`,
@@ -329,6 +365,8 @@ export function completeOutboxItem(
       { outbox_item_id: input.outboxItemId },
     );
   }
+  const classGuard = rejectWorkflowMutation(row, "complete");
+  if (classGuard !== null) return classGuard;
   if (row.status !== "claimed") {
     return fail("wrong_state", `outbox item ${input.outboxItemId} is ${row.status}`, {
       outbox_item_id: input.outboxItemId,
@@ -392,6 +430,11 @@ export function failOutboxItem(
   if (input.lastError.trim().length === 0) {
     return fail("validation_error", "outbox fail requires a non-empty error");
   }
+  const normalizedNextEligibleAt = normalizeIsoInstant(
+    input.nextEligibleAt,
+    "next_eligible_at",
+  );
+  if (!normalizedNextEligibleAt.ok) return normalizedNextEligibleAt;
   const row = loadOutboxItem(deps.db, input.outboxItemId);
   if (!row) {
     return fail(
@@ -400,6 +443,8 @@ export function failOutboxItem(
       { outbox_item_id: input.outboxItemId },
     );
   }
+  const classGuard = rejectWorkflowMutation(row, "fail");
+  if (classGuard !== null) return classGuard;
   if (row.status !== "claimed") {
     return fail("wrong_state", `outbox item ${input.outboxItemId} is ${row.status}`, {
       outbox_item_id: input.outboxItemId,
@@ -415,7 +460,7 @@ export function failOutboxItem(
   }
 
   const now = deps.clock.nowISO();
-  const nextEligibleAt = input.nextEligibleAt ?? null;
+  const nextEligibleAt = normalizedNextEligibleAt.value;
   const upd = deps.db
     .query(
       `UPDATE outbox_items

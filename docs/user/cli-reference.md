@@ -242,11 +242,14 @@ quay outbox fail <outbox_item_id> --claim-id <claim_id> --error <message> [--nex
 
 `outbox` is the shared durable side-effect surface for Hermes delivery loops.
 Workflow/intervention items back the existing human-advice handoff flow and may
-claim or resume a task through the task claim commands. Delivery items are
-notification-only: claiming, completing, or failing them does not change task
-state. `outbox fail` records `last_error`, clears the claim, and reopens the
-item as `pending` so retry is driven by Quay's idempotency key rather than by
-the downstream side effect.
+claim or resume a task through the task claim commands. `outbox list` defaults
+to `--handler-class delivery`; pass `--handler-class workflow_intervention` only
+for inspection. Delivery items are notification-only: claiming, completing, or
+failing them does not change task state, and the generic outbox mutation
+commands reject workflow/intervention items. `outbox fail` records `last_error`,
+clears the claim, and reopens the item as `pending` so retry is driven by Quay's
+idempotency key rather than by the downstream side effect. `--next-eligible-at`
+must be an ISO-8601 instant and is stored in canonical UTC form.
 
 ## Tasks
 

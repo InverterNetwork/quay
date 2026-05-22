@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
+import { enqueueOrchestratorHandoff } from "../../src/core/orchestrator_handoffs.ts";
 import { enqueueOutboxItem } from "../../src/core/outbox.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
@@ -45,6 +46,65 @@ test("outbox list returns eligible pending items", async () => {
     kind: "slack.pr_ready_approved",
     handler_class: "delivery",
     status: "pending",
+  });
+});
+
+test("outbox list defaults to delivery items and requires opt-in for workflow rows", async () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-outbox-cli-filter");
+  const deliveryTaskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-outbox-cli-filter-delivery",
+  });
+  const workflowTaskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-outbox-cli-filter-workflow",
+    state: "awaiting-next-brief",
+  });
+  const deliveryOutboxItemId = enqueueOutboxItem(
+    { db: h.db, clock: h.clock },
+    {
+      taskId: deliveryTaskId,
+      kind: "slack.pr_ready_approved",
+      handlerClass: "delivery",
+    },
+  );
+  const workflowEventId = insertAwaitingEvent(workflowTaskId);
+  enqueueOrchestratorHandoff(
+    { db: h.db, clock: h.clock },
+    {
+      taskId: workflowTaskId,
+      reason: "worker_blocker",
+      stateEventId: workflowEventId,
+    },
+  );
+
+  const defaultIo = bufferIO();
+  const defaultResult = await dispatch(
+    ["outbox", "list"],
+    buildCliDeps(h).deps,
+    defaultIo,
+  );
+  expect(defaultResult.exitCode).toBe(0);
+  const defaultRows = JSON.parse(defaultIo.out()) as Array<{
+    outbox_item_id: number;
+  }>;
+  expect(defaultRows.map((row) => row.outbox_item_id)).toEqual([
+    deliveryOutboxItemId,
+  ]);
+
+  const workflowIo = bufferIO();
+  const workflowResult = await dispatch(
+    ["outbox", "list", "--handler-class", "workflow_intervention"],
+    buildCliDeps(h).deps,
+    workflowIo,
+  );
+  expect(workflowResult.exitCode).toBe(0);
+  const workflowRows = JSON.parse(workflowIo.out());
+  expect(workflowRows).toHaveLength(1);
+  expect(workflowRows[0]).toMatchObject({
+    task_id: workflowTaskId,
+    handler_class: "workflow_intervention",
   });
 });
 
@@ -142,3 +202,60 @@ test("outbox fail records last_error and hides cooled-down pending item", async 
   await dispatch(["outbox", "list"], buildCliDeps(h).deps, listIo);
   expect(JSON.parse(listIo.out())).toEqual([]);
 });
+
+test("outbox fail rejects malformed retry timestamps", async () => {
+  h = createHarness();
+  const taskId = insertTask(h.db, {
+    repoId: insertRepo(h.db, "repo-outbox-cli-bad-timestamp"),
+    taskId: "task-outbox-cli-bad-timestamp",
+  });
+  const outboxItemId = enqueueOutboxItem(
+    { db: h.db, clock: h.clock },
+    {
+      taskId,
+      kind: "slack.pr_ready_approved",
+      handlerClass: "delivery",
+    },
+  );
+  await dispatch(
+    ["outbox", "claim", String(outboxItemId), "--claim-id", "claim-bad-time"],
+    buildCliDeps(h).deps,
+    bufferIO(),
+  );
+
+  const failIo = bufferIO();
+  const failResult = await dispatch(
+    [
+      "outbox",
+      "fail",
+      String(outboxItemId),
+      "--claim-id",
+      "claim-bad-time",
+      "--error",
+      "rate limited",
+      "--next-eligible-at",
+      "tomorrow",
+    ],
+    buildCliDeps(h).deps,
+    failIo,
+  );
+
+  expect(failResult.exitCode).toBe(1);
+  expect(JSON.parse(failIo.err())).toMatchObject({
+    error: "validation_error",
+  });
+});
+
+function insertAwaitingEvent(taskId: string): number {
+  if (!h) throw new Error("missing harness");
+  const row = h.db
+    .query<{ event_id: number }, [string, string]>(
+      `INSERT INTO events (
+         task_id, event_type, from_state, to_state, occurred_at
+       ) VALUES (?, 'blocker_ingested', 'running', 'awaiting-next-brief', ?)
+       RETURNING event_id`,
+    )
+    .get(taskId, h.clock.nowISO());
+  if (!row) throw new Error("event insert returned no row");
+  return row.event_id;
+}

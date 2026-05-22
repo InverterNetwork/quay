@@ -206,7 +206,9 @@ quay artifact get <task_id> <kind>         # raw bytes to stdout
 that Hermes delivers. Workflow/intervention rows are backed by the existing
 handoff flow and may claim/block/resume a task; delivery rows are
 notification-only work that can be claimed, completed, failed, and retried
-without changing task state. Quay enforces idempotency with
+without changing task state. `quay outbox list` defaults to delivery rows, and
+generic outbox mutation commands reject workflow/intervention rows so delivery
+workers cannot consume task-resume handoffs. Quay enforces idempotency with
 `idempotency_key`, so Slack delivery does not need to dedupe duplicate Quay
 emissions.
 

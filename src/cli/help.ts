@@ -120,12 +120,12 @@ const COMMANDS: Record<string, CommandSpec> = {
     synopsis:
       "quay outbox list [--status <s>] [--task <task_id>] [--kind <kind>] [--handler-class <class>] [--include-ineligible]",
     summary:
-      "List outbox items. Defaults to eligible pending rows and outputs a JSON array.",
+      "List outbox items. Defaults to eligible pending delivery rows and outputs a JSON array.",
     flags: [
       { flag: "--status <s>", desc: "Filter by status: pending, claimed, completed, cancelled. Defaults to pending." },
       { flag: "--task <task_id>", desc: "Filter by task_id." },
       { flag: "--kind <kind>", desc: "Filter by side-effect kind." },
-      { flag: "--handler-class <class>", desc: "Filter by handler class: workflow_intervention or delivery." },
+      { flag: "--handler-class <class>", desc: "Filter by handler class: workflow_intervention or delivery. Defaults to delivery." },
       { flag: "--include-ineligible", desc: "Include pending items whose next_eligible_at is still in the future." },
     ],
   },

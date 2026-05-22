@@ -405,6 +405,7 @@ function handleOutboxList(
     includeIneligible: boolean;
   } = {
     status: rawStatus,
+    handlerClass: rawHandlerClass ?? "delivery",
     eligibleAtOrBefore: deps.clock.nowISO(),
     includeIneligible: argv.includes("--include-ineligible"),
   };
@@ -412,7 +413,6 @@ function handleOutboxList(
   if (taskId !== null) filters.taskId = taskId;
   const kind = readFlag(argv, "--kind");
   if (kind !== null) filters.kind = kind;
-  if (rawHandlerClass !== null) filters.handlerClass = rawHandlerClass;
   const rows = listOutboxItems(deps.db, filters);
   io.stdout(`${JSON.stringify(rows)}\n`);
   return { exitCode: 0 };

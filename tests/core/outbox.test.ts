@@ -132,6 +132,58 @@ test("outbox fail records error and reopens item for retry after cooldown", () =
   expect(retried.ok ? retried.value.claim_id : "").toBe("claim-retry-2");
 });
 
+test("outbox fail validates retry timestamp and stores canonical UTC instant", () => {
+  h = createHarness();
+  h.clock.set("2026-05-22T10:00:00.000Z");
+  const taskId = insertTask(h.db, {
+    repoId: insertRepo(h.db, "repo-outbox-timestamp"),
+    taskId: "task-outbox-timestamp",
+  });
+  const outboxItemId = enqueueOutboxItem(
+    { db: h.db, clock: h.clock },
+    {
+      taskId,
+      kind: "slack.pr_ready_approved",
+      handlerClass: "delivery",
+    },
+  );
+  const claimed = claimOutboxItem(
+    { db: h.db, clock: h.clock },
+    { outboxItemId, claimId: "claim-time" },
+  );
+  expect(claimed.ok).toBe(true);
+
+  const invalid = failOutboxItem(
+    { db: h.db, clock: h.clock },
+    {
+      outboxItemId,
+      claimId: "claim-time",
+      lastError: "bad timestamp",
+      nextEligibleAt: "tomorrow",
+    },
+  );
+  expect(invalid).toMatchObject({
+    ok: false,
+    error: { code: "validation_error" },
+  });
+
+  const failed = failOutboxItem(
+    { db: h.db, clock: h.clock },
+    {
+      outboxItemId,
+      claimId: "claim-time",
+      lastError: "retry later",
+      nextEligibleAt: "2026-05-22T12:15:00+02:00",
+    },
+  );
+  expect(failed).toMatchObject({
+    ok: true,
+    value: {
+      next_eligible_at: "2026-05-22T10:15:00.000Z",
+    },
+  });
+});
+
 test("delivery outbox completion marks delivered without changing task state", () => {
   h = createHarness();
   h.clock.set("2026-05-22T12:00:00.000Z");
@@ -176,6 +228,69 @@ test("delivery outbox completion marks delivered without changing task state", (
     .query<{ state: string }, [string]>("SELECT state FROM tasks WHERE task_id = ?")
     .get(taskId);
   expect(task?.state).toBe("pr-open");
+});
+
+test("generic outbox mutations reject workflow intervention rows", () => {
+  h = createHarness();
+  const taskId = insertTask(h.db, {
+    repoId: insertRepo(h.db, "repo-outbox-workflow-guard"),
+    taskId: "task-outbox-workflow-guard",
+    state: "awaiting-next-brief",
+  });
+  const eventId = insertAwaitingEvent(taskId);
+  const handoffId = enqueueOrchestratorHandoff(
+    { db: h.db, clock: h.clock },
+    { taskId, reason: "worker_blocker", stateEventId: eventId },
+  );
+  const outboxItemId = h.db
+    .query<{ outbox_item_id: number }, [number]>(
+      `SELECT outbox_item_id
+         FROM orchestrator_handoffs
+        WHERE handoff_id = ?`,
+    )
+    .get(handoffId)!.outbox_item_id;
+
+  const claim = claimOutboxItem(
+    { db: h.db, clock: h.clock },
+    { outboxItemId, claimId: "generic-claim" },
+  );
+  expect(claim).toMatchObject({
+    ok: false,
+    error: { code: "validation_error" },
+  });
+  expect(singleOutboxStatus(outboxItemId)).toMatchObject({
+    status: "pending",
+    claim_id: null,
+  });
+
+  claimPendingOrchestratorHandoffs(
+    { db: h.db, clock: h.clock },
+    { taskId, claimId: "handoff-claim" },
+  );
+  const complete = completeOutboxItem(
+    { db: h.db, clock: h.clock },
+    { outboxItemId, claimId: "handoff-claim" },
+  );
+  const failed = failOutboxItem(
+    { db: h.db, clock: h.clock },
+    {
+      outboxItemId,
+      claimId: "handoff-claim",
+      lastError: "wrong consumer",
+    },
+  );
+  expect(complete).toMatchObject({
+    ok: false,
+    error: { code: "validation_error" },
+  });
+  expect(failed).toMatchObject({
+    ok: false,
+    error: { code: "validation_error" },
+  });
+  expect(singleOutboxStatus(outboxItemId)).toMatchObject({
+    status: "claimed",
+    claim_id: "handoff-claim",
+  });
 });
 
 test("orchestrator handoff compatibility creates and syncs workflow outbox item", () => {
