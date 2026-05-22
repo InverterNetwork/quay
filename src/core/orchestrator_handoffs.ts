@@ -1,5 +1,6 @@
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
+import { enqueueOutboxItem, outboxKindForHandoff } from "./outbox.ts";
 
 export type OrchestratorHandoffReason =
   | "worker_blocker"
@@ -16,6 +17,7 @@ export type OrchestratorHandoffStatus =
 
 export interface OrchestratorHandoffRow {
   handoff_id: number;
+  outbox_item_id: number | null;
   task_id: string;
   reason: OrchestratorHandoffReason;
   state_event_id: number;
@@ -48,20 +50,29 @@ export function enqueueOrchestratorHandoff(
   const idempotencyKey = `${input.taskId}:${input.stateEventId}:${input.reason}`;
   const payloadJson =
     input.payload === undefined ? null : JSON.stringify(input.payload);
+  const outboxItemId = enqueueOutboxItem(deps, {
+    taskId: input.taskId,
+    kind: outboxKindForHandoff(input.reason),
+    handlerClass: "workflow_intervention",
+    sourceEventId: input.stateEventId,
+    idempotencyKey,
+    payload: input.payload,
+  });
 
   const inserted = deps.db
     .query<
       { handoff_id: number },
-      [string, string, number, string, string | null, string, string]
+      [number, string, string, number, string, string | null, string, string]
     >(
       `INSERT INTO orchestrator_handoffs (
-         task_id, reason, state_event_id, idempotency_key,
+         outbox_item_id, task_id, reason, state_event_id, idempotency_key,
          payload_json, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(idempotency_key) DO NOTHING
        RETURNING handoff_id`,
     )
     .get(
+      outboxItemId,
       input.taskId,
       input.reason,
       input.stateEventId,
@@ -71,6 +82,14 @@ export function enqueueOrchestratorHandoff(
       now,
     );
   if (inserted) return inserted.handoff_id;
+
+  deps.db
+    .query(
+      `UPDATE orchestrator_handoffs
+          SET outbox_item_id = COALESCE(outbox_item_id, ?)
+        WHERE idempotency_key = ?`,
+    )
+    .run(outboxItemId, idempotencyKey);
 
   const existing = deps.db
     .query<{ handoff_id: number }, [string]>(
@@ -90,6 +109,24 @@ export function claimPendingOrchestratorHandoffs(
   input: { taskId: string; claimId: string },
 ): number {
   const now = deps.clock.nowISO();
+  deps.db
+    .query(
+      `UPDATE outbox_items
+          SET status = 'claimed',
+              claim_id = ?,
+              claimed_at = ?,
+              next_eligible_at = NULL,
+              updated_at = ?
+        WHERE status = 'pending'
+          AND outbox_item_id IN (
+            SELECT outbox_item_id
+              FROM orchestrator_handoffs
+             WHERE task_id = ?
+               AND status = 'pending'
+               AND outbox_item_id IS NOT NULL
+          )`,
+    )
+    .run(input.claimId, now, now, input.taskId);
   const res = deps.db
     .query(
       `UPDATE orchestrator_handoffs
@@ -114,6 +151,31 @@ export function reopenClaimedOrchestratorHandoffs(
   },
 ): number {
   const now = deps.clock.nowISO();
+  deps.db
+    .query(
+      `UPDATE outbox_items
+          SET status = 'pending',
+              claim_id = NULL,
+              claimed_at = NULL,
+              next_eligible_at = ?,
+              updated_at = ?
+        WHERE status = 'claimed'
+          AND outbox_item_id IN (
+            SELECT outbox_item_id
+              FROM orchestrator_handoffs
+             WHERE task_id = ?
+               AND status = 'claimed'
+               AND (? IS NULL OR claim_id = ?)
+               AND outbox_item_id IS NOT NULL
+          )`,
+    )
+    .run(
+      input.nextEligibleAt ?? null,
+      now,
+      input.taskId,
+      input.claimId ?? null,
+      input.claimId ?? null,
+    );
   const res = deps.db
     .query(
       `UPDATE orchestrator_handoffs
@@ -141,6 +203,23 @@ export function completeClaimedOrchestratorHandoffs(
   input: { taskId: string; claimId: string },
 ): number {
   const now = deps.clock.nowISO();
+  deps.db
+    .query(
+      `UPDATE outbox_items
+          SET status = 'completed',
+              completed_at = ?,
+              updated_at = ?
+        WHERE status = 'claimed'
+          AND outbox_item_id IN (
+            SELECT outbox_item_id
+              FROM orchestrator_handoffs
+             WHERE task_id = ?
+               AND status = 'claimed'
+               AND claim_id = ?
+               AND outbox_item_id IS NOT NULL
+          )`,
+    )
+    .run(now, now, input.taskId, input.claimId);
   const res = deps.db
     .query(
       `UPDATE orchestrator_handoffs
@@ -160,6 +239,22 @@ export function cancelOpenOrchestratorHandoffs(
   taskId: string,
 ): number {
   const now = deps.clock.nowISO();
+  deps.db
+    .query(
+      `UPDATE outbox_items
+          SET status = 'cancelled',
+              completed_at = ?,
+              updated_at = ?
+        WHERE status IN ('pending', 'claimed')
+          AND outbox_item_id IN (
+            SELECT outbox_item_id
+              FROM orchestrator_handoffs
+             WHERE task_id = ?
+               AND status IN ('pending', 'claimed')
+               AND outbox_item_id IS NOT NULL
+          )`,
+    )
+    .run(now, now, taskId);
   const res = deps.db
     .query(
       `UPDATE orchestrator_handoffs
@@ -195,7 +290,7 @@ export function listOrchestratorHandoffs(
         string,
       ]
     >(
-      `SELECT handoff_id, task_id, reason, state_event_id, idempotency_key,
+      `SELECT handoff_id, outbox_item_id, task_id, reason, state_event_id, idempotency_key,
               payload_json, status, claim_id, claimed_at, completed_at,
               next_eligible_at, created_at, updated_at
          FROM orchestrator_handoffs

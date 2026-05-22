@@ -109,6 +109,56 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--include-ineligible", desc: "Include pending handoffs whose next_eligible_at is still in the future." },
     ],
   },
+  outbox: {
+    path: "outbox",
+    synopsis: "quay outbox <subcommand> [options]",
+    summary: "Inspect and update durable orchestrator side-effect outbox items",
+    subcommands: ["outbox list", "outbox claim", "outbox complete", "outbox fail"],
+  },
+  "outbox list": {
+    path: "outbox list",
+    synopsis:
+      "quay outbox list [--status <s>] [--task <task_id>] [--kind <kind>] [--handler-class <class>] [--include-ineligible]",
+    summary:
+      "List outbox items. Defaults to eligible pending delivery rows and outputs a JSON array.",
+    flags: [
+      { flag: "--status <s>", desc: "Filter by status: pending, claimed, completed, cancelled. Defaults to pending." },
+      { flag: "--task <task_id>", desc: "Filter by task_id." },
+      { flag: "--kind <kind>", desc: "Filter by side-effect kind." },
+      { flag: "--handler-class <class>", desc: "Filter by handler class: workflow_intervention or delivery. Defaults to delivery." },
+      { flag: "--include-ineligible", desc: "Include pending items whose next_eligible_at is still in the future." },
+    ],
+  },
+  "outbox claim": {
+    path: "outbox claim",
+    synopsis: "quay outbox claim <outbox_item_id> [--claim-id <id>]",
+    summary:
+      "Claim one eligible pending outbox item. A claim_id is minted when omitted.",
+    flags: [
+      { flag: "--claim-id <id>", desc: "Optional caller-supplied claim id." },
+    ],
+  },
+  "outbox complete": {
+    path: "outbox complete",
+    synopsis: "quay outbox complete <outbox_item_id> --claim-id <id>",
+    summary:
+      "Complete a claimed outbox item. Delivery items also receive delivered_at.",
+    flags: [
+      { flag: "--claim-id <id>", desc: "The claim_id returned by `outbox claim`." },
+    ],
+  },
+  "outbox fail": {
+    path: "outbox fail",
+    synopsis:
+      "quay outbox fail <outbox_item_id> --claim-id <id> --error <message> [--next-eligible-at <iso>]",
+    summary:
+      "Record a delivery failure and reopen the outbox item for retry.",
+    flags: [
+      { flag: "--claim-id <id>", desc: "The claim_id returned by `outbox claim`." },
+      { flag: "--error <message>", desc: "Error text to store in last_error." },
+      { flag: "--next-eligible-at <iso>", desc: "Optional retry cooldown timestamp." },
+    ],
+  },
   enqueue: {
     path: "enqueue",
     synopsis:
@@ -442,6 +492,7 @@ const TOP_LEVEL_ORDER: string[] = [
   "task",
   "tick",
   "handoff",
+  "outbox",
   "enqueue",
   "review-pr",
   "adopt-pr",

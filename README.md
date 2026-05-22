@@ -192,12 +192,27 @@ quay tags list --repo <repo_id>                            # merged vocab + enfo
 quay handoff list [--status <s>] [--task <id>] [--include-ineligible]
                                                # durable awaiting-next-brief handoffs
                                                # (JSON; default status is eligible pending)
+quay outbox list [--status <s>] [--handler-class <class>] [--task <id>]
+quay outbox claim <outbox_item_id> [--claim-id <id>]
+quay outbox complete <outbox_item_id> --claim-id <id>
+quay outbox fail <outbox_item_id> --claim-id <id> --error <message>
+                                               # shared side-effect outbox
 quay task get <task_id> | task list        # read commands (deterministic JSON)
 quay submit-brief | escalate-human | record-human-reply | cancel
 quay artifact get <task_id> <kind>         # raw bytes to stdout
 ```
 
-`quay handoff list` is the pull-based orchestrator handoff surface. It defaults
+`outbox_items` is the shared durable outbox for Quay-originated side effects
+that Hermes delivers. Workflow/intervention rows are backed by the existing
+handoff flow and may claim/block/resume a task; delivery rows are
+notification-only work that can be claimed, completed, failed, and retried
+without changing task state. `quay outbox list` defaults to delivery rows, and
+generic outbox mutation commands reject workflow/intervention rows so delivery
+workers cannot consume task-resume handoffs. Quay enforces idempotency with
+`idempotency_key`, so Slack delivery does not need to dedupe duplicate Quay
+emissions.
+
+`quay handoff list` is the compatibility pull surface for workflow handoffs. It defaults
 to `--status pending` and hides pending rows whose `next_eligible_at` is still
 in the future; pass `--include-ineligible` to include cooled-down rows for
 inspection. Accepted statuses are `pending`, `claimed`, `completed`, and
