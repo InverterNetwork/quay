@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { createAgentResolver } from "../../src/core/agents.ts";
+import type { SupervisorLock } from "../../src/core/supervisor_lock.ts";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
@@ -132,11 +133,26 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
     checks: { checkSha: "head-51", items: [] },
   });
 
+  const originalLock = built.deps.supervisorLock;
+  let lockRunCount = 0;
+  const recordingLock: SupervisorLock = {
+    async run(fn) {
+      lockRunCount++;
+      return await fn();
+    },
+    tryRun(fn) {
+      return originalLock.tryRun(fn);
+    },
+  };
+  built.deps.supervisorLock = recordingLock;
+
   const io = bufferIO();
   const result = await dispatch(["adopt-pr", "--pr", "acc/quay:51"], built.deps, io);
 
   expect(result.exitCode).toBe(0);
   expect(io.err()).toBe("");
+  expect(lockRunCount).toBe(1);
+  built.deps.supervisorLock = originalLock;
   const out = JSON.parse(io.out());
   expect(out).toMatchObject({
     task_id: "pr-review-quay-51",
@@ -187,9 +203,7 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
         c.args.baseRef === "origin/feature/human-adopt",
     ),
   ).toBe(true);
-  expect(built.commandRunner.calls).toEqual([
-    { command: "bun install", cwd: task ? `${built.worktreesRoot}/quay-review/quay/51` : "" },
-  ]);
+  expect(built.commandRunner.calls).toEqual([]);
 
   const promptRow = h.db
     .query<{ file_path: string }, [number]>(

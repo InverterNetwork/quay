@@ -4,7 +4,6 @@ import { join } from "node:path";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
-import type { CommandRunner } from "../ports/command_runner.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PullRequestView } from "../ports/github.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
@@ -105,7 +104,6 @@ export interface AdoptPrDeps {
   clock: Clock;
   github: GitHubPort;
   git: GitPort;
-  commandRunner: CommandRunner;
   artifactStore: ArtifactStore;
   paths: { reposRoot: string; worktreesRoot: string; artifactsRoot: string };
   agentResolver?: AgentResolver;
@@ -160,7 +158,6 @@ interface ReviewRequestRow {
 interface RepoRow {
   repo_id: string;
   base_branch: string;
-  install_cmd: string;
   archived_at: string | null;
 }
 
@@ -636,14 +633,6 @@ export function adoptPr(
       `origin/${headBranch}`,
     );
     worktreePrepared = true;
-    const installResult = deps.commandRunner.run(repo.install_cmd, {
-      cwd: task.worktree_path,
-    });
-    if (installResult.exitCode !== 0) {
-      throw new Error(
-        `install_cmd failed (exit ${installResult.exitCode}): ${installResult.stderr.trim()}`,
-      );
-    }
   } catch (err) {
     if (worktreePrepared) {
       try {
@@ -887,7 +876,7 @@ function lookupRepo(db: DB, repoId: string): RepoRow | null {
   return (
     db
       .query<RepoRow, [string]>(
-        `SELECT repo_id, base_branch, install_cmd, archived_at
+        `SELECT repo_id, base_branch, archived_at
            FROM repos
           WHERE repo_id = ?`,
       )

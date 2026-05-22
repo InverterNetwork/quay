@@ -173,7 +173,7 @@ export async function dispatch(
       case "review-pr":
         return handleReviewPr(rest, deps, io);
       case "adopt-pr":
-        return handleAdoptPr(rest, deps, io);
+        return await handleAdoptPr(rest, deps, io);
       case "repo":
         return handleRepo(rest, deps, io);
       case "tags":
@@ -700,11 +700,11 @@ function handleReviewPr(
   return { exitCode: 0 };
 }
 
-function handleAdoptPr(
+async function handleAdoptPr(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
-): DispatchResult {
+): Promise<DispatchResult> {
   if (wantsHelp(argv)) return printHelp(io, ["adopt-pr"]);
   const validation = validateFlags(argv, { valued: ["--pr"] });
   if (!validation.ok) {
@@ -748,19 +748,20 @@ function handleAdoptPr(
 
   let result: AdoptPrResult;
   try {
-    result = adoptPr(
-      {
-        db: deps.db,
-        clock: deps.clock,
-        github: deps.github,
-        git: deps.git,
-        commandRunner: deps.commandRunner,
-        artifactStore: deps.artifactStore,
-        paths: deps.paths,
-        agentResolver: deps.agentResolver,
-        referenceReposRoot: deps.tickOptions?.referenceReposRoot,
-      },
-      { repoId, prNumber: parsedPr.prNumber },
+    result = await deps.supervisorLock.run(() =>
+      adoptPr(
+        {
+          db: deps.db,
+          clock: deps.clock,
+          github: deps.github,
+          git: deps.git,
+          artifactStore: deps.artifactStore,
+          paths: deps.paths,
+          agentResolver: deps.agentResolver,
+          referenceReposRoot: deps.tickOptions?.referenceReposRoot,
+        },
+        { repoId, prNumber: parsedPr.prNumber },
+      ),
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
