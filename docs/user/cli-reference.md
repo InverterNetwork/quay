@@ -231,6 +231,23 @@ Each row includes `handoff_id`, `task_id`, `reason`, `state_event_id`,
 `idempotency_key`, `payload_json`, `status`, `claim_id`, `claimed_at`,
 `completed_at`, `next_eligible_at`, `created_at`, and `updated_at`.
 
+## Outbox
+
+```bash
+quay outbox list [--status <pending|claimed|completed|cancelled>] [--task <task_id>] [--kind <kind>] [--handler-class <workflow_intervention|delivery>] [--include-ineligible]
+quay outbox claim <outbox_item_id> [--claim-id <claim_id>]
+quay outbox complete <outbox_item_id> --claim-id <claim_id>
+quay outbox fail <outbox_item_id> --claim-id <claim_id> --error <message> [--next-eligible-at <iso>]
+```
+
+`outbox` is the shared durable side-effect surface for Hermes delivery loops.
+Workflow/intervention items back the existing human-advice handoff flow and may
+claim or resume a task through the task claim commands. Delivery items are
+notification-only: claiming, completing, or failing them does not change task
+state. `outbox fail` records `last_error`, clears the claim, and reopens the
+item as `pending` so retry is driven by Quay's idempotency key rather than by
+the downstream side effect.
+
 ## Tasks
 
 ```bash

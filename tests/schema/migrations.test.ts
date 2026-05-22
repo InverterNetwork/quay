@@ -18,6 +18,7 @@ test("test_schema_creates_required_tables", () => {
     "artifacts",
     "events",
     "orchestrator_handoffs",
+    "outbox_items",
     "review_requests",
   ];
   const rows = h.db
@@ -71,4 +72,16 @@ test("orchestrator handoffs carry next eligibility timestamp", () => {
     .all()
     .map((r) => r.name);
   expect(cols).toContain("next_eligible_at");
+});
+
+test("outbox items support delivery and workflow metadata", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(outbox_items)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toContain("handler_class");
+  expect(cols).toContain("route_hint_json");
+  expect(cols).toContain("delivered_at");
+  expect(cols).toContain("last_error");
 });

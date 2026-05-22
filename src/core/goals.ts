@@ -409,6 +409,21 @@ export function supersedeCurrentGoalHandoff(
   const now = deps.clock.nowISO();
   deps.db
     .query(
+      `UPDATE outbox_items
+          SET status = 'cancelled',
+              completed_at = ?,
+              updated_at = ?
+        WHERE status IN ('pending', 'claimed')
+          AND outbox_item_id = (
+            SELECT outbox_item_id
+              FROM orchestrator_handoffs
+             WHERE handoff_id = ?
+               AND task_id = ?
+          )`,
+    )
+    .run(now, now, goal.current_handoff_id, taskId);
+  deps.db
+    .query(
       `UPDATE orchestrator_handoffs
           SET status = 'cancelled',
               completed_at = ?,

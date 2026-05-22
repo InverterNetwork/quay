@@ -50,6 +50,14 @@ import {
   listOrchestratorHandoffs,
   type OrchestratorHandoffStatus,
 } from "../core/orchestrator_handoffs.ts";
+import {
+  claimOutboxItem,
+  completeOutboxItem,
+  failOutboxItem,
+  listOutboxItems,
+  type OutboxHandlerClass,
+  type OutboxStatus,
+} from "../core/outbox.ts";
 import { tick_once, type TickDeps, type TickOptions } from "../core/tick.ts";
 import type { SupervisorLock } from "../core/supervisor_lock.ts";
 import { toCliError, serviceErrorToCli } from "./errors.ts";
@@ -168,6 +176,8 @@ export async function dispatch(
         return await handleTick(rest, deps, io);
       case "handoff":
         return handleHandoff(rest, deps, io);
+      case "outbox":
+        return handleOutbox(rest, deps, io);
       case "enqueue":
         return await handleEnqueue(rest, deps, io);
       case "review-pr":
@@ -316,6 +326,204 @@ function isHandoffStatus(s: string): s is OrchestratorHandoffStatus {
     s === "completed" ||
     s === "cancelled"
   );
+}
+
+function handleOutbox(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  if (argv.length === 0) {
+    return writeErrorWithUsage(
+      io,
+      ["outbox"],
+      "usage_error",
+      "outbox subcommand required",
+    );
+  }
+  const [sub, ...rest] = argv;
+  if (isHelpToken(sub as string)) return printHelp(io, ["outbox"]);
+  switch (sub) {
+    case "list":
+      if (wantsHelp(rest)) return printHelp(io, ["outbox", "list"]);
+      return handleOutboxList(rest, deps, io);
+    case "claim":
+      if (wantsHelp(rest)) return printHelp(io, ["outbox", "claim"]);
+      return handleOutboxClaim(rest, deps, io);
+    case "complete":
+      if (wantsHelp(rest)) return printHelp(io, ["outbox", "complete"]);
+      return handleOutboxComplete(rest, deps, io);
+    case "fail":
+      if (wantsHelp(rest)) return printHelp(io, ["outbox", "fail"]);
+      return handleOutboxFail(rest, deps, io);
+    default:
+      return writeErrorWithUsage(
+        io,
+        ["outbox"],
+        "usage_error",
+        `unknown outbox subcommand: ${sub}`,
+      );
+  }
+}
+
+function handleOutboxList(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {
+    valued: ["--status", "--task", "--kind", "--handler-class"],
+    boolean: ["--include-ineligible"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const rawStatus = readFlag(argv, "--status") ?? "pending";
+  if (!isOutboxStatus(rawStatus)) {
+    return writeError(
+      io,
+      "usage_error",
+      `outbox list --status must be pending, claimed, completed, or cancelled (got ${rawStatus})`,
+      { status: rawStatus },
+    );
+  }
+  const rawHandlerClass = readFlag(argv, "--handler-class");
+  if (rawHandlerClass !== null && !isOutboxHandlerClass(rawHandlerClass)) {
+    return writeError(
+      io,
+      "usage_error",
+      `outbox list --handler-class must be workflow_intervention or delivery (got ${rawHandlerClass})`,
+      { handler_class: rawHandlerClass },
+    );
+  }
+  const filters: {
+    status: OutboxStatus;
+    taskId?: string;
+    kind?: string;
+    handlerClass?: OutboxHandlerClass;
+    eligibleAtOrBefore: string;
+    includeIneligible: boolean;
+  } = {
+    status: rawStatus,
+    eligibleAtOrBefore: deps.clock.nowISO(),
+    includeIneligible: argv.includes("--include-ineligible"),
+  };
+  const taskId = readFlag(argv, "--task");
+  if (taskId !== null) filters.taskId = taskId;
+  const kind = readFlag(argv, "--kind");
+  if (kind !== null) filters.kind = kind;
+  if (rawHandlerClass !== null) filters.handlerClass = rawHandlerClass;
+  const rows = listOutboxItems(deps.db, filters);
+  io.stdout(`${JSON.stringify(rows)}\n`);
+  return { exitCode: 0 };
+}
+
+function handleOutboxClaim(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {
+    valued: ["--claim-id"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const parsed = parsePositiveIntArg(positional(argv), "outbox claim");
+  if (!parsed.ok) return writeError(io, "usage_error", parsed.message);
+  const claimId = readFlag(argv, "--claim-id") ?? undefined;
+  const input: { outboxItemId: number; claimId?: string } = {
+    outboxItemId: parsed.value,
+  };
+  if (claimId !== undefined) input.claimId = claimId;
+  return emitServiceResult(
+    claimOutboxItem(
+      { db: deps.db, clock: deps.clock },
+      input,
+    ),
+    io,
+  );
+}
+
+function handleOutboxComplete(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {
+    valued: ["--claim-id"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const parsed = parsePositiveIntArg(positional(argv), "outbox complete");
+  const claimId = readFlag(argv, "--claim-id");
+  if (!parsed.ok || !claimId) {
+    return writeError(
+      io,
+      "usage_error",
+      !parsed.ok
+        ? parsed.message
+        : "outbox complete requires <outbox_item_id> --claim-id <id>",
+    );
+  }
+  return emitServiceResult(
+    completeOutboxItem(
+      { db: deps.db, clock: deps.clock },
+      { outboxItemId: parsed.value, claimId },
+    ),
+    io,
+  );
+}
+
+function handleOutboxFail(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {
+    valued: ["--claim-id", "--error", "--next-eligible-at"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const parsed = parsePositiveIntArg(positional(argv), "outbox fail");
+  const claimId = readFlag(argv, "--claim-id");
+  const lastError = readFlag(argv, "--error");
+  if (!parsed.ok || !claimId || !lastError) {
+    return writeError(
+      io,
+      "usage_error",
+      !parsed.ok
+        ? parsed.message
+        : "outbox fail requires <outbox_item_id> --claim-id <id> --error <message>",
+    );
+  }
+  return emitServiceResult(
+    failOutboxItem(
+      { db: deps.db, clock: deps.clock },
+      {
+        outboxItemId: parsed.value,
+        claimId,
+        lastError,
+        nextEligibleAt: readFlag(argv, "--next-eligible-at"),
+      },
+    ),
+    io,
+  );
+}
+
+function isOutboxStatus(s: string): s is OutboxStatus {
+  return (
+    s === "pending" ||
+    s === "claimed" ||
+    s === "completed" ||
+    s === "cancelled"
+  );
+}
+
+function isOutboxHandlerClass(s: string): s is OutboxHandlerClass {
+  return s === "workflow_intervention" || s === "delivery";
 }
 
 async function handleTask(
@@ -1692,6 +1900,22 @@ function parseGoalTokenBudget(
     return {
       ok: false,
       message: `--goal-token-budget must be a positive integer or none (got ${raw})`,
+    };
+  }
+  return { ok: true, value: Number(raw) };
+}
+
+function parsePositiveIntArg(
+  raw: string | null,
+  command: string,
+): { ok: true; value: number } | { ok: false; message: string } {
+  if (raw === null) {
+    return { ok: false, message: `${command} requires <outbox_item_id>` };
+  }
+  if (!/^[1-9]\d*$/.test(raw)) {
+    return {
+      ok: false,
+      message: `${command} requires a positive integer outbox_item_id (got ${raw})`,
     };
   }
   return { ok: true, value: Number(raw) };
