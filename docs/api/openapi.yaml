@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Quay Admin API
   version: 1.0.0
-  description: Read-only loopback Admin API for Quay UI integrations.
+  description: Loopback Admin API for Quay UI integrations.
 servers:
   - url: http://127.0.0.1:9731
 paths:
@@ -164,6 +164,82 @@ paths:
           $ref: "#/components/responses/CorsPreflight"
         "403":
           $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/changes/preview:
+    post:
+      summary: Validate and preview a structured Admin UI change set.
+      operationId: previewChanges
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeRequest"
+      responses:
+        "200":
+          description: Server-generated deterministic preview.
+          headers:
+            ETag:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChangePreview"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "409":
+          $ref: "#/components/responses/StaleRevision"
+        "422":
+          $ref: "#/components/responses/UnsupportedChange"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for change preview.
+      operationId: optionsChangePreview
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/changes/apply:
+    post:
+      summary: Atomically apply a structured Admin UI change set.
+      operationId: applyChanges
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeRequest"
+      responses:
+        "200":
+          description: Applied change result with the refreshed read model.
+          headers:
+            ETag:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChangeApplyResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "409":
+          $ref: "#/components/responses/StaleRevision"
+        "422":
+          $ref: "#/components/responses/UnsupportedChange"
+        "500":
+          $ref: "#/components/responses/ApplyFailed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for change apply.
+      operationId: optionsChangeApply
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
 components:
   responses:
     CorsPreflight:
@@ -200,6 +276,30 @@ components:
         Allow:
           schema:
             type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ValidationError:
+      description: Request JSON or structured change payload is invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StaleRevision:
+      description: The submitted base revision no longer matches server state.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnsupportedChange:
+      description: The change type is not supported by this API version.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ApplyFailed:
+      description: The change set failed during apply and was rolled back where practical.
       content:
         application/json:
           schema:
@@ -288,6 +388,7 @@ components:
       type: object
       additionalProperties: false
       required:
+        - revision
         - repo_id
         - repo_url
         - base_branch
@@ -306,6 +407,8 @@ components:
         - tag_namespaces
         - inherited_tag_namespaces
       properties:
+        revision:
+          type: string
         repo_id:
           type: string
         repo_url:
@@ -365,6 +468,7 @@ components:
       type: object
       additionalProperties: false
       required:
+        - revision
         - config_path
         - data_dir
         - paths
@@ -375,6 +479,8 @@ components:
         - retry_templates
         - tag_namespaces
       properties:
+        revision:
+          type: string
         config_path:
           type:
             - string
@@ -661,8 +767,11 @@ components:
       type: object
       additionalProperties: false
       required:
+        - revision
         - tag_namespaces
       properties:
+        revision:
+          type: string
         tag_namespaces:
           type: array
           items:
@@ -693,8 +802,11 @@ components:
       type: object
       additionalProperties: false
       required:
+        - revision
         - rows
       properties:
+        revision:
+          type: string
         rows:
           type: array
           items:
@@ -725,6 +837,207 @@ components:
             type:
               - string
               - "null"
+    ChangeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - base_revision
+        - changes
+      properties:
+        base_revision:
+          type: string
+          description: Revision returned by the read model the UI edited from.
+        changes:
+          type: array
+          minItems: 1
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/RepoUpdateChange"
+              - $ref: "#/components/schemas/TagsReplaceChange"
+            discriminator:
+              propertyName: type
+    RepoUpdateChange:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - repo_id
+        - patch
+      properties:
+        type:
+          type: string
+          const: repo.update
+        repo_id:
+          type: string
+        patch:
+          $ref: "#/components/schemas/RepoPatch"
+    RepoPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        repo_url:
+          type: string
+        base_branch:
+          type: string
+        package_manager:
+          type: string
+        install_cmd:
+          type: string
+        test_cmd:
+          type:
+            - string
+            - "null"
+        ci_workflow_name:
+          type:
+            - string
+            - "null"
+        contribution_guide_path:
+          type:
+            - string
+            - "null"
+        agent_worker:
+          type:
+            - string
+            - "null"
+        agent_reviewer:
+          type:
+            - string
+            - "null"
+        model_worker:
+          type:
+            - string
+            - "null"
+        model_reviewer:
+          type:
+            - string
+            - "null"
+    TagsReplaceChange:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - scope
+        - tag_namespaces
+      properties:
+        type:
+          type: string
+          const: tags.replace
+        scope:
+          type: string
+          enum:
+            - deployment
+            - repo
+        repo_id:
+          type: string
+          description: Required when scope is repo; omitted for deployment scope.
+        tag_namespaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/TagNamespaceInput"
+    TagNamespaceInput:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - required
+        - values
+      properties:
+        name:
+          type: string
+        required:
+          type: boolean
+        values:
+          type: array
+          items:
+            type: string
+    ChangePreview:
+      type: object
+      additionalProperties: false
+      required:
+        - base_revision
+        - current_revision
+        - valid
+        - summary
+        - operations
+      properties:
+        base_revision:
+          type: string
+        current_revision:
+          type: string
+        valid:
+          type: boolean
+          const: true
+        summary:
+          type: array
+          items:
+            type: string
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChangeOperation"
+    ChangeOperation:
+      type: object
+      additionalProperties: false
+      required:
+        - op_id
+        - type
+        - scope
+        - target
+        - before
+        - after
+        - summary
+      properties:
+        op_id:
+          type: string
+        type:
+          type: string
+        scope:
+          type: string
+        target:
+          type: string
+        field:
+          type: string
+        before: {}
+        after: {}
+        summary:
+          type: string
+    ChangeApplyResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - previous_revision
+        - revision
+        - preview
+        - read_model
+      properties:
+        previous_revision:
+          type: string
+        revision:
+          type: string
+        preview:
+          $ref: "#/components/schemas/ChangePreview"
+        read_model:
+          $ref: "#/components/schemas/AdminReadModel"
+    AdminReadModel:
+      type: object
+      additionalProperties: false
+      required:
+        - revision
+        - global
+        - matrix
+        - repos
+      properties:
+        revision:
+          type: string
+        global:
+          $ref: "#/components/schemas/GlobalReadModel"
+        matrix:
+          $ref: "#/components/schemas/MatrixReadModel"
+        repos:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepoDetail"
     Error:
       type: object
       additionalProperties: false
@@ -736,3 +1049,4 @@ components:
           type: string
         message:
           type: string
+        details: {}

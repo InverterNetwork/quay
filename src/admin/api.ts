@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
+import { z } from "zod";
 import type { QuayConfig } from "../cli/config.ts";
 import { DEFAULT_RETRY_BUDGET } from "../core/enqueue.ts";
 import {
   buildAgentSelection,
   type AgentRole,
 } from "../core/agents.ts";
+import { QuayError } from "../core/errors.ts";
 import {
   DEFAULT_PREAMBLE_BODY,
   DEFAULT_REVIEWER_PREAMBLE_BODY,
@@ -11,6 +14,7 @@ import {
 } from "../core/preamble.ts";
 import { DEFAULT_RETRY_TEMPLATES } from "../core/retries.ts";
 import type { RepoRow, RepoService } from "../core/repos/service.ts";
+import { repoUpdateInputSchema } from "../core/repos/schema.ts";
 import type { TagService, TagVocab } from "../core/tags/service.ts";
 import {
   DEFAULT_CLAIM_TIMEOUT_SECONDS,
@@ -100,6 +104,115 @@ interface AdminMatrixRow {
   values: Record<string, string | null>;
 }
 
+type RepoPatch = z.infer<typeof repoUpdateInputSchema>;
+type AdminChange = z.infer<typeof changeSchema>;
+
+interface AdminChangeOperation {
+  op_id: string;
+  type: string;
+  scope: string;
+  target: string;
+  field?: string;
+  before: unknown;
+  after: unknown;
+  summary: string;
+}
+
+interface AdminChangePreview {
+  base_revision: string;
+  current_revision: string;
+  valid: true;
+  summary: string[];
+  operations: AdminChangeOperation[];
+}
+
+class AdminHttpError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly details: Record<string, unknown> | undefined;
+
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "AdminHttpError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+const tagNamespaceInputSchema = z
+  .object({
+    name: z.string().min(1),
+    required: z.boolean(),
+    values: z.array(z.string()),
+  })
+  .strict();
+
+const repoUpdateChangeSchema = z
+  .object({
+    type: z.literal("repo.update"),
+    repo_id: z.string().min(1),
+    patch: repoUpdateInputSchema,
+  })
+  .strict()
+  .refine((change) => Object.keys(change.patch).length > 0, {
+    message: "repo.update patch must include at least one field",
+    path: ["patch"],
+  });
+
+const tagReplaceChangeSchema = z
+  .object({
+    type: z.literal("tags.replace"),
+    scope: z.enum(["deployment", "repo"]),
+    repo_id: z.string().min(1).optional(),
+    tag_namespaces: z.array(tagNamespaceInputSchema),
+  })
+  .strict()
+  .superRefine((change, ctx) => {
+    if (change.scope === "repo" && change.repo_id === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repo_id"],
+        message: "repo_id is required for repo tag changes",
+      });
+    }
+    if (change.scope === "deployment" && change.repo_id !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repo_id"],
+        message: "repo_id is only valid for repo tag changes",
+      });
+    }
+    const seen = new Set<string>();
+    for (const [index, namespace] of change.tag_namespaces.entries()) {
+      if (seen.has(namespace.name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["tag_namespaces", index, "name"],
+          message: `duplicate namespace "${namespace.name}"`,
+        });
+      }
+      seen.add(namespace.name);
+    }
+  });
+
+const changeSchema = z.union([
+  repoUpdateChangeSchema,
+  tagReplaceChangeSchema,
+]);
+
+const changeRequestSchema = z
+  .object({
+    base_revision: z.string().min(1),
+    changes: z.array(changeSchema).min(1),
+  })
+  .strict();
+
 const ACTIVE_TASK_STATES = [
   "queued",
   "running",
@@ -145,18 +258,48 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
         status: 204,
         headers: {
           ...cors.headers,
-          "Access-Control-Allow-Methods": "GET, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Accept, Content-Type",
           "Access-Control-Max-Age": "600",
         },
       });
     }
-    if (request.method !== "GET") {
+
+    if (request.method === "POST") {
+      if (isWriteRoute(segments, "preview")) {
+        return handleAdminMutation(
+          cors.headers,
+          () => previewChanges(runtime, request),
+        );
+      }
+      if (isWriteRoute(segments, "apply")) {
+        return handleAdminMutation(
+          cors.headers,
+          () => applyChanges(runtime, request),
+        );
+      }
+      if (!isVersionedRoute(segments)) {
+        return errorResponse(
+          404,
+          "not_found",
+          `route not found: ${url.pathname}`,
+          cors.headers,
+        );
+      }
       return errorResponse(
         405,
         "method_not_allowed",
         `method ${request.method} is not allowed`,
         { ...cors.headers, Allow: "GET, OPTIONS" },
+      );
+    }
+
+    if (request.method !== "GET") {
+      return errorResponse(
+        405,
+        "method_not_allowed",
+        `method ${request.method} is not allowed`,
+        { ...cors.headers, Allow: "GET, POST, OPTIONS" },
       );
     }
 
@@ -177,19 +320,30 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
     }
 
     if (segments.length === 2 && segments[0] === "v1" && segments[1] === "global") {
-      return jsonResponse(buildGlobalReadModel(runtime), 200, cors.headers);
+      const body = buildGlobalReadModel(runtime);
+      return jsonResponse(
+        body,
+        200,
+        { ...cors.headers, ETag: quoteEtag(body.revision as string) },
+      );
     }
 
     if (segments.length === 2 && segments[0] === "v1" && segments[1] === "tags") {
+      const revision = computeAdminRevision(runtime);
       return jsonResponse(
-        { tag_namespaces: deploymentTagNamespaces(runtime) },
+        { revision, tag_namespaces: deploymentTagNamespaces(runtime) },
         200,
-        cors.headers,
+        { ...cors.headers, ETag: quoteEtag(revision) },
       );
     }
 
     if (segments.length === 2 && segments[0] === "v1" && segments[1] === "matrix") {
-      return jsonResponse(buildMatrixReadModel(runtime), 200, cors.headers);
+      const body = buildMatrixReadModel(runtime);
+      return jsonResponse(
+        body,
+        200,
+        { ...cors.headers, ETag: quoteEtag(body.revision as string) },
+      );
     }
 
     if (
@@ -215,7 +369,12 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
           cors.headers,
         );
       }
-      return jsonResponse(buildRepoDetail(runtime, row), 200, cors.headers);
+      const body = buildRepoDetail(runtime, row);
+      return jsonResponse(
+        body,
+        200,
+        { ...cors.headers, ETag: quoteEtag(body.revision as string) },
+      );
     }
 
     return errorResponse(
@@ -238,13 +397,27 @@ function isVersionedRoute(segments: string[]): boolean {
       "tags",
     ].includes(segments[1] ?? "");
   }
+  if (segments.length === 3 && segments[1] === "changes") {
+    return ["preview", "apply"].includes(segments[2] ?? "");
+  }
   return segments.length === 3 && segments[1] === "repos";
+}
+
+function isWriteRoute(
+  segments: string[],
+  action: "preview" | "apply",
+): boolean {
+  return segments.length === 3 &&
+    segments[0] === "v1" &&
+    segments[1] === "changes" &&
+    segments[2] === action;
 }
 
 function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown> {
   const agentSelection = buildAgentSelection(runtime.config);
   const repos = runtime.repoService.list({ activeOnly: true });
   return {
+    revision: computeAdminRevision(runtime),
     config_path: runtime.configPath,
     data_dir: runtime.dataDir,
     paths: {
@@ -350,6 +523,7 @@ function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown>
 
 function buildRepoDetail(runtime: AdminApiRuntime, row: RepoRow): Record<string, unknown> {
   return {
+    revision: computeAdminRevision(runtime),
     ...row,
     active_task_count: countActiveTasks(runtime.db, row.repo_id),
     tag_namespaces: tagNamespacesFromVocab(runtime.tagService.getVocab("repo", row.repo_id)),
@@ -442,7 +616,7 @@ function buildMatrixReadModel(runtime: AdminApiRuntime): Record<string, unknown>
     });
   }
 
-  return { rows };
+  return { revision: computeAdminRevision(runtime), rows };
 }
 
 function matrixRow(
@@ -460,6 +634,392 @@ function matrixRow(
     default_value: defaultValue,
     values: Object.fromEntries(repos.map((repo) => [repo.repo_id, select(repo)])),
   };
+}
+
+async function handleAdminMutation(
+  corsHeaders: JsonHeaders,
+  run: () => Promise<unknown>,
+): Promise<Response> {
+  try {
+    const body = await run();
+    const record = body !== null && typeof body === "object"
+      ? body as Record<string, unknown>
+      : {};
+    const revision =
+      typeof record.revision === "string"
+        ? record.revision
+        : typeof record.current_revision === "string"
+          ? record.current_revision
+          : undefined;
+    return jsonResponse(
+      body,
+      200,
+      revision === undefined
+        ? corsHeaders
+        : { ...corsHeaders, ETag: quoteEtag(revision) },
+    );
+  } catch (err) {
+    return adminErrorResponse(err, corsHeaders);
+  }
+}
+
+async function previewChanges(
+  runtime: AdminApiRuntime,
+  request: Request,
+): Promise<AdminChangePreview> {
+  const parsed = await parseChangeRequest(request);
+  assertCurrentRevision(runtime, parsed.base_revision);
+  return buildChangePreview(runtime, parsed.base_revision, parsed.changes);
+}
+
+async function applyChanges(
+  runtime: AdminApiRuntime,
+  request: Request,
+): Promise<Record<string, unknown>> {
+  const parsed = await parseChangeRequest(request);
+  assertCurrentRevision(runtime, parsed.base_revision);
+  const preview = buildChangePreview(
+    runtime,
+    parsed.base_revision,
+    parsed.changes,
+  );
+  try {
+    runtime.db.transaction(() => {
+      for (const change of parsed.changes) {
+        applyOneChange(runtime, change);
+      }
+    })();
+  } catch (err) {
+    if (err instanceof QuayError) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    throw new AdminHttpError(
+      500,
+      "apply_failed",
+      `failed to apply changes: ${message}`,
+    );
+  }
+  const revision = computeAdminRevision(runtime);
+  return {
+    previous_revision: parsed.base_revision,
+    revision,
+    preview,
+    read_model: buildAdminReadModel(runtime),
+  };
+}
+
+async function parseChangeRequest(request: Request): Promise<{
+  base_revision: string;
+  changes: AdminChange[];
+}> {
+  const raw = await readJsonBody(request);
+  const unsupported = unsupportedChangeType(raw);
+  if (unsupported !== null) {
+    throw new AdminHttpError(
+      422,
+      "unsupported_change",
+      `unsupported change type "${unsupported}"`,
+      { supported_types: ["repo.update", "tags.replace"] },
+    );
+  }
+  const result = changeRequestSchema.safeParse(raw);
+  if (!result.success) {
+    const summary = result.error.issues
+      .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
+      .join("; ");
+    throw new AdminHttpError(
+      400,
+      "validation_error",
+      `change request invalid: ${summary}`,
+      { issues: result.error.issues },
+    );
+  }
+  return result.data;
+}
+
+async function readJsonBody(request: Request): Promise<unknown> {
+  const text = await request.text();
+  if (text.trim() === "") {
+    throw new AdminHttpError(
+      400,
+      "validation_error",
+      "request body must be a JSON object",
+    );
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new AdminHttpError(
+      400,
+      "validation_error",
+      `request body is not valid JSON: ${message}`,
+    );
+  }
+}
+
+function unsupportedChangeType(raw: unknown): string | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const changes = (raw as { changes?: unknown }).changes;
+  if (!Array.isArray(changes)) return null;
+  for (const change of changes) {
+    if (change === null || typeof change !== "object") continue;
+    const type = (change as { type?: unknown }).type;
+    if (
+      typeof type === "string" &&
+      type !== "repo.update" &&
+      type !== "tags.replace"
+    ) {
+      return type;
+    }
+  }
+  return null;
+}
+
+function assertCurrentRevision(
+  runtime: AdminApiRuntime,
+  baseRevision: string,
+): void {
+  const current = computeAdminRevision(runtime);
+  if (baseRevision !== current) {
+    throw new AdminHttpError(
+      409,
+      "stale_revision",
+      "submitted changes were based on a stale Admin API revision; reload before retrying",
+      { base_revision: baseRevision, current_revision: current },
+    );
+  }
+}
+
+function buildChangePreview(
+  runtime: AdminApiRuntime,
+  baseRevision: string,
+  changes: AdminChange[],
+): AdminChangePreview {
+  const operations: AdminChangeOperation[] = [];
+  for (const [index, change] of changes.entries()) {
+    if (change.type === "repo.update") {
+      operations.push(...repoUpdateOperations(runtime, change, index));
+      continue;
+    }
+    operations.push(...tagReplaceOperations(runtime, change, index));
+  }
+  return {
+    base_revision: baseRevision,
+    current_revision: computeAdminRevision(runtime),
+    valid: true,
+    summary: operations.length === 0
+      ? ["No effective changes."]
+      : operations.map((operation) => operation.summary),
+    operations,
+  };
+}
+
+function repoUpdateOperations(
+  runtime: AdminApiRuntime,
+  change: Extract<AdminChange, { type: "repo.update" }>,
+  changeIndex: number,
+): AdminChangeOperation[] {
+  const repo = assertActiveRepo(runtime, change.repo_id);
+  validateAgentPatch(runtime, change.repo_id, change.patch);
+  const operations: AdminChangeOperation[] = [];
+  for (const field of REPO_PATCH_FIELDS) {
+    if (!(field in change.patch)) continue;
+    const after = change.patch[field];
+    const before = repo[field];
+    if (before === after) continue;
+    operations.push({
+      op_id: `change-${changeIndex + 1}:${field}`,
+      type: "repo.update",
+      scope: "repo",
+      target: change.repo_id,
+      field,
+      before,
+      after,
+      summary:
+        `repo ${change.repo_id}: set ${field} from ${formatPreviewValue(before)} to ${formatPreviewValue(after)}`,
+    });
+  }
+  return operations;
+}
+
+function tagReplaceOperations(
+  runtime: AdminApiRuntime,
+  change: Extract<AdminChange, { type: "tags.replace" }>,
+  changeIndex: number,
+): AdminChangeOperation[] {
+  const repoId = change.scope === "repo" ? change.repo_id! : null;
+  if (repoId !== null) assertActiveRepo(runtime, repoId);
+  const desired = tagVocabFromChange(runtime, change);
+  const current = runtime.tagService.getVocab(
+    change.scope,
+    repoId === null ? undefined : repoId,
+  );
+  const operations: AdminChangeOperation[] = [];
+  const namespaces = [
+    ...new Set([...Object.keys(current), ...Object.keys(desired)]),
+  ].sort();
+  for (const namespace of namespaces) {
+    const before = current[namespace] ?? null;
+    const after = desired[namespace] ?? null;
+    if (stableJson(before) === stableJson(after)) continue;
+    const target = repoId === null ? "deployment" : repoId;
+    operations.push({
+      op_id: `change-${changeIndex + 1}:tags:${namespace}`,
+      type: "tag_namespace.replace",
+      scope: change.scope,
+      target,
+      field: namespace,
+      before,
+      after,
+      summary:
+        `${target} tags: replace ${namespace} from ${formatPreviewValue(before)} to ${formatPreviewValue(after)}`,
+    });
+  }
+  return operations;
+}
+
+function applyOneChange(runtime: AdminApiRuntime, change: AdminChange): void {
+  if (change.type === "repo.update") {
+    validateAgentPatch(runtime, change.repo_id, change.patch);
+    runtime.repoService.update(change.repo_id, change.patch);
+    return;
+  }
+  const repoId = change.scope === "repo" ? change.repo_id! : null;
+  runtime.tagService.apply(change.scope, repoId, tagVocabFromChange(runtime, change));
+}
+
+const REPO_PATCH_FIELDS = [
+  "repo_url",
+  "base_branch",
+  "package_manager",
+  "install_cmd",
+  "test_cmd",
+  "ci_workflow_name",
+  "contribution_guide_path",
+  "agent_worker",
+  "agent_reviewer",
+  "model_worker",
+  "model_reviewer",
+] as const satisfies readonly (keyof RepoPatch)[];
+
+function assertActiveRepo(runtime: AdminApiRuntime, repoId: string): RepoRow {
+  const repo = runtime.repoService.get(repoId);
+  if (repo === null) {
+    throw new QuayError("unknown_repo", `repo "${repoId}" not found`, {
+      repo_id: repoId,
+    });
+  }
+  if (repo.archived_at !== null) {
+    throw new QuayError("repo_archived", `repo "${repoId}" is archived`, {
+      repo_id: repoId,
+    });
+  }
+  return repo;
+}
+
+function validateAgentPatch(
+  runtime: AdminApiRuntime,
+  repoId: string,
+  patch: RepoPatch,
+): void {
+  const selection = buildAgentSelection(runtime.config);
+  const entries = [
+    ["worker", patch.agent_worker],
+    ["reviewer", patch.agent_reviewer],
+  ] as const;
+  for (const [role, agentName] of entries) {
+    if (agentName === undefined || agentName === null) continue;
+    const invocation = selection.invocations[agentName];
+    if (invocation === undefined || invocation[role] === undefined) {
+      throw new QuayError(
+        "validation_error",
+        `agent "${agentName}" is not registered for ${role} role`,
+        { repo_id: repoId, role, agent: agentName },
+      );
+    }
+  }
+}
+
+function tagVocabFromChange(
+  runtime: AdminApiRuntime,
+  change: Extract<AdminChange, { type: "tags.replace" }>,
+): TagVocab {
+  const desired = Object.fromEntries(
+    [...change.tag_namespaces]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((namespace) => [
+        namespace.name,
+        {
+          required: namespace.required,
+          values: [...new Set(namespace.values)].sort(),
+        },
+      ]),
+  );
+  const validated = runtime.tagService.validateApply(
+    change.scope,
+    change.scope === "repo" ? change.repo_id! : null,
+    desired,
+  );
+  return Object.fromEntries(
+    Object.entries(validated).map(([namespace, spec]) => [
+      namespace,
+      { required: spec.required ?? false, values: spec.values },
+    ]),
+  );
+}
+
+function buildAdminReadModel(runtime: AdminApiRuntime): Record<string, unknown> {
+  return {
+    revision: computeAdminRevision(runtime),
+    global: buildGlobalReadModel(runtime),
+    matrix: buildMatrixReadModel(runtime),
+    repos: runtime.repoService
+      .list({ activeOnly: true })
+      .map((repo) => buildRepoDetail(runtime, repo)),
+  };
+}
+
+function computeAdminRevision(runtime: AdminApiRuntime): string {
+  const state = {
+    version: 1,
+    repos: runtime.repoService.list({ activeOnly: true }),
+    deployment_tags: runtime.tagService.getVocab("deployment"),
+    repo_tags: Object.fromEntries(
+      runtime.repoService
+        .list({ activeOnly: true })
+        .map((repo) => [
+          repo.repo_id,
+          runtime.tagService.getVocab("repo", repo.repo_id),
+        ]),
+    ),
+  };
+  const digest = createHash("sha256").update(stableJson(state)).digest("hex");
+  return `sha256:${digest}`;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function formatPreviewValue(value: unknown): string {
+  if (value === null || value === undefined) return "unset";
+  if (typeof value === "string") return JSON.stringify(value);
+  return stableJson(value);
+}
+
+function quoteEtag(revision: string): string {
+  return `"${revision}"`;
 }
 
 function configField(
@@ -807,11 +1367,62 @@ function jsonResponse(
   });
 }
 
+function adminErrorResponse(err: unknown, extraHeaders: JsonHeaders): Response {
+  if (err instanceof AdminHttpError) {
+    return errorResponse(
+      err.status,
+      err.code,
+      err.message,
+      extraHeaders,
+      err.details,
+    );
+  }
+  if (err instanceof QuayError) {
+    return errorResponse(
+      statusForQuayError(err),
+      err.code,
+      err.message,
+      extraHeaders,
+      err.details,
+    );
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return errorResponse(
+    500,
+    "apply_failed",
+    `Admin API request failed: ${message}`,
+    extraHeaders,
+  );
+}
+
+function statusForQuayError(err: QuayError): number {
+  switch (err.code) {
+    case "stale_revision":
+      return 409;
+    case "unsupported_change":
+      return 422;
+    case "repo_has_active_tasks":
+      return 409;
+    case "validation_error":
+    case "unknown_repo":
+    case "repo_archived":
+    case "duplicate_repo":
+      return 400;
+    default:
+      return 500;
+  }
+}
+
 function errorResponse(
   status: number,
   code: string,
   message: string,
   extraHeaders: JsonHeaders = {},
+  details?: Record<string, unknown>,
 ): Response {
-  return jsonResponse({ error: code, message }, status, extraHeaders);
+  return jsonResponse(
+    details === undefined ? { error: code, message } : { error: code, message, details },
+    status,
+    extraHeaders,
+  );
 }
