@@ -24,6 +24,7 @@ without doing work.
 ```bash
 quay serve
 quay serve --host 127.0.0.1 --port 9731
+quay serve --ui-dir ../quay-ui/dist
 ```
 
 `quay serve` starts the local Admin HTTP API using the same config, data
@@ -33,6 +34,23 @@ URL. `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or
 `localhost`); non-loopback binds are rejected because the Admin API is
 unauthenticated and exposes local repo registry data plus a narrow structured
 write surface.
+
+Pass `--ui-dir <path>` to host a built Quay UI bundle from disk:
+
+```bash
+cd ../quay-ui
+bun run build
+
+cd ../quay
+quay serve --ui-dir ../quay-ui/dist
+```
+
+The UI directory must exist, be readable, and contain a readable `index.html`.
+When enabled, Quay serves static files from that directory and returns
+`index.html` for non-API SPA routes such as `/repos/example`. Versioned Admin
+API paths under `/v1/*` keep precedence over static files and are never served
+from the UI directory. Missing static asset paths such as `/assets/app.js`
+return 404 instead of falling back to the SPA entrypoint.
 
 Initial endpoints:
 
