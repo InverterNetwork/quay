@@ -192,7 +192,7 @@ test("embedded handler serves static assets with content type and cache headers"
   expect(await response.text()).toBe("console.log('quay');");
 });
 
-test("embedded handler protects static UI assets when admin auth is configured", async () => {
+test("embedded handler serves browser bootstrap while protected API requires auth", async () => {
   h = createHarness();
   const handler = createEmbeddedAdminApiHandler(
     createRuntime({
@@ -205,21 +205,26 @@ test("embedded handler protects static UI assets when admin auth is configured",
     }),
   );
 
-  const missing = await handler(new Request("http://quay.local/"));
-  expect(missing.status).toBe(401);
-  expect(missing.headers.get("content-type")).toContain("application/json");
-  expect(await missing.json()).toEqual({
+  const apiMissing = await handler(new Request("http://quay.local/v1/meta"));
+  expect(apiMissing.status).toBe(401);
+  expect(apiMissing.headers.get("content-type")).toContain("application/json");
+  expect(await apiMissing.json()).toEqual({
     error: "admin_auth_required",
     message: "Admin API requires Authorization: Bearer <token>",
   });
 
-  const valid = await handler(
-    new Request("http://quay.local/", {
-      headers: { Authorization: "Bearer secret-token" },
-    }),
-  );
-  expect(valid.status).toBe(200);
-  expect(valid.headers.get("content-type")).toContain("text/html");
+  const root = await handler(new Request("http://quay.local/"));
+  expect(root.status).toBe(200);
+  expect(root.headers.get("content-type")).toContain("text/html");
+  const body = await root.text();
+  expect(body).toContain("__QUAY_ADMIN_AUTH_BOOTSTRAP__");
+  expect(body).toContain("sessionStorage.setItem(key,token)");
+  expect(body).toContain('url.pathname.startsWith("/v1/")');
+  expect(body).toContain('headers.set("Authorization"');
+
+  const asset = await handler(new Request("http://quay.local/assets/app.js"));
+  expect(asset.status).toBe(200);
+  expect(await asset.text()).toBe("console.log('quay');");
 });
 
 test("hosted handler returns index.html for non-api SPA routes", async () => {

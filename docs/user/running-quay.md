@@ -31,14 +31,21 @@ quay serve --ui-dir ../quay-ui/dist
 directory, migrations, and repo registry as the rest of the CLI. The server
 binds to `127.0.0.1:9731` by default and prints one JSON line with the bound
 URL. `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or
-`localhost`); non-loopback binds are rejected because the Admin API is
-unauthenticated and exposes local repo registry data plus a narrow structured
-write surface.
+`localhost`); non-loopback binds are rejected because the Admin API exposes
+local repo registry data plus a narrow structured write surface. Local
+standalone serves are unauthenticated by default. Set `[admin].require_auth =
+true` and provide `QUAY_ADMIN_TOKEN` to require bearer auth for `/v1/*`.
 
 Release binaries include an embedded production Quay UI bundle. With those
 binaries, `quay serve` hosts the Admin UI and injects same-origin API runtime
 config before the UI app loads, so browser requests go to the serving Quay
 process under `/v1/*`.
+
+When admin auth is enabled, static Admin UI assets still load in a browser, and
+the injected runtime config adds `Authorization: Bearer <token>` to same-origin
+`/v1/*` fetches. Open the UI with `/#quay_admin_token=<token>` once to move the
+token into browser `sessionStorage`; non-browser clients and header-injecting
+proxies can send the `Authorization` header directly.
 
 Pass `--ui-dir <path>` to override the embedded UI with a built Quay UI bundle
 from disk:

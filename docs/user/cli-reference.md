@@ -60,9 +60,15 @@ reload before retrying.
 
 `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or `localhost`).
 By default the API is unauthenticated on loopback for local standalone use, so
-Quay refuses non-loopback binds. To protect `/v1/*` and the served Admin UI,
-set `[admin].require_auth = true` and provide `QUAY_ADMIN_TOKEN`; requests must
+Quay refuses non-loopback binds. To protect `/v1/*`, set
+`[admin].require_auth = true` and provide `QUAY_ADMIN_TOKEN`; API requests must
 send `Authorization: Bearer <token>`.
+
+Static Admin UI assets stay browser-loadable in protected mode. Quay injects a
+same-origin `/v1/*` fetch wrapper into `index.html`; open the UI with
+`/#quay_admin_token=<token>` once to store the token in browser
+`sessionStorage`. Non-browser clients and reverse proxies can send the
+`Authorization` header directly.
 
 `--ui-dir` overrides embedded UI assets with a built Quay UI directory from the
 same loopback server:

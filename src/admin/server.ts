@@ -6,8 +6,7 @@ import {
   type AdminApiRuntime,
 } from "./api.ts";
 import {
-  adminAuthErrorResponse,
-  authorizeAdminRequest,
+  resolveAdminAuth,
 } from "./auth.ts";
 import { EMBEDDED_UI_ASSETS } from "../build/embedded.generated.ts";
 
@@ -87,14 +86,17 @@ export function createHostedAdminApiHandler(
   runtime: AdminApiRuntime,
   uiDir: string,
 ) {
-  return createAdminUiHandler(runtime, createStaticUiHandler(uiDir));
+  return createAdminUiHandler(runtime, createStaticUiHandler(runtime, uiDir));
 }
 
 export function createEmbeddedAdminApiHandler(
   runtime: AdminApiRuntime,
   assets: readonly EmbeddedUiAsset[],
 ) {
-  return createAdminUiHandler(runtime, createEmbeddedStaticUiHandler(assets));
+  return createAdminUiHandler(
+    runtime,
+    createEmbeddedStaticUiHandler(runtime, assets),
+  );
 }
 
 function createAdminUiHandler(
@@ -109,15 +111,11 @@ function createAdminUiHandler(
     if (isAdminApiPath(url.pathname)) {
       return apiHandler(request);
     }
-    const auth = authorizeAdminRequest(runtime, request);
-    if (!auth.ok) {
-      return adminAuthErrorResponse(auth.failure);
-    }
     return staticHandler(request);
   };
 }
 
-function createStaticUiHandler(uiDir: string) {
+function createStaticUiHandler(runtime: AdminApiRuntime, uiDir: string) {
   const root = resolve(uiDir);
   const indexPath = join(root, "index.html");
   return async function handleStaticUi(request: Request): Promise<Response> {
@@ -144,6 +142,7 @@ function createStaticUiHandler(uiDir: string) {
       targetPath.path,
       url.pathname,
       request.method,
+      runtime,
     );
     if (response !== null) return response;
 
@@ -156,7 +155,7 @@ function createStaticUiHandler(uiDir: string) {
       );
     }
 
-    return (await readStaticFile(indexPath, "/index.html", request.method)) ??
+    return (await readStaticFile(indexPath, "/index.html", request.method, runtime)) ??
       textResponse(
         500,
         "static UI index.html is no longer readable",
@@ -166,7 +165,10 @@ function createStaticUiHandler(uiDir: string) {
   };
 }
 
-function createEmbeddedStaticUiHandler(assets: readonly EmbeddedUiAsset[]) {
+function createEmbeddedStaticUiHandler(
+  runtime: AdminApiRuntime,
+  assets: readonly EmbeddedUiAsset[],
+) {
   const assetByPath = new Map<string, EmbeddedUiAsset>();
   for (const asset of assets) {
     assetByPath.set(normalizeEmbeddedAssetPath(asset.path), asset);
@@ -196,7 +198,7 @@ function createEmbeddedStaticUiHandler(assets: readonly EmbeddedUiAsset[]) {
 
     const targetAsset = assetByPath.get(staticAssetPath(target.segments));
     if (targetAsset !== undefined) {
-      return embeddedAssetResponse(targetAsset, url.pathname, request.method);
+      return embeddedAssetResponse(targetAsset, url.pathname, request.method, runtime);
     }
 
     if (target.assetRequest) {
@@ -208,7 +210,7 @@ function createEmbeddedStaticUiHandler(assets: readonly EmbeddedUiAsset[]) {
       );
     }
 
-    return embeddedAssetResponse(indexAsset, "/index.html", request.method);
+    return embeddedAssetResponse(indexAsset, "/index.html", request.method, runtime);
   };
 }
 
@@ -286,10 +288,11 @@ async function readStaticFile(
   filePath: string,
   requestPath: string,
   method: string,
+  runtime: AdminApiRuntime,
 ): Promise<Response | null> {
   try {
     const bytes = await readFile(filePath);
-    return staticAssetResponse(bytes, requestPath, method);
+    return staticAssetResponse(bytes, requestPath, method, runtime);
   } catch (err) {
     const code = typeof err === "object" && err !== null && "code" in err
       ? String((err as { code?: unknown }).code)
@@ -310,11 +313,13 @@ function embeddedAssetResponse(
   asset: EmbeddedUiAsset,
   requestPath: string,
   method: string,
+  runtime: AdminApiRuntime,
 ): Response {
   return staticAssetResponse(
     Buffer.from(asset.contentBase64, "base64"),
     requestPath,
     method,
+    runtime,
   );
 }
 
@@ -322,32 +327,56 @@ function staticAssetResponse(
   bytes: Uint8Array,
   requestPath: string,
   method: string,
+  runtime: AdminApiRuntime,
 ): Response {
-  return new Response(method === "HEAD" ? null : bodyForStaticAsset(bytes, requestPath), {
+  return new Response(method === "HEAD" ? null : bodyForStaticAsset(bytes, requestPath, runtime), {
     status: 200,
     headers: staticHeaders(requestPath),
   });
 }
 
-function bodyForStaticAsset(bytes: Uint8Array, requestPath: string): Uint8Array | string {
+function bodyForStaticAsset(
+  bytes: Uint8Array,
+  requestPath: string,
+  runtime: AdminApiRuntime,
+): Uint8Array | string {
   if (!isIndexHtmlRequestPath(requestPath)) return bytes;
-  return injectIndexRuntimeConfig(new TextDecoder().decode(bytes));
+  return injectIndexRuntimeConfig(new TextDecoder().decode(bytes), runtime);
 }
 
 const RUNTIME_CONFIG_SCRIPT =
-  `<script>window.__QUAY_API_BASE_URL__=window.__QUAY_API_BASE_URL__??window.location.origin;</script>`;
+  `window.__QUAY_API_BASE_URL__=window.__QUAY_API_BASE_URL__??window.location.origin;`;
 
-function injectIndexRuntimeConfig(html: string): string {
-  if (html.includes("__QUAY_API_BASE_URL__")) return html;
+const ADMIN_AUTH_BOOTSTRAP_MARKER = "__QUAY_ADMIN_AUTH_BOOTSTRAP__";
+
+function runtimeConfigScript(runtime: AdminApiRuntime): string {
+  const auth = resolveAdminAuth(runtime);
+  const lines = [RUNTIME_CONFIG_SCRIPT];
+  if (auth.enabled) {
+    lines.push(`window.${ADMIN_AUTH_BOOTSTRAP_MARKER}=true;`);
+    lines.push(`(()=>{const key="quay_admin_token";const params=new URLSearchParams(window.location.hash.startsWith("#")?window.location.hash.slice(1):window.location.hash);const token=params.get(key);if(token!==null&&token!==""){window.sessionStorage.setItem(key,token);window.history.replaceState(null,document.title,window.location.pathname+window.location.search);}const originalFetch=window.fetch.bind(window);window.fetch=(input,init={})=>{const url=new URL(input instanceof Request?input.url:String(input),window.location.href);if(url.origin===window.location.origin&&url.pathname.startsWith("/v1/")){const stored=window.sessionStorage.getItem(key);if(stored!==null&&stored!==""){const headers=new Headers(input instanceof Request?input.headers:init.headers);if(!headers.has("Authorization"))headers.set("Authorization",\`Bearer \${stored}\`);if(input instanceof Request){input=new Request(input,{headers});}else{init={...init,headers};}}}return originalFetch(input,init);};})();`);
+  }
+  return `<script>${lines.join("")}</script>`;
+}
+
+function injectIndexRuntimeConfig(html: string, runtime: AdminApiRuntime): string {
+  const auth = resolveAdminAuth(runtime);
+  if (
+    html.includes("__QUAY_API_BASE_URL__") &&
+    (!auth.enabled || html.includes(ADMIN_AUTH_BOOTSTRAP_MARKER))
+  ) {
+    return html;
+  }
+  const script = runtimeConfigScript(runtime);
   const headClose = html.match(/<\/head\s*>/i);
   if (headClose?.index !== undefined) {
-    return `${html.slice(0, headClose.index)}${RUNTIME_CONFIG_SCRIPT}${html.slice(headClose.index)}`;
+    return `${html.slice(0, headClose.index)}${script}${html.slice(headClose.index)}`;
   }
   const moduleScriptIndex = html.search(/<script\b[^>]*\btype=["']module["'][^>]*>/i);
   if (moduleScriptIndex >= 0) {
-    return `${html.slice(0, moduleScriptIndex)}${RUNTIME_CONFIG_SCRIPT}${html.slice(moduleScriptIndex)}`;
+    return `${html.slice(0, moduleScriptIndex)}${script}${html.slice(moduleScriptIndex)}`;
   }
-  return `${RUNTIME_CONFIG_SCRIPT}${html}`;
+  return `${script}${html}`;
 }
 
 function isIndexHtmlRequestPath(requestPath: string): boolean {
