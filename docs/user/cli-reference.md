@@ -47,10 +47,15 @@ quay -v
 quay serve [--host <host>] [--port <port>]
 ```
 
-Starts the read-only Admin HTTP API using the same runtime wiring as CLI
-commands: config loading, data directory resolution, migrations, and repo
-registry services. Defaults to `127.0.0.1:9731`. The OpenAPI contract is
-checked in at `docs/api/openapi.yaml`.
+Starts the Admin HTTP API using the same runtime wiring as CLI commands:
+config loading, data directory resolution, migrations, and repo registry
+services. Defaults to `127.0.0.1:9731`. The OpenAPI contract is checked in at
+`docs/api/openapi.yaml`.
+
+The API exposes read models plus a narrow structured write surface under
+`POST /v1/changes/preview` and `POST /v1/changes/apply`. Apply requests are
+guarded by the read-model revision returned by the API, so stale clients must
+reload before retrying.
 
 `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or `localhost`).
 The API is unauthenticated, so Quay refuses non-loopback binds.

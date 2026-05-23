@@ -14,6 +14,7 @@ export interface TagNamespaceState {
 }
 
 export type TagVocab = Record<string, TagNamespaceState>;
+type TagApplyVocab = Record<string, { values: string[]; required?: boolean | undefined }>;
 
 export interface TagServiceDeps {
   db: DB;
@@ -43,6 +44,11 @@ export interface TagService {
     namespace: string,
     required: boolean,
   ): void;
+  validateApply(
+    scope: TagScope,
+    repoId: string | null,
+    desired: unknown,
+  ): TagApplyVocab;
   apply(
     scope: TagScope,
     repoId: string | null,
@@ -257,11 +263,11 @@ export function createTagService({
     ).run(scope, repoId, namespace, required ? 1 : 0, nowMs());
   }
 
-  function apply(
+  function validateApply(
     scope: TagScope,
     repoId: string | null,
     desiredRaw: unknown,
-  ): TagVocab {
+  ): TagApplyVocab {
     ensureRepoForScope(scope, repoId);
     const desired = parseOrThrow(applyInputSchema, desiredRaw, "apply");
     for (const [ns, spec] of Object.entries(desired)) {
@@ -270,6 +276,15 @@ export function createTagService({
         parseOrThrow(valueSchema, v, `value in namespace "${ns}"`);
       }
     }
+    return desired;
+  }
+
+  function apply(
+    scope: TagScope,
+    repoId: string | null,
+    desiredRaw: unknown,
+  ): TagVocab {
+    const desired = validateApply(scope, repoId, desiredRaw);
 
     const insertValue = db.query(
       `INSERT OR IGNORE INTO tag_namespaces (scope, repo_id, namespace, value, created_at)
@@ -310,6 +325,7 @@ export function createTagService({
     setValue,
     unsetValue,
     setRequired,
+    validateApply,
     apply,
   };
 }

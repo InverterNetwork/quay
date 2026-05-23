@@ -14,6 +14,9 @@ export type QuayErrorCode =
   | "adapter_not_enabled"
   | "adapter_not_configured"
   | "adapter_error"
+  | "stale_revision"
+  | "unsupported_change"
+  | "apply_failed"
   // Raised by the Linear adapter when the configured state-name map
   // references a workflow state that doesn't exist on the issue's team.
   // Caught upstream by `syncLinearState` and downgraded to a warning.
