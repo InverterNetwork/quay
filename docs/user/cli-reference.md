@@ -41,6 +41,17 @@ quay -v
 
 `--version` short-circuits before config, DB, and migrations.
 
+## Serve
+
+```bash
+quay serve [--host <host>] [--port <port>]
+```
+
+Starts the read-only Admin HTTP API using the same runtime wiring as CLI
+commands: config loading, data directory resolution, migrations, and repo
+registry services. Defaults to `127.0.0.1:9731`. The OpenAPI contract is
+checked in at `docs/api/openapi.yaml`.
+
 ## Repo
 
 ```bash

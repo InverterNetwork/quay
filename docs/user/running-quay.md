@@ -19,6 +19,34 @@ Output is newline-delimited JSON. Each line describes one task action:
 If another tick or cancel holds the supervisor lock, `quay tick` exits cleanly
 without doing work.
 
+## Admin API
+
+```bash
+quay serve
+quay serve --host 127.0.0.1 --port 9731
+```
+
+`quay serve` starts the local read-only Admin HTTP API using the same config,
+data directory, migrations, and repo registry as the rest of the CLI. The
+server binds to `127.0.0.1:9731` by default and prints one JSON line with the
+bound URL.
+
+Initial endpoints:
+
+- `GET /v1/meta`
+- `GET /v1/repos`
+- `GET /v1/repos/<repo_id>`
+
+The API returns JSON and uses a stable error envelope:
+
+```json
+{"error":"repo_not_found","message":"repo \"example\" not found"}
+```
+
+The versioned contract is owned in `docs/api/openapi.yaml`. UI clients should
+target the `/v1/*` paths from that contract and should not call CLI commands or
+depend on `hermes-agent`.
+
 ## What Tick Processes
 
 Each cycle:

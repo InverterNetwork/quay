@@ -1,48 +1,26 @@
 #!/usr/bin/env bun
-// Quay CLI entry. Wires real adapters and a shared SQLite DB under
-// $QUAY_DATA_DIR (or ~/.quay), then hands argv to dispatch().
+// Quay CLI entry. Handles stateless short-circuits and startup environment
+// guards, then creates the shared runtime used by CLI dispatch and HTTP serve.
 //
 // Tests do NOT import this file: they call dispatch() directly with fakes.
 // Keep this entry thin.
 
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { createArtifactStore } from "../artifacts/store.ts";
+import { readFileSync } from "node:fs";
 import {
   EMBEDDED_MIGRATIONS,
   EMBEDDED_TICKET_SCHEMA,
   QUAY_VERSION,
 } from "../build/embedded.generated.ts";
-import { openDatabase } from "../db/connection.ts";
-import { runMigrations } from "../db/migrate.ts";
 import {
-  GitHubCliAdapter,
-  LinearAdapter,
-  LocalGitAdapter,
-  ShellCommandRunner,
-  SlackAdapter,
-  TmuxAdapter,
-} from "../adapters/index.ts";
-import { FileSupervisorLock } from "../core/supervisor_lock.ts";
-import { SpawnedValidatorRunner } from "../core/validator_runner.ts";
-import { SystemClock } from "../ports/clock.ts";
-import { UuidIdGenerator } from "../ports/id_generator.ts";
-import {
-  adaptersConfigFromConfig,
-  linearAdapterOptionsFromConfig,
-  loadConfig,
-  slackAdapterOptionsFromConfig,
-  tickOptionsFromConfig,
-} from "./config.ts";
-import { resolveDataDir } from "./data_dir.ts";
-import { dispatch, type CliDeps } from "./dispatch.ts";
+  createQuayRuntime,
+  QuayRuntimeStartupError,
+} from "../runtime/quay_runtime.ts";
+import { dispatch } from "./dispatch.ts";
+import { commandHelp, wantsHelp } from "./help.ts";
 import { createLazyRepoVocabLookup } from "./repo_vocab_lookup.ts";
+import { runServeCommand } from "./serve.ts";
 import { detectStartupEnvHazard } from "./startup_env.ts";
 import { handleValidateTicket } from "./validate_ticket.ts";
-import { createRepoService } from "../core/repos/service.ts";
-import { createTagService } from "../core/tags/service.ts";
-import { createAgentResolver } from "../core/agents.ts";
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
@@ -79,6 +57,10 @@ async function main(): Promise<number> {
     );
     return result.exitCode;
   }
+  if (argv[0] === "serve" && wantsHelp(argv.slice(1))) {
+    process.stdout.write(commandHelp(["serve"]) ?? "");
+    return 0;
+  }
   // An inherited cwd the process can't read (e.g. `sudo -u <unprivileged>`
   // from a root shell at `/root`) has historically degraded config + DB
   // init into a silent `~/.quay/` fallback. Pin cwd to `/` for init, then
@@ -110,95 +92,21 @@ async function main(): Promise<number> {
     );
     return 2;
   }
-  const { config } = loadConfig();
-  const adaptersConfig = adaptersConfigFromConfig(config);
-  const dataDir = resolveDataDir(process.env, config.data_dir, homedir());
-  // Spec §13: `repos_root` defaults to `${data_dir}/repos`. The config
-  // override is honored verbatim (operator-controlled absolute path), with
-  // the same precedence as `worktree_root` — config wins over the derived
-  // default; there is no env override for this knob.
-  //
-  // Consumer model: quay does NOT create an operator-configured `repos_root`.
-  // If the operator explicitly sets `repos_root` in config, that directory must
-  // already exist — a missing path indicates a misconfiguration (e.g. a typo'd
-  // path), and silently materializing it would hide the error until a later
-  // `bare_clone_missing`. The derived default (`${data_dir}/repos`) is still
-  // mkdir'd because it's quay's own data dir.
-  const reposRootIsDerived = config.repos_root === undefined;
-  const reposRoot = config.repos_root ?? join(dataDir, "repos");
-  // Spec §13: `worktree_root` defaults to `${data_dir}/worktrees`. The config
-  // override is honored verbatim (operator-controlled absolute path), with
-  // the same precedence as `tick_lock_path` — config wins over the derived
-  // default; there is no env override for this knob.
-  const worktreesRoot = config.worktree_root ?? join(dataDir, "worktrees");
-  const artifactsRoot = join(dataDir, "artifacts");
-  // Always mkdir quay-owned dirs. Only mkdir reposRoot when it is the derived
-  // default; an explicitly configured path must already exist.
-  const dirsQuayOwns = [dataDir, worktreesRoot, artifactsRoot];
-  if (reposRootIsDerived) dirsQuayOwns.push(reposRoot);
-  for (const d of dirsQuayOwns) {
-    mkdirSync(d, { recursive: true });
-  }
-  if (!reposRootIsDerived && !existsSync(reposRoot)) {
-    process.stderr.write(
-      `${JSON.stringify({ error: "repos_root_missing", message: `repos_root "${reposRoot}" does not exist; quay does not create operator-configured paths. Create the directory yourself, then retry.` })}\n`,
-    );
-    return 2;
-  }
-  const db = openDatabase(join(dataDir, "quay.db"));
-  runMigrations(db, EMBEDDED_MIGRATIONS);
-  const clock = new SystemClock();
-  const ids = new UuidIdGenerator();
-  const artifactStore = createArtifactStore({
-    db,
-    artifactRoot: artifactsRoot,
-    clock,
-  });
-  const repoService = createRepoService({ db, clock });
-  const agentResolver = createAgentResolver({ db, config });
-
-  const deps: CliDeps = {
-    db,
-    clock,
-    ids,
-    git: new LocalGitAdapter(reposRoot),
-    github: new GitHubCliAdapter(reposRoot),
-    tmux: new TmuxAdapter(),
-    slack: new SlackAdapter(slackAdapterOptionsFromConfig(config)),
-    linear: new LinearAdapter(linearAdapterOptionsFromConfig(config)),
-    commandRunner: new ShellCommandRunner(),
-    artifactStore,
-    supervisorLock: new FileSupervisorLock(
-      // Spec §11: `tick_lock_path` defaults to `${data_dir}/tick.lock`. Name
-      // retained for compatibility; semantically the supervisor lock that
-      // serializes every tmux/Slack/gh/branch side effect across processes.
-      config.supervisor_lock_stale_seconds !== undefined
-        ? {
-            lockfilePath:
-              config.tick_lock_path ?? join(dataDir, "tick.lock"),
-            staleSeconds: config.supervisor_lock_stale_seconds,
-          }
-        : {
-            lockfilePath:
-              config.tick_lock_path ?? join(dataDir, "tick.lock"),
-          },
-    ),
-    paths: { reposRoot, worktreesRoot, artifactsRoot },
-    tickOptions: tickOptionsFromConfig(config),
-    ...(config.retry_budget !== undefined
-      ? { retryBudget: config.retry_budget }
-      : {}),
-    // The Linear adapter and validator runner are constructed
-    // unconditionally; the dispatcher gates `--linear-issue` on
-    // `adaptersConfig.linearEnabled`. Tokens resolve lazily on first use,
-    // so a deployment that never enables Linear pays no cost for the
-    // unused adapter object.
-    validatorRunner: new SpawnedValidatorRunner(),
-    adaptersConfig,
-    repoService,
-    tagService: createTagService({ db, clock, repoService }),
-    agentResolver,
-  };
+  const runtime = (() => {
+    try {
+      return createQuayRuntime({
+        migrations: EMBEDDED_MIGRATIONS,
+        version: QUAY_VERSION,
+      });
+    } catch (err) {
+      if (err instanceof QuayRuntimeStartupError) {
+        process.stderr.write(`${JSON.stringify(err.toPayload())}\n`);
+        return { startupExitCode: err.exitCode } as const;
+      }
+      throw err;
+    }
+  })();
+  if ("startupExitCode" in runtime) return runtime.startupExitCode;
 
   const io = {
     // process.stdout.write accepts both string and Uint8Array natively,
@@ -217,8 +125,15 @@ async function main(): Promise<number> {
       process.chdir(invocationCwd);
     } catch {}
   }
-  const result = await dispatch(argv, deps, io);
-  return result.exitCode;
+  try {
+    if (argv[0] === "serve") {
+      return await runServeCommand(argv.slice(1), runtime, io);
+    }
+    const result = await dispatch(argv, runtime.cliDeps, io);
+    return result.exitCode;
+  } finally {
+    runtime.close();
+  }
 }
 
 main().then((code) => process.exit(code)).catch((err) => {
