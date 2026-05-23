@@ -567,7 +567,7 @@ components:
       required:
         - name
         - roles
-        - cmd
+        - commands
         - capabilities
         - used_by_repos
         - used_by_tasks
@@ -581,8 +581,15 @@ components:
             enum:
               - worker
               - reviewer
-        cmd:
-          type: string
+        commands:
+          type: object
+          additionalProperties: false
+          minProperties: 1
+          properties:
+            worker:
+              type: string
+            reviewer:
+              type: string
         capabilities:
           type: array
           items:

@@ -597,10 +597,13 @@ function buildAgentInvocations(
           ...(invocation.reviewerCapabilities ?? []),
         ]),
       ];
+      const commands = Object.fromEntries(
+        roles.map((role) => [role, invocation[role] ?? ""]),
+      );
       return {
         name,
         roles,
-        cmd: invocation.worker ?? invocation.reviewer ?? "",
+        commands,
         capabilities,
         used_by_repos: repos.filter((repo) =>
           roles.some((role) => effectiveRepoAgent(repo, role, selection) === name)
@@ -724,10 +727,12 @@ function deploymentTagNamespaces(runtime: AdminApiRuntime): AdminTagNamespace[] 
 function repoTagExtensionCounts(db: DB): Map<string, number> {
   const rows = db
     .query<{ namespace: string; n: number }, []>(
-      `SELECT namespace, COUNT(DISTINCT repo_id) AS n
-         FROM tag_namespaces
-        WHERE scope = 'repo'
-        GROUP BY namespace`,
+      `SELECT tn.namespace, COUNT(DISTINCT tn.repo_id) AS n
+         FROM tag_namespaces tn
+         JOIN repos r ON r.repo_id = tn.repo_id
+        WHERE tn.scope = 'repo'
+          AND r.archived_at IS NULL
+        GROUP BY tn.namespace`,
     )
     .all();
   return new Map(rows.map((row) => [row.namespace, row.n]));
