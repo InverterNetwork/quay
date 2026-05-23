@@ -61,6 +61,7 @@ export interface QuayRuntime {
   config: QuayConfig;
   configPath: string | null;
   dataDir: string;
+  env?: NodeJS.ProcessEnv;
   paths: CliPaths;
   db: DB;
   repoService: RepoService;
@@ -160,6 +161,7 @@ export function createQuayRuntime(
     config,
     configPath,
     dataDir,
+    env,
     paths,
     db,
     repoService,

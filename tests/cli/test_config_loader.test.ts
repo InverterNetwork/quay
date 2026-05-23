@@ -325,6 +325,39 @@ max_thread_messages = 400
   });
 });
 
+test("loads [admin] bearer auth configuration", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[admin]
+require_auth = true
+token_env = "CUSTOM_QUAY_ADMIN_TOKEN"
+forwarded_identity_header = "X-Quay-User"
+`,
+  );
+  const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
+  expect(result.config.admin).toEqual({
+    require_auth: true,
+    token_env: "CUSTOM_QUAY_ADMIN_TOKEN",
+    forwarded_identity_header: "X-Quay-User",
+  });
+});
+
+test("[admin].forwarded_identity_header rejects invalid HTTP header names", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[admin]
+forwarded_identity_header = "not a header"
+`,
+  );
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /forwarded_identity_header|header name/i,
+  );
+});
+
 test("absent [adapters] section means both adapters disabled", () => {
   expect(adaptersConfigFromConfig({})).toEqual({
     linearEnabled: false,
