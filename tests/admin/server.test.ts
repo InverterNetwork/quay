@@ -20,16 +20,19 @@ afterEach(() => {
   h = null;
 });
 
-function createRuntime(): AdminApiRuntime {
+function createRuntime(opts: {
+  config?: AdminApiRuntime["config"];
+  env?: NodeJS.ProcessEnv;
+} = {}): AdminApiRuntime {
   if (h === null) throw new Error("harness not initialized");
   const repoService = createRepoService({ db: h.db, clock: h.clock });
   return {
     version: "test-version",
-    config: {},
+    config: opts.config ?? {},
     configPath: null,
     dataDir: h.dataDir,
     db: h.db,
-    env: {},
+    env: opts.env ?? {},
     paths: {
       reposRoot: `${h.dataDir}/repos`,
       worktreesRoot: `${h.dataDir}/worktrees`,
@@ -187,6 +190,36 @@ test("embedded handler serves static assets with content type and cache headers"
     "public, max-age=31536000, immutable",
   );
   expect(await response.text()).toBe("console.log('quay');");
+});
+
+test("embedded handler protects static UI assets when admin auth is configured", async () => {
+  h = createHarness();
+  const handler = createEmbeddedAdminApiHandler(
+    createRuntime({
+      config: { admin: { require_auth: true } },
+      env: { QUAY_ADMIN_TOKEN: "secret-token" },
+    }),
+    makeEmbeddedAssets({
+      "index.html": "<!doctype html><div id=\"root\"></div>",
+      "assets/app.js": "console.log('quay');",
+    }),
+  );
+
+  const missing = await handler(new Request("http://quay.local/"));
+  expect(missing.status).toBe(401);
+  expect(missing.headers.get("content-type")).toContain("application/json");
+  expect(await missing.json()).toEqual({
+    error: "admin_auth_required",
+    message: "Admin API requires Authorization: Bearer <token>",
+  });
+
+  const valid = await handler(
+    new Request("http://quay.local/", {
+      headers: { Authorization: "Bearer secret-token" },
+    }),
+  );
+  expect(valid.status).toBe(200);
+  expect(valid.headers.get("content-type")).toContain("text/html");
 });
 
 test("hosted handler returns index.html for non-api SPA routes", async () => {

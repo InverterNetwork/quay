@@ -8,6 +8,7 @@ import {
   startAdminApiServer,
   type StartedAdminApiServer,
 } from "../admin/server.ts";
+import { assertAdminAuthReady } from "../admin/auth.ts";
 import type { QuayRuntime } from "../runtime/quay_runtime.ts";
 import { commandHelp, wantsHelp } from "./help.ts";
 import type { CliIO } from "./io.ts";
@@ -58,6 +59,16 @@ export async function runServeCommand(
       return 2;
     }
     uiDirPath = validation.path;
+  }
+
+  try {
+    assertAdminAuthReady(runtime);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    io.stderr(
+      `${JSON.stringify({ error: "startup_error", message })}\n`,
+    );
+    return 2;
   }
 
   let server: StartedAdminApiServer;

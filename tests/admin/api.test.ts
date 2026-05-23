@@ -1,5 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { createAdminApiHandler } from "../../src/admin/api.ts";
+import {
+  createAdminApiHandler,
+  type AdminAuditEvent,
+} from "../../src/admin/api.ts";
 import {
   DEFAULT_CLAUDE_REVIEWER_INVOCATION,
   DEFAULT_CLAUDE_WORKER_INVOCATION,
@@ -17,6 +20,8 @@ afterEach(() => {
 
 function createHandler(opts: {
   config?: Parameters<typeof createAdminApiHandler>[0]["config"];
+  env?: NodeJS.ProcessEnv;
+  adminAudit?: Parameters<typeof createAdminApiHandler>[0]["adminAudit"];
   repoService?: ReturnType<typeof createRepoService>;
 } = {}) {
   if (h === null) throw new Error("harness not initialized");
@@ -28,7 +33,8 @@ function createHandler(opts: {
     configPath: null,
     dataDir: h.dataDir,
     db: h.db,
-    env: {},
+    env: opts.env ?? {},
+    ...(opts.adminAudit !== undefined ? { adminAudit: opts.adminAudit } : {}),
     paths: {
       reposRoot: `${h.dataDir}/repos`,
       worktreesRoot: `${h.dataDir}/worktrees`,
@@ -71,6 +77,90 @@ test("GET /v1/meta returns API and Quay version metadata", async () => {
     service: "quay",
     api_version: "v1",
     quay_version: "test-version",
+  });
+});
+
+test("admin bearer auth protects reads and writes when configured", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  repoService.add({
+    repo_id: "repo-a",
+    repo_url: "git@example.com:owner/repo-a.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  const auditEvents: AdminAuditEvent[] = [];
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: { QUAY_ADMIN_TOKEN: "secret-token" },
+    repoService,
+    adminAudit: (event) => auditEvents.push(event),
+  });
+
+  const missing = await handler(new Request("http://quay.local/v1/meta"));
+  expect(missing.status).toBe(401);
+  expect(missing.headers.get("www-authenticate")).toBe(
+    'Bearer realm="quay-admin"',
+  );
+  expect(await responseJson(missing)).toEqual({
+    error: "admin_auth_required",
+    message: "Admin API requires Authorization: Bearer <token>",
+  });
+
+  const invalid = await handler(
+    new Request("http://quay.local/v1/meta", {
+      headers: { Authorization: "Bearer wrong-token" },
+    }),
+  );
+  expect(invalid.status).toBe(401);
+  expect(await responseJson(invalid)).toEqual({
+    error: "admin_auth_invalid",
+    message: "invalid admin bearer token",
+  });
+
+  const meta = await handler(
+    new Request("http://quay.local/v1/meta", {
+      headers: { Authorization: "Bearer secret-token" },
+    }),
+  );
+  expect(meta.status).toBe(200);
+
+  const global = await handler(
+    new Request("http://quay.local/v1/global", {
+      headers: { Authorization: "Bearer secret-token" },
+    }),
+  );
+  const revision = (await responseJson(global)).revision as string;
+  const applied = await handler(
+    new Request("http://quay.local/v1/changes/apply", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "hermes-user-123",
+      },
+      body: JSON.stringify({
+        base_revision: revision,
+        changes: [
+          {
+            type: "repo.update",
+            repo_id: "repo-a",
+            patch: { base_branch: "dev" },
+          },
+        ],
+      }),
+    }),
+  );
+
+  expect(applied.status).toBe(200);
+  expect(repoService.get("repo-a")?.base_branch).toBe("dev");
+  expect(auditEvents).toContainEqual({
+    action: "changes.apply",
+    method: "POST",
+    path: "/v1/changes/apply",
+    forwarded_identity: "hermes-user-123",
+    forwarded_identity_header: "X-Hermes-User-Id",
   });
 });
 
@@ -704,7 +794,7 @@ test("Admin API handles CORS preflight for versioned routes", async () => {
     "GET, POST, OPTIONS",
   );
   expect(response.headers.get("access-control-allow-headers")).toBe(
-    "Accept, Content-Type",
+    "Accept, Authorization, Content-Type, X-Hermes-User-Id",
   );
 });
 

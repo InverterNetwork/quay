@@ -2,9 +2,12 @@ openapi: 3.1.0
 info:
   title: Quay Admin API
   version: 1.0.0
-  description: Loopback Admin API for Quay UI integrations.
+  description: Loopback Admin API for Quay UI integrations. Deployments may require bearer auth with QUAY_ADMIN_TOKEN.
 servers:
   - url: http://127.0.0.1:9731
+security:
+  - AdminBearer: []
+  - {}
 paths:
   /v1/meta:
     get:
@@ -17,6 +20,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Meta"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "403":
@@ -42,6 +47,8 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Repo"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "403":
@@ -71,6 +78,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RepoDetail"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
         "404":
           description: Repo is unknown or archived.
           content:
@@ -106,6 +115,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GlobalReadModel"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "403":
@@ -129,6 +140,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TagsResponse"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "403":
@@ -152,6 +165,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MatrixReadModel"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "403":
@@ -185,6 +200,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ChangePreview"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
         "400":
           $ref: "#/components/responses/ValidationError"
         "409":
@@ -222,6 +239,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ChangeApplyResponse"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
         "400":
           $ref: "#/components/responses/ValidationError"
         "409":
@@ -241,6 +260,10 @@ paths:
         "403":
           $ref: "#/components/responses/CorsOriginNotAllowed"
 components:
+  securitySchemes:
+    AdminBearer:
+      type: http
+      scheme: bearer
   responses:
     CorsPreflight:
       description: Allowed local UI origin preflight response.
@@ -274,6 +297,16 @@ components:
       description: HTTP method is not supported for this route.
       headers:
         Allow:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    AdminAuthRequired:
+      description: Admin bearer auth is required or the supplied token is invalid.
+      headers:
+        WWW-Authenticate:
           schema:
             type: string
       content:

@@ -55,6 +55,18 @@ const ContextConfigSchema = z
   })
   .strict();
 
+const HttpHeaderNameSchema = z.string().min(1).regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, {
+  message: "header name must be a valid HTTP field name",
+});
+
+const AdminConfigSchema = z
+  .object({
+    require_auth: z.boolean().optional(),
+    token_env: z.string().min(1).optional(),
+    forwarded_identity_header: HttpHeaderNameSchema.optional(),
+  })
+  .strict();
+
 const ReviewerConfigSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -129,6 +141,7 @@ export const ConfigSchema = z
     tick_lock_path: z.string().min(1).optional(),
     supervisor_lock_stale_seconds: positiveInt.optional(),
     adapters: AdaptersConfigSchema.optional(),
+    admin: AdminConfigSchema.optional(),
     context: ContextConfigSchema.optional(),
     reviewer: ReviewerConfigSchema.optional(),
   })

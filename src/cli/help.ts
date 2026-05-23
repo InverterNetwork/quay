@@ -96,7 +96,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     synopsis: "quay serve [--host <host>] [--port <port>] [--ui-dir <path>]",
     summary: "Start the local Admin HTTP API and UI server",
     details:
-      "Serves the versioned Admin API using the same config, data directory, migrations, and repo registry as the CLI. Release binaries serve the embedded Quay UI by default. Pass --ui-dir to override it with a built UI bundle from disk while keeping /v1/* reserved for the API.",
+      "Serves the versioned Admin API using the same config, data directory, migrations, and repo registry as the CLI. Release binaries serve the embedded Quay UI by default. Pass --ui-dir to override it with a built UI bundle from disk while keeping /v1/* reserved for the API. Set [admin].require_auth=true and QUAY_ADMIN_TOKEN to require bearer auth.",
     flags: [
       { flag: "--host <host>", desc: "Bind loopback host. Defaults to 127.0.0.1." },
       { flag: "--port <port>", desc: "Bind port. Defaults to 9731." },

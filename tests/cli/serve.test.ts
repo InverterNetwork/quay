@@ -89,6 +89,34 @@ test("runServeCommand starts server and stops it after shutdown", async () => {
   });
 });
 
+test("runServeCommand rejects protected admin mode without a token", async () => {
+  const io = bufferIO();
+  let started = false;
+  const exitCode = await runServeCommand(
+    [],
+    {
+      config: { admin: { require_auth: true } },
+      env: {},
+    } as QuayRuntime,
+    io,
+    {
+      waitForShutdown: async () => {},
+      startServer: () => {
+        started = true;
+        throw new Error("server should not start");
+      },
+    },
+  );
+
+  expect(exitCode).toBe(2);
+  expect(started).toBe(false);
+  expect(io.out()).toBe("");
+  expect(JSON.parse(io.err())).toEqual({
+    error: "startup_error",
+    message: "Admin auth is enabled but QUAY_ADMIN_TOKEN is not set",
+  });
+});
+
 test("runServeCommand validates ui dir and passes resolved path to server", async () => {
   const uiDir = makeUiDir();
   try {

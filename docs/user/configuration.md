@@ -41,6 +41,11 @@ enabled = true
 bot_token_env = "SLACK_TOKEN"
 max_thread_messages = 200
 
+[admin]
+require_auth = true
+token_env = "QUAY_ADMIN_TOKEN"
+forwarded_identity_header = "X-Hermes-User-Id"
+
 [context]
 reference_repos_root = "/home/hermes/.hermes/code"
 
@@ -89,7 +94,26 @@ capabilities = ["browser", "screenshots"]
 | `max_non_budget_respawns` | `20` | Review/conflict respawns before `non_budget_loop`. |
 | `tick_lock_path` | `${data_dir}/tick.lock` | Supervisor lock path. |
 | `supervisor_lock_stale_seconds` | `30` | Stale lock grace window. |
+| `[admin].require_auth` | `false` unless the token env is set | Requires `Authorization: Bearer <token>` for the Admin API and served Admin UI. |
+| `[admin].token_env` | `QUAY_ADMIN_TOKEN` | Environment variable containing the admin bearer token. If `require_auth = true`, `quay serve` fails clearly when this env var is unset. |
+| `[admin].forwarded_identity_header` | `X-Hermes-User-Id` | Optional upstream identity header accepted for audit context without coupling Quay to Hermes. |
 | `[context].reference_repos_root` | unset | Optional root containing read-only working-tree mirrors. Immediate child repos are listed in worker and reviewer prompts. |
+
+## Admin API Auth
+
+Local standalone `quay serve` remains unauthenticated on loopback by default.
+To protect the Admin API and embedded or hosted Admin UI, set:
+
+```toml
+[admin]
+require_auth = true
+token_env = "QUAY_ADMIN_TOKEN"
+```
+
+Then start the server with `QUAY_ADMIN_TOKEN` in the environment. Requests must
+send `Authorization: Bearer <token>`. Setting `QUAY_ADMIN_TOKEN` without an
+explicit `[admin]` block also enables auth; set `require_auth = false` to keep a
+local development shell unauthenticated even if that env var is present.
 
 ## Reviewer
 

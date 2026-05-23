@@ -59,7 +59,10 @@ guarded by the read-model revision returned by the API, so stale clients must
 reload before retrying.
 
 `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or `localhost`).
-The API is unauthenticated, so Quay refuses non-loopback binds.
+By default the API is unauthenticated on loopback for local standalone use, so
+Quay refuses non-loopback binds. To protect `/v1/*` and the served Admin UI,
+set `[admin].require_auth = true` and provide `QUAY_ADMIN_TOKEN`; requests must
+send `Authorization: Bearer <token>`.
 
 `--ui-dir` overrides embedded UI assets with a built Quay UI directory from the
 same loopback server:

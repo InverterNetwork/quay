@@ -8,6 +8,12 @@ import {
 } from "../core/agents.ts";
 import { QuayError } from "../core/errors.ts";
 import {
+  adminAuthAllowedHeaders,
+  adminAuthErrorResponse,
+  authorizeAdminRequest,
+  type AdminRequestAuditContext,
+} from "./auth.ts";
+import {
   DEFAULT_PREAMBLE_BODY,
   DEFAULT_REVIEWER_PREAMBLE_BODY,
   type PreambleKind,
@@ -49,6 +55,7 @@ export interface AdminApiRuntime {
   dataDir: string;
   db: DB;
   env?: NodeJS.ProcessEnv;
+  adminAudit?: (event: AdminAuditEvent) => void;
   paths: {
     reposRoot: string;
     worktreesRoot: string;
@@ -56,6 +63,12 @@ export interface AdminApiRuntime {
   };
   repoService: RepoService;
   tagService: TagService;
+}
+
+export interface AdminAuditEvent extends AdminRequestAuditContext {
+  action: "changes.preview" | "changes.apply";
+  method: string;
+  path: string;
 }
 
 type JsonHeaders = Record<string, string>;
@@ -259,23 +272,34 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
         headers: {
           ...cors.headers,
           "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Accept, Content-Type",
+          "Access-Control-Allow-Headers": adminAuthAllowedHeaders(runtime),
           "Access-Control-Max-Age": "600",
         },
       });
+    }
+
+    const auth = authorizeAdminRequest(runtime, request);
+    if (!auth.ok) {
+      return adminAuthErrorResponse(auth.failure, cors.headers);
     }
 
     if (request.method === "POST") {
       if (isWriteRoute(segments, "preview")) {
         return handleAdminMutation(
           cors.headers,
-          () => previewChanges(runtime, request),
+          () => {
+            recordAdminAudit(runtime, request, "changes.preview", auth.audit);
+            return previewChanges(runtime, request);
+          },
         );
       }
       if (isWriteRoute(segments, "apply")) {
         return handleAdminMutation(
           cors.headers,
-          () => applyChanges(runtime, request),
+          () => {
+            recordAdminAudit(runtime, request, "changes.apply", auth.audit);
+            return applyChanges(runtime, request);
+          },
         );
       }
       if (!isVersionedRoute(segments)) {
@@ -384,6 +408,20 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
       cors.headers,
     );
   };
+}
+
+function recordAdminAudit(
+  runtime: AdminApiRuntime,
+  request: Request,
+  action: AdminAuditEvent["action"],
+  audit: AdminRequestAuditContext,
+): void {
+  runtime.adminAudit?.({
+    action,
+    method: request.method,
+    path: new URL(request.url).pathname,
+    ...audit,
+  });
 }
 
 function isVersionedRoute(segments: string[]): boolean {

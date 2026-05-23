@@ -5,6 +5,10 @@ import {
   createAdminApiHandler,
   type AdminApiRuntime,
 } from "./api.ts";
+import {
+  adminAuthErrorResponse,
+  authorizeAdminRequest,
+} from "./auth.ts";
 import { EMBEDDED_UI_ASSETS } from "../build/embedded.generated.ts";
 
 export interface EmbeddedUiAsset {
@@ -104,6 +108,10 @@ function createAdminUiHandler(
     const url = new URL(request.url);
     if (isAdminApiPath(url.pathname)) {
       return apiHandler(request);
+    }
+    const auth = authorizeAdminRequest(runtime, request);
+    if (!auth.ok) {
+      return adminAuthErrorResponse(auth.failure);
     }
     return staticHandler(request);
   };
