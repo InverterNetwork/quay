@@ -91,6 +91,17 @@ const COMMANDS: Record<string, CommandSpec> = {
     summary:
       "Run the supervisor tick loop once and exit. Emits one JSON line per result.",
   },
+  serve: {
+    path: "serve",
+    synopsis: "quay serve [--host <host>] [--port <port>]",
+    summary: "Start the local Admin HTTP API server",
+    details:
+      "Serves the versioned read-only Admin API using the same config, data directory, migrations, and repo registry as the CLI.",
+    flags: [
+      { flag: "--host <host>", desc: "Bind loopback host. Defaults to 127.0.0.1." },
+      { flag: "--port <port>", desc: "Bind port. Defaults to 9731." },
+    ],
+  },
   handoff: {
     path: "handoff",
     synopsis: "quay handoff <subcommand> [options]",
@@ -491,6 +502,7 @@ const COMMANDS: Record<string, CommandSpec> = {
 const TOP_LEVEL_ORDER: string[] = [
   "task",
   "tick",
+  "serve",
   "handoff",
   "outbox",
   "enqueue",

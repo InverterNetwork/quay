@@ -19,6 +19,48 @@ Output is newline-delimited JSON. Each line describes one task action:
 If another tick or cancel holds the supervisor lock, `quay tick` exits cleanly
 without doing work.
 
+## Admin API
+
+```bash
+quay serve
+quay serve --host 127.0.0.1 --port 9731
+```
+
+`quay serve` starts the local read-only Admin HTTP API using the same config,
+data directory, migrations, and repo registry as the rest of the CLI. The
+server binds to `127.0.0.1:9731` by default and prints one JSON line with the
+bound URL. `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or
+`localhost`); non-loopback binds are rejected because the Admin API is
+unauthenticated and exposes local repo registry data.
+
+Initial endpoints:
+
+- `GET /v1/meta`
+- `GET /v1/repos`
+- `GET /v1/repos/<repo_id>`
+
+The API returns JSON and uses a stable error envelope:
+
+```json
+{"error":"repo_not_found","message":"repo \"example\" not found"}
+```
+
+The versioned contract is owned in `docs/api/openapi.yaml`. UI clients should
+target the `/v1/*` paths from that contract and should not call CLI commands or
+depend on `hermes-agent`.
+
+Browser clients are supported from these local development origins:
+
+- `http://localhost:3000`
+- `http://127.0.0.1:3000`
+- `http://localhost:4173`
+- `http://127.0.0.1:4173`
+- `http://localhost:5173`
+- `http://127.0.0.1:5173`
+
+The IPv6 loopback form (`http://[::1]:<port>`) is also allowed for the same
+ports. Other origins receive `cors_origin_not_allowed`.
+
 ## What Tick Processes
 
 Each cycle:

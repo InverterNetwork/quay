@@ -1,0 +1,228 @@
+openapi: 3.1.0
+info:
+  title: Quay Admin API
+  version: 1.0.0
+  description: Read-only loopback Admin API for Quay UI integrations.
+servers:
+  - url: http://127.0.0.1:9731
+paths:
+  /v1/meta:
+    get:
+      summary: Inspect the running Quay API service.
+      operationId: getMeta
+      responses:
+        "200":
+          description: Runtime metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Meta"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for runtime metadata.
+      operationId: optionsMeta
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/repos:
+    get:
+      summary: List active registered repos.
+      operationId: listRepos
+      responses:
+        "200":
+          description: Active repo registry rows ordered by repo_id.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Repo"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for repo listing.
+      operationId: optionsRepos
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/repos/{repo_id}:
+    get:
+      summary: Get one active registered repo.
+      operationId: getRepo
+      parameters:
+        - name: repo_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One active repo registry row.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Repo"
+        "404":
+          description: Repo is unknown or archived.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for repo detail.
+      operationId: optionsRepo
+      parameters:
+        - name: repo_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+components:
+  responses:
+    CorsPreflight:
+      description: Allowed local UI origin preflight response.
+      headers:
+        Access-Control-Allow-Origin:
+          schema:
+            type: string
+        Access-Control-Allow-Methods:
+          schema:
+            type: string
+        Access-Control-Allow-Headers:
+          schema:
+            type: string
+        Access-Control-Max-Age:
+          schema:
+            type: string
+        Vary:
+          schema:
+            type: string
+    CorsOriginNotAllowed:
+      description: Origin is not in the local UI allow-list.
+      headers:
+        Vary:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    MethodNotAllowed:
+      description: HTTP method is not supported for this route.
+      headers:
+        Allow:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Meta:
+      type: object
+      additionalProperties: false
+      required:
+        - service
+        - api_version
+        - quay_version
+      properties:
+        service:
+          type: string
+          const: quay
+        api_version:
+          type: string
+          const: v1
+        quay_version:
+          type: string
+    Repo:
+      type: object
+      additionalProperties: false
+      required:
+        - repo_id
+        - repo_url
+        - base_branch
+        - package_manager
+        - install_cmd
+        - test_cmd
+        - ci_workflow_name
+        - contribution_guide_path
+        - agent_worker
+        - agent_reviewer
+        - model_worker
+        - model_reviewer
+        - archived_at
+        - created_at
+      properties:
+        repo_id:
+          type: string
+        repo_url:
+          type: string
+        base_branch:
+          type: string
+        package_manager:
+          type: string
+        install_cmd:
+          type: string
+        test_cmd:
+          type:
+            - string
+            - "null"
+        ci_workflow_name:
+          type:
+            - string
+            - "null"
+        contribution_guide_path:
+          type:
+            - string
+            - "null"
+        agent_worker:
+          type:
+            - string
+            - "null"
+        agent_reviewer:
+          type:
+            - string
+            - "null"
+        model_worker:
+          type:
+            - string
+            - "null"
+        model_reviewer:
+          type:
+            - string
+            - "null"
+        archived_at:
+          type:
+            - string
+            - "null"
+        created_at:
+          type: string
+    Error:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+        message:
+          type: string
