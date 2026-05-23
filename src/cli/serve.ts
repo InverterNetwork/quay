@@ -1,3 +1,5 @@
+import { accessSync, constants, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   ADMIN_API_VERSION,
   type AdminApiRuntime,
@@ -19,6 +21,7 @@ export interface RunServeCommandOptions {
     runtime: AdminApiRuntime;
     hostname: string;
     port: number;
+    uiDir?: string | null;
   }) => StartedAdminApiServer;
 }
 
@@ -45,11 +48,33 @@ export async function runServeCommand(
 
   const startServer = opts.startServer ?? startAdminApiServer;
   const waitForShutdown = opts.waitForShutdown ?? waitForProcessSignal;
-  const server = startServer({
-    runtime,
-    hostname: parsed.hostname,
-    port: parsed.port,
-  });
+  let uiDirPath: string | null = null;
+  if (parsed.uiDir !== null) {
+    const validation = validateUiDir(parsed.uiDir);
+    if (!validation.ok) {
+      io.stderr(
+        `${JSON.stringify({ error: "startup_error", message: validation.message })}\n`,
+      );
+      return 2;
+    }
+    uiDirPath = validation.path;
+  }
+
+  let server: StartedAdminApiServer;
+  try {
+    server = startServer({
+      runtime,
+      hostname: parsed.hostname,
+      port: parsed.port,
+      uiDir: uiDirPath,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    io.stderr(
+      `${JSON.stringify({ error: "startup_error", message })}\n`,
+    );
+    return 2;
+  }
   io.stdout(
     `${JSON.stringify({
       listening: true,
@@ -57,6 +82,7 @@ export async function runServeCommand(
       host: server.hostname,
       port: server.port,
       api_version: ADMIN_API_VERSION,
+      ui_dir: uiDirPath ?? undefined,
     })}\n`,
   );
 
@@ -69,12 +95,13 @@ export async function runServeCommand(
 }
 
 export type ServeArgsResult =
-  | { ok: true; hostname: string; port: number }
+  | { ok: true; hostname: string; port: number; uiDir: string | null }
   | { ok: false; message: string };
 
 export function parseServeArgs(argv: string[]): ServeArgsResult {
   let hostname = DEFAULT_HOST;
   let port = DEFAULT_PORT;
+  let uiDir: string | null = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -113,6 +140,26 @@ export function parseServeArgs(argv: string[]): ServeArgsResult {
       port = parsedPort;
       continue;
     }
+    if (arg === "--ui-dir") {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) {
+        return { ok: false, message: "--ui-dir requires a value" };
+      }
+      if (value.trim() === "") {
+        return { ok: false, message: "--ui-dir must not be empty" };
+      }
+      uiDir = value;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--ui-dir=")) {
+      const value = arg.slice("--ui-dir=".length);
+      if (value.trim() === "") {
+        return { ok: false, message: "--ui-dir must not be empty" };
+      }
+      uiDir = value;
+      continue;
+    }
     return { ok: false, message: `unknown serve argument: ${arg}` };
   }
 
@@ -127,7 +174,7 @@ export function parseServeArgs(argv: string[]): ServeArgsResult {
     };
   }
 
-  return { ok: true, hostname, port };
+  return { ok: true, hostname, port, uiDir };
 }
 
 export function isLoopbackHost(hostname: string): boolean {
@@ -170,4 +217,49 @@ function parsePort(raw: string): number | null {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1 || n > 65535) return null;
   return n;
+}
+
+type UiDirValidation =
+  | { ok: true; path: string }
+  | { ok: false; message: string };
+
+export function validateUiDir(rawPath: string): UiDirValidation {
+  const path = resolve(rawPath);
+  let dirStat: ReturnType<typeof statSync>;
+  try {
+    dirStat = statSync(path);
+  } catch {
+    return { ok: false, message: `--ui-dir path does not exist: ${path}` };
+  }
+  if (!dirStat.isDirectory()) {
+    return { ok: false, message: `--ui-dir must point to a directory: ${path}` };
+  }
+  try {
+    accessSync(path, constants.R_OK);
+  } catch {
+    return { ok: false, message: `--ui-dir is not readable: ${path}` };
+  }
+
+  const indexPath = join(path, "index.html");
+  let indexStat: ReturnType<typeof statSync>;
+  try {
+    indexStat = statSync(indexPath);
+  } catch {
+    return {
+      ok: false,
+      message: `--ui-dir must contain index.html: ${indexPath}`,
+    };
+  }
+  if (!indexStat.isFile()) {
+    return {
+      ok: false,
+      message: `--ui-dir index.html must be a file: ${indexPath}`,
+    };
+  }
+  try {
+    accessSync(indexPath, constants.R_OK);
+  } catch {
+    return { ok: false, message: `--ui-dir index.html is not readable: ${indexPath}` };
+  }
+  return { ok: true, path };
 }

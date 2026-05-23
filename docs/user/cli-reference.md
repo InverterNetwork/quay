@@ -44,7 +44,7 @@ quay -v
 ## Serve
 
 ```bash
-quay serve [--host <host>] [--port <port>]
+quay serve [--host <host>] [--port <port>] [--ui-dir <path>]
 ```
 
 Starts the Admin HTTP API using the same runtime wiring as CLI commands:
@@ -59,6 +59,20 @@ reload before retrying.
 
 `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or `localhost`).
 The API is unauthenticated, so Quay refuses non-loopback binds.
+
+`--ui-dir` serves a built Quay UI directory from the same loopback server:
+
+```bash
+cd ../quay-ui
+bun run build
+cd ../quay
+quay serve --ui-dir ../quay-ui/dist
+```
+
+The directory must contain `index.html`. Quay serves `/v1/*` through the Admin
+API before checking static files, serves existing assets with content-type and
+cache headers, returns `index.html` for non-API SPA routes, and returns 404 for
+missing asset-like paths.
 
 ## Repo
 

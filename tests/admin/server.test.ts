@@ -1,0 +1,136 @@
+import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  createHostedAdminApiHandler,
+} from "../../src/admin/server.ts";
+import type { AdminApiRuntime } from "../../src/admin/api.ts";
+import { createRepoService } from "../../src/core/repos/service.ts";
+import { createTagService } from "../../src/core/tags/service.ts";
+import { createHarness, type Harness } from "../support/harness.ts";
+
+let h: Harness | null = null;
+afterEach(() => {
+  h?.cleanup();
+  h = null;
+});
+
+function createRuntime(): AdminApiRuntime {
+  if (h === null) throw new Error("harness not initialized");
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  return {
+    version: "test-version",
+    config: {},
+    configPath: null,
+    dataDir: h.dataDir,
+    db: h.db,
+    env: {},
+    paths: {
+      reposRoot: `${h.dataDir}/repos`,
+      worktreesRoot: `${h.dataDir}/worktrees`,
+      artifactsRoot: h.artifactRoot,
+    },
+    repoService,
+    tagService: createTagService({ db: h.db, clock: h.clock, repoService }),
+  };
+}
+
+test("hosted handler keeps /v1 API routes ahead of static files", async () => {
+  h = createHarness();
+  const uiDir = makeUiDir();
+  try {
+    mkdirSync(join(uiDir, "v1"));
+    writeFileSync(join(uiDir, "v1", "meta"), "static meta");
+    const handler = createHostedAdminApiHandler(createRuntime(), uiDir);
+
+    const response = await handler(new Request("http://quay.local/v1/meta"));
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(body).toEqual({
+      service: "quay",
+      api_version: "v1",
+      quay_version: "test-version",
+    });
+
+    const missingApi = await handler(
+      new Request("http://quay.local/v1/not-a-route"),
+    );
+    expect(missingApi.status).toBe(404);
+    expect(missingApi.headers.get("content-type")).toContain("application/json");
+    expect(await missingApi.json()).toEqual({
+      error: "not_found",
+      message: "route not found: /v1/not-a-route",
+    });
+  } finally {
+    rmSync(uiDir, { recursive: true, force: true });
+  }
+});
+
+test("hosted handler serves static assets with content type and cache headers", async () => {
+  h = createHarness();
+  const uiDir = makeUiDir();
+  try {
+    const handler = createHostedAdminApiHandler(createRuntime(), uiDir);
+
+    const response = await handler(
+      new Request("http://quay.local/assets/app.js"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/javascript");
+    expect(response.headers.get("cache-control")).toBe(
+      "public, max-age=31536000, immutable",
+    );
+    expect(await response.text()).toBe("console.log('quay');");
+  } finally {
+    rmSync(uiDir, { recursive: true, force: true });
+  }
+});
+
+test("hosted handler returns index.html for non-api SPA routes", async () => {
+  h = createHarness();
+  const uiDir = makeUiDir();
+  try {
+    const handler = createHostedAdminApiHandler(createRuntime(), uiDir);
+
+    const response = await handler(new Request("http://quay.local/repos/repo-a"));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(response.headers.get("cache-control")).toBe("no-cache");
+    expect(await response.text()).toContain("<div id=\"root\"></div>");
+  } finally {
+    rmSync(uiDir, { recursive: true, force: true });
+  }
+});
+
+test("hosted handler returns a clear 404 for missing static assets", async () => {
+  h = createHarness();
+  const uiDir = makeUiDir();
+  try {
+    const handler = createHostedAdminApiHandler(createRuntime(), uiDir);
+
+    const response = await handler(
+      new Request("http://quay.local/assets/missing.js"),
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-type")).toContain("text/plain");
+    expect(await response.text()).toContain(
+      "static asset not found: /assets/missing.js",
+    );
+  } finally {
+    rmSync(uiDir, { recursive: true, force: true });
+  }
+});
+
+function makeUiDir(): string {
+  const uiDir = mkdtempSync(join(tmpdir(), "quay-hosted-ui-"));
+  mkdirSync(join(uiDir, "assets"));
+  writeFileSync(join(uiDir, "index.html"), "<!doctype html><div id=\"root\"></div>");
+  writeFileSync(join(uiDir, "assets", "app.js"), "console.log('quay');");
+  return uiDir;
+}
