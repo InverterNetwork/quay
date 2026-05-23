@@ -119,8 +119,35 @@ export function parseServeArgs(argv: string[]): ServeArgsResult {
   if (hostname.trim() === "") {
     return { ok: false, message: "--host must not be empty" };
   }
+  hostname = hostname.trim();
+  if (!isLoopbackHost(hostname)) {
+    return {
+      ok: false,
+      message: "--host must be a loopback address: 127.0.0.1, ::1, or localhost",
+    };
+  }
 
   return { ok: true, hostname, port };
+}
+
+export function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  if (
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized === "[::1]" ||
+    normalized === "0:0:0:0:0:0:0:1"
+  ) {
+    return true;
+  }
+
+  const parts = normalized.split(".");
+  if (parts.length !== 4 || parts[0] !== "127") return false;
+  return parts.every((part) => {
+    if (!/^\d+$/.test(part)) return false;
+    const n = Number(part);
+    return Number.isInteger(n) && n >= 0 && n <= 255;
+  });
 }
 
 export function waitForProcessSignal(): Promise<void> {

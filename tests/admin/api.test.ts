@@ -104,9 +104,67 @@ test("Admin API rejects unsupported HTTP methods with stable error shape", async
   );
 
   expect(response.status).toBe(405);
-  expect(response.headers.get("allow")).toBe("GET");
+  expect(response.headers.get("allow")).toBe("GET, OPTIONS");
   expect(await responseJson(response)).toEqual({
     error: "method_not_allowed",
     message: "method POST is not allowed",
+  });
+});
+
+test("Admin API includes CORS headers for allowed local UI origins", async () => {
+  h = createHarness();
+  const handler = createHandler();
+
+  const response = await handler(
+    new Request("http://quay.local/v1/meta", {
+      headers: { Origin: "http://localhost:5173" },
+    }),
+  );
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("access-control-allow-origin")).toBe(
+    "http://localhost:5173",
+  );
+  expect(response.headers.get("vary")).toBe("Origin");
+});
+
+test("Admin API handles CORS preflight for versioned routes", async () => {
+  h = createHarness();
+  const handler = createHandler();
+
+  const response = await handler(
+    new Request("http://quay.local/v1/repos", {
+      method: "OPTIONS",
+      headers: { Origin: "http://127.0.0.1:5173" },
+    }),
+  );
+
+  expect(response.status).toBe(204);
+  expect(response.headers.get("access-control-allow-origin")).toBe(
+    "http://127.0.0.1:5173",
+  );
+  expect(response.headers.get("access-control-allow-methods")).toBe(
+    "GET, OPTIONS",
+  );
+  expect(response.headers.get("access-control-allow-headers")).toBe(
+    "Content-Type",
+  );
+});
+
+test("Admin API rejects disallowed CORS origins", async () => {
+  h = createHarness();
+  const handler = createHandler();
+
+  const response = await handler(
+    new Request("http://quay.local/v1/repos", {
+      headers: { Origin: "https://example.com" },
+    }),
+  );
+
+  expect(response.status).toBe(403);
+  expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  expect(await responseJson(response)).toEqual({
+    error: "cors_origin_not_allowed",
+    message: 'origin "https://example.com" is not allowed',
   });
 });

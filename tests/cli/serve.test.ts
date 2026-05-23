@@ -1,12 +1,16 @@
 import { expect, test } from "bun:test";
-import { runServeCommand, parseServeArgs } from "../../src/cli/serve.ts";
+import {
+  isLoopbackHost,
+  runServeCommand,
+  parseServeArgs,
+} from "../../src/cli/serve.ts";
 import type { QuayRuntime } from "../../src/runtime/quay_runtime.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 
 test("parseServeArgs accepts host and port flags", () => {
-  expect(parseServeArgs(["--host", "0.0.0.0", "--port", "9732"])).toEqual({
+  expect(parseServeArgs(["--host", "localhost", "--port", "9732"])).toEqual({
     ok: true,
-    hostname: "0.0.0.0",
+    hostname: "localhost",
     port: 9732,
   });
   expect(parseServeArgs(["--port=70000"])).toEqual({
@@ -17,6 +21,19 @@ test("parseServeArgs accepts host and port flags", () => {
     ok: false,
     message: "--port must be an integer from 1 to 65535",
   });
+  expect(parseServeArgs(["--host", "0.0.0.0"])).toEqual({
+    ok: false,
+    message: "--host must be a loopback address: 127.0.0.1, ::1, or localhost",
+  });
+});
+
+test("isLoopbackHost accepts loopback hosts and rejects network binds", () => {
+  expect(isLoopbackHost("127.0.0.1")).toBe(true);
+  expect(isLoopbackHost("127.10.20.30")).toBe(true);
+  expect(isLoopbackHost("localhost")).toBe(true);
+  expect(isLoopbackHost("::1")).toBe(true);
+  expect(isLoopbackHost("0.0.0.0")).toBe(false);
+  expect(isLoopbackHost("192.168.1.5")).toBe(false);
 });
 
 test("runServeCommand starts server and stops it after shutdown", async () => {

@@ -98,7 +98,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     details:
       "Serves the versioned read-only Admin API using the same config, data directory, migrations, and repo registry as the CLI.",
     flags: [
-      { flag: "--host <host>", desc: "Bind host. Defaults to 127.0.0.1." },
+      { flag: "--host <host>", desc: "Bind loopback host. Defaults to 127.0.0.1." },
       { flag: "--port <port>", desc: "Bind port. Defaults to 9731." },
     ],
   },
