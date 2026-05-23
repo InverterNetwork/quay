@@ -35,7 +35,13 @@ URL. `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or
 unauthenticated and exposes local repo registry data plus a narrow structured
 write surface.
 
-Pass `--ui-dir <path>` to host a built Quay UI bundle from disk:
+Release binaries include an embedded production Quay UI bundle. With those
+binaries, `quay serve` hosts the Admin UI and injects same-origin API runtime
+config before the UI app loads, so browser requests go to the serving Quay
+process under `/v1/*`.
+
+Pass `--ui-dir <path>` to override the embedded UI with a built Quay UI bundle
+from disk:
 
 ```bash
 cd ../quay-ui
@@ -46,10 +52,10 @@ quay serve --ui-dir ../quay-ui/dist
 ```
 
 The UI directory must exist, be readable, and contain a readable `index.html`.
-When enabled, Quay serves static files from that directory and returns
-`index.html` for non-API SPA routes such as `/repos/example`. Versioned Admin
-API paths under `/v1/*` keep precedence over static files and are never served
-from the UI directory. Missing static asset paths such as `/assets/app.js`
+When embedded UI assets or `--ui-dir` are enabled, Quay serves static files and
+returns `index.html` for non-API SPA routes such as `/repos/example`. Versioned
+Admin API paths under `/v1/*` keep precedence over static files and are never
+served from UI assets. Missing static asset paths such as `/assets/app.js`
 return 404 instead of falling back to the SPA entrypoint.
 
 Initial endpoints:

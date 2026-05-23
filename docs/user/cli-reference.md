@@ -47,7 +47,8 @@ quay -v
 quay serve [--host <host>] [--port <port>] [--ui-dir <path>]
 ```
 
-Starts the Admin HTTP API using the same runtime wiring as CLI commands:
+Starts the Admin HTTP API and, for release binaries, the embedded Admin UI
+using the same runtime wiring as CLI commands:
 config loading, data directory resolution, migrations, and repo registry
 services. Defaults to `127.0.0.1:9731`. The OpenAPI contract is checked in at
 `docs/api/openapi.yaml`.
@@ -60,7 +61,8 @@ reload before retrying.
 `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or `localhost`).
 The API is unauthenticated, so Quay refuses non-loopback binds.
 
-`--ui-dir` serves a built Quay UI directory from the same loopback server:
+`--ui-dir` overrides embedded UI assets with a built Quay UI directory from the
+same loopback server:
 
 ```bash
 cd ../quay-ui
@@ -69,10 +71,11 @@ cd ../quay
 quay serve --ui-dir ../quay-ui/dist
 ```
 
-The directory must contain `index.html`. Quay serves `/v1/*` through the Admin
-API before checking static files, serves existing assets with content-type and
-cache headers, returns `index.html` for non-API SPA routes, and returns 404 for
-missing asset-like paths.
+The directory must contain `index.html`. When embedded UI assets or `--ui-dir`
+are active, Quay serves `/v1/*` through the Admin API before checking static
+files, serves existing assets with content-type and cache headers, injects
+same-origin API runtime config into `index.html`, returns `index.html` for
+non-API SPA routes, and returns 404 for missing asset-like paths.
 
 ## Repo
 

@@ -26,7 +26,9 @@ not as the current user contract:
 Quay ships as a single, statically-compiled Bun binary. No runtime is
 required on the target host — `bun build --compile` bundles the
 TypeScript source, all migration SQL, and the shipped default
-`ticket_schema.toml` into one executable.
+`ticket_schema.toml` into one executable. Release binaries also embed the
+production Quay UI bundle, so `quay serve` can serve the Admin UI without a
+separate `quay-ui/dist` directory on the host.
 
 ```bash
 # Build locally from a checkout (requires Bun ≥ 1.1):
@@ -39,7 +41,11 @@ bun run build         # → dist/quay (~58 MB)
 
 Quay is delivered as prebuilt binaries on tagged GitHub Releases. Each
 `v*` tag triggers `.github/workflows/release.yml`, which builds four
-artifacts and a SHA256SUMS manifest, then attaches them to the release.
+artifacts and a SHA256SUMS manifest, then attaches them to the release. The
+release workflow builds `InverterNetwork/quay-ui` from `main` first and embeds
+that `dist/` output into each binary. Because `quay-ui` is a private sibling
+repository, the release repo must provide `QUAY_UI_READ_TOKEN` with
+`contents:read` access to `InverterNetwork/quay-ui`.
 
 Artifacts published per release:
 
@@ -124,9 +130,12 @@ bun run quay -- task list # invoke the CLI from TS source
 ```
 
 `scripts/embed.ts` regenerates `src/build/embedded.generated.ts` (the
-in-binary copy of migrations + shipped schema + version stamp). The
-generated file is gitignored; `bun install` and `bun run build` both
-regenerate it.
+in-binary copy of migrations + shipped schema + version stamp + optional UI
+assets). The generated file is gitignored; `bun install` and `bun run build`
+both regenerate it. Set `QUAY_UI_DIST_DIR=/path/to/quay-ui/dist` to embed a
+specific UI build; if the variable is unset and `../quay-ui/dist` exists, that
+sibling checkout output is embedded automatically. Without either, local builds
+remain API-only unless `quay serve --ui-dir <path>` is used.
 
 ## Bootstrapping a repo
 

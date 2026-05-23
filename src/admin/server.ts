@@ -1,15 +1,23 @@
+import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
 import {
   createAdminApiHandler,
   type AdminApiRuntime,
 } from "./api.ts";
+import { EMBEDDED_UI_ASSETS } from "../build/embedded.generated.ts";
+
+export interface EmbeddedUiAsset {
+  readonly path: string;
+  readonly contentBase64: string;
+}
 
 export interface StartAdminApiServerOptions {
   runtime: AdminApiRuntime;
   hostname: string;
   port: number;
   uiDir?: string | null;
+  embeddedUiAssets?: readonly EmbeddedUiAsset[];
 }
 
 export type AdminApiServer = ReturnType<typeof Bun.serve>;
@@ -25,12 +33,18 @@ export interface StartedAdminApiServer {
 export function startAdminApiServer(
   opts: StartAdminApiServerOptions,
 ): StartedAdminApiServer {
+  const handlerOpts: {
+    uiDir?: string | null;
+    embeddedUiAssets?: readonly EmbeddedUiAsset[];
+  } = {};
+  if (opts.uiDir !== undefined) handlerOpts.uiDir = opts.uiDir;
+  if (opts.embeddedUiAssets !== undefined) {
+    handlerOpts.embeddedUiAssets = opts.embeddedUiAssets;
+  }
   const server = Bun.serve({
     hostname: opts.hostname,
     port: opts.port,
-    fetch: opts.uiDir === undefined || opts.uiDir === null
-      ? createAdminApiHandler(opts.runtime)
-      : createHostedAdminApiHandler(opts.runtime, opts.uiDir),
+    fetch: createAdminApiServerHandler(opts.runtime, handlerOpts),
   });
   const hostname = server.hostname ?? opts.hostname;
   const port = server.port ?? opts.port;
@@ -48,12 +62,42 @@ function formatHttpUrl(hostname: string, port: number): string {
   return `http://${host}:${port}`;
 }
 
+export function createAdminApiServerHandler(
+  runtime: AdminApiRuntime,
+  opts: {
+    uiDir?: string | null;
+    embeddedUiAssets?: readonly EmbeddedUiAsset[];
+  } = {},
+) {
+  if (opts.uiDir !== undefined && opts.uiDir !== null) {
+    return createHostedAdminApiHandler(runtime, opts.uiDir);
+  }
+  const embeddedUiAssets = opts.embeddedUiAssets ?? EMBEDDED_UI_ASSETS;
+  if (embeddedUiAssets.length > 0) {
+    return createEmbeddedAdminApiHandler(runtime, embeddedUiAssets);
+  }
+  return createAdminApiHandler(runtime);
+}
+
 export function createHostedAdminApiHandler(
   runtime: AdminApiRuntime,
   uiDir: string,
 ) {
+  return createAdminUiHandler(runtime, createStaticUiHandler(uiDir));
+}
+
+export function createEmbeddedAdminApiHandler(
+  runtime: AdminApiRuntime,
+  assets: readonly EmbeddedUiAsset[],
+) {
+  return createAdminUiHandler(runtime, createEmbeddedStaticUiHandler(assets));
+}
+
+function createAdminUiHandler(
+  runtime: AdminApiRuntime,
+  staticHandler: (request: Request) => Promise<Response>,
+) {
   const apiHandler = createAdminApiHandler(runtime);
-  const staticHandler = createStaticUiHandler(uiDir);
   return async function handleHostedAdminApi(
     request: Request,
   ): Promise<Response> {
@@ -79,13 +123,17 @@ function createStaticUiHandler(uiDir: string) {
     }
 
     const url = new URL(request.url);
-    const target = staticTarget(root, url.pathname);
+    const target = staticTarget(url.pathname);
     if (!target.ok) {
       return textResponse(400, target.message, {}, request.method);
     }
+    const targetPath = staticFilePath(root, target.segments);
+    if (!targetPath.ok) {
+      return textResponse(400, targetPath.message, {}, request.method);
+    }
 
     const response = await readStaticFile(
-      target.path,
+      targetPath.path,
       url.pathname,
       request.method,
     );
@@ -110,15 +158,61 @@ function createStaticUiHandler(uiDir: string) {
   };
 }
 
+function createEmbeddedStaticUiHandler(assets: readonly EmbeddedUiAsset[]) {
+  const assetByPath = new Map<string, EmbeddedUiAsset>();
+  for (const asset of assets) {
+    assetByPath.set(normalizeEmbeddedAssetPath(asset.path), asset);
+  }
+  const indexAsset = assetByPath.get("index.html");
+  if (indexAsset === undefined) {
+    throw new Error("embedded UI assets must include index.html");
+  }
+
+  return async function handleEmbeddedStaticUi(
+    request: Request,
+  ): Promise<Response> {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return textResponse(
+        405,
+        `method ${request.method} is not allowed for static UI assets`,
+        { Allow: "GET, HEAD" },
+        request.method,
+      );
+    }
+
+    const url = new URL(request.url);
+    const target = staticTarget(url.pathname);
+    if (!target.ok) {
+      return textResponse(400, target.message, {}, request.method);
+    }
+
+    const targetAsset = assetByPath.get(staticAssetPath(target.segments));
+    if (targetAsset !== undefined) {
+      return embeddedAssetResponse(targetAsset, url.pathname, request.method);
+    }
+
+    if (target.assetRequest) {
+      return textResponse(
+        404,
+        `static asset not found: ${url.pathname}`,
+        {},
+        request.method,
+      );
+    }
+
+    return embeddedAssetResponse(indexAsset, "/index.html", request.method);
+  };
+}
+
 function isAdminApiPath(pathname: string): boolean {
   return pathname === "/v1" || pathname.startsWith("/v1/");
 }
 
 type StaticTargetResult =
-  | { ok: true; path: string; assetRequest: boolean }
+  | { ok: true; segments: string[]; assetRequest: boolean }
   | { ok: false; message: string };
 
-function staticTarget(root: string, pathname: string): StaticTargetResult {
+function staticTarget(pathname: string): StaticTargetResult {
   const rawSegments = pathname.split("/").filter((segment) => segment !== "");
   const segments: string[] = [];
   for (const raw of rawSegments) {
@@ -136,6 +230,18 @@ function staticTarget(root: string, pathname: string): StaticTargetResult {
     }
     segments.push(decoded);
   }
+  return {
+    ok: true,
+    segments,
+    assetRequest: isAssetRequest(pathname, segments),
+  };
+}
+
+type StaticFilePathResult =
+  | { ok: true; path: string }
+  | { ok: false; message: string };
+
+function staticFilePath(root: string, segments: string[]): StaticFilePathResult {
   const path = segments.length === 0
     ? join(root, "index.html")
     : join(root, ...segments);
@@ -143,11 +249,23 @@ function staticTarget(root: string, pathname: string): StaticTargetResult {
   if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
     return { ok: false, message: "static asset path escapes ui root" };
   }
-  return {
-    ok: true,
-    path: resolved,
-    assetRequest: isAssetRequest(pathname, segments),
-  };
+  return { ok: true, path: resolved };
+}
+
+function staticAssetPath(segments: string[]): string {
+  return segments.length === 0 ? "index.html" : segments.join("/");
+}
+
+function normalizeEmbeddedAssetPath(path: string): string {
+  const normalized = path.replaceAll("\\", "/").replace(/^\/+/, "");
+  const segments = normalized.split("/");
+  if (
+    normalized === "" ||
+    segments.some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    throw new Error(`invalid embedded UI asset path: ${path}`);
+  }
+  return normalized;
 }
 
 function isAssetRequest(pathname: string, segments: string[]): boolean {
@@ -163,10 +281,7 @@ async function readStaticFile(
 ): Promise<Response | null> {
   try {
     const bytes = await readFile(filePath);
-    return new Response(method === "HEAD" ? null : bytes, {
-      status: 200,
-      headers: staticHeaders(requestPath),
-    });
+    return staticAssetResponse(bytes, requestPath, method);
   } catch (err) {
     const code = typeof err === "object" && err !== null && "code" in err
       ? String((err as { code?: unknown }).code)
@@ -181,6 +296,54 @@ async function readStaticFile(
       method,
     );
   }
+}
+
+function embeddedAssetResponse(
+  asset: EmbeddedUiAsset,
+  requestPath: string,
+  method: string,
+): Response {
+  return staticAssetResponse(
+    Buffer.from(asset.contentBase64, "base64"),
+    requestPath,
+    method,
+  );
+}
+
+function staticAssetResponse(
+  bytes: Uint8Array,
+  requestPath: string,
+  method: string,
+): Response {
+  return new Response(method === "HEAD" ? null : bodyForStaticAsset(bytes, requestPath), {
+    status: 200,
+    headers: staticHeaders(requestPath),
+  });
+}
+
+function bodyForStaticAsset(bytes: Uint8Array, requestPath: string): Uint8Array | string {
+  if (!isIndexHtmlRequestPath(requestPath)) return bytes;
+  return injectIndexRuntimeConfig(new TextDecoder().decode(bytes));
+}
+
+const RUNTIME_CONFIG_SCRIPT =
+  `<script>window.__QUAY_API_BASE_URL__=window.__QUAY_API_BASE_URL__??window.location.origin;</script>`;
+
+function injectIndexRuntimeConfig(html: string): string {
+  if (html.includes("__QUAY_API_BASE_URL__")) return html;
+  const headClose = html.match(/<\/head\s*>/i);
+  if (headClose?.index !== undefined) {
+    return `${html.slice(0, headClose.index)}${RUNTIME_CONFIG_SCRIPT}${html.slice(headClose.index)}`;
+  }
+  const moduleScriptIndex = html.search(/<script\b[^>]*\btype=["']module["'][^>]*>/i);
+  if (moduleScriptIndex >= 0) {
+    return `${html.slice(0, moduleScriptIndex)}${RUNTIME_CONFIG_SCRIPT}${html.slice(moduleScriptIndex)}`;
+  }
+  return `${RUNTIME_CONFIG_SCRIPT}${html}`;
+}
+
+function isIndexHtmlRequestPath(requestPath: string): boolean {
+  return requestPath === "/" || requestPath === "/index.html";
 }
 
 function staticHeaders(requestPath: string): Record<string, string> {
@@ -204,6 +367,7 @@ function staticHeaders(requestPath: string): Record<string, string> {
 }
 
 function contentTypeForPath(pathname: string): string {
+  if (pathname === "/") return "text/html; charset=utf-8";
   switch (extname(pathname).toLowerCase()) {
     case ".html":
       return "text/html; charset=utf-8";

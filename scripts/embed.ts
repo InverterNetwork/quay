@@ -5,12 +5,21 @@
 // Embeds:
 //   - All migrations/*.sql files (sorted, name+sql pairs)
 //   - The shipped default config/ticket_schema.toml
+//   - Built Quay UI static assets when QUAY_UI_DIST_DIR is set, or when
+//     ../quay-ui/dist exists in a sibling checkout
 //   - Build version: $QUAY_VERSION (release tags) or "dev" + short git SHA
 //
 // Run by `bun install` (via the `prepare` script) and `bun run build`.
 
-import { readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
@@ -18,6 +27,12 @@ const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MIGRATIONS_DIR = join(REPO_ROOT, "migrations");
 const SCHEMA_FILE = join(REPO_ROOT, "config", "ticket_schema.toml");
 const OUT_FILE = join(REPO_ROOT, "src", "build", "embedded.generated.ts");
+const DEFAULT_UI_DIST_DIR = join(REPO_ROOT, "..", "quay-ui", "dist");
+
+interface EmbeddedUiAsset {
+  path: string;
+  contentBase64: string;
+}
 
 function readMigrations(): Array<{ name: string; sql: string }> {
   const files = readdirSync(MIGRATIONS_DIR)
@@ -31,6 +46,79 @@ function readMigrations(): Array<{ name: string; sql: string }> {
 
 function readSchema(): string {
   return readFileSync(SCHEMA_FILE, "utf8");
+}
+
+export function resolveUiDistDir(
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  const configured = env.QUAY_UI_DIST_DIR;
+  if (configured !== undefined) {
+    if (configured.trim() === "") {
+      throw new Error("QUAY_UI_DIST_DIR must not be empty when set");
+    }
+    return resolve(REPO_ROOT, configured);
+  }
+  return existsSync(DEFAULT_UI_DIST_DIR) ? DEFAULT_UI_DIST_DIR : null;
+}
+
+function assertUiDistDir(path: string): void {
+  let dirStat: ReturnType<typeof statSync>;
+  try {
+    dirStat = statSync(path);
+  } catch {
+    throw new Error(`QUAY_UI_DIST_DIR path does not exist: ${path}`);
+  }
+  if (!dirStat.isDirectory()) {
+    throw new Error(`QUAY_UI_DIST_DIR must point to a directory: ${path}`);
+  }
+  const indexPath = join(path, "index.html");
+  let indexStat: ReturnType<typeof statSync>;
+  try {
+    indexStat = statSync(indexPath);
+  } catch {
+    throw new Error(`QUAY_UI_DIST_DIR must contain index.html: ${indexPath}`);
+  }
+  if (!indexStat.isFile()) {
+    throw new Error(`QUAY_UI_DIST_DIR must contain index.html: ${indexPath}`);
+  }
+}
+
+function listUiAssetPaths(root: string, relativeDir = ""): string[] {
+  const dirPath = relativeDir === ""
+    ? root
+    : join(root, ...relativeDir.split("/").filter(Boolean));
+  const entries = readdirSync(dirPath, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const files: string[] = [];
+  for (const entry of entries) {
+    const relativePath = relativeDir === ""
+      ? entry.name
+      : `${relativeDir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      files.push(...listUiAssetPaths(root, relativePath));
+      continue;
+    }
+    if (entry.isFile()) {
+      files.push(relativePath);
+      continue;
+    }
+    throw new Error(`unsupported UI asset type: ${join(dirPath, entry.name)}`);
+  }
+  return files;
+}
+
+export function readEmbeddedUiAssets(
+  env: Record<string, string | undefined> = process.env,
+): EmbeddedUiAsset[] {
+  const uiDistDir = resolveUiDistDir(env);
+  if (uiDistDir === null) return [];
+  assertUiDistDir(uiDistDir);
+  return listUiAssetPaths(uiDistDir).map((path) => ({
+    path,
+    contentBase64: readFileSync(join(uiDistDir, ...path.split("/"))).toString(
+      "base64",
+    ),
+  }));
 }
 
 function readGitSha(): string {
@@ -74,12 +162,19 @@ function tsLiteral(s: string): string {
 function render(env: Record<string, string | undefined> = process.env): string {
   const migrations = readMigrations();
   const schema = readSchema();
+  const uiAssets = readEmbeddedUiAssets(env);
   const version = buildVersion(env);
 
   const migrationLines = migrations
     .map(
       (m) =>
         `  { name: ${tsLiteral(m.name)}, sql: ${tsLiteral(m.sql)} },`,
+    )
+    .join("\n");
+  const uiAssetLines = uiAssets
+    .map(
+      (asset) =>
+        `  { path: ${tsLiteral(asset.path)}, contentBase64: ${tsLiteral(asset.contentBase64)} },`,
     )
     .join("\n");
 
@@ -95,6 +190,15 @@ ${migrationLines}
 ];
 
 export const EMBEDDED_TICKET_SCHEMA = ${tsLiteral(schema)};
+
+export interface EmbeddedUiAsset {
+  readonly path: string;
+  readonly contentBase64: string;
+}
+
+export const EMBEDDED_UI_ASSETS: readonly EmbeddedUiAsset[] = [
+${uiAssetLines}
+];
 `;
 }
 

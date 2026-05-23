@@ -94,13 +94,13 @@ const COMMANDS: Record<string, CommandSpec> = {
   serve: {
     path: "serve",
     synopsis: "quay serve [--host <host>] [--port <port>] [--ui-dir <path>]",
-    summary: "Start the local Admin HTTP API server",
+    summary: "Start the local Admin HTTP API and UI server",
     details:
-      "Serves the versioned Admin API using the same config, data directory, migrations, and repo registry as the CLI. Pass --ui-dir to host a built Quay UI bundle from disk while keeping /v1/* reserved for the API.",
+      "Serves the versioned Admin API using the same config, data directory, migrations, and repo registry as the CLI. Release binaries serve the embedded Quay UI by default. Pass --ui-dir to override it with a built UI bundle from disk while keeping /v1/* reserved for the API.",
     flags: [
       { flag: "--host <host>", desc: "Bind loopback host. Defaults to 127.0.0.1." },
       { flag: "--port <port>", desc: "Bind port. Defaults to 9731." },
-      { flag: "--ui-dir <path>", desc: "Serve a built Quay UI directory with SPA fallback." },
+      { flag: "--ui-dir <path>", desc: "Override embedded UI assets with a built UI directory." },
     ],
   },
   handoff: {
