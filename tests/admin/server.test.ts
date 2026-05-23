@@ -69,6 +69,57 @@ test("hosted handler keeps /v1 API routes ahead of static files", async () => {
   }
 });
 
+test("hosted handler allows same-origin API mutation requests", async () => {
+  h = createHarness();
+  const uiDir = makeUiDir();
+  try {
+    const runtime = createRuntime();
+    runtime.repoService.add({
+      repo_id: "repo-a",
+      repo_url: "git@example.com:owner/repo-a.git",
+      base_branch: "main",
+      package_manager: "bun",
+      install_cmd: "bun install",
+    });
+    const handler = createHostedAdminApiHandler(runtime, uiDir);
+    const origin = "http://127.0.0.1:9731";
+
+    const globalResponse = await handler(
+      new Request(`${origin}/v1/global`, { headers: { Origin: origin } }),
+    );
+    expect(globalResponse.status).toBe(200);
+    expect(globalResponse.headers.get("access-control-allow-origin")).toBe(origin);
+    const global = await globalResponse.json() as { revision: string };
+
+    const response = await handler(
+      new Request(`${origin}/v1/changes/preview`, {
+        method: "POST",
+        headers: {
+          Origin: origin,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          base_revision: global.revision,
+          changes: [
+            {
+              type: "repo.update",
+              repo_id: "repo-a",
+              patch: { base_branch: "dev" },
+            },
+          ],
+        }),
+      }),
+    );
+    const body = await response.json() as { valid?: boolean };
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("access-control-allow-origin")).toBe(origin);
+    expect(body.valid).toBe(true);
+  } finally {
+    rmSync(uiDir, { recursive: true, force: true });
+  }
+});
+
 test("hosted handler serves static assets with content type and cache headers", async () => {
   h = createHarness();
   const uiDir = makeUiDir();

@@ -1337,7 +1337,7 @@ function corsDecision(
   const origin = request.headers.get("origin");
   if (origin === null || origin === "") return { ok: true, headers: {} };
   const headers = { Vary: "Origin" };
-  if (!ADMIN_API_ALLOWED_ORIGINS.includes(origin as typeof ADMIN_API_ALLOWED_ORIGINS[number])) {
+  if (!isAllowedCorsOrigin(origin, request)) {
     return { ok: false, origin, headers };
   }
   return {
@@ -1347,6 +1347,17 @@ function corsDecision(
       "Access-Control-Allow-Origin": origin,
     },
   };
+}
+
+function isAllowedCorsOrigin(origin: string, request: Request): boolean {
+  if (
+    ADMIN_API_ALLOWED_ORIGINS.includes(
+      origin as typeof ADMIN_API_ALLOWED_ORIGINS[number],
+    )
+  ) {
+    return true;
+  }
+  return origin === new URL(request.url).origin;
 }
 
 function pathSegments(pathname: string): string[] | null {
