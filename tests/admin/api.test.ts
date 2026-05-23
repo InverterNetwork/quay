@@ -588,6 +588,70 @@ test("POST /v1/changes/apply rejects stale base revisions", async () => {
   expect(repoService.get("repo-a")?.base_branch).toBe("main");
 });
 
+test("POST /v1/changes/apply fences revisions inside the write transaction", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  repoService.add({
+    repo_id: "repo-a",
+    repo_url: "git@example.com:owner/repo-a.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  const tagService = createTagService({ db: h.db, clock: h.clock, repoService });
+  let injected = false;
+  const db = new Proxy(h.db, {
+    get(target, prop, receiver) {
+      if (prop !== "transaction") {
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (fn: () => unknown) => {
+        const run = target.transaction(fn);
+        return () => {
+          if (!injected) {
+            injected = true;
+            tagService.setValue("deployment", null, "priority", "p1");
+          }
+          return run();
+        };
+      };
+    },
+  }) as typeof h.db;
+  const handler = createAdminApiHandler({
+    version: "test-version",
+    config: {},
+    configPath: null,
+    dataDir: h.dataDir,
+    db,
+    env: {},
+    paths: {
+      reposRoot: `${h.dataDir}/repos`,
+      worktreesRoot: `${h.dataDir}/worktrees`,
+      artifactsRoot: h.artifactRoot,
+    },
+    repoService,
+    tagService,
+  });
+  const revision = await currentRevision(handler);
+
+  const response = await handler(postJson("/v1/changes/apply", {
+    base_revision: revision,
+    changes: [
+      {
+        type: "repo.update",
+        repo_id: "repo-a",
+        patch: { base_branch: "dev" },
+      },
+    ],
+  }));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(409);
+  expect(body.error).toBe("stale_revision");
+  expect(repoService.get("repo-a")?.base_branch).toBe("main");
+});
+
 test("Admin API rejects unsupported HTTP methods with stable error shape", async () => {
   h = createHarness();
   const handler = createHandler();

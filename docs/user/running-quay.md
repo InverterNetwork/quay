@@ -26,18 +26,29 @@ quay serve
 quay serve --host 127.0.0.1 --port 9731
 ```
 
-`quay serve` starts the local read-only Admin HTTP API using the same config,
-data directory, migrations, and repo registry as the rest of the CLI. The
-server binds to `127.0.0.1:9731` by default and prints one JSON line with the
-bound URL. `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or
+`quay serve` starts the local Admin HTTP API using the same config, data
+directory, migrations, and repo registry as the rest of the CLI. The server
+binds to `127.0.0.1:9731` by default and prints one JSON line with the bound
+URL. `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or
 `localhost`); non-loopback binds are rejected because the Admin API is
-unauthenticated and exposes local repo registry data.
+unauthenticated and exposes local repo registry data plus a narrow structured
+write surface.
 
 Initial endpoints:
 
 - `GET /v1/meta`
 - `GET /v1/repos`
 - `GET /v1/repos/<repo_id>`
+- `GET /v1/global`
+- `GET /v1/tags`
+- `GET /v1/matrix`
+- `POST /v1/changes/preview`
+- `POST /v1/changes/apply`
+
+Writes are limited to structured Admin UI change requests that Quay validates
+and fences with the read-model revision returned by the API. Clients should
+preview a change set before applying it, and must reload when the server returns
+`stale_revision`.
 
 The API returns JSON and uses a stable error envelope:
 

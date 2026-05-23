@@ -677,20 +677,25 @@ async function applyChanges(
   request: Request,
 ): Promise<Record<string, unknown>> {
   const parsed = await parseChangeRequest(request);
-  assertCurrentRevision(runtime, parsed.base_revision);
-  const preview = buildChangePreview(
-    runtime,
-    parsed.base_revision,
-    parsed.changes,
-  );
+  let preview: AdminChangePreview | undefined;
+  let revision: string | undefined;
+  let readModel: Record<string, unknown> | undefined;
   try {
     runtime.db.transaction(() => {
+      assertCurrentRevision(runtime, parsed.base_revision);
+      preview = buildChangePreview(
+        runtime,
+        parsed.base_revision,
+        parsed.changes,
+      );
       for (const change of parsed.changes) {
         applyOneChange(runtime, change);
       }
+      revision = computeAdminRevision(runtime);
+      readModel = buildAdminReadModel(runtime);
     })();
   } catch (err) {
-    if (err instanceof QuayError) throw err;
+    if (err instanceof QuayError || err instanceof AdminHttpError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     throw new AdminHttpError(
       500,
@@ -698,12 +703,14 @@ async function applyChanges(
       `failed to apply changes: ${message}`,
     );
   }
-  const revision = computeAdminRevision(runtime);
+  if (preview === undefined || revision === undefined || readModel === undefined) {
+    throw new AdminHttpError(500, "apply_failed", "failed to apply changes");
+  }
   return {
     previous_revision: parsed.base_revision,
     revision,
     preview,
-    read_model: buildAdminReadModel(runtime),
+    read_model: readModel,
   };
 }
 
