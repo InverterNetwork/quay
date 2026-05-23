@@ -70,7 +70,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Repo"
+                $ref: "#/components/schemas/RepoDetail"
         "404":
           description: Repo is unknown or archived.
           content:
@@ -90,6 +90,75 @@ paths:
           required: true
           schema:
             type: string
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/global:
+    get:
+      summary: Read global Admin UI configuration state.
+      operationId: getGlobal
+      responses:
+        "200":
+          description: Global read model for Quay UI.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GlobalReadModel"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for global read model.
+      operationId: optionsGlobal
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/tags:
+    get:
+      summary: Read deployment tag namespaces.
+      operationId: listDeploymentTags
+      responses:
+        "200":
+          description: Deployment tag vocabulary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TagsResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for deployment tags.
+      operationId: optionsTags
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/matrix:
+    get:
+      summary: Read the cross-repo resolved settings matrix.
+      operationId: getMatrix
+      responses:
+        "200":
+          description: Matrix rows keyed by repo_id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MatrixReadModel"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for matrix read model.
+      operationId: optionsMatrix
       responses:
         "204":
           $ref: "#/components/responses/CorsPreflight"
@@ -215,6 +284,447 @@ components:
             - "null"
         created_at:
           type: string
+    RepoDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - repo_id
+        - repo_url
+        - base_branch
+        - package_manager
+        - install_cmd
+        - test_cmd
+        - ci_workflow_name
+        - contribution_guide_path
+        - agent_worker
+        - agent_reviewer
+        - model_worker
+        - model_reviewer
+        - archived_at
+        - created_at
+        - active_task_count
+        - tag_namespaces
+        - inherited_tag_namespaces
+      properties:
+        repo_id:
+          type: string
+        repo_url:
+          type: string
+        base_branch:
+          type: string
+        package_manager:
+          type: string
+        install_cmd:
+          type: string
+        test_cmd:
+          type:
+            - string
+            - "null"
+        ci_workflow_name:
+          type:
+            - string
+            - "null"
+        contribution_guide_path:
+          type:
+            - string
+            - "null"
+        agent_worker:
+          type:
+            - string
+            - "null"
+        agent_reviewer:
+          type:
+            - string
+            - "null"
+        model_worker:
+          type:
+            - string
+            - "null"
+        model_reviewer:
+          type:
+            - string
+            - "null"
+        archived_at:
+          type:
+            - string
+            - "null"
+        created_at:
+          type: string
+        active_task_count:
+          type: integer
+          minimum: 0
+        tag_namespaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/TagNamespace"
+        inherited_tag_namespaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/TagNamespace"
+    GlobalReadModel:
+      type: object
+      additionalProperties: false
+      required:
+        - config_path
+        - data_dir
+        - paths
+        - operations
+        - adapters
+        - agents
+        - preambles
+        - retry_templates
+        - tag_namespaces
+      properties:
+        config_path:
+          type:
+            - string
+            - "null"
+        data_dir:
+          type: string
+        paths:
+          $ref: "#/components/schemas/RuntimePaths"
+        operations:
+          $ref: "#/components/schemas/OperationsReadModel"
+        adapters:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdapterSummary"
+        agents:
+          $ref: "#/components/schemas/AgentsReadModel"
+        preambles:
+          type: array
+          items:
+            $ref: "#/components/schemas/PreambleSummary"
+        retry_templates:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetryTemplate"
+        tag_namespaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/TagNamespace"
+    RuntimePaths:
+      type: object
+      additionalProperties: false
+      required:
+        - data_dir
+        - repos_root
+        - worktree_root
+        - artifacts_root
+      properties:
+        data_dir:
+          type: string
+        repos_root:
+          type: string
+        worktree_root:
+          type: string
+        artifacts_root:
+          type: string
+    OperationsReadModel:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          $ref: "#/components/schemas/AdminField"
+      properties:
+        concurrency:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminField"
+        budgets:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminField"
+        live_worker_thresholds:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminField"
+        claims:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminField"
+        paths:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminField"
+    AdminField:
+      type: object
+      additionalProperties: false
+      required:
+        - key
+        - label
+        - value
+        - source
+      properties:
+        key:
+          type: string
+        label:
+          type: string
+        value:
+          type:
+            - string
+            - "null"
+        source:
+          type: string
+          enum:
+            - config
+            - database
+            - default
+            - derived
+        unit:
+          type: string
+    AdapterSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - title
+        - enabled
+        - status
+        - status_tone
+        - status_text
+        - fields
+      properties:
+        name:
+          type: string
+        title:
+          type: string
+        enabled:
+          type: boolean
+        status:
+          type: string
+          enum:
+            - disabled
+            - ready
+            - missing_env
+        status_tone:
+          type: string
+          enum:
+            - good
+            - warn
+            - neutral
+        status_text:
+          type: string
+        fields:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdapterField"
+    AdapterField:
+      type: object
+      additionalProperties: false
+      required:
+        - label
+        - value
+      properties:
+        label:
+          type: string
+        value:
+          type: string
+        dot_tone:
+          type: string
+          enum:
+            - good
+            - warn
+        mono:
+          type: boolean
+    AgentsReadModel:
+      type: object
+      additionalProperties: false
+      required:
+        - defaults
+        - invocations
+      properties:
+        defaults:
+          $ref: "#/components/schemas/AgentDefaults"
+        invocations:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentInvocation"
+    AgentDefaults:
+      type: object
+      additionalProperties: false
+      required:
+        - worker
+        - reviewer
+        - worker_model
+        - reviewer_model
+      properties:
+        worker:
+          type: string
+        reviewer:
+          type: string
+        worker_model:
+          type:
+            - string
+            - "null"
+        reviewer_model:
+          type:
+            - string
+            - "null"
+    AgentInvocation:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - roles
+        - commands
+        - capabilities
+        - used_by_repos
+        - used_by_tasks
+      properties:
+        name:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+            enum:
+              - worker
+              - reviewer
+        commands:
+          type: object
+          additionalProperties: false
+          minProperties: 1
+          properties:
+            worker:
+              type: string
+            reviewer:
+              type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        used_by_repos:
+          type: integer
+          minimum: 0
+        used_by_tasks:
+          type: integer
+          minimum: 0
+    PreambleSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - title
+        - version
+        - body
+        - refs
+        - last_edited
+        - used_by_repos
+        - override_repos
+      properties:
+        kind:
+          type: string
+          enum:
+            - code
+            - review
+        title:
+          type: string
+        version:
+          type: integer
+          minimum: 0
+        body:
+          type: string
+        refs:
+          type: integer
+          minimum: 0
+        last_edited:
+          type:
+            - string
+            - "null"
+        used_by_repos:
+          type: integer
+          minimum: 0
+        override_repos:
+          type: integer
+          minimum: 0
+    RetryTemplate:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+        - body
+        - version
+        - refs
+      properties:
+        reason:
+          type: string
+        body:
+          type: string
+        version:
+          type: integer
+          minimum: 0
+        refs:
+          type: integer
+          minimum: 0
+    TagsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - tag_namespaces
+      properties:
+        tag_namespaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/TagNamespace"
+    TagNamespace:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - required
+        - values
+      properties:
+        name:
+          type: string
+        required:
+          type: boolean
+        values:
+          type: array
+          items:
+            type: string
+        inherited_by:
+          type: integer
+          minimum: 0
+        extended_by:
+          type: integer
+          minimum: 0
+    MatrixReadModel:
+      type: object
+      additionalProperties: false
+      required:
+        - rows
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/MatrixRow"
+    MatrixRow:
+      type: object
+      additionalProperties: false
+      required:
+        - group
+        - label
+        - key
+        - default_value
+        - values
+      properties:
+        group:
+          type: string
+        label:
+          type: string
+        key:
+          type: string
+        default_value:
+          type:
+            - string
+            - "null"
+        values:
+          type: object
+          additionalProperties:
+            type:
+              - string
+              - "null"
     Error:
       type: object
       additionalProperties: false

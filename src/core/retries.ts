@@ -64,7 +64,7 @@ export interface ScheduleDeterministicRetryResult {
   budgetExhausted?: boolean;
 }
 
-const DEFAULT_RETRY_TEMPLATES: Record<BudgetRetryReason, string> = {
+export const DEFAULT_RETRY_TEMPLATES: Record<BudgetRetryReason, string> = {
   ci_fail:
     "The pull request CI failed. Use the CI failure excerpt, inspect the code, fix the failure, push the branch, and update the existing PR.",
   crash:

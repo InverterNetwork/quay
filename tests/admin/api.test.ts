@@ -1,7 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
 import { createAdminApiHandler } from "../../src/admin/api.ts";
+import {
+  DEFAULT_CLAUDE_REVIEWER_INVOCATION,
+  DEFAULT_CLAUDE_WORKER_INVOCATION,
+} from "../../src/core/agents.ts";
 import { createRepoService } from "../../src/core/repos/service.ts";
+import { createTagService } from "../../src/core/tags/service.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
+import { insertTask } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -9,11 +15,27 @@ afterEach(() => {
   h = null;
 });
 
-function createHandler() {
+function createHandler(opts: {
+  config?: Parameters<typeof createAdminApiHandler>[0]["config"];
+  repoService?: ReturnType<typeof createRepoService>;
+} = {}) {
   if (h === null) throw new Error("harness not initialized");
+  const repoService = opts.repoService ??
+    createRepoService({ db: h.db, clock: h.clock });
   return createAdminApiHandler({
     version: "test-version",
-    repoService: createRepoService({ db: h.db, clock: h.clock }),
+    config: opts.config ?? {},
+    configPath: null,
+    dataDir: h.dataDir,
+    db: h.db,
+    env: {},
+    paths: {
+      reposRoot: `${h.dataDir}/repos`,
+      worktreesRoot: `${h.dataDir}/worktrees`,
+      artifactsRoot: h.artifactRoot,
+    },
+    repoService,
+    tagService: createTagService({ db: h.db, clock: h.clock, repoService }),
   });
 }
 
@@ -56,7 +78,18 @@ test("GET /v1/repos returns active repo rows ordered by repo_id", async () => {
   repoService.remove("repo-b");
   const handler = createAdminApiHandler({
     version: "test-version",
+    config: {},
+    configPath: null,
+    dataDir: h.dataDir,
+    db: h.db,
+    env: {},
+    paths: {
+      reposRoot: `${h.dataDir}/repos`,
+      worktreesRoot: `${h.dataDir}/worktrees`,
+      artifactsRoot: h.artifactRoot,
+    },
     repoService,
+    tagService: createTagService({ db: h.db, clock: h.clock, repoService }),
   });
 
   const response = await handler(new Request("http://quay.local/v1/repos"));
@@ -78,7 +111,18 @@ test("GET /v1/repos/:id returns a repo or stable not-found error", async () => {
   });
   const handler = createAdminApiHandler({
     version: "test-version",
+    config: {},
+    configPath: null,
+    dataDir: h.dataDir,
+    db: h.db,
+    env: {},
+    paths: {
+      reposRoot: `${h.dataDir}/repos`,
+      worktreesRoot: `${h.dataDir}/worktrees`,
+      artifactsRoot: h.artifactRoot,
+    },
     repoService,
+    tagService: createTagService({ db: h.db, clock: h.clock, repoService }),
   });
 
   const found = await handler(new Request("http://quay.local/v1/repos/repo-a"));
@@ -92,6 +136,215 @@ test("GET /v1/repos/:id returns a repo or stable not-found error", async () => {
   expect(await responseJson(missing)).toEqual({
     error: "repo_not_found",
     message: 'repo "missing" not found',
+  });
+});
+
+test("GET /v1/global returns deployment config, agents, prompts, and tags", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  const tagService = createTagService({ db: h.db, clock: h.clock, repoService });
+  tagService.setValue("deployment", null, "priority", "p1");
+  tagService.setRequired("deployment", null, "priority", true);
+  const handler = createAdminApiHandler({
+    version: "test-version",
+    config: {
+      retry_budget: 8,
+      agents: {
+        worker: "codex",
+        invocations: {
+          codex: { worker: "codex exec < {prompt_file}" },
+        },
+      },
+    },
+    configPath: "/tmp/quay-config.toml",
+    dataDir: h.dataDir,
+    db: h.db,
+    env: {},
+    paths: {
+      reposRoot: `${h.dataDir}/repos`,
+      worktreesRoot: `${h.dataDir}/worktrees`,
+      artifactsRoot: h.artifactRoot,
+    },
+    repoService,
+    tagService,
+  });
+
+  const response = await handler(new Request("http://quay.local/v1/global"));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(body.config_path).toBe("/tmp/quay-config.toml");
+  expect(body).toMatchObject({
+    agents: { defaults: { worker: "codex", reviewer: "claude" } },
+  });
+  expect(JSON.stringify(body)).toContain('"label":"RETRY_BUDGET"');
+  expect(JSON.stringify(body)).toContain('"value":"8"');
+  expect(JSON.stringify(body)).toContain('"name":"priority"');
+  expect(JSON.stringify(body)).toContain('"title":"Worker preamble"');
+  expect(JSON.stringify(body)).toContain('"reason":"ci_fail"');
+
+  const agentInvocations = (body.agents as {
+    invocations: Array<{
+      name: string;
+      roles: string[];
+      commands: { worker?: string; reviewer?: string };
+    }>;
+  }).invocations;
+  expect(agentInvocations.find((invocation) => invocation.name === "claude"))
+    .toMatchObject({
+      roles: ["worker", "reviewer"],
+      commands: {
+        worker: DEFAULT_CLAUDE_WORKER_INVOCATION,
+        reviewer: DEFAULT_CLAUDE_REVIEWER_INVOCATION,
+      },
+    });
+  expect(agentInvocations.find((invocation) => invocation.name === "codex"))
+    .toMatchObject({
+      roles: ["worker"],
+      commands: { worker: "codex exec < {prompt_file}" },
+    });
+});
+
+test("GET /v1/tags counts repo tag extensions only for active repos", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  repoService.add({
+    repo_id: "repo-active",
+    repo_url: "git@example.com:owner/repo-active.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  repoService.add({
+    repo_id: "repo-archived",
+    repo_url: "git@example.com:owner/repo-archived.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  const tagService = createTagService({ db: h.db, clock: h.clock, repoService });
+  tagService.setValue("deployment", null, "priority", "p1");
+  tagService.setValue("repo", "repo-active", "priority", "p1");
+  tagService.setValue("repo", "repo-archived", "priority", "p1");
+  repoService.remove("repo-archived");
+  const handler = createAdminApiHandler({
+    version: "test-version",
+    config: {},
+    configPath: null,
+    dataDir: h.dataDir,
+    db: h.db,
+    env: {},
+    paths: {
+      reposRoot: `${h.dataDir}/repos`,
+      worktreesRoot: `${h.dataDir}/worktrees`,
+      artifactsRoot: h.artifactRoot,
+    },
+    repoService,
+    tagService,
+  });
+
+  const response = await handler(new Request("http://quay.local/v1/tags"));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(body.tag_namespaces).toEqual([
+    {
+      name: "priority",
+      required: false,
+      values: ["p1"],
+      inherited_by: 1,
+      extended_by: 1,
+    },
+  ]);
+});
+
+test("GET /v1/repos/:id returns detail tags and active task count", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  repoService.add({
+    repo_id: "repo-a",
+    repo_url: "git@example.com:owner/repo-a.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  insertTask(h.db, { repoId: "repo-a", taskId: "task-a", state: "queued" });
+  insertTask(h.db, { repoId: "repo-a", taskId: "task-b", state: "parked" });
+  const tagService = createTagService({ db: h.db, clock: h.clock, repoService });
+  tagService.setValue("deployment", null, "priority", "p1");
+  tagService.setRequired("deployment", null, "priority", true);
+  tagService.setValue("repo", "repo-a", "area", "ui");
+  const handler = createAdminApiHandler({
+    version: "test-version",
+    config: {},
+    configPath: null,
+    dataDir: h.dataDir,
+    db: h.db,
+    env: {},
+    paths: {
+      reposRoot: `${h.dataDir}/repos`,
+      worktreesRoot: `${h.dataDir}/worktrees`,
+      artifactsRoot: h.artifactRoot,
+    },
+    repoService,
+    tagService,
+  });
+
+  const response = await handler(new Request("http://quay.local/v1/repos/repo-a"));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(body).toMatchObject({
+    repo_id: "repo-a",
+    active_task_count: 1,
+  });
+  expect(body.tag_namespaces).toEqual([
+    { name: "area", required: false, values: ["ui"] },
+  ]);
+  expect(body.inherited_tag_namespaces).toEqual([
+    {
+      name: "priority",
+      required: true,
+      values: ["p1"],
+      inherited_by: 1,
+      extended_by: 0,
+    },
+  ]);
+});
+
+test("GET /v1/matrix returns repo override rows", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  repoService.add({
+    repo_id: "repo-a",
+    repo_url: "git@example.com:owner/repo-a.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+    agent_worker: "codex",
+  });
+  const handler = createHandler({
+    config: {
+      agents: {
+        worker: "claude",
+        invocations: {
+          codex: { worker: "codex exec < {prompt_file}" },
+        },
+      },
+    },
+    repoService,
+  });
+
+  const response = await handler(new Request("http://quay.local/v1/matrix"));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(body.rows).toContainEqual({
+    group: "AGENTS",
+    label: "worker agent",
+    key: "agent_worker",
+    default_value: "claude",
+    values: { "repo-a": "codex" },
   });
 });
 
