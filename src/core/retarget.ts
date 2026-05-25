@@ -100,6 +100,7 @@ interface ArtifactRow {
 
 interface ActiveAttemptRow {
   attempt_id: number;
+  attempt_number: number;
   tmux_session: string | null;
 }
 
@@ -290,7 +291,7 @@ function retargetUnderLock(
     throw err;
   }
 
-  cleanupSourceSubstrate(deps, source, activeAttempt?.tmux_session ?? null);
+  cleanupSourceSubstrate(deps, source, activeAttempt);
   return {
     ok: true,
     value: {
@@ -322,11 +323,14 @@ function retargetEventData(
 function cleanupSourceSubstrate(
   deps: RetargetDeps,
   source: SourceTaskRow,
-  activeTmuxSession: string | null,
+  activeAttempt: ActiveAttemptRow | null,
 ): void {
-  if (source.state === "running" && activeTmuxSession !== null) {
+  if (source.state === "running" && activeAttempt !== null) {
+    const session =
+      activeAttempt.tmux_session ??
+      `quay-task-${source.tmux_id}-${activeAttempt.attempt_number}`;
     try {
-      deps.tmux.kill(activeTmuxSession);
+      deps.tmux.kill(session);
     } catch {}
   }
   try {
@@ -399,7 +403,7 @@ function loadActiveAttempt(db: DB, taskId: string): ActiveAttemptRow | null {
   return (
     db
       .query<ActiveAttemptRow, [string]>(
-        `SELECT attempt_id, tmux_session
+        `SELECT attempt_id, attempt_number, tmux_session
            FROM attempts
           WHERE task_id = ?
             AND spawned_at IS NOT NULL

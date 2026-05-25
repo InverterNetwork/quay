@@ -280,3 +280,54 @@ test("task retarget closes active attempt when source is running", async () => {
     event_type: "retargeted",
   });
 });
+
+test("task retarget kills canonical session when running attempt has no tmux_session yet", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-25T10:00:00.000Z");
+  addRepo(h, "repo-source");
+  addRepo(h, "repo-target");
+
+  const built = buildCliDeps(h);
+  built.git.seedBareClone("repo-source");
+  built.git.seedBareClone("repo-target");
+  h.ids.push("55555555bbbbbbbbbbbbbbbbbbbbbbbb");
+
+  const source = insertRunningTask(h.db, {
+    taskId: "spawn-window-retarget-source",
+    repoId: "repo-source",
+    worktreesRoot: built.worktreesRoot,
+    tmuxId: "spawn-window",
+    attemptNumber: 3,
+    tmuxSession: null,
+  });
+  seedTaskObjective(h, source.taskId, "Retarget this spawn-window worker.");
+  const canonicalSession = `quay-task-${source.tmuxId}-${source.attemptNumber}`;
+  built.tmux.liveSessions.add(canonicalSession);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["task", "retarget", source.taskId, "--repo", "repo-target", "--yes"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(built.tmux.killCalls).toContain(canonicalSession);
+  expect(built.tmux.liveSessions.has(canonicalSession)).toBe(false);
+
+  const attempt = h.db
+    .query<
+      { ended_at: string | null; exit_kind: string | null; tmux_session: string | null },
+      [number]
+    >(
+      `SELECT ended_at, exit_kind, tmux_session
+         FROM attempts
+        WHERE attempt_id = ?`,
+    )
+    .get(source.attemptId);
+  expect(attempt).toEqual({
+    ended_at: "2026-05-25T10:00:00.000Z",
+    exit_kind: "killed_cancel",
+    tmux_session: null,
+  });
+});
