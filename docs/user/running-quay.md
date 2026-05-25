@@ -19,6 +19,97 @@ Output is newline-delimited JSON. Each line describes one task action:
 If another tick or cancel holds the supervisor lock, `quay tick` exits cleanly
 without doing work.
 
+## Admin API
+
+```bash
+quay serve
+quay serve --host 127.0.0.1 --port 9731
+quay serve --ui-dir ../quay-ui/dist
+```
+
+`quay serve` starts the local Admin HTTP API using the same config, data
+directory, migrations, and repo registry as the rest of the CLI. The server
+binds to `127.0.0.1:9731` by default and prints one JSON line with the bound
+URL. `--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or
+`localhost`); non-loopback binds are rejected because the Admin API exposes
+local repo registry data plus a narrow structured write surface. Local
+standalone serves are unauthenticated by default. Set `[admin].require_auth =
+true` and provide `QUAY_ADMIN_TOKEN` to require bearer auth for `/v1/*`.
+
+Release binaries include an embedded production Quay UI bundle. With those
+binaries, `quay serve` hosts the Admin UI and injects same-origin API runtime
+config before the UI app loads, so browser requests go to the serving Quay
+process under `/v1/*`.
+
+When admin auth is enabled, static Admin UI assets still load in a browser, and
+the injected runtime config adds `Authorization: Bearer <token>` to same-origin
+`/v1/*` fetches. Open the UI with `/#quay_admin_token=<token>` once to move the
+token into browser `sessionStorage`; non-browser clients and header-injecting
+proxies can send the `Authorization` header directly.
+
+Pass `--ui-dir <path>` to override the embedded UI with a built Quay UI bundle
+from disk:
+
+```bash
+cd ../quay-ui
+bun run build
+
+cd ../quay
+quay serve --ui-dir ../quay-ui/dist
+```
+
+The UI directory must exist, be readable, and contain a readable `index.html`.
+When embedded UI assets or `--ui-dir` are enabled, Quay serves static files and
+returns `index.html` for non-API SPA routes such as `/repos/example`. Versioned
+Admin API paths under `/v1/*` keep precedence over static files and are never
+served from UI assets. Missing static asset paths such as `/assets/app.js`
+return 404 instead of falling back to the SPA entrypoint.
+
+Initial endpoints:
+
+- `GET /v1/meta`
+- `GET /v1/repos`
+- `GET /v1/repos/<repo_id>`
+- `GET /v1/global`
+- `GET /v1/tags`
+- `GET /v1/matrix`
+- `POST /v1/changes/preview`
+- `POST /v1/changes/apply`
+
+Writes are limited to structured Admin UI change requests that Quay validates
+and fences with the read-model revision returned by the API. Clients should
+preview a change set before applying it, and must reload when the server returns
+`stale_revision`.
+
+Each `POST /v1/changes/preview` and `POST /v1/changes/apply` emits a structured
+`quay_admin_audit` JSON line on server stderr with the Slack user ID when a
+protected proxy supplied it, timestamp, success or failure status, sanitized
+operation summaries, and target resources. Audit summaries name fields and
+targets but omit raw repository URLs, commands, token values, and other full
+configuration values.
+
+The API returns JSON and uses a stable error envelope:
+
+```json
+{"error":"repo_not_found","message":"repo \"example\" not found"}
+```
+
+The versioned contract is owned in `docs/api/openapi.yaml`. UI clients should
+target the `/v1/*` paths from that contract and should not call CLI commands or
+depend on `hermes-agent`.
+
+Browser clients are supported from these local development origins:
+
+- `http://localhost:3000`
+- `http://127.0.0.1:3000`
+- `http://localhost:4173`
+- `http://127.0.0.1:4173`
+- `http://localhost:5173`
+- `http://127.0.0.1:5173`
+
+The IPv6 loopback form (`http://[::1]:<port>`) is also allowed for the same
+ports. Other origins receive `cors_origin_not_allowed`.
+
 ## What Tick Processes
 
 Each cycle:

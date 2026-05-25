@@ -35,6 +35,10 @@ import {
   type CancelResult,
 } from "../core/cancel.ts";
 import {
+  task_retarget,
+  type RetargetDeps,
+} from "../core/retarget.ts";
+import {
   claim_task,
   release_claim,
   submit_brief,
@@ -54,6 +58,7 @@ import {
   claimOutboxItem,
   completeOutboxItem,
   failOutboxItem,
+  listDeliveryOutboxItems,
   listOutboxItems,
   type OutboxHandlerClass,
   type OutboxStatus,
@@ -413,7 +418,9 @@ function handleOutboxList(
   if (taskId !== null) filters.taskId = taskId;
   const kind = readFlag(argv, "--kind");
   if (kind !== null) filters.kind = kind;
-  const rows = listOutboxItems(deps.db, filters);
+  const rows = rawHandlerClass === null
+    ? listDeliveryOutboxItems(deps.db, filters)
+    : listOutboxItems(deps.db, filters);
   io.stdout(`${JSON.stringify(rows)}\n`);
   return { exitCode: 0 };
 }
@@ -561,6 +568,9 @@ async function handleTask(
     case "release-claim":
       if (wantsHelp(rest)) return printHelp(io, ["task", "release-claim"]);
       return handleReleaseClaim(rest, deps, io);
+    case "retarget":
+      if (wantsHelp(rest)) return printHelp(io, ["task", "retarget"]);
+      return await handleTaskRetarget(rest, deps, io);
     default:
       // A typo'd subcommand benefits from the noun's usage block as much as
       // a missing one — surface it on stderr alongside the structured envelope.
@@ -571,6 +581,49 @@ async function handleTask(
         `unknown task subcommand: ${sub}`,
       );
   }
+}
+
+async function handleTaskRetarget(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  const validation = validateFlags(argv, {
+    boolean: ["--yes"],
+    valued: ["--repo", "--base-branch"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const taskId = positional(argv);
+  if (!taskId) {
+    return writeError(io, "usage_error", "task retarget requires <task_id>");
+  }
+  const targetRepo = readFlag(argv, "--repo");
+  if (targetRepo === null) {
+    return writeError(io, "usage_error", "task retarget requires --repo <target_repo>");
+  }
+  const retargetDeps: RetargetDeps = {
+    db: deps.db,
+    clock: deps.clock,
+    ids: deps.ids,
+    git: deps.git,
+    tmux: deps.tmux,
+    commandRunner: deps.commandRunner,
+    artifactStore: deps.artifactStore,
+    supervisorLock: deps.supervisorLock,
+    paths: deps.paths,
+    agentResolver: deps.agentResolver,
+    referenceReposRoot: deps.tickOptions?.referenceReposRoot,
+  };
+  const input: { taskId: string; targetRepo: string; baseBranch?: string; yes: boolean } = {
+    taskId,
+    targetRepo,
+    yes: argv.includes("--yes"),
+  };
+  const baseBranch = readFlag(argv, "--base-branch");
+  if (baseBranch !== null) input.baseBranch = baseBranch;
+  return emitServiceResult(await task_retarget(retargetDeps, input), io);
 }
 
 // Common "explicit --help" path for any command/subcommand: prints to stdout,

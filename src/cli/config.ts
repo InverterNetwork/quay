@@ -20,6 +20,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { isSecretBearingForwardedIdentityHeader } from "../admin/auth.ts";
 import type { TickOptions } from "../core/tick.ts";
 
 const positiveInt = z.number().int().positive();
@@ -52,6 +53,24 @@ const AdaptersConfigSchema = z
 const ContextConfigSchema = z
   .object({
     reference_repos_root: z.string().min(1).optional(),
+  })
+  .strict();
+
+const HttpHeaderNameSchema = z.string().min(1).regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, {
+  message: "header name must be a valid HTTP field name",
+}).refine((name) => !isSecretBearingHeaderName(name), {
+  message: "header name must not be a secret-bearing header",
+});
+
+function isSecretBearingHeaderName(name: string): boolean {
+  return isSecretBearingForwardedIdentityHeader(name);
+}
+
+const AdminConfigSchema = z
+  .object({
+    require_auth: z.boolean().optional(),
+    token_env: z.string().min(1).optional(),
+    forwarded_identity_header: HttpHeaderNameSchema.optional(),
   })
   .strict();
 
@@ -129,6 +148,7 @@ export const ConfigSchema = z
     tick_lock_path: z.string().min(1).optional(),
     supervisor_lock_stale_seconds: positiveInt.optional(),
     adapters: AdaptersConfigSchema.optional(),
+    admin: AdminConfigSchema.optional(),
     context: ContextConfigSchema.optional(),
     reviewer: ReviewerConfigSchema.optional(),
   })

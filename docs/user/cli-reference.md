@@ -41,6 +41,51 @@ quay -v
 
 `--version` short-circuits before config, DB, and migrations.
 
+## Serve
+
+```bash
+quay serve [--host <host>] [--port <port>] [--ui-dir <path>]
+```
+
+Starts the Admin HTTP API and, for release binaries, the embedded Admin UI
+using the same runtime wiring as CLI commands:
+config loading, data directory resolution, migrations, and repo registry
+services. Defaults to `127.0.0.1:9731`. The OpenAPI contract is checked in at
+`docs/api/openapi.yaml`.
+
+The API exposes read models plus a narrow structured write surface under
+`POST /v1/changes/preview` and `POST /v1/changes/apply`. Apply requests are
+guarded by the read-model revision returned by the API, so stale clients must
+reload before retrying.
+
+`--host` only accepts loopback addresses (`127.0.0.1`, `::1`, or `localhost`).
+By default the API is unauthenticated on loopback for local standalone use, so
+Quay refuses non-loopback binds. To protect `/v1/*`, set
+`[admin].require_auth = true` and provide `QUAY_ADMIN_TOKEN`; API requests must
+send `Authorization: Bearer <token>`.
+
+Static Admin UI assets stay browser-loadable in protected mode. Quay injects a
+same-origin `/v1/*` fetch wrapper into `index.html`; open the UI with
+`/#quay_admin_token=<token>` once to store the token in browser
+`sessionStorage`. Non-browser clients and reverse proxies can send the
+`Authorization` header directly.
+
+`--ui-dir` overrides embedded UI assets with a built Quay UI directory from the
+same loopback server:
+
+```bash
+cd ../quay-ui
+bun run build
+cd ../quay
+quay serve --ui-dir ../quay-ui/dist
+```
+
+The directory must contain `index.html`. When embedded UI assets or `--ui-dir`
+are active, Quay serves `/v1/*` through the Admin API before checking static
+files, serves existing assets with content-type and cache headers, injects
+same-origin API runtime config into `index.html`, returns `index.html` for
+non-API SPA routes, and returns 404 for missing asset-like paths.
+
 ## Repo
 
 ```bash
@@ -267,6 +312,7 @@ quay task get <task_id>
 quay task events <task_id>
 quay task claim <task_id>
 quay task release-claim <task_id> --claim-id <claim_id>
+quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes
 ```
 
 `task claim` only succeeds for `awaiting-next-brief` tasks.
@@ -275,6 +321,17 @@ quay task release-claim <task_id> --claim-id <claim_id>
 It also includes `authors`, parsed from the ticket's `quay-config.authors`
 block as `{name, slack_id}` objects. Legacy or malformed rows return
 `authors: []`.
+
+`task retarget` clones the original `task_objective`, ticket snapshot, tags,
+author metadata, agent/model overrides, screenshot settings, worker execution
+mode, and retry budget into a new `queued` task in the target repo. The new
+task is linked with `retargeted_from_task_id`; the source task is moved to
+`cancelled` with a `retargeted` audit event whose `event_data` names the new
+task. `--yes` is required because the source task is mutated and any live
+worker session is killed. If retarget crashes after creating the linked clone
+but before the source reaches terminal state, the next `quay tick` recovers the
+cancel intent and writes the same source-side `retargeted` audit context from
+the linked clone.
 
 ## Submit Brief
 

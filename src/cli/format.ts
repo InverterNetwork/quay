@@ -6,6 +6,7 @@ export interface TaskListRow {
   task_id: string;
   repo_id: string;
   base_branch: string;
+  retargeted_from_task_id: string | null;
   state: string;
   external_ref: string | null;
   branch_name: string;
@@ -58,7 +59,7 @@ export interface TaskGetPayload extends TaskListRow {
 
 const TASK_LIST_COLUMNS = `
   t.task_id, t.repo_id, COALESCE(t.base_branch, r.base_branch) AS base_branch,
-  t.state, t.external_ref, t.branch_name,
+  t.retargeted_from_task_id, t.state, t.external_ref, t.branch_name,
   t.attempts_consumed, t.retry_budget, t.budget_exhausted,
   t.pr_screenshots_requested, t.pr_screenshots_required,
   t.worker_execution,
@@ -70,6 +71,7 @@ interface TaskListRawRow {
   task_id: string;
   repo_id: string;
   base_branch: string;
+  retargeted_from_task_id: string | null;
   state: string;
   external_ref: string | null;
   branch_name: string;
@@ -92,6 +94,7 @@ function rowToList(r: TaskListRawRow): TaskListRow {
     task_id: r.task_id,
     repo_id: r.repo_id,
     base_branch: r.base_branch,
+    retargeted_from_task_id: r.retargeted_from_task_id,
     state: r.state,
     external_ref: r.external_ref,
     branch_name: r.branch_name,

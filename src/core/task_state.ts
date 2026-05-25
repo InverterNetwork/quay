@@ -259,7 +259,12 @@ export const TASK_TRANSITIONS = [
     ),
   ]),
   ...CANCEL_FROM_STATES.map((from) =>
-    transition(from, "cancelled", ["cancelled"], "operator cancelled task"),
+    transition(
+      from,
+      "cancelled",
+      ["cancelled", "retargeted"],
+      "operator cancelled or retargeted task",
+    ),
   ),
 ] as const satisfies readonly TaskTransition[];
 

@@ -50,6 +50,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       "task events",
       "task claim",
       "task release-claim",
+      "task retarget",
     ],
   },
   "task list": {
@@ -85,11 +86,35 @@ const COMMANDS: Record<string, CommandSpec> = {
     summary: "Release a previously held claim.",
     flags: [{ flag: "--claim-id <id>", desc: "The claim_id returned by `task claim`." }],
   },
+  "task retarget": {
+    path: "task retarget",
+    synopsis:
+      "quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes",
+    summary:
+      "Clone a task into another repo and cancel the source task with a retarget audit event.",
+    flags: [
+      { flag: "--repo <target_repo>", desc: "Target repo_id for the cloned queued task." },
+      { flag: "--base-branch <branch>", desc: "Optional target task base branch override." },
+      { flag: "--yes", desc: "Required confirmation for the source task mutation." },
+    ],
+  },
   tick: {
     path: "tick",
     synopsis: "quay tick",
     summary:
       "Run the supervisor tick loop once and exit. Emits one JSON line per result.",
+  },
+  serve: {
+    path: "serve",
+    synopsis: "quay serve [--host <host>] [--port <port>] [--ui-dir <path>]",
+    summary: "Start the local Admin HTTP API and UI server",
+    details:
+      "Serves the versioned Admin API using the same config, data directory, migrations, and repo registry as the CLI. Release binaries serve the embedded Quay UI by default. Pass --ui-dir to override it with a built UI bundle from disk while keeping /v1/* reserved for the API. Set [admin].require_auth=true and QUAY_ADMIN_TOKEN to require bearer auth.",
+    flags: [
+      { flag: "--host <host>", desc: "Bind loopback host. Defaults to 127.0.0.1." },
+      { flag: "--port <port>", desc: "Bind port. Defaults to 9731." },
+      { flag: "--ui-dir <path>", desc: "Override embedded UI assets with a built UI directory." },
+    ],
   },
   handoff: {
     path: "handoff",
@@ -491,6 +516,7 @@ const COMMANDS: Record<string, CommandSpec> = {
 const TOP_LEVEL_ORDER: string[] = [
   "task",
   "tick",
+  "serve",
   "handoff",
   "outbox",
   "enqueue",
