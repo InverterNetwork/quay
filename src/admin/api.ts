@@ -69,7 +69,23 @@ export interface AdminAuditEvent extends AdminRequestAuditContext {
   action: "changes.preview" | "changes.apply";
   method: string;
   path: string;
+  timestamp: string;
+  success: boolean;
+  status: number;
+  operation_summary: string[];
+  target_resources: string[];
+  error_code?: string;
+  error_message?: string;
 }
+
+type AdminAuditOutcome = Omit<
+  AdminAuditEvent,
+  keyof AdminRequestAuditContext | "action" | "method" | "path" | "timestamp"
+>;
+type AdminAuditMutationDetails = Pick<
+  AdminAuditEvent,
+  "operation_summary" | "target_resources"
+>;
 
 type JsonHeaders = Record<string, string>;
 type AdminFieldSource = "config" | "database" | "default" | "derived";
@@ -157,6 +173,8 @@ class AdminHttpError extends Error {
     this.details = details;
   }
 }
+
+const mutationAuditErrorDetails = new WeakMap<object, AdminAuditMutationDetails>();
 
 const tagNamespaceInputSchema = z
   .object({
@@ -287,19 +305,21 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
       if (isWriteRoute(segments, "preview")) {
         return handleAdminMutation(
           cors.headers,
-          () => {
-            recordAdminAudit(runtime, request, "changes.preview", auth.audit);
-            return previewChanges(runtime, request);
-          },
+          request,
+          runtime,
+          "changes.preview",
+          auth.audit,
+          () => previewChanges(runtime, request),
         );
       }
       if (isWriteRoute(segments, "apply")) {
         return handleAdminMutation(
           cors.headers,
-          () => {
-            recordAdminAudit(runtime, request, "changes.apply", auth.audit);
-            return applyChanges(runtime, request);
-          },
+          request,
+          runtime,
+          "changes.apply",
+          auth.audit,
+          () => applyChanges(runtime, request),
         );
       }
       if (!isVersionedRoute(segments)) {
@@ -415,12 +435,15 @@ function recordAdminAudit(
   request: Request,
   action: AdminAuditEvent["action"],
   audit: AdminRequestAuditContext,
+  outcome: AdminAuditOutcome,
 ): void {
   runtime.adminAudit?.({
     action,
     method: request.method,
     path: new URL(request.url).pathname,
+    timestamp: new Date().toISOString(),
     ...audit,
+    ...outcome,
   });
 }
 
@@ -676,6 +699,10 @@ function matrixRow(
 
 async function handleAdminMutation(
   corsHeaders: JsonHeaders,
+  request: Request,
+  runtime: AdminApiRuntime,
+  action: AdminAuditEvent["action"],
+  audit: AdminRequestAuditContext,
   run: () => Promise<unknown>,
 ): Promise<Response> {
   try {
@@ -689,15 +716,27 @@ async function handleAdminMutation(
         : typeof record.current_revision === "string"
           ? record.current_revision
           : undefined;
-    return jsonResponse(
+    const response = jsonResponse(
       body,
       200,
       revision === undefined
         ? corsHeaders
         : { ...corsHeaders, ETag: quoteEtag(revision) },
     );
+    recordAdminAudit(runtime, request, action, audit, {
+      success: true,
+      status: response.status,
+      ...auditDetailsFromMutationBody(body),
+    });
+    return response;
   } catch (err) {
-    return adminErrorResponse(err, corsHeaders);
+    const response = adminErrorResponse(err, corsHeaders);
+    recordAdminAudit(runtime, request, action, audit, {
+      success: false,
+      status: response.status,
+      ...auditDetailsFromMutationError(err),
+    });
+    return response;
   }
 }
 
@@ -706,8 +745,12 @@ async function previewChanges(
   request: Request,
 ): Promise<AdminChangePreview> {
   const parsed = await parseChangeRequest(request);
-  assertCurrentRevision(runtime, parsed.base_revision);
-  return buildChangePreview(runtime, parsed.base_revision, parsed.changes);
+  try {
+    assertCurrentRevision(runtime, parsed.base_revision);
+    return buildChangePreview(runtime, parsed.base_revision, parsed.changes);
+  } catch (err) {
+    throwWithMutationAuditDetails(err, auditDetailsFromChanges(parsed.changes));
+  }
 }
 
 async function applyChanges(
@@ -733,13 +776,15 @@ async function applyChanges(
       readModel = buildAdminReadModel(runtime);
     })();
   } catch (err) {
-    if (err instanceof QuayError || err instanceof AdminHttpError) throw err;
+    if (err instanceof QuayError || err instanceof AdminHttpError) {
+      throwWithMutationAuditDetails(err, auditDetailsFromChanges(parsed.changes));
+    }
     const message = err instanceof Error ? err.message : String(err);
-    throw new AdminHttpError(
+    throwWithMutationAuditDetails(new AdminHttpError(
       500,
       "apply_failed",
       `failed to apply changes: ${message}`,
-    );
+    ), auditDetailsFromChanges(parsed.changes));
   }
   if (preview === undefined || revision === undefined || readModel === undefined) {
     throw new AdminHttpError(500, "apply_failed", "failed to apply changes");
@@ -750,6 +795,146 @@ async function applyChanges(
     preview,
     read_model: readModel,
   };
+}
+
+function auditDetailsFromMutationBody(body: unknown): {
+  operation_summary: string[];
+  target_resources: string[];
+} {
+  const preview = adminChangePreviewFromBody(body);
+  if (preview === null) {
+    return { operation_summary: [], target_resources: [] };
+  }
+  return {
+    operation_summary: preview.operations.map(auditOperationSummary),
+    target_resources: targetResourcesFromOperations(preview.operations),
+  };
+}
+
+function auditDetailsFromMutationError(err: unknown): {
+  operation_summary: string[];
+  target_resources: string[];
+  error_code: string;
+  error_message: string;
+} {
+  const details = err !== null &&
+    (typeof err === "object" || typeof err === "function")
+    ? mutationAuditErrorDetails.get(err)
+    : undefined;
+  return {
+    operation_summary: details?.operation_summary ?? [],
+    target_resources: details?.target_resources ?? [],
+    error_code: errorCodeForAudit(err),
+    error_message: errorMessageForAudit(err),
+  };
+}
+
+function throwWithMutationAuditDetails(
+  err: unknown,
+  details: AdminAuditMutationDetails,
+): never {
+  if (err !== null && (typeof err === "object" || typeof err === "function")) {
+    mutationAuditErrorDetails.set(err, details);
+  }
+  throw err;
+}
+
+function auditDetailsFromChanges(changes: AdminChange[]): AdminAuditMutationDetails {
+  return {
+    operation_summary: changes.flatMap(auditChangeSummaries),
+    target_resources: targetResourcesFromChanges(changes),
+  };
+}
+
+function auditChangeSummaries(change: AdminChange): string[] {
+  if (change.type === "repo.update") {
+    return REPO_PATCH_FIELDS
+      .filter((field) => field in change.patch)
+      .map((field) => `repo ${change.repo_id}: update ${field}`);
+  }
+  const prefix = change.scope === "deployment"
+    ? "deployment tags"
+    : `repo ${change.repo_id!} tags`;
+  return change.tag_namespaces
+    .map((namespace) => `${prefix}: replace ${namespace.name}`);
+}
+
+function targetResourcesFromChanges(changes: AdminChange[]): string[] {
+  const targets = new Set<string>();
+  for (const change of changes) {
+    if (change.type === "repo.update") {
+      targets.add(`repo:${change.repo_id}`);
+      continue;
+    }
+    targets.add(change.scope === "deployment" ? "deployment" : `repo:${change.repo_id!}`);
+  }
+  return [...targets].sort();
+}
+
+function adminChangePreviewFromBody(body: unknown): AdminChangePreview | null {
+  if (isAdminChangePreview(body)) return body;
+  if (body !== null && typeof body === "object") {
+    const preview = (body as { preview?: unknown }).preview;
+    if (isAdminChangePreview(preview)) return preview;
+  }
+  return null;
+}
+
+function isAdminChangePreview(value: unknown): value is AdminChangePreview {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as { operations?: unknown };
+  return Array.isArray(candidate.operations) &&
+    candidate.operations.every(isAdminChangeOperation);
+}
+
+function isAdminChangeOperation(value: unknown): value is AdminChangeOperation {
+  if (value === null || typeof value !== "object") return false;
+  const op = value as Record<string, unknown>;
+  return typeof op.type === "string" &&
+    typeof op.scope === "string" &&
+    typeof op.target === "string" &&
+    (op.field === undefined || typeof op.field === "string");
+}
+
+function auditOperationSummary(operation: AdminChangeOperation): string {
+  if (operation.type === "repo.update") {
+    return operation.field === undefined
+      ? `repo ${operation.target}: update repository settings`
+      : `repo ${operation.target}: update ${operation.field}`;
+  }
+  if (operation.type === "tag_namespace.replace") {
+    const prefix = operation.scope === "deployment"
+      ? "deployment tags"
+      : `repo ${operation.target} tags`;
+    return operation.field === undefined
+      ? `${prefix}: replace tag namespace`
+      : `${prefix}: replace ${operation.field}`;
+  }
+  return `${operation.scope} ${operation.target}: ${operation.type}`;
+}
+
+function targetResourcesFromOperations(
+  operations: AdminChangeOperation[],
+): string[] {
+  const targets = new Set<string>();
+  for (const operation of operations) {
+    if (operation.scope === "deployment") {
+      targets.add("deployment");
+    } else {
+      targets.add(`repo:${operation.target}`);
+    }
+  }
+  return [...targets].sort();
+}
+
+function errorCodeForAudit(err: unknown): string {
+  if (err instanceof AdminHttpError || err instanceof QuayError) return err.code;
+  return "apply_failed";
+}
+
+function errorMessageForAudit(err: unknown): string {
+  if (err instanceof AdminHttpError || err instanceof QuayError) return err.message;
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function parseChangeRequest(request: Request): Promise<{

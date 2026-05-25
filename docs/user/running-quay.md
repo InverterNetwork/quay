@@ -81,6 +81,13 @@ and fences with the read-model revision returned by the API. Clients should
 preview a change set before applying it, and must reload when the server returns
 `stale_revision`.
 
+Each `POST /v1/changes/preview` and `POST /v1/changes/apply` emits a structured
+`quay_admin_audit` JSON line on server stderr with the Slack user ID when a
+protected proxy supplied it, timestamp, success or failure status, sanitized
+operation summaries, and target resources. Audit summaries name fields and
+targets but omit raw repository URLs, commands, token values, and other full
+configuration values.
+
 The API returns JSON and uses a stable error envelope:
 
 ```json

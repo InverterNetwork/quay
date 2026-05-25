@@ -358,6 +358,20 @@ forwarded_identity_header = "not a header"
   );
 });
 
+test("[admin].forwarded_identity_header rejects secret-bearing header names", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[admin]
+forwarded_identity_header = "Authorization"
+`,
+  );
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /forwarded_identity_header|secret-bearing/i,
+  );
+});
+
 test("absent [adapters] section means both adapters disabled", () => {
   expect(adaptersConfigFromConfig({})).toEqual({
     linearEnabled: false,

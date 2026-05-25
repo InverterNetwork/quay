@@ -6,6 +6,16 @@ export const DEFAULT_ADMIN_TOKEN_ENV = "QUAY_ADMIN_TOKEN";
 export const DEFAULT_ADMIN_FORWARDED_IDENTITY_HEADER = "X-Hermes-User-Id";
 
 const BEARER_REALM = "quay-admin";
+const SECRET_BEARING_FORWARD_HEADER_NAMES = new Set([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "set-cookie",
+  "x-api-key",
+  "x-auth-token",
+  "x-csrf-token",
+  "x-xsrf-token",
+]);
 
 export interface AdminAuthRuntime {
   config?: QuayConfig;
@@ -28,6 +38,8 @@ export interface AdminAuthFailure {
 }
 
 export interface AdminRequestAuditContext {
+  slack_user_id: string | null;
+  identity_status: "forwarded" | "missing" | "standalone";
   forwarded_identity: string | null;
   forwarded_identity_header: string;
 }
@@ -45,6 +57,20 @@ export function resolveAdminAuth(runtime: AdminAuthRuntime): ResolvedAdminAuth {
   if (!requireAuth) {
     return { enabled: false, tokenEnv, forwardedIdentityHeader };
   }
+  if (isSecretBearingForwardedIdentityHeader(forwardedIdentityHeader)) {
+    return {
+      enabled: true,
+      tokenEnv,
+      forwardedIdentityHeader,
+      startupFailure: {
+        status: 500,
+        code: "admin_forwarded_identity_header_secret_bearing",
+        message:
+          `[admin].forwarded_identity_header must not be a secret-bearing header: ${forwardedIdentityHeader}`,
+        headers: {},
+      },
+    };
+  }
   if (token === "") {
     return {
       enabled: true,
@@ -59,6 +85,10 @@ export function resolveAdminAuth(runtime: AdminAuthRuntime): ResolvedAdminAuth {
     };
   }
   return { enabled: true, tokenEnv, forwardedIdentityHeader, token };
+}
+
+export function isSecretBearingForwardedIdentityHeader(name: string): boolean {
+  return SECRET_BEARING_FORWARD_HEADER_NAMES.has(name.toLowerCase());
 }
 
 export function assertAdminAuthReady(runtime: AdminAuthRuntime): void {
@@ -141,11 +171,21 @@ function adminRequestAuditContext(
   request: Request,
   auth: ResolvedAdminAuth,
 ): AdminRequestAuditContext {
+  if (!auth.enabled) {
+    return {
+      slack_user_id: null,
+      identity_status: "standalone",
+      forwarded_identity: null,
+      forwarded_identity_header: auth.forwardedIdentityHeader,
+    };
+  }
   const rawIdentity = request.headers.get(auth.forwardedIdentityHeader);
   const forwardedIdentity = rawIdentity === null || rawIdentity.trim() === ""
     ? null
     : rawIdentity.trim();
   return {
+    slack_user_id: forwardedIdentity,
+    identity_status: forwardedIdentity === null ? "missing" : "forwarded",
     forwarded_identity: forwardedIdentity,
     forwarded_identity_header: auth.forwardedIdentityHeader,
   };
