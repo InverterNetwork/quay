@@ -54,6 +54,7 @@ import {
   claimOutboxItem,
   completeOutboxItem,
   failOutboxItem,
+  listDeliveryOutboxItems,
   listOutboxItems,
   type OutboxHandlerClass,
   type OutboxStatus,
@@ -413,7 +414,9 @@ function handleOutboxList(
   if (taskId !== null) filters.taskId = taskId;
   const kind = readFlag(argv, "--kind");
   if (kind !== null) filters.kind = kind;
-  const rows = listOutboxItems(deps.db, filters);
+  const rows = rawHandlerClass === null
+    ? listDeliveryOutboxItems(deps.db, filters)
+    : listOutboxItems(deps.db, filters);
   io.stdout(`${JSON.stringify(rows)}\n`);
   return { exitCode: 0 };
 }
