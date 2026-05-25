@@ -211,6 +211,15 @@ function retargetUnderLock(
   if (deps.referenceReposRoot !== undefined) {
     enqueueDeps.referenceReposRoot = deps.referenceReposRoot;
   }
+  const now = deps.clock.nowISO();
+  const activeAttempt =
+    source.state === "running" ? loadActiveAttempt(deps.db, input.taskId) : null;
+  enqueueDeps.retargetIntent = {
+    retargetedFromTaskId: source.task_id,
+    sourceTaskId: source.task_id,
+    cancelRequestedAt: now,
+    activeAttemptId: activeAttempt?.attempt_id ?? null,
+  };
   const enqueueInput: {
     repo_id: string;
     brief: string;
@@ -248,10 +257,6 @@ function retargetUnderLock(
   }
   const cloned = enqueue(enqueueDeps, enqueueInput);
 
-  const now = deps.clock.nowISO();
-  const activeAttempt =
-    source.state === "running" ? loadActiveAttempt(deps.db, input.taskId) : null;
-  commitRetargetIntent(deps, source, activeAttempt, cloned, now);
   fireFailpoint("after_retarget_intent_commit");
   cleanupSourceSubstrate(deps, source, activeAttempt);
   commitRetargetTerminal(deps, source, activeAttempt, input, cloned, now);
@@ -267,46 +272,6 @@ function retargetUnderLock(
       retargeted_worktree_path: cloned.worktree_path,
     },
   };
-}
-
-function commitRetargetIntent(
-  deps: RetargetDeps,
-  source: SourceTaskRow,
-  activeAttempt: ActiveAttemptRow | null,
-  cloned: EnqueueResult,
-  now: string,
-): void {
-  deps.db.exec("BEGIN IMMEDIATE");
-  try {
-    deps.db
-      .query(`UPDATE tasks SET retargeted_from_task_id = ? WHERE task_id = ?`)
-      .run(source.task_id, cloned.task_id);
-    deps.db
-      .query(
-        `UPDATE tasks
-            SET cancel_requested_at = COALESCE(cancel_requested_at, ?),
-                cancel_close_pr = 0,
-                cancel_keep_worktree = 0,
-                tick_error = NULL,
-                updated_at = ?
-          WHERE task_id = ?`,
-      )
-      .run(now, now, source.task_id);
-    if (source.state === "running" && activeAttempt !== null) {
-      deps.db
-        .query(
-          `UPDATE attempts SET kill_intent = 'cancel'
-            WHERE attempt_id = ? AND kill_intent IS NULL`,
-        )
-        .run(activeAttempt.attempt_id);
-    }
-    deps.db.exec("COMMIT");
-  } catch (err) {
-    try {
-      deps.db.exec("ROLLBACK");
-    } catch {}
-    throw err;
-  }
 }
 
 function commitRetargetTerminal(

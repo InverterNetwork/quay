@@ -46,6 +46,12 @@ export interface EnqueueDeps {
   retryBudget?: number;
   agentResolver?: AgentResolver;
   referenceReposRoot?: string | undefined;
+  retargetIntent?: {
+    retargetedFromTaskId: string;
+    sourceTaskId: string;
+    cancelRequestedAt: string;
+    activeAttemptId: number | null;
+  };
 }
 
 export const enqueueInputSchema = z
@@ -270,8 +276,8 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
              retry_budget, slack_thread_ref, authors_json, worker_execution,
              pr_screenshots_requested, pr_screenshots_required,
              worker_agent, worker_model, reviewer_agent, reviewer_model,
-             created_at, updated_at
-           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             retargeted_from_task_id, created_at, updated_at
+           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
@@ -291,9 +297,36 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           agentSnapshot.worker_model,
           agentSnapshot.reviewer_agent,
           agentSnapshot.reviewer_model,
+          deps.retargetIntent?.retargetedFromTaskId ?? null,
           now,
           now,
         );
+
+      if (deps.retargetIntent !== undefined) {
+        deps.db
+          .query(
+            `UPDATE tasks
+                SET cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                    cancel_close_pr = 0,
+                    cancel_keep_worktree = 0,
+                    tick_error = NULL,
+                    updated_at = ?
+              WHERE task_id = ?`,
+          )
+          .run(
+            deps.retargetIntent.cancelRequestedAt,
+            deps.retargetIntent.cancelRequestedAt,
+            deps.retargetIntent.sourceTaskId,
+          );
+        if (deps.retargetIntent.activeAttemptId !== null) {
+          deps.db
+            .query(
+              `UPDATE attempts SET kill_intent = 'cancel'
+                WHERE attempt_id = ? AND kill_intent IS NULL`,
+            )
+            .run(deps.retargetIntent.activeAttemptId);
+        }
+      }
 
       // Spec §8 step 5 / §12: task_tags rows land in the same transaction as
       // the tasks insert. Dedupe in JS (the spec already deduped inside the
