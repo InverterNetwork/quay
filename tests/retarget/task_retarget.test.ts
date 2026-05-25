@@ -6,6 +6,7 @@ import { enqueue } from "../../src/core/enqueue.ts";
 import { createRepoService } from "../../src/core/repos/service.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
+import { insertRunningTask, seedTaskObjective } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -212,4 +213,70 @@ test("task retarget requires explicit confirmation", async () => {
       .query<{ count: number }, []>(`SELECT count(*) AS count FROM tasks`)
       .get()!.count,
   ).toBe(1);
+});
+
+test("task retarget closes active attempt when source is running", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-25T10:00:00.000Z");
+  addRepo(h, "repo-source");
+  addRepo(h, "repo-target");
+
+  const built = buildCliDeps(h);
+  built.git.seedBareClone("repo-source");
+  built.git.seedBareClone("repo-target");
+  h.ids.push("44444444bbbbbbbbbbbbbbbbbbbbbbbb");
+
+  const source = insertRunningTask(h.db, {
+    taskId: "running-retarget-source",
+    repoId: "repo-source",
+    worktreesRoot: built.worktreesRoot,
+    spawnedAt: "2026-05-25T09:00:00.000Z",
+    tmuxSession: "quay-task-running-retarget-source-1",
+  });
+  seedTaskObjective(h, source.taskId, "Retarget this active worker.");
+  built.tmux.liveSessions.add(source.sessionName!);
+  h.db
+    .query(`UPDATE attempts SET kill_intent = 'wall_clock' WHERE attempt_id = ?`)
+    .run(source.attemptId);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["task", "retarget", source.taskId, "--repo", "repo-target", "--yes"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(built.tmux.killCalls).toContain(source.sessionName!);
+  expect(built.tmux.liveSessions.has(source.sessionName!)).toBe(false);
+
+  const attempt = h.db
+    .query<
+      { ended_at: string | null; exit_kind: string | null; kill_intent: string | null },
+      [number]
+    >(
+      `SELECT ended_at, exit_kind, kill_intent
+         FROM attempts
+        WHERE attempt_id = ?`,
+    )
+    .get(source.attemptId);
+  expect(attempt).toEqual({
+    ended_at: "2026-05-25T10:00:00.000Z",
+    exit_kind: "killed_cancel",
+    kill_intent: null,
+  });
+
+  const event = h.db
+    .query<{ attempt_id: number | null; event_type: string }, [string]>(
+      `SELECT attempt_id, event_type
+         FROM events
+        WHERE task_id = ?
+        ORDER BY event_id DESC
+        LIMIT 1`,
+    )
+    .get(source.taskId);
+  expect(event).toEqual({
+    attempt_id: source.attemptId,
+    event_type: "retargeted",
+  });
 });

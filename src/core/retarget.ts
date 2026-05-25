@@ -98,6 +98,11 @@ interface ArtifactRow {
   file_path: string;
 }
 
+interface ActiveAttemptRow {
+  attempt_id: number;
+  tmux_session: string | null;
+}
+
 const TERMINAL_STATES = new Set(["cancelled", "merged", "closed_unmerged"]);
 
 export async function task_retarget(
@@ -242,17 +247,32 @@ function retargetUnderLock(
   const cloned = enqueue(enqueueDeps, enqueueInput);
 
   const now = deps.clock.nowISO();
+  const activeAttempt =
+    source.state === "running" ? loadActiveAttempt(deps.db, input.taskId) : null;
   deps.db.exec("BEGIN");
   try {
     deps.db
       .query(`UPDATE tasks SET retargeted_from_task_id = ? WHERE task_id = ?`)
       .run(input.taskId, cloned.task_id);
 
+    if (activeAttempt !== null) {
+      deps.db
+        .query(
+          `UPDATE attempts
+              SET exit_kind = 'killed_cancel',
+                  ended_at = ?,
+                  kill_intent = NULL
+            WHERE attempt_id = ? AND ended_at IS NULL`,
+        )
+        .run(now, activeAttempt.attempt_id);
+    }
+
     const transition = transitionTaskState(deps, {
       taskId: input.taskId,
       from: source.state,
       to: "cancelled",
       eventType: "retargeted",
+      attemptId: activeAttempt?.attempt_id ?? null,
       now,
       updates: { clearTickError: true, clearClaim: true },
       respectCancelRequest: false,
@@ -270,7 +290,7 @@ function retargetUnderLock(
     throw err;
   }
 
-  cleanupSourceSubstrate(deps, source);
+  cleanupSourceSubstrate(deps, source, activeAttempt?.tmux_session ?? null);
   return {
     ok: true,
     value: {
@@ -299,14 +319,15 @@ function retargetEventData(
   };
 }
 
-function cleanupSourceSubstrate(deps: RetargetDeps, source: SourceTaskRow): void {
-  if (source.state === "running") {
-    const session = loadRunningTmuxSession(deps.db, source.task_id);
-    if (session !== null) {
-      try {
-        deps.tmux.kill(session);
-      } catch {}
-    }
+function cleanupSourceSubstrate(
+  deps: RetargetDeps,
+  source: SourceTaskRow,
+  activeTmuxSession: string | null,
+): void {
+  if (source.state === "running" && activeTmuxSession !== null) {
+    try {
+      deps.tmux.kill(activeTmuxSession);
+    } catch {}
   }
   try {
     deps.git.worktreeRemove(source.worktree_path);
@@ -374,11 +395,11 @@ function loadTags(db: DB, taskId: string): string[] {
     .map((row) => row.tag);
 }
 
-function loadRunningTmuxSession(db: DB, taskId: string): string | null {
+function loadActiveAttempt(db: DB, taskId: string): ActiveAttemptRow | null {
   return (
     db
-      .query<{ tmux_session: string | null }, [string]>(
-        `SELECT tmux_session
+      .query<ActiveAttemptRow, [string]>(
+        `SELECT attempt_id, tmux_session
            FROM attempts
           WHERE task_id = ?
             AND spawned_at IS NOT NULL
@@ -386,6 +407,6 @@ function loadRunningTmuxSession(db: DB, taskId: string): string | null {
           ORDER BY attempt_id DESC
           LIMIT 1`,
       )
-      .get(taskId)?.tmux_session ?? null
+      .get(taskId) ?? null
   );
 }
