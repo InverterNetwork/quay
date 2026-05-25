@@ -127,6 +127,12 @@ the Slack admin identity for Admin API audit records. In standalone
 unauthenticated mode, Quay marks audit identity as `standalone` and ignores that
 header instead of trusting a spoofable client value.
 
+The forwarded identity header is a trusted upstream assertion, not something
+Quay independently verifies. Any client with the Admin bearer token can send
+that header directly if it can reach `quay serve`, so deployments that expose
+Quay through a proxy must strip client-supplied identity headers and inject the
+configured header only after authenticating and allowlisting the Slack user.
+
 ## Reviewer
 
 ```toml

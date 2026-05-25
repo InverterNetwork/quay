@@ -970,7 +970,7 @@ test("Admin API includes CORS headers for allowed local UI origins", async () =>
   expect(response.headers.get("vary")).toBe("Origin");
 });
 
-test("Admin API handles CORS preflight for versioned routes", async () => {
+test("Admin API handles CORS preflight for read-only versioned routes", async () => {
   h = createHarness();
   const handler = createHandler();
 
@@ -986,11 +986,44 @@ test("Admin API handles CORS preflight for versioned routes", async () => {
     "http://127.0.0.1:5173",
   );
   expect(response.headers.get("access-control-allow-methods")).toBe(
-    "GET, POST, OPTIONS",
+    "GET, OPTIONS",
   );
   expect(response.headers.get("access-control-allow-headers")).toBe(
     "Accept, Authorization, Content-Type, X-Hermes-User-Id",
   );
+});
+
+test("Admin API handles CORS preflight for write-only versioned routes", async () => {
+  h = createHarness();
+  const handler = createHandler();
+
+  const response = await handler(
+    new Request("http://quay.local/v1/changes/apply", {
+      method: "OPTIONS",
+      headers: { Origin: "http://127.0.0.1:5173" },
+    }),
+  );
+
+  expect(response.status).toBe(204);
+  expect(response.headers.get("access-control-allow-methods")).toBe(
+    "POST, OPTIONS",
+  );
+});
+
+test("Admin API rejects GET on write-only routes with matching Allow header", async () => {
+  h = createHarness();
+  const handler = createHandler();
+
+  const response = await handler(
+    new Request("http://quay.local/v1/changes/apply"),
+  );
+
+  expect(response.status).toBe(405);
+  expect(response.headers.get("allow")).toBe("POST, OPTIONS");
+  expect(await responseJson(response)).toEqual({
+    error: "method_not_allowed",
+    message: "method GET is not allowed",
+  });
 });
 
 test("Admin API rejects disallowed CORS origins", async () => {

@@ -277,7 +277,8 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
       );
     }
     if (request.method === "OPTIONS") {
-      if (!isVersionedRoute(segments)) {
+      const allowedMethods = allowedMethodsForRoute(segments);
+      if (allowedMethods === null) {
         return errorResponse(
           404,
           "not_found",
@@ -289,7 +290,7 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
         status: 204,
         headers: {
           ...cors.headers,
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Methods": allowedMethods,
           "Access-Control-Allow-Headers": adminAuthAllowedHeaders(runtime),
           "Access-Control-Max-Age": "600",
         },
@@ -334,7 +335,7 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
         405,
         "method_not_allowed",
         `method ${request.method} is not allowed`,
-        { ...cors.headers, Allow: "GET, OPTIONS" },
+        { ...cors.headers, Allow: allowedMethodsForRoute(segments) ?? "GET, OPTIONS" },
       );
     }
 
@@ -343,7 +344,16 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
         405,
         "method_not_allowed",
         `method ${request.method} is not allowed`,
-        { ...cors.headers, Allow: "GET, POST, OPTIONS" },
+        { ...cors.headers, Allow: allowedMethodsForRoute(segments) ?? "GET, POST, OPTIONS" },
+      );
+    }
+
+    if (allowedMethodsForRoute(segments) === "POST, OPTIONS") {
+      return errorResponse(
+        405,
+        "method_not_allowed",
+        `method ${request.method} is not allowed`,
+        { ...cors.headers, Allow: "POST, OPTIONS" },
       );
     }
 
@@ -448,7 +458,11 @@ function recordAdminAudit(
 }
 
 function isVersionedRoute(segments: string[]): boolean {
-  if (segments[0] !== "v1") return false;
+  return allowedMethodsForRoute(segments) !== null;
+}
+
+function allowedMethodsForRoute(segments: string[]): string | null {
+  if (segments[0] !== "v1") return null;
   if (segments.length === 2) {
     return [
       "global",
@@ -456,12 +470,16 @@ function isVersionedRoute(segments: string[]): boolean {
       "meta",
       "repos",
       "tags",
-    ].includes(segments[1] ?? "");
+    ].includes(segments[1] ?? "") ? "GET, OPTIONS" : null;
   }
   if (segments.length === 3 && segments[1] === "changes") {
-    return ["preview", "apply"].includes(segments[2] ?? "");
+    return ["preview", "apply"].includes(segments[2] ?? "")
+      ? "POST, OPTIONS"
+      : null;
   }
-  return segments.length === 3 && segments[1] === "repos";
+  return segments.length === 3 && segments[1] === "repos"
+    ? "GET, OPTIONS"
+    : null;
 }
 
 function isWriteRoute(

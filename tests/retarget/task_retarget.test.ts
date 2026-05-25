@@ -430,4 +430,30 @@ test("task retarget crash after intent is recovered by cancel finalizer", async 
   expect(finalAttempt!.exit_kind).toBe("killed_cancel");
   expect(finalAttempt!.kill_intent).toBeNull();
   expect(built.tmux.killCalls).toContain(source.sessionName!);
+
+  const finalEvent = h.db
+    .query<
+      { event_type: string; from_state: string | null; to_state: string | null; event_data: string | null },
+      [string]
+    >(
+      `SELECT event_type, from_state, to_state, event_data
+         FROM events
+        WHERE task_id = ?
+        ORDER BY event_id DESC
+        LIMIT 1`,
+    )
+    .get(source.taskId);
+  expect(finalEvent).toMatchObject({
+    event_type: "retargeted",
+    from_state: "running",
+    to_state: "cancelled",
+  });
+  expect(JSON.parse(finalEvent!.event_data!)).toMatchObject({
+    source_repo_id: "repo-source",
+    target_repo_id: "repo-target",
+    target_task_id: "66666666bbbbbbbbbbbbbbbbbbbbbbbb",
+    target_branch_name: "quay/task-66666666",
+    target_base_branch: "main",
+    base_branch_override: null,
+  });
 });

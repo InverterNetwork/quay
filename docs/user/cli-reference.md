@@ -328,7 +328,10 @@ mode, and retry budget into a new `queued` task in the target repo. The new
 task is linked with `retargeted_from_task_id`; the source task is moved to
 `cancelled` with a `retargeted` audit event whose `event_data` names the new
 task. `--yes` is required because the source task is mutated and any live
-worker session is killed.
+worker session is killed. If retarget crashes after creating the linked clone
+but before the source reaches terminal state, the next `quay tick` recovers the
+cancel intent and writes the same source-side `retargeted` audit context from
+the linked clone.
 
 ## Submit Brief
 

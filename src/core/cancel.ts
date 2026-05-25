@@ -97,6 +97,15 @@ interface AttemptRow {
   kill_intent: string | null;
 }
 
+interface RetargetCloneRow {
+  task_id: string;
+  repo_id: string;
+  branch_name: string;
+  worktree_path: string;
+  base_branch: string;
+  repo_base_branch: string | null;
+}
+
 const TERMINAL_NON_CANCELLED = new Set(["merged", "closed_unmerged"]);
 
 function loadTaskRow(db: DB, taskId: string): TaskRow | null {
@@ -124,6 +133,22 @@ function loadLatestAttempt(db: DB, taskId: string): AttemptRow | null {
           LIMIT 1`,
       )
       .get(taskId) ?? null
+  );
+}
+
+function loadRetargetClone(db: DB, sourceTaskId: string): RetargetCloneRow | null {
+  return (
+    db
+      .query<RetargetCloneRow, [string]>(
+        `SELECT t.task_id, t.repo_id, t.branch_name, t.worktree_path,
+                t.base_branch, r.base_branch AS repo_base_branch
+           FROM tasks t
+           LEFT JOIN repos r ON r.repo_id = t.repo_id
+          WHERE t.retargeted_from_task_id = ?
+          ORDER BY t.created_at DESC, t.task_id DESC
+          LIMIT 1`,
+      )
+      .get(sourceTaskId) ?? null
   );
 }
 
@@ -433,6 +458,21 @@ function commitTerminal(
   exitInfo: PaneExitInfo,
 ): boolean {
   const now = deps.clock.nowISO();
+  const retargetClone = loadRetargetClone(deps.db, row.task_id);
+  const eventType = retargetClone === null ? "cancelled" : "retargeted";
+  const eventData = retargetClone === null
+    ? null
+    : JSON.stringify({
+      source_repo_id: row.repo_id,
+      target_repo_id: retargetClone.repo_id,
+      target_task_id: retargetClone.task_id,
+      target_branch_name: retargetClone.branch_name,
+      target_worktree_path: retargetClone.worktree_path,
+      target_base_branch: retargetClone.base_branch,
+      base_branch_override: retargetClone.repo_base_branch === retargetClone.base_branch
+        ? null
+        : retargetClone.base_branch,
+    });
   deps.db.exec("BEGIN IMMEDIATE");
   try {
     const upd = deps.db
@@ -487,18 +527,19 @@ function commitTerminal(
       deps.db
         .query(
           `INSERT INTO events (
-             task_id, attempt_id, event_type, from_state, to_state, occurred_at
-           ) VALUES (?, ?, 'cancelled', ?, 'cancelled', ?)`,
+             task_id, attempt_id, event_type, from_state, to_state, occurred_at,
+             event_data
+           ) VALUES (?, ?, ?, ?, 'cancelled', ?, ?)`,
         )
-        .run(row.task_id, latest.attempt_id, row.state, now);
+        .run(row.task_id, latest.attempt_id, eventType, row.state, now, eventData);
     } else {
       deps.db
         .query(
           `INSERT INTO events (
-             task_id, event_type, from_state, to_state, occurred_at
-           ) VALUES (?, 'cancelled', ?, 'cancelled', ?)`,
+             task_id, event_type, from_state, to_state, occurred_at, event_data
+           ) VALUES (?, ?, ?, 'cancelled', ?, ?)`,
         )
-        .run(row.task_id, row.state, now);
+        .run(row.task_id, eventType, row.state, now, eventData);
     }
     cancelOpenOrchestratorHandoffs(deps, row.task_id);
     deps.db.exec("COMMIT");
