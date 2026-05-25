@@ -28,6 +28,8 @@ export interface AdminAuthFailure {
 }
 
 export interface AdminRequestAuditContext {
+  slack_user_id: string | null;
+  identity_status: "forwarded" | "missing" | "standalone";
   forwarded_identity: string | null;
   forwarded_identity_header: string;
 }
@@ -141,11 +143,21 @@ function adminRequestAuditContext(
   request: Request,
   auth: ResolvedAdminAuth,
 ): AdminRequestAuditContext {
+  if (!auth.enabled) {
+    return {
+      slack_user_id: null,
+      identity_status: "standalone",
+      forwarded_identity: null,
+      forwarded_identity_header: auth.forwardedIdentityHeader,
+    };
+  }
   const rawIdentity = request.headers.get(auth.forwardedIdentityHeader);
   const forwardedIdentity = rawIdentity === null || rawIdentity.trim() === ""
     ? null
     : rawIdentity.trim();
   return {
+    slack_user_id: forwardedIdentity,
+    identity_status: forwardedIdentity === null ? "missing" : "forwarded",
     forwarded_identity: forwardedIdentity,
     forwarded_identity_header: auth.forwardedIdentityHeader,
   };

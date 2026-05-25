@@ -6,6 +6,7 @@ import {
   validateUiDir,
 } from "../../src/cli/serve.ts";
 import type { QuayRuntime } from "../../src/runtime/quay_runtime.ts";
+import type { AdminAuditEvent } from "../../src/admin/api.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -60,32 +61,66 @@ test("isLoopbackHost accepts loopback hosts and rejects network binds", () => {
 test("runServeCommand starts server and stops it after shutdown", async () => {
   const io = bufferIO();
   let stopped = false;
+  let auditSink: ((event: AdminAuditEvent) => void) | undefined;
   const exitCode = await runServeCommand(
     ["--host", "127.0.0.1", "--port", "9732"],
     {} as QuayRuntime,
     io,
     {
       waitForShutdown: async () => {},
-      startServer: ({ hostname, port }) => ({
-        hostname,
-        port,
-        url: `http://${hostname}:${port}`,
-        server: {} as ReturnType<typeof Bun.serve>,
-        stop: () => {
-          stopped = true;
-        },
-      }),
+      startServer: ({ runtime, hostname, port }) => {
+        auditSink = runtime.adminAudit;
+        return {
+          hostname,
+          port,
+          url: `http://${hostname}:${port}`,
+          server: {} as ReturnType<typeof Bun.serve>,
+          stop: () => {
+            stopped = true;
+          },
+        };
+      },
     },
   );
 
   expect(exitCode).toBe(0);
   expect(stopped).toBe(true);
+  if (auditSink === undefined) throw new Error("admin audit sink was not installed");
+  auditSink({
+    action: "changes.apply",
+    method: "POST",
+    path: "/v1/changes/apply",
+    timestamp: "2026-05-25T00:00:00.000Z",
+    success: true,
+    status: 200,
+    slack_user_id: "U06TDC56VJB",
+    identity_status: "forwarded",
+    forwarded_identity: "U06TDC56VJB",
+    forwarded_identity_header: "X-Hermes-User-Id",
+    operation_summary: ["repo repo-a: update base_branch"],
+    target_resources: ["repo:repo-a"],
+  });
   expect(JSON.parse(io.out())).toEqual({
     listening: true,
     url: "http://127.0.0.1:9732",
     host: "127.0.0.1",
     port: 9732,
     api_version: "v1",
+  });
+  expect(JSON.parse(io.err())).toEqual({
+    event: "quay_admin_audit",
+    action: "changes.apply",
+    method: "POST",
+    path: "/v1/changes/apply",
+    timestamp: "2026-05-25T00:00:00.000Z",
+    success: true,
+    status: 200,
+    slack_user_id: "U06TDC56VJB",
+    identity_status: "forwarded",
+    forwarded_identity: "U06TDC56VJB",
+    forwarded_identity_header: "X-Hermes-User-Id",
+    operation_summary: ["repo repo-a: update base_branch"],
+    target_resources: ["repo:repo-a"],
   });
 });
 

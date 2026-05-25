@@ -155,12 +155,196 @@ test("admin bearer auth protects reads and writes when configured", async () => 
 
   expect(applied.status).toBe(200);
   expect(repoService.get("repo-a")?.base_branch).toBe("dev");
-  expect(auditEvents).toContainEqual({
+  expect(auditEvents).toHaveLength(1);
+  expect(auditEvents[0]).toEqual({
     action: "changes.apply",
     method: "POST",
     path: "/v1/changes/apply",
+    timestamp: expect.any(String),
+    success: true,
+    status: 200,
+    slack_user_id: "hermes-user-123",
+    identity_status: "forwarded",
     forwarded_identity: "hermes-user-123",
     forwarded_identity_header: "X-Hermes-User-Id",
+    operation_summary: ["repo repo-a: update base_branch"],
+    target_resources: ["repo:repo-a"],
+  });
+  expect(Date.parse(auditEvents[0]!.timestamp)).not.toBeNaN();
+});
+
+test("admin audit records failed writes with explicit missing identity", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  repoService.add({
+    repo_id: "repo-a",
+    repo_url: "git@example.com:owner/repo-a.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  const auditEvents: AdminAuditEvent[] = [];
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: { QUAY_ADMIN_TOKEN: "secret-token" },
+    repoService,
+    adminAudit: (event) => auditEvents.push(event),
+  });
+  const global = await handler(
+    new Request("http://quay.local/v1/global", {
+      headers: { Authorization: "Bearer secret-token" },
+    }),
+  );
+  const revision = (await responseJson(global)).revision as string;
+
+  const response = await handler(
+    new Request("http://quay.local/v1/changes/apply", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        base_revision: revision,
+        changes: [
+          {
+            type: "repo.update",
+            repo_id: "repo-a",
+            patch: { agent_worker: "missing-agent" },
+          },
+        ],
+      }),
+    }),
+  );
+
+  expect(response.status).toBe(400);
+  expect(auditEvents).toHaveLength(1);
+  expect(auditEvents[0]).toMatchObject({
+    action: "changes.apply",
+    success: false,
+    status: 400,
+    slack_user_id: null,
+    identity_status: "missing",
+    forwarded_identity: null,
+    forwarded_identity_header: "X-Hermes-User-Id",
+    operation_summary: [],
+    target_resources: [],
+    error_code: "validation_error",
+  });
+  expect(auditEvents[0]!.error_message).toContain("missing-agent");
+});
+
+test("standalone admin mode does not trust forwarded identity headers", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  repoService.add({
+    repo_id: "repo-a",
+    repo_url: "git@example.com:owner/repo-a.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  const auditEvents: AdminAuditEvent[] = [];
+  const handler = createHandler({
+    repoService,
+    adminAudit: (event) => auditEvents.push(event),
+  });
+  const revision = await currentRevision(handler);
+
+  const response = await handler(
+    new Request("http://quay.local/v1/changes/apply", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "spoofed-user",
+      },
+      body: JSON.stringify({
+        base_revision: revision,
+        changes: [
+          {
+            type: "repo.update",
+            repo_id: "repo-a",
+            patch: { base_branch: "dev" },
+          },
+        ],
+      }),
+    }),
+  );
+
+  expect(response.status).toBe(200);
+  expect(auditEvents).toHaveLength(1);
+  expect(auditEvents[0]).toMatchObject({
+    success: true,
+    slack_user_id: null,
+    identity_status: "standalone",
+    forwarded_identity: null,
+    operation_summary: ["repo repo-a: update base_branch"],
+    target_resources: ["repo:repo-a"],
+  });
+});
+
+test("admin audit omits sensitive repository values from operation summaries", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  repoService.add({
+    repo_id: "repo-a",
+    repo_url: "https://old-token@example.com/owner/repo-a.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  const auditEvents: AdminAuditEvent[] = [];
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: { QUAY_ADMIN_TOKEN: "secret-token" },
+    repoService,
+    adminAudit: (event) => auditEvents.push(event),
+  });
+  const global = await handler(
+    new Request("http://quay.local/v1/global", {
+      headers: { Authorization: "Bearer secret-token" },
+    }),
+  );
+  const revision = (await responseJson(global)).revision as string;
+
+  const response = await handler(
+    new Request("http://quay.local/v1/changes/preview", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "U06TDC56VJB",
+      },
+      body: JSON.stringify({
+        base_revision: revision,
+        changes: [
+          {
+            type: "repo.update",
+            repo_id: "repo-a",
+            patch: {
+              repo_url: "https://new-token@example.com/owner/repo-a.git",
+              install_cmd: "TOKEN=super-secret bun install",
+            },
+          },
+        ],
+      }),
+    }),
+  );
+
+  expect(response.status).toBe(200);
+  expect(auditEvents).toHaveLength(1);
+  const serialized = JSON.stringify(auditEvents[0]);
+  expect(serialized).not.toContain("old-token");
+  expect(serialized).not.toContain("new-token");
+  expect(serialized).not.toContain("super-secret");
+  expect(auditEvents[0]).toMatchObject({
+    action: "changes.preview",
+    slack_user_id: "U06TDC56VJB",
+    operation_summary: [
+      "repo repo-a: update repo_url",
+      "repo repo-a: update install_cmd",
+    ],
+    target_resources: ["repo:repo-a"],
   });
 });
 

@@ -122,6 +122,11 @@ with `/#quay_admin_token=<token>` once, and the token is moved into
 proxies and non-browser clients can keep sending the `Authorization` header
 directly.
 
+When auth is enabled, Quay accepts the configured forwarded identity header as
+the Slack admin identity for Admin API audit records. In standalone
+unauthenticated mode, Quay marks audit identity as `standalone` and ignores that
+header instead of trusting a spoofable client value.
+
 ## Reviewer
 
 ```toml

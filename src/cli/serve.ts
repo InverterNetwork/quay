@@ -74,7 +74,12 @@ export async function runServeCommand(
   let server: StartedAdminApiServer;
   try {
     server = startServer({
-      runtime,
+      runtime: {
+        ...runtime,
+        adminAudit: (event) => {
+          io.stderr(`${JSON.stringify({ event: "quay_admin_audit", ...event })}\n`);
+        },
+      },
       hostname: parsed.hostname,
       port: parsed.port,
       uiDir: uiDirPath,
