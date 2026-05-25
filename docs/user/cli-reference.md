@@ -312,6 +312,7 @@ quay task get <task_id>
 quay task events <task_id>
 quay task claim <task_id>
 quay task release-claim <task_id> --claim-id <claim_id>
+quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes
 ```
 
 `task claim` only succeeds for `awaiting-next-brief` tasks.
@@ -320,6 +321,14 @@ quay task release-claim <task_id> --claim-id <claim_id>
 It also includes `authors`, parsed from the ticket's `quay-config.authors`
 block as `{name, slack_id}` objects. Legacy or malformed rows return
 `authors: []`.
+
+`task retarget` clones the original `task_objective`, ticket snapshot, tags,
+author metadata, agent/model overrides, screenshot settings, worker execution
+mode, and retry budget into a new `queued` task in the target repo. The new
+task is linked with `retargeted_from_task_id`; the source task is moved to
+`cancelled` with a `retargeted` audit event whose `event_data` names the new
+task. `--yes` is required because the source task is mutated and any live
+worker session is killed.
 
 ## Submit Brief
 

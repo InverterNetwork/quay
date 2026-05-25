@@ -51,6 +51,15 @@ test("tasks table has effective base_branch column", () => {
   expect(cols).toContain("base_branch");
 });
 
+test("tasks table has retarget source link column", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(tasks)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toContain("retargeted_from_task_id");
+});
+
 test("tasks table has PR screenshot request flag with default off", () => {
   h = createHarness();
   const cols = h.db
