@@ -3,13 +3,19 @@ import { readFileSync } from "node:fs";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { enqueue } from "../../src/core/enqueue.ts";
+import {
+  clearAllFailpoints,
+  setFailpoint,
+} from "../../src/core/failpoints.ts";
 import { createRepoService } from "../../src/core/repos/service.ts";
+import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
 import { insertRunningTask, seedTaskObjective } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
+  clearAllFailpoints();
   h?.cleanup();
   h = null;
 });
@@ -330,4 +336,98 @@ test("task retarget kills canonical session when running attempt has no tmux_ses
     exit_kind: "killed_cancel",
     tmux_session: null,
   });
+});
+
+test("task retarget crash after intent is recovered by cancel finalizer", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-25T10:00:00.000Z");
+  addRepo(h, "repo-source");
+  addRepo(h, "repo-target");
+
+  const built = buildCliDeps(h);
+  built.git.seedBareClone("repo-source");
+  built.git.seedBareClone("repo-target");
+  built.github.setPrIsOpen("repo-source", "quay/running-retarget-source", false);
+  h.ids.push("66666666bbbbbbbbbbbbbbbbbbbbbbbb");
+
+  const source = insertRunningTask(h.db, {
+    taskId: "running-retarget-source",
+    repoId: "repo-source",
+    worktreesRoot: built.worktreesRoot,
+    spawnedAt: "2026-05-25T09:00:00.000Z",
+    tmuxSession: "quay-task-running-retarget-source-1",
+  });
+  seedTaskObjective(h, source.taskId, "Retarget with recoverable intent.");
+  built.tmux.liveSessions.add(source.sessionName!);
+
+  setFailpoint("after_retarget_intent_commit", () => {
+    throw new Error("simulated crash after retarget intent commit");
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["task", "retarget", source.taskId, "--repo", "repo-target", "--yes"],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(1);
+  expect(JSON.parse(io.err())).toMatchObject({
+    error: "internal_error",
+    message: expect.stringContaining("simulated crash"),
+  });
+
+  const midTask = h.db
+    .query<
+      {
+        state: string;
+        cancel_requested_at: string | null;
+        retargeted_from_task_id: string | null;
+      },
+      [string]
+    >(
+      `SELECT state, cancel_requested_at, retargeted_from_task_id
+         FROM tasks
+        WHERE task_id = ?`,
+    )
+    .get(source.taskId);
+  expect(midTask).toEqual({
+    state: "running",
+    cancel_requested_at: "2026-05-25T10:00:00.000Z",
+    retargeted_from_task_id: null,
+  });
+  const cloned = h.db
+    .query<{ retargeted_from_task_id: string | null }, [string]>(
+      `SELECT retargeted_from_task_id FROM tasks WHERE task_id = ?`,
+    )
+    .get("66666666bbbbbbbbbbbbbbbbbbbbbbbb");
+  expect(cloned).toEqual({ retargeted_from_task_id: source.taskId });
+  const midAttempt = h.db
+    .query<{ ended_at: string | null; kill_intent: string | null }, [number]>(
+      `SELECT ended_at, kill_intent FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(source.attemptId);
+  expect(midAttempt).toEqual({ ended_at: null, kill_intent: "cancel" });
+  expect(built.tmux.liveSessions.has(source.sessionName!)).toBe(true);
+
+  clearAllFailpoints();
+  expect(await tick_once(built.deps)).toContainEqual({
+    task_id: source.taskId,
+    action: "cancel_finalized",
+  });
+
+  const finalTask = h.db
+    .query<{ state: string }, [string]>(
+      `SELECT state FROM tasks WHERE task_id = ?`,
+    )
+    .get(source.taskId);
+  expect(finalTask).toEqual({ state: "cancelled" });
+  const finalAttempt = h.db
+    .query<{ ended_at: string | null; exit_kind: string | null; kill_intent: string | null }, [number]>(
+      `SELECT ended_at, exit_kind, kill_intent FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(source.attemptId);
+  expect(finalAttempt!.ended_at).not.toBeNull();
+  expect(finalAttempt!.exit_kind).toBe("killed_cancel");
+  expect(finalAttempt!.kill_intent).toBeNull();
+  expect(built.tmux.killCalls).toContain(source.sessionName!);
 });

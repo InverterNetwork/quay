@@ -14,6 +14,7 @@ import {
   isTaskState,
   transitionTaskState,
 } from "./task_state.ts";
+import { fireFailpoint } from "./failpoints.ts";
 
 export type RetargetErrorCode =
   | "unknown_task"
@@ -250,12 +251,77 @@ function retargetUnderLock(
   const now = deps.clock.nowISO();
   const activeAttempt =
     source.state === "running" ? loadActiveAttempt(deps.db, input.taskId) : null;
-  deps.db.exec("BEGIN");
+  commitRetargetIntent(deps, source, activeAttempt, cloned, now);
+  fireFailpoint("after_retarget_intent_commit");
+  cleanupSourceSubstrate(deps, source, activeAttempt);
+  commitRetargetTerminal(deps, source, activeAttempt, input, cloned, now);
+
+  return {
+    ok: true,
+    value: {
+      task_id: input.taskId,
+      state: "cancelled",
+      retargeted_task_id: cloned.task_id,
+      retargeted_repo_id: input.targetRepo,
+      retargeted_branch_name: cloned.branch_name,
+      retargeted_worktree_path: cloned.worktree_path,
+    },
+  };
+}
+
+function commitRetargetIntent(
+  deps: RetargetDeps,
+  source: SourceTaskRow,
+  activeAttempt: ActiveAttemptRow | null,
+  cloned: EnqueueResult,
+  now: string,
+): void {
+  deps.db.exec("BEGIN IMMEDIATE");
   try {
     deps.db
       .query(`UPDATE tasks SET retargeted_from_task_id = ? WHERE task_id = ?`)
-      .run(input.taskId, cloned.task_id);
+      .run(source.task_id, cloned.task_id);
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                cancel_close_pr = 0,
+                cancel_keep_worktree = 0,
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ?`,
+      )
+      .run(now, now, source.task_id);
+    if (source.state === "running" && activeAttempt !== null) {
+      deps.db
+        .query(
+          `UPDATE attempts SET kill_intent = 'cancel'
+            WHERE attempt_id = ? AND kill_intent IS NULL`,
+        )
+        .run(activeAttempt.attempt_id);
+    }
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+}
 
+function commitRetargetTerminal(
+  deps: RetargetDeps,
+  source: SourceTaskRow,
+  activeAttempt: ActiveAttemptRow | null,
+  input: RetargetTaskInput,
+  cloned: EnqueueResult,
+  now: string,
+): void {
+  if (!isTaskState(source.state)) {
+    throw new Error(`retarget transition failed: unknown state ${source.state}`);
+  }
+  deps.db.exec("BEGIN");
+  try {
     if (activeAttempt !== null) {
       deps.db
         .query(
@@ -266,6 +332,12 @@ function retargetUnderLock(
             WHERE attempt_id = ? AND ended_at IS NULL`,
         )
         .run(now, activeAttempt.attempt_id);
+      deps.db
+        .query(
+          `UPDATE attempts SET kill_intent = NULL
+            WHERE attempt_id = ? AND kill_intent IS NOT NULL`,
+        )
+        .run(activeAttempt.attempt_id);
     }
 
     const transition = transitionTaskState(deps, {
@@ -290,19 +362,6 @@ function retargetUnderLock(
     } catch {}
     throw err;
   }
-
-  cleanupSourceSubstrate(deps, source, activeAttempt);
-  return {
-    ok: true,
-    value: {
-      task_id: input.taskId,
-      state: "cancelled",
-      retargeted_task_id: cloned.task_id,
-      retargeted_repo_id: input.targetRepo,
-      retargeted_branch_name: cloned.branch_name,
-      retargeted_worktree_path: cloned.worktree_path,
-    },
-  };
 }
 
 function retargetEventData(
