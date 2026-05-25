@@ -227,8 +227,8 @@ test("admin audit records failed writes with explicit missing identity", async (
     identity_status: "missing",
     forwarded_identity: null,
     forwarded_identity_header: "X-Hermes-User-Id",
-    operation_summary: [],
-    target_resources: [],
+    operation_summary: ["repo repo-a: update agent_worker"],
+    target_resources: ["repo:repo-a"],
     error_code: "validation_error",
   });
   expect(auditEvents[0]!.error_message).toContain("missing-agent");
@@ -822,6 +822,7 @@ test("POST /v1/changes/apply rejects stale base revisions", async () => {
     install_cmd: "bun install",
   });
   const tagService = createTagService({ db: h.db, clock: h.clock, repoService });
+  const auditEvents: AdminAuditEvent[] = [];
   const handler = createAdminApiHandler({
     version: "test-version",
     config: {},
@@ -836,6 +837,7 @@ test("POST /v1/changes/apply rejects stale base revisions", async () => {
     },
     repoService,
     tagService,
+    adminAudit: (event) => auditEvents.push(event),
   });
   const staleRevision = await currentRevision(handler);
   tagService.setValue("deployment", null, "priority", "p1");
@@ -860,6 +862,15 @@ test("POST /v1/changes/apply rejects stale base revisions", async () => {
     staleRevision,
   );
   expect(repoService.get("repo-a")?.base_branch).toBe("main");
+  expect(auditEvents).toHaveLength(1);
+  expect(auditEvents[0]).toMatchObject({
+    action: "changes.apply",
+    success: false,
+    status: 409,
+    operation_summary: ["repo repo-a: update base_branch"],
+    target_resources: ["repo:repo-a"],
+    error_code: "stale_revision",
+  });
 });
 
 test("POST /v1/changes/apply fences revisions inside the write transaction", async () => {

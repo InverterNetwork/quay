@@ -6,6 +6,16 @@ export const DEFAULT_ADMIN_TOKEN_ENV = "QUAY_ADMIN_TOKEN";
 export const DEFAULT_ADMIN_FORWARDED_IDENTITY_HEADER = "X-Hermes-User-Id";
 
 const BEARER_REALM = "quay-admin";
+const SECRET_BEARING_FORWARD_HEADER_NAMES = new Set([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "set-cookie",
+  "x-api-key",
+  "x-auth-token",
+  "x-csrf-token",
+  "x-xsrf-token",
+]);
 
 export interface AdminAuthRuntime {
   config?: QuayConfig;
@@ -47,6 +57,20 @@ export function resolveAdminAuth(runtime: AdminAuthRuntime): ResolvedAdminAuth {
   if (!requireAuth) {
     return { enabled: false, tokenEnv, forwardedIdentityHeader };
   }
+  if (isSecretBearingForwardedIdentityHeader(forwardedIdentityHeader)) {
+    return {
+      enabled: true,
+      tokenEnv,
+      forwardedIdentityHeader,
+      startupFailure: {
+        status: 500,
+        code: "admin_forwarded_identity_header_secret_bearing",
+        message:
+          `[admin].forwarded_identity_header must not be a secret-bearing header: ${forwardedIdentityHeader}`,
+        headers: {},
+      },
+    };
+  }
   if (token === "") {
     return {
       enabled: true,
@@ -61,6 +85,10 @@ export function resolveAdminAuth(runtime: AdminAuthRuntime): ResolvedAdminAuth {
     };
   }
   return { enabled: true, tokenEnv, forwardedIdentityHeader, token };
+}
+
+export function isSecretBearingForwardedIdentityHeader(name: string): boolean {
+  return SECRET_BEARING_FORWARD_HEADER_NAMES.has(name.toLowerCase());
 }
 
 export function assertAdminAuthReady(runtime: AdminAuthRuntime): void {
