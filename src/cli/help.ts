@@ -50,6 +50,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       "task events",
       "task claim",
       "task release-claim",
+      "task retarget",
     ],
   },
   "task list": {
@@ -84,6 +85,18 @@ const COMMANDS: Record<string, CommandSpec> = {
     synopsis: "quay task release-claim <task_id> --claim-id <id>",
     summary: "Release a previously held claim.",
     flags: [{ flag: "--claim-id <id>", desc: "The claim_id returned by `task claim`." }],
+  },
+  "task retarget": {
+    path: "task retarget",
+    synopsis:
+      "quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes",
+    summary:
+      "Clone a task into another repo and cancel the source task with a retarget audit event.",
+    flags: [
+      { flag: "--repo <target_repo>", desc: "Target repo_id for the cloned queued task." },
+      { flag: "--base-branch <branch>", desc: "Optional target task base branch override." },
+      { flag: "--yes", desc: "Required confirmation for the source task mutation." },
+    ],
   },
   tick: {
     path: "tick",
