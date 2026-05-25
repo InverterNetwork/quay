@@ -269,6 +269,22 @@ export function listOutboxItems(
     );
 }
 
+export function listDeliveryOutboxItems(
+  db: DB,
+  filters: {
+    status?: OutboxStatus;
+    taskId?: string;
+    kind?: string;
+    eligibleAtOrBefore: string;
+    includeIneligible?: boolean;
+  },
+): OutboxItemRow[] {
+  return listOutboxItems(db, {
+    ...filters,
+    handlerClass: "delivery",
+  });
+}
+
 function loadOutboxItem(db: DB, outboxItemId: number): OutboxItemRow | null {
   return (
     db

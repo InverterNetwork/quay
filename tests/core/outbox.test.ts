@@ -4,6 +4,7 @@ import {
   completeOutboxItem,
   enqueueOutboxItem,
   failOutboxItem,
+  listDeliveryOutboxItems,
   listOutboxItems,
 } from "../../src/core/outbox.ts";
 import {
@@ -11,6 +12,7 @@ import {
   completeClaimedOrchestratorHandoffs,
   enqueueOrchestratorHandoff,
 } from "../../src/core/orchestrator_handoffs.ts";
+import { PR_READY_APPROVED_OUTBOX_KIND } from "../../src/core/pr_ready_approved_outbox.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertRepo, insertTask } from "../support/fixtures.ts";
 
@@ -357,6 +359,100 @@ test("orchestrator handoff compatibility creates and syncs workflow outbox item"
   });
 });
 
+test("delivery outbox drains while human handoff is claimed and waiting", () => {
+  h = createHarness();
+  h.clock.set("2026-05-24T13:16:38.000Z");
+  const repoId = insertRepo(h.db, "repo-outbox-human-wait-isolation");
+  const humanTaskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-outbox-human-wait",
+    state: "awaiting-next-brief",
+  });
+  const humanEventId = insertAwaitingEvent(humanTaskId);
+  enqueueOrchestratorHandoff(
+    { db: h.db, clock: h.clock },
+    {
+      taskId: humanTaskId,
+      reason: "worker_blocker",
+      stateEventId: humanEventId,
+    },
+  );
+  claimPendingOrchestratorHandoffs(
+    { db: h.db, clock: h.clock },
+    { taskId: humanTaskId, claimId: "human-handoff-claim" },
+  );
+  h.db
+    .query(
+      `UPDATE tasks
+          SET state = 'waiting_human',
+              claim_id = ?,
+              updated_at = ?
+        WHERE task_id = ?`,
+    )
+    .run("human-handoff-claim", h.clock.nowISO(), humanTaskId);
+
+  const deliveryTaskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-outbox-pr-ready",
+    state: "done",
+  });
+  const outboxItemId = enqueueOutboxItem(
+    { db: h.db, clock: h.clock },
+    {
+      taskId: deliveryTaskId,
+      kind: PR_READY_APPROVED_OUTBOX_KIND,
+      handlerClass: "delivery",
+      payload: { pr_url: "https://github.example/repo/pull/147" },
+      routeHint: {
+        slack_thread_ref: null,
+        fallback: "deployment_default_slack_channel",
+      },
+    },
+  );
+
+  const deliveryRows = listDeliveryOutboxItems(h.db, {
+    status: "pending",
+    kind: PR_READY_APPROVED_OUTBOX_KIND,
+    eligibleAtOrBefore: h.clock.nowISO(),
+  });
+  expect(deliveryRows.map((row) => row.outbox_item_id)).toEqual([
+    outboxItemId,
+  ]);
+
+  const claimed = claimOutboxItem(
+    { db: h.db, clock: h.clock },
+    { outboxItemId, claimId: "delivery-claim" },
+  );
+  expect(claimed).toMatchObject({
+    ok: true,
+    value: {
+      outbox_item_id: outboxItemId,
+      handler_class: "delivery",
+      claim_id: "delivery-claim",
+    },
+  });
+  const completed = completeOutboxItem(
+    { db: h.db, clock: h.clock },
+    { outboxItemId, claimId: "delivery-claim" },
+  );
+  expect(completed).toMatchObject({
+    ok: true,
+    value: {
+      outbox_item_id: outboxItemId,
+      handler_class: "delivery",
+      status: "completed",
+    },
+  });
+  expect(singleOutboxStatus(outboxItemId)).toMatchObject({
+    status: "completed",
+    claim_id: "delivery-claim",
+  });
+  expect(singleOutboxStatusForTask(humanTaskId)).toMatchObject({
+    status: "claimed",
+    claim_id: "human-handoff-claim",
+  });
+});
+
 function insertAwaitingEvent(taskId: string): number {
   if (!h) throw new Error("missing harness");
   const row = h.db
@@ -369,6 +465,19 @@ function insertAwaitingEvent(taskId: string): number {
     .get(taskId, h.clock.nowISO());
   if (!row) throw new Error("event insert returned no row");
   return row.event_id;
+}
+
+function singleOutboxStatusForTask(taskId: string) {
+  if (!h) throw new Error("missing harness");
+  const row = h.db
+    .query<{ status: string; claim_id: string | null }, [string]>(
+      `SELECT status, claim_id
+         FROM outbox_items
+        WHERE task_id = ?`,
+    )
+    .get(taskId);
+  if (!row) throw new Error("missing outbox item");
+  return row;
 }
 
 function singleOutboxStatus(outboxItemId: number) {
