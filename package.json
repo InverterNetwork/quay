@@ -1,26 +1,25 @@
 {
-  "name": "quay",
+  "name": "quay-monorepo",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "test": "bun test",
-    "typecheck": "tsc --noEmit",
-    "quay": "bun run src/cli/index.ts",
-    "embed": "bun run scripts/embed.ts",
-    "build": "bun run scripts/embed.ts && bun build --compile --no-compile-autoload-bunfig --no-compile-autoload-dotenv src/cli/index.ts --outfile dist/quay",
-    "prepare": "bun run scripts/embed.ts"
-  },
-  "bin": {
-    "quay": "src/cli/index.ts"
-  },
-  "dependencies": {
-    "commander": "^12.1.0",
-    "zod": "^3.23.8"
-  },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "^5.6.3"
+    "test": "bun run --cwd packages/cli test",
+    "test:cli": "bun run --cwd packages/cli test",
+    "typecheck": "bun run typecheck:cli && bun run typecheck:admin-ui",
+    "typecheck:cli": "bun run --cwd packages/cli typecheck",
+    "typecheck:admin-ui": "bun run --cwd packages/admin-ui typecheck",
+    "quay": "bun run --cwd packages/cli quay",
+    "embed": "bun run --cwd packages/cli embed",
+    "admin-ui:dev": "bun run --cwd packages/admin-ui dev",
+    "admin-ui:build": "bun run --cwd packages/admin-ui build",
+    "admin-ui:preview": "bun run --cwd packages/admin-ui preview",
+    "build": "bun run admin-ui:build && bun run --cwd packages/cli build",
+    "build:cli": "bun run --cwd packages/cli build",
+    "prepare": "bun run --cwd packages/cli embed"
   },
   "engines": {
     "bun": ">=1.1.0"

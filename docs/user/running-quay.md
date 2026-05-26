@@ -24,7 +24,7 @@ without doing work.
 ```bash
 quay serve
 quay serve --host 127.0.0.1 --port 9731
-quay serve --ui-dir ../quay-ui/dist
+quay serve --ui-dir packages/admin-ui/dist
 ```
 
 `quay serve` starts the local Admin HTTP API using the same config, data
@@ -47,15 +47,12 @@ the injected runtime config adds `Authorization: Bearer <token>` to same-origin
 token into browser `sessionStorage`; non-browser clients and header-injecting
 proxies can send the `Authorization` header directly.
 
-Pass `--ui-dir <path>` to override the embedded UI with a built Quay UI bundle
+Pass `--ui-dir <path>` to override the embedded UI with a built Admin UI bundle
 from disk:
 
 ```bash
-cd ../quay-ui
-bun run build
-
-cd ../quay
-quay serve --ui-dir ../quay-ui/dist
+bun run admin-ui:build
+quay serve --ui-dir packages/admin-ui/dist
 ```
 
 The UI directory must exist, be readable, and contain a readable `index.html`.

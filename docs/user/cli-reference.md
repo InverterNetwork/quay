@@ -1,7 +1,8 @@
 # CLI Reference
 
-The main command surface is implemented by `src/cli/dispatch.ts`. The older
-spec docs may lag behind this list.
+The main command surface is implemented by
+`packages/cli/src/cli/dispatch.ts`. The older spec docs may lag behind this
+list.
 
 ## Output Conventions
 
@@ -70,14 +71,12 @@ same-origin `/v1/*` fetch wrapper into `index.html`; open the UI with
 `sessionStorage`. Non-browser clients and reverse proxies can send the
 `Authorization` header directly.
 
-`--ui-dir` overrides embedded UI assets with a built Quay UI directory from the
-same loopback server:
+`--ui-dir` overrides embedded UI assets with a built Admin UI directory from
+the same loopback server:
 
 ```bash
-cd ../quay-ui
-bun run build
-cd ../quay
-quay serve --ui-dir ../quay-ui/dist
+bun run admin-ui:build
+quay serve --ui-dir packages/admin-ui/dist
 ```
 
 The directory must contain `index.html`. When embedded UI assets or `--ui-dir`

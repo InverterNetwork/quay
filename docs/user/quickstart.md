@@ -20,6 +20,9 @@ bun run build
 ./dist/quay --version
 ```
 
+The build includes the local `packages/admin-ui` bundle, so the resulting
+binary can serve the Admin UI without a separate UI checkout.
+
 For source-mode development, replace `./dist/quay` below with:
 
 ```bash
