@@ -133,6 +133,9 @@ soft-deleted entries (and `repo export` keeps full-fidelity backup
 semantics). Pass `--active` to limit the output to rows with
 `archived_at IS NULL` — the typical "which repos are in service?"
 question that consumers like `setup-hermes.sh` ask.
+When exported repos have preamble overrides, the dump includes companion
+`preamble_worker_record` / `preamble_reviewer_record` objects so import can
+restore the referenced prompt bodies and remap database-local IDs.
 
 ## Tags
 

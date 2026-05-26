@@ -12,6 +12,7 @@ import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
+import { insertPreamble } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 let scratchDirs: string[] = [];
@@ -303,6 +304,88 @@ test("repo export → wipe → repo import is a faithful round-trip", async () =
     "repo-rt-a",
     "repo-rt-b",
   ]);
+});
+
+test("repo export/import restores preamble override records with remapped ids", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const sourcePreambleId = insertPreamble(
+    h.db,
+    "exported worker preamble",
+    "code",
+  );
+  const addIO = bufferIO();
+  const addResult = await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "repo-rt-preamble",
+      "--url",
+      "git@example.com:owner/repo-rt-preamble.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "bun install",
+      "--preamble-worker",
+      String(sourcePreambleId),
+    ],
+    built.deps,
+    addIO,
+  );
+  expect(addResult.exitCode).toBe(0);
+
+  const dumpPath = join(tempDir(), "rt-preamble.json");
+  await dispatch(
+    ["repo", "export", "--out", dumpPath],
+    built.deps,
+    bufferIO(),
+  );
+  const exported = JSON.parse(readFileSync(dumpPath, "utf8")) as Array<{
+    repo_id: string;
+    preamble_worker: number;
+    preamble_worker_record: Record<string, unknown>;
+  }>;
+  const exportedRow = exported[0];
+  expect(exportedRow).toBeDefined();
+  expect(exportedRow!.preamble_worker_record).toMatchObject({
+    preamble_id: sourcePreambleId,
+    kind: "code",
+    body: "exported worker preamble",
+  });
+
+  // Simulate restore into a fresh registry where numeric preamble IDs are not
+  // portable. AUTOINCREMENT deliberately does not reuse sourcePreambleId.
+  built.deps.db.exec("DELETE FROM repos");
+  built.deps.db.exec("DELETE FROM preambles");
+
+  const importIO = bufferIO();
+  const importResult = await dispatch(
+    ["repo", "import", "--in", dumpPath],
+    built.deps,
+    importIO,
+  );
+  expect(importResult.exitCode).toBe(0);
+  expect(JSON.parse(importIO.out()).repo_ids).toEqual(["repo-rt-preamble"]);
+
+  const restored = built.deps.db
+    .query<
+      { preamble_worker: number | null; body: string; kind: string },
+      []
+    >(
+      `SELECT r.preamble_worker, p.body, p.kind
+         FROM repos r
+         JOIN preambles p ON p.preamble_id = r.preamble_worker
+        WHERE r.repo_id = 'repo-rt-preamble'`,
+    )
+    .get();
+  expect(restored).toMatchObject({
+    kind: "code",
+    body: "exported worker preamble",
+  });
+  expect(restored?.preamble_worker).not.toBe(sourcePreambleId);
 });
 
 test("repo import errors with usage_error when --in is omitted", async () => {

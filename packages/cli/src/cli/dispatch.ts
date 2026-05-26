@@ -29,6 +29,8 @@ import type { AgentResolver } from "../core/agents.ts";
 import type { TagService, TagVocab } from "../core/tags/service.ts";
 import { mergeVocab } from "../core/tags/merge.ts";
 import { parseImportToml, planImport } from "../core/tags/import_toml.ts";
+import { QuayError } from "../core/errors.ts";
+import type { PreambleKind } from "../core/preamble.ts";
 import {
   cancel_task,
   type CancelDeps,
@@ -1163,10 +1165,10 @@ function handleRepo(
       return handleRepoList(rest, service, io);
     case "export":
       if (wantsHelp(rest)) return printHelp(io, ["repo", "export"]);
-      return handleRepoExport(rest, service, io);
+      return handleRepoExport(rest, service, deps.db, io);
     case "import":
       if (wantsHelp(rest)) return printHelp(io, ["repo", "import"]);
-      return handleRepoImport(rest, service, io);
+      return handleRepoImport(rest, service, deps.db, io);
     case "set-tags":
       if (wantsHelp(rest)) return printHelp(io, ["repo", "set-tags"]);
       return handleRepoSetTags(rest, deps.tagService, io);
@@ -1357,6 +1359,7 @@ function handleRepoList(
 function handleRepoExport(
   argv: string[],
   service: RepoService,
+  db: DB,
   io: CliIO,
 ): DispatchResult {
   const validation = validateFlags(argv, {
@@ -1369,7 +1372,8 @@ function handleRepoExport(
   const out = readFlag(argv, "--out");
   const activeOnly = argv.includes("--active");
   const rows = service.list({ activeOnly });
-  const body = JSON.stringify(rows);
+  const exportedRows = rows.map((row) => withExportedPreambleRecords(db, row));
+  const body = JSON.stringify(exportedRows);
   if (out !== null) {
     try {
       writeFileSync(out, `${body}\n`, { encoding: "utf8" });
@@ -1393,6 +1397,7 @@ function handleRepoExport(
 function handleRepoImport(
   argv: string[],
   service: RepoService,
+  db: DB,
   io: CliIO,
 ): DispatchResult {
   const inputPath = readFlag(argv, "--in");
@@ -1428,13 +1433,227 @@ function handleRepoImport(
   // to the failing row.
   const ids: string[] = [];
   for (const row of parsed) {
-    const r = service.upsert(row);
+    const r = service.upsert(withImportedPreambleIds(db, row));
     ids.push(r.repo_id);
   }
   io.stdout(
     `${JSON.stringify({ imported: ids.length, repo_ids: ids })}\n`,
   );
   return { exitCode: 0 };
+}
+
+interface RepoExportPreambleRecord {
+  preamble_id: number;
+  kind: PreambleKind;
+  body: string;
+  created_at: string;
+}
+
+const REPO_EXPORT_PREAMBLE_FIELDS = [
+  {
+    idKey: "preamble_worker",
+    recordKey: "preamble_worker_record",
+    kind: "code",
+  },
+  {
+    idKey: "preamble_reviewer",
+    recordKey: "preamble_reviewer_record",
+    kind: "review",
+  },
+] as const satisfies ReadonlyArray<{
+  idKey: "preamble_worker" | "preamble_reviewer";
+  recordKey: "preamble_worker_record" | "preamble_reviewer_record";
+  kind: PreambleKind;
+}>;
+
+function withExportedPreambleRecords(
+  db: DB,
+  row: ReturnType<RepoService["list"]>[number],
+): Record<string, unknown> {
+  const exported: Record<string, unknown> = { ...row };
+  for (const field of REPO_EXPORT_PREAMBLE_FIELDS) {
+    const preambleId = row[field.idKey];
+    if (preambleId === null) continue;
+    exported[field.recordKey] = loadRepoExportPreambleRecord(
+      db,
+      preambleId,
+      field.kind,
+      row.repo_id,
+    );
+  }
+  return exported;
+}
+
+function withImportedPreambleIds(db: DB, row: unknown): unknown {
+  if (!isRecord(row)) return row;
+  const imported: Record<string, unknown> = { ...row };
+  for (const field of REPO_EXPORT_PREAMBLE_FIELDS) {
+    delete imported[field.recordKey];
+    const rawPreambleId = coercePositiveInteger(row[field.idKey]);
+    if (rawPreambleId === null) continue;
+    const record = parseRepoExportPreambleRecord(
+      row[field.recordKey],
+      field.kind,
+      field.recordKey,
+    );
+    if (record === null) continue;
+    if (record.preamble_id !== rawPreambleId) {
+      throw new QuayError(
+        "validation_error",
+        `repo import ${field.recordKey}.preamble_id does not match ${field.idKey}`,
+        {
+          field: field.idKey,
+          record_field: field.recordKey,
+          preamble_id: rawPreambleId,
+          record_preamble_id: record.preamble_id,
+        },
+      );
+    }
+    imported[field.idKey] = ensureImportedPreambleRecord(db, record);
+  }
+  return imported;
+}
+
+function loadRepoExportPreambleRecord(
+  db: DB,
+  preambleId: number,
+  expectedKind: PreambleKind,
+  repoId: string,
+): RepoExportPreambleRecord {
+  const row = db
+    .query<
+      { preamble_id: number; kind: string; body: string; created_at: string },
+      [number]
+    >(
+      `SELECT preamble_id, kind, body, created_at
+         FROM preambles
+        WHERE preamble_id = ?`,
+    )
+    .get(preambleId);
+  if (!row) {
+    throw new QuayError(
+      "validation_error",
+      `repo ${repoId} references missing preamble ${preambleId}`,
+      { repo_id: repoId, preamble_id: preambleId },
+    );
+  }
+  if (row.kind !== expectedKind) {
+    throw new QuayError(
+      "validation_error",
+      `repo ${repoId} preamble ${preambleId} has kind ${row.kind}; expected ${expectedKind}`,
+      {
+        repo_id: repoId,
+        preamble_id: preambleId,
+        actual_kind: row.kind,
+        expected_kind: expectedKind,
+      },
+    );
+  }
+  return {
+    preamble_id: row.preamble_id,
+    kind: expectedKind,
+    body: row.body,
+    created_at: row.created_at,
+  };
+}
+
+function parseRepoExportPreambleRecord(
+  value: unknown,
+  expectedKind: PreambleKind,
+  recordField: string,
+): RepoExportPreambleRecord | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value)) {
+    throw new QuayError(
+      "validation_error",
+      `repo import ${recordField} must be an object when present`,
+      { field: recordField },
+    );
+  }
+  const preambleId = coercePositiveInteger(value.preamble_id);
+  if (preambleId === null) {
+    throw new QuayError(
+      "validation_error",
+      `repo import ${recordField}.preamble_id must be a positive integer`,
+      { field: recordField },
+    );
+  }
+  if (value.kind !== expectedKind) {
+    throw new QuayError(
+      "validation_error",
+      `repo import ${recordField}.kind must be ${expectedKind}`,
+      { field: recordField, expected_kind: expectedKind, actual_kind: value.kind },
+    );
+  }
+  if (typeof value.body !== "string") {
+    throw new QuayError(
+      "validation_error",
+      `repo import ${recordField}.body must be a string`,
+      { field: recordField },
+    );
+  }
+  if (typeof value.created_at !== "string" || value.created_at === "") {
+    throw new QuayError(
+      "validation_error",
+      `repo import ${recordField}.created_at must be a non-empty string`,
+      { field: recordField },
+    );
+  }
+  return {
+    preamble_id: preambleId,
+    kind: expectedKind,
+    body: value.body,
+    created_at: value.created_at,
+  };
+}
+
+function ensureImportedPreambleRecord(
+  db: DB,
+  record: RepoExportPreambleRecord,
+): number {
+  const existing = db
+    .query<{ preamble_id: number }, [string, string, string]>(
+      `SELECT preamble_id
+         FROM preambles
+        WHERE kind = ?
+          AND body = ?
+          AND created_at = ?
+        ORDER BY preamble_id
+        LIMIT 1`,
+    )
+    .get(record.kind, record.body, record.created_at);
+  if (existing) return existing.preamble_id;
+
+  const inserted = db
+    .query<{ preamble_id: number }, [string, string, string]>(
+      `INSERT INTO preambles (body, kind, created_at)
+       VALUES (?, ?, ?)
+       RETURNING preamble_id`,
+    )
+    .get(record.body, record.kind, record.created_at);
+  if (!inserted) {
+    throw new QuayError(
+      "validation_error",
+      "failed to import repo preamble record",
+      { preamble_id: record.preamble_id, kind: record.kind },
+    );
+  }
+  return inserted.preamble_id;
+}
+
+function coercePositiveInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) {
+    const parsed = Number(value);
+    if (Number.isSafeInteger(parsed)) return parsed;
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function handleRepoSetTags(

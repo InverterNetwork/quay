@@ -460,14 +460,27 @@ function effectiveWithPending(
         };
   }
   const parsed = Number(pendingId);
-  return Number.isInteger(parsed) && parsed > 0
-    ? {
-        ...preamble,
-        source: 'repo',
-        configuredPreambleId: parsed,
-        effectivePreambleId: parsed,
-      }
-    : preamble;
+  if (!Number.isInteger(parsed) || parsed <= 0) return preamble;
+  if (globalPreamble !== null && globalPreamble.version === parsed) {
+    return {
+      ...preamble,
+      source: 'repo',
+      configuredPreambleId: parsed,
+      effectivePreambleId: parsed,
+      body: globalPreamble.body,
+      refs: globalPreamble.refs,
+      lastEdited: globalPreamble.lastEdited,
+    };
+  }
+  return {
+    ...preamble,
+    source: 'repo',
+    configuredPreambleId: parsed,
+    effectivePreambleId: parsed,
+    body: `Pending preamble override ${parsed}. Apply changes to refresh this preview from the Admin API.`,
+    refs: 0,
+    lastEdited: null,
+  };
 }
 
 function RepoPreambleCard({ preamble }: { preamble: RepoEffectivePreamble }) {

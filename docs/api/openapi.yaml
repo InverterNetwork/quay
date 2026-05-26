@@ -370,6 +370,8 @@ components:
         - agent_reviewer
         - model_worker
         - model_reviewer
+        - preamble_worker
+        - preamble_reviewer
         - archived_at
         - created_at
       properties:
@@ -411,6 +413,16 @@ components:
           type:
             - string
             - "null"
+        preamble_worker:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        preamble_reviewer:
+          type:
+            - integer
+            - "null"
+          minimum: 1
         archived_at:
           type:
             - string
@@ -434,9 +446,12 @@ components:
         - agent_reviewer
         - model_worker
         - model_reviewer
+        - preamble_worker
+        - preamble_reviewer
         - archived_at
         - created_at
         - active_task_count
+        - effective_preambles
         - tag_namespaces
         - inherited_tag_namespaces
       properties:
@@ -480,6 +495,16 @@ components:
           type:
             - string
             - "null"
+        preamble_worker:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        preamble_reviewer:
+          type:
+            - integer
+            - "null"
+          minimum: 1
         archived_at:
           type:
             - string
@@ -489,6 +514,8 @@ components:
         active_task_count:
           type: integer
           minimum: 0
+        effective_preambles:
+          $ref: "#/components/schemas/RepoEffectivePreambles"
         tag_namespaces:
           type: array
           items:
@@ -497,6 +524,65 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TagNamespace"
+    RepoEffectivePreambles:
+      type: object
+      additionalProperties: false
+      required:
+        - worker
+        - reviewer
+      properties:
+        worker:
+          $ref: "#/components/schemas/RepoEffectivePreamble"
+        reviewer:
+          $ref: "#/components/schemas/RepoEffectivePreamble"
+    RepoEffectivePreamble:
+      type: object
+      additionalProperties: false
+      required:
+        - role
+        - kind
+        - source
+        - configured_preamble_id
+        - effective_preamble_id
+        - title
+        - body
+        - refs
+        - last_edited
+      properties:
+        role:
+          type: string
+          enum:
+            - worker
+            - reviewer
+        kind:
+          type: string
+          enum:
+            - code
+            - review
+        source:
+          type: string
+          enum:
+            - repo
+            - global
+        configured_preamble_id:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        effective_preamble_id:
+          type: integer
+          minimum: 0
+        title:
+          type: string
+        body:
+          type: string
+        refs:
+          type: integer
+          minimum: 0
+        last_edited:
+          type:
+            - string
+            - "null"
     GlobalReadModel:
       type: object
       additionalProperties: false
@@ -945,6 +1031,16 @@ components:
           type:
             - string
             - "null"
+        preamble_worker:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        preamble_reviewer:
+          type:
+            - integer
+            - "null"
+          minimum: 1
     TagsReplaceChange:
       type: object
       additionalProperties: false
