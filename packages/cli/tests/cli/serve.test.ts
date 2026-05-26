@@ -19,17 +19,17 @@ test("parseServeArgs accepts host and port flags", () => {
     port: 9732,
     uiDir: null,
   });
-  expect(parseServeArgs(["--ui-dir", "../quay-ui/dist"])).toEqual({
+  expect(parseServeArgs(["--ui-dir", "packages/admin-ui/dist"])).toEqual({
     ok: true,
     hostname: "127.0.0.1",
     port: 9731,
-    uiDir: "../quay-ui/dist",
+    uiDir: "packages/admin-ui/dist",
   });
-  expect(parseServeArgs(["--ui-dir=../quay-ui/dist"])).toEqual({
+  expect(parseServeArgs(["--ui-dir=packages/admin-ui/dist"])).toEqual({
     ok: true,
     hostname: "127.0.0.1",
     port: 9731,
-    uiDir: "../quay-ui/dist",
+    uiDir: "packages/admin-ui/dist",
   });
   expect(parseServeArgs(["--port=70000"])).toEqual({
     ok: false,

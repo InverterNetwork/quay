@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Quay — Configuration (v2)</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@200,300,400,500,600,700&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="hifi.css">
+
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    background: #ECE6D9;
+    font-family: 'General Sans', system-ui, sans-serif;
+    color: #0E0E0C;
+    overscroll-behavior: none;
+  }
+</style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="hifi-shared.jsx"></script>
+<script type="text/babel" src="hifi-config-v2.jsx"></script>
+<script type="text/babel" src="hifi-config-v2-gaps.jsx"></script>
+
+<script type="text/babel">
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "mode": "light"
+}/*EDITMODE-END*/;
+
+function App() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  React.useEffect(() => {
+    document.documentElement.dataset.mode = t.mode;
+    document.body.style.background = t.mode === 'dark' ? '#050505' : '#ECE6D9';
+  }, [t.mode]);
+
+  return (
+    <>
+      <DesignCanvas>
+        <DCSection
+          id="global"
+          title="Global"
+          subtitle="Deployment-wide defaults. Single long form with anchor TOC; sections that exist at both scopes use identical field UI.">
+          <DCArtboard id="cv2-global" label="Global · Settings" width={CV2_W} height={CV2_H_LONG}>
+            <div data-mode={t.mode}><CV2GlobalScreen /></div>
+          </DCArtboard>
+          <DCArtboard id="cv2-matrix" label="Global · Resolved across repos" width={CV2_W} height={CV2_H}>
+            <div data-mode={t.mode}><CV2MatrixScreen /></div>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection
+          id="repo"
+          title="Per-repo · acme-orders"
+          subtitle="Same shell, different sections. Identity & checkout are repo-only; Agents / Prompts / Tags use the same controls as Global with an inheritance chip on every field.">
+          <DCArtboard id="cv2-repo" label="acme-orders · Settings" width={CV2_W} height={CV2_H_LONG}>
+            <div data-mode={t.mode}><CV2RepoScreen /></div>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection
+          id="states"
+          title="States & flows"
+          subtitle="Drawers, modals, and field states the developer needs in addition to the page-level views.">
+          <DCArtboard id="cv2-states" label="Reference · Field states" width={CV2_W} height={1200}>
+            <div data-mode={t.mode}><CV2FieldStates /></div>
+          </DCArtboard>
+          <DCArtboard id="cv2-drawer" label="Preamble edit drawer" width={CV2_W} height={1080}>
+            <div data-mode={t.mode}><CV2PreambleDrawerScreen /></div>
+          </DCArtboard>
+          <DCArtboard id="cv2-save" label="Save-preview modal" width={CV2_W} height={1000}>
+            <div data-mode={t.mode}><CV2SaveModalScreen /></div>
+          </DCArtboard>
+          <DCArtboard id="cv2-add" label="Add-repo dialog" width={CV2_W} height={1000}>
+            <div data-mode={t.mode}><CV2AddRepoScreen /></div>
+          </DCArtboard>
+          <DCArtboard id="cv2-archive" label="Archive confirm" width={CV2_W} height={900}>
+            <div data-mode={t.mode}><CV2ArchiveConfirmScreen /></div>
+          </DCArtboard>
+          <DCArtboard id="cv2-empty" label="Empty state · zero repos" width={CV2_W} height={900}>
+            <div data-mode={t.mode}><CV2EmptyScreen /></div>
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+
+      <TweaksPanel title="Tweaks">
+        <TweakSection label="Mode">
+          <TweakRadio label="Color mode" value={t.mode}
+            options={['light', 'dark']}
+            onChange={v => setTweak('mode', v)} />
+        </TweakSection>
+      </TweaksPanel>
+    </>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
