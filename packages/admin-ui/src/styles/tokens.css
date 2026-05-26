@@ -1,0 +1,105 @@
+/* Quay UI tokens — light first, full dark mode. */
+
+:root {
+  /* Ink scale (warm near-black to mid-gray) */
+  --ink:    #0E0E0C;
+  --ink-2:  #38342C;
+  --ink-3:  #6B655B;
+  --ink-4:  #A39C8E;
+  --ink-5:  #C9C2B2;
+
+  /* Paper / surfaces */
+  --paper:     #FAF8F4;
+  --paper-2:   #F4F0E5;
+  --surface:   #FFFFFF;
+  --surface-2: #F7F3EA;
+  --surface-3: #EFEADE;
+
+  /* Lines */
+  --line:    #E8E2D3;
+  --line-2:  #D6CFBD;
+  --line-3:  #BBB29D;
+
+  /* Accent — harbor blue */
+  --accent:        oklch(0.46 0.085 232);
+  --accent-hover:  oklch(0.40 0.090 232);
+  --accent-soft:   oklch(0.94 0.025 232);
+  --accent-line:   oklch(0.82 0.040 232);
+  --accent-ink:    oklch(0.28 0.080 232);
+
+  /* States */
+  --good:       oklch(0.52 0.095 158);
+  --good-soft:  oklch(0.945 0.035 158);
+  --good-line:  oklch(0.83 0.060 158);
+  --good-ink:   oklch(0.30 0.075 158);
+
+  --warn:       oklch(0.62 0.115 75);
+  --warn-soft:  oklch(0.95 0.045 75);
+  --warn-line:  oklch(0.84 0.080 75);
+  --warn-ink:   oklch(0.36 0.085 60);
+
+  --danger:       oklch(0.55 0.160 28);
+  --danger-soft:  oklch(0.945 0.045 28);
+  --danger-line:  oklch(0.82 0.080 28);
+  --danger-ink:   oklch(0.38 0.110 28);
+
+  /* Radii */
+  --r-xs: 3px;
+  --r-sm: 5px;
+  --r-md: 7px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+
+  /* Type */
+  --sans:  ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono:  ui-monospace, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+  --serif: Georgia, 'Times New Roman', Times, serif;
+
+  /* Shadows */
+  --shadow-sm:  0 1px 0 rgba(14, 14, 12, 0.04);
+  --shadow-md:  0 1px 2px rgba(14, 14, 12, 0.06), 0 0 0 1px var(--line);
+  --shadow-pop: 0 8px 24px rgba(14, 14, 12, 0.08), 0 0 0 1px var(--line);
+}
+
+[data-mode='dark'] {
+  --ink:    #F2EDE0;
+  --ink-2:  #BDB6A4;
+  --ink-3:  #8A8474;
+  --ink-4:  #5C5749;
+  --ink-5:  #3F3B30;
+
+  --paper:     #0B0B0A;
+  --paper-2:   #0F0F0D;
+  --surface:   #16140F;
+  --surface-2: #1D1B16;
+  --surface-3: #24221C;
+
+  --line:    #2A2823;
+  --line-2:  #353128;
+  --line-3:  #4A4538;
+
+  --accent:        oklch(0.72 0.095 230);
+  --accent-hover:  oklch(0.78 0.095 230);
+  --accent-soft:   oklch(0.30 0.060 230);
+  --accent-line:   oklch(0.45 0.075 230);
+  --accent-ink:    oklch(0.86 0.060 230);
+
+  --good:       oklch(0.72 0.100 158);
+  --good-soft:  oklch(0.28 0.055 158);
+  --good-line:  oklch(0.42 0.075 158);
+  --good-ink:   oklch(0.86 0.075 158);
+
+  --warn:       oklch(0.78 0.115 75);
+  --warn-soft:  oklch(0.30 0.055 75);
+  --warn-line:  oklch(0.46 0.075 75);
+  --warn-ink:   oklch(0.88 0.080 75);
+
+  --danger:       oklch(0.72 0.155 28);
+  --danger-soft:  oklch(0.32 0.065 28);
+  --danger-line:  oklch(0.48 0.110 28);
+  --danger-ink:   oklch(0.88 0.110 28);
+
+  --shadow-sm:  0 0 0 1px rgba(255,255,255,0.03);
+  --shadow-md:  0 0 0 1px var(--line);
+  --shadow-pop: 0 12px 28px rgba(0,0,0,0.4), 0 0 0 1px var(--line);
+}

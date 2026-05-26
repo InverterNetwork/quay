@@ -75,11 +75,11 @@ $(tail -80 "$TC_LOG")
 \`\`\`"
 fi
 
-# 3. expected tests present (each named test must appear in tests/)
+# 3. expected tests present (each named test must appear in the CLI tests)
 missing_tests=()
 while IFS= read -r name; do
   [[ -z "$name" ]] && continue
-  if ! grep -rq -- "$name" tests/ 2>/dev/null; then
+  if ! grep -rq -- "$name" packages/cli/tests/ 2>/dev/null; then
     missing_tests+=("$name")
   fi
 done < <(jq -r '.expected_tests[]' "$CONFIG")
@@ -89,7 +89,7 @@ if (( ${#missing_tests[@]} > 0 )); then
     formatted+="- \`$t\`
 "
   done
-  add_reason "### Expected tests missing from \`tests/\`
+  add_reason "### Expected tests missing from \`packages/cli/tests/\`
 
 The slice prompt names these tests as required. They were not found by grep:
 
@@ -150,7 +150,7 @@ fi
 # Scope to the quay/ subtree so unrelated changes elsewhere in the
 # enclosing repo don't show up as forbidden-path drift. Use
 # --relative so output paths match cwd-relative gate-config patterns
-# (e.g. "src/cli/" instead of "quay/src/cli/").
+# (e.g. "packages/cli/src/cli/" instead of "quay/packages/cli/src/cli/").
 committed_changed="$(git diff --relative --name-only "$BASE_REF"..HEAD -- . || true)"
 untracked="$(git ls-files --others --exclude-standard -- . || true)"
 changed="$(printf '%s\n%s\n' "$committed_changed" "$untracked" | awk 'NF && !seen[$0]++')"

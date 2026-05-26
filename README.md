@@ -28,7 +28,7 @@ required on the target host — `bun build --compile` bundles the
 TypeScript source, all migration SQL, and the shipped default
 `ticket_schema.toml` into one executable. Release binaries also embed the
 production Quay UI bundle, so `quay serve` can serve the Admin UI without a
-separate `quay-ui/dist` directory on the host.
+separate `packages/admin-ui/dist` directory on the host.
 
 ```bash
 # Build locally from a checkout (requires Bun ≥ 1.1):
@@ -42,10 +42,9 @@ bun run build         # → dist/quay (~58 MB)
 Quay is delivered as prebuilt binaries on tagged GitHub Releases. Each
 `v*` tag triggers `.github/workflows/release.yml`, which builds four
 artifacts and a SHA256SUMS manifest, then attaches them to the release. The
-release workflow builds `InverterNetwork/quay-ui` from `main` first and embeds
-that `dist/` output into each binary. Because `quay-ui` is a private sibling
-repository, the release repo must provide `QUAY_UI_READ_TOKEN` with
-`contents:read` access to `InverterNetwork/quay-ui`.
+release workflow builds the in-repo `packages/admin-ui` workspace first and
+embeds that `dist/` output into each binary. No private cross-repo checkout or
+UI read token is required.
 
 Artifacts published per release:
 
@@ -123,19 +122,25 @@ deployed.
 ### Building from source for development
 
 ```bash
-bun install            # also runs scripts/embed.ts (prepare hook)
+bun install            # also runs packages/cli/scripts/embed.ts (prepare hook)
 bun test
 bun run typecheck
+bun run admin-ui:build # optional when iterating on UI assets
 bun run quay -- task list # invoke the CLI from TS source
 ```
 
-`scripts/embed.ts` regenerates `src/build/embedded.generated.ts` (the
+`packages/cli/scripts/embed.ts` regenerates
+`packages/cli/src/build/embedded.generated.ts` (the
 in-binary copy of migrations + shipped schema + version stamp + optional UI
 assets). The generated file is gitignored; `bun install` and `bun run build`
-both regenerate it. Set `QUAY_UI_DIST_DIR=/path/to/quay-ui/dist` to embed a
-specific UI build; if the variable is unset and `../quay-ui/dist` exists, that
-sibling checkout output is embedded automatically. Without either, local builds
-remain API-only unless `quay serve --ui-dir <path>` is used.
+both regenerate it. `bun run build` builds `packages/admin-ui` and embeds that
+local UI bundle into `dist/quay`. Set `QUAY_UI_DIST_DIR=/path/to/dist` to embed
+a specific UI build. Without a UI build, local CLI-only builds remain API-only
+unless `quay serve --ui-dir <path>` is used.
+
+The old `InverterNetwork/quay-ui` repository has been migrated into
+`packages/admin-ui`. Keep that repository read-only with a pointer back here,
+or archive it once any remaining consumers have moved to this monorepo.
 
 ## Bootstrapping a repo
 
@@ -289,7 +294,8 @@ token (e.g. `LINEAR_API_KEY` unset) surfaces as `adapter_not_configured`.
 
 Resolution order (first match wins): `--schema-file <path>`,
 `$QUAY_CONFIG_DIR/ticket_schema.toml`, `$HOME/.quay/ticket_schema.toml`,
-shipped default at [`config/ticket_schema.toml`](config/ticket_schema.toml).
+shipped default at
+[`packages/cli/config/ticket_schema.toml`](packages/cli/config/ticket_schema.toml).
 The default mirrors the `quay-config` block used by the Linear adapter, so
 tag/author shape stays consistent across validation and enqueue.
 
@@ -307,19 +313,23 @@ tag/author shape stays consistent across validation and enqueue.
 ## Layout
 
 ```
-migrations/       SQL migration files (read at runtime, applied in lex order)
-config/           shipped defaults (ticket_schema.toml)
-src/
-  cli/            entry point + dispatch; production wiring lives in cli/index.ts
-  core/           service API: enqueue, tick_once, claim_task, ticket_context, ...
-  adapters/       LinearAdapter, SlackAdapter, GitHub CLI, tmux, local git
-  validator/      pure validateTicket library + TOML schema loader
-  db/             sqlite connection + migration runner
-  artifacts/      artifact-store helper
-  ports/          interfaces: TmuxPort, GitPort, GitHubPort, SlackPort, LinearPort, Clock, ...
-tests/
-  support/        harness, fakes, fixtures (test-only)
-  schema/ enqueue/ tick/ claim/ cancel/ slack/ pr/ cli/ adapters/ validator/ ticket_context/ quay_config_block/
+packages/
+  cli/
+    migrations/   SQL migration files (read at runtime, applied in lex order)
+    config/       shipped defaults (ticket_schema.toml)
+    src/
+      cli/        entry point + dispatch; production wiring lives in cli/index.ts
+      core/       service API: enqueue, tick_once, claim_task, ticket_context, ...
+      adapters/   LinearAdapter, SlackAdapter, GitHub CLI, tmux, local git
+      validator/  pure validateTicket library + TOML schema loader
+      db/         sqlite connection + migration runner
+      artifacts/  artifact-store helper
+      ports/      interfaces: TmuxPort, GitPort, GitHubPort, SlackPort, LinearPort, Clock, ...
+    tests/
+      support/    harness, fakes, fixtures (test-only)
+      schema/ enqueue/ tick/ claim/ cancel/ slack/ pr/ cli/ adapters/ validator/ ticket_context/ quay_config_block/
+  admin-ui/       React/Vite Admin UI for the versioned /v1 Admin API
+scripts/          repo-level driver scripts used by the historical slice gates
 ```
 
 Tests are organized by domain. The full suite runs without network access;

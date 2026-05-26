@@ -1,7 +1,8 @@
 # CLI Reference
 
-The main command surface is implemented by `src/cli/dispatch.ts`. The older
-spec docs may lag behind this list.
+The main command surface is implemented by
+`packages/cli/src/cli/dispatch.ts`. The older spec docs may lag behind this
+list.
 
 ## Output Conventions
 
@@ -70,14 +71,12 @@ same-origin `/v1/*` fetch wrapper into `index.html`; open the UI with
 `sessionStorage`. Non-browser clients and reverse proxies can send the
 `Authorization` header directly.
 
-`--ui-dir` overrides embedded UI assets with a built Quay UI directory from the
-same loopback server:
+`--ui-dir` overrides embedded UI assets with a built Admin UI directory from
+the same loopback server:
 
 ```bash
-cd ../quay-ui
-bun run build
-cd ../quay
-quay serve --ui-dir ../quay-ui/dist
+bun run admin-ui:build
+quay serve --ui-dir packages/admin-ui/dist
 ```
 
 The directory must contain `index.html`. When embedded UI assets or `--ui-dir`
@@ -101,7 +100,9 @@ quay repo add \
   [--agent-worker <name>] \
   [--agent-reviewer <name>] \
   [--model-worker <model>] \
-  [--model-reviewer <model>]
+  [--model-reviewer <model>] \
+  [--preamble-worker <preamble_id>] \
+  [--preamble-reviewer <preamble_id>]
 
 quay repo update <repo_id> [flags]
 quay repo update --id <repo_id> [flags]
@@ -118,9 +119,13 @@ quay repo apply-tags <repo_id> --from <path>
 
 `repo add` and `repo update` also accept `--input <json>` for structured
 automation. Agent/model flags set per-repo worker and reviewer defaults.
+Preamble flags pin that repo role to a specific `preambles.preamble_id`;
+when omitted, attempts continue using the latest global preamble for their
+role.
 Use `repo update --agent-worker ""`, `--agent-reviewer ""`,
-`--model-worker ""`, or `--model-reviewer ""` to clear an override and fall
-back to deployment defaults.
+`--model-worker ""`, `--model-reviewer ""`, `--preamble-worker ""`, or
+`--preamble-reviewer ""` to clear an override and fall back to deployment or
+global defaults.
 
 `repo list` and `repo export` default to returning every row, archived
 included, so operators debugging "where did my repo go?" still see
@@ -128,6 +133,9 @@ soft-deleted entries (and `repo export` keeps full-fidelity backup
 semantics). Pass `--active` to limit the output to rows with
 `archived_at IS NULL` — the typical "which repos are in service?"
 question that consumers like `setup-hermes.sh` ask.
+When exported repos have preamble overrides, the dump includes companion
+`preamble_worker_record` / `preamble_reviewer_record` objects so import can
+restore the referenced prompt bodies and remap database-local IDs.
 
 ## Tags
 
