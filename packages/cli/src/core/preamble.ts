@@ -215,6 +215,16 @@ export const DEFAULT_REVIEWER_PREAMBLE_BODY = [
 
 export type PreambleKind = "code" | "review";
 
+export interface PreambleSummary {
+  preamble_id: number;
+  kind: PreambleKind;
+  created_at: string;
+}
+
+export interface PreambleRecord extends PreambleSummary {
+  body: string;
+}
+
 export interface PreambleResolutionOptions {
   // Task-level override hook for callers that have already chosen an explicit
   // preamble. Repo-level overrides are ignored when this is present.
@@ -249,6 +259,61 @@ export function ensurePreambleId(
     .get(body, kind, clock.nowISO());
   if (!inserted) throw new Error("preamble insert returned no row");
   return inserted.preamble_id;
+}
+
+export function createPreamble(
+  db: DB,
+  clock: Clock,
+  kind: PreambleKind,
+  body: string,
+): PreambleRecord {
+  const inserted = db
+    .query<PreambleRecord, [string, string, string]>(
+      `INSERT INTO preambles (body, kind, created_at)
+       VALUES (?, ?, ?)
+       RETURNING preamble_id, kind, created_at, body`,
+    )
+    .get(body, kind, clock.nowISO());
+  if (!inserted) throw new Error("preamble insert returned no row");
+  return inserted;
+}
+
+export function listPreambles(
+  db: DB,
+  kind?: PreambleKind,
+): PreambleSummary[] {
+  if (kind !== undefined) {
+    return db
+      .query<PreambleSummary, [string]>(
+        `SELECT preamble_id, kind, created_at
+           FROM preambles
+          WHERE kind = ?
+          ORDER BY preamble_id`,
+      )
+      .all(kind);
+  }
+  return db
+    .query<PreambleSummary, []>(
+      `SELECT preamble_id, kind, created_at
+         FROM preambles
+        ORDER BY preamble_id`,
+    )
+    .all();
+}
+
+export function getPreamble(
+  db: DB,
+  preambleId: number,
+): PreambleRecord | null {
+  return (
+    db
+      .query<PreambleRecord, [number]>(
+        `SELECT preamble_id, kind, created_at, body
+           FROM preambles
+          WHERE preamble_id = ?`,
+      )
+      .get(preambleId) ?? null
+  );
 }
 
 export function ensurePreambleIdForAttemptReason(
