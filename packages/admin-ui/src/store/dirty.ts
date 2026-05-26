@@ -21,6 +21,8 @@ export interface RepoUpdateChange {
     agent_reviewer: string | null;
     model_worker: string | null;
     model_reviewer: string | null;
+    preamble_worker: string | number | null;
+    preamble_reviewer: string | number | null;
   }>;
 }
 

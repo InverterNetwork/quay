@@ -689,6 +689,7 @@ function rejectGoalCompletion(
       deps.db,
       deps.clock,
       GOAL_AUDIT_REJECTED_ATTEMPT_REASON,
+      { repoId: input.task.repo_id },
     );
     const objective = loadOriginalTaskObjective(deps.db, input.task.task_id);
     const goalContext = loadGoalPromptContext(deps.db, input.task.task_id);

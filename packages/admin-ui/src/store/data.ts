@@ -18,8 +18,26 @@ export interface RepoSummary {
   agentReviewer?: string | null;
   modelWorker?: string | null;
   modelReviewer?: string | null;
+  preambleWorker?: number | null;
+  preambleReviewer?: number | null;
+  effectivePreambles: {
+    worker: RepoEffectivePreamble;
+    reviewer: RepoEffectivePreamble;
+  };
   tagNamespaces: TagNamespace[];
   inheritedTagNamespaces: TagNamespace[];
+}
+
+export interface RepoEffectivePreamble {
+  role: 'worker' | 'reviewer';
+  kind: 'code' | 'review';
+  source: 'repo' | 'global';
+  configuredPreambleId: number | null;
+  effectivePreambleId: number;
+  title: string;
+  body: string;
+  refs: number;
+  lastEdited: string | null;
 }
 
 export interface AgentInvocation {

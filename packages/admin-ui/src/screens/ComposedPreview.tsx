@@ -6,7 +6,7 @@ import { HStack } from '../components/Stack';
 import { T } from '../components/Typography';
 import { Icon } from '../icons/Icon';
 import { TONES, type Tone } from '../styles/tones';
-import type { GuidanceTemplate, PreambleSummary } from '../store/data';
+import type { GuidanceTemplate, RepoEffectivePreamble } from '../store/data';
 
 interface PreviewSection {
   tone: Tone;
@@ -16,7 +16,7 @@ interface PreviewSection {
 }
 
 interface ComposedPreviewProps {
-  preamble: PreambleSummary | null;
+  preamble: RepoEffectivePreamble | null;
   guidanceTemplates: GuidanceTemplate[];
   repoId: string;
 }
@@ -159,15 +159,21 @@ export function ComposedPreview({ preamble, guidanceTemplates, repoId }: Compose
 }
 
 function buildSections(
-  preamble: PreambleSummary | null,
+  preamble: RepoEffectivePreamble | null,
   template: GuidanceTemplate | null,
   repoId: string,
 ): PreviewSection[] {
+  const preambleVersion =
+    preamble === null
+      ? null
+      : preamble.effectivePreambleId === 0
+        ? 'default'
+        : `v${preamble.effectivePreambleId}`;
   return [
     {
       tone: 'accent',
       label: '1 · PREAMBLE',
-      src: preamble ? `${preamble.title} v${preamble.version} · global` : 'not exposed',
+      src: preamble ? `${preamble.title} ${preambleVersion} · ${preamble.source}` : 'not exposed',
       body: preamble ? previewText(preamble.body) : 'No worker preamble is exposed by the Admin API.',
     },
     {

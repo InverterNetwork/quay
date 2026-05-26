@@ -503,6 +503,7 @@ export async function submit_brief(
     deps.db,
     deps.clock,
     input.reason,
+    { taskId: input.taskId },
   );
   const preambleBody = loadPreambleBody(deps.db, preambleId);
   const objective = loadOriginalTaskObjective(deps.db, input.taskId);

@@ -35,6 +35,8 @@ export interface QuayAdminRepo {
   agent_reviewer: string | null;
   model_worker: string | null;
   model_reviewer: string | null;
+  preamble_worker: number | null;
+  preamble_reviewer: number | null;
   archived_at: string | null;
   created_at: string;
 }
@@ -42,8 +44,24 @@ export interface QuayAdminRepo {
 export interface QuayAdminRepoDetail extends QuayAdminRepo {
   revision: string;
   active_task_count: number;
+  effective_preambles: {
+    worker: QuayAdminRepoEffectivePreamble;
+    reviewer: QuayAdminRepoEffectivePreamble;
+  };
   tag_namespaces: QuayAdminTagNamespace[];
   inherited_tag_namespaces: QuayAdminTagNamespace[];
+}
+
+interface QuayAdminRepoEffectivePreamble {
+  role: 'worker' | 'reviewer';
+  kind: 'code' | 'review';
+  source: 'repo' | 'global';
+  configured_preamble_id: number | null;
+  effective_preamble_id: number;
+  title: string;
+  body: string;
+  refs: number;
+  last_edited: string | null;
 }
 
 interface QuayAdminField {
@@ -373,6 +391,8 @@ function toRepoSummary(repo: QuayAdminRepoDetail): RepoSummary {
     repo.agent_reviewer,
     repo.model_worker,
     repo.model_reviewer,
+    repo.preamble_worker,
+    repo.preamble_reviewer,
   ].filter(Boolean);
 
   return {
@@ -393,8 +413,28 @@ function toRepoSummary(repo: QuayAdminRepoDetail): RepoSummary {
     agentReviewer: repo.agent_reviewer,
     modelWorker: repo.model_worker,
     modelReviewer: repo.model_reviewer,
+    preambleWorker: repo.preamble_worker,
+    preambleReviewer: repo.preamble_reviewer,
+    effectivePreambles: {
+      worker: toRepoEffectivePreamble(repo.effective_preambles.worker),
+      reviewer: toRepoEffectivePreamble(repo.effective_preambles.reviewer),
+    },
     tagNamespaces: repo.tag_namespaces.map(toTagNamespace),
     inheritedTagNamespaces: repo.inherited_tag_namespaces.map(toTagNamespace),
+  };
+}
+
+function toRepoEffectivePreamble(preamble: QuayAdminRepoEffectivePreamble) {
+  return {
+    role: preamble.role,
+    kind: preamble.kind,
+    source: preamble.source,
+    configuredPreambleId: preamble.configured_preamble_id,
+    effectivePreambleId: preamble.effective_preamble_id,
+    title: preamble.title,
+    body: preamble.body,
+    refs: preamble.refs,
+    lastEdited: preamble.last_edited,
   };
 }
 

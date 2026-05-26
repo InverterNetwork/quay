@@ -126,6 +126,7 @@ export interface AdoptPrResult {
 
 interface TaskLookupRow {
   task_id: string;
+  repo_id: string;
   state: string;
   authoring_mode: TaskAuthoringMode;
   branch_name: string;
@@ -223,6 +224,7 @@ export function enterReview(
     deps.db,
     deps.clock,
     "review_only",
+    { repoId: input.repoId },
   );
   const preamble = loadPreambleBody(deps.db, preambleId);
   const brief = synthetic
@@ -780,7 +782,7 @@ function findTaskByPr(
   return (
     db
       .query<TaskLookupRow, [string, number]>(
-        `SELECT t.task_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
+        `SELECT t.task_id, t.repo_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
                 CASE
                   WHEN t.authoring_mode = 'quay_owned'
                    AND t.task_id LIKE 'pr-review-%'
@@ -812,7 +814,7 @@ function findTaskByBranch(
   return (
     db
       .query<TaskLookupRow, [string, string]>(
-        `SELECT t.task_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
+        `SELECT t.task_id, t.repo_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
                 CASE
                   WHEN t.authoring_mode = 'quay_owned'
                    AND t.task_id LIKE 'pr-review-%'
@@ -836,7 +838,7 @@ function findTaskById(db: DB, taskId: string): TaskLookupRow | null {
   return (
     db
       .query<TaskLookupRow, [string]>(
-        `SELECT t.task_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
+        `SELECT t.task_id, t.repo_id, t.state, t.branch_name, t.worktree_path, t.tmux_id,
                 CASE
                   WHEN t.authoring_mode = 'quay_owned'
                    AND t.task_id LIKE 'pr-review-%'
@@ -966,6 +968,7 @@ function scheduleAdoptedWorkerAttempt(
     deps.db,
     deps.clock,
     "adopt_pr",
+    { repoId: input.task.repo_id },
   );
   const preambleBody = loadPreambleBody(deps.db, preambleId);
   const nextAttemptNumber = nextAttemptNumberForTask(

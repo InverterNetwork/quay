@@ -184,6 +184,7 @@ export function scheduleNonBudgetRespawn(
       deps.db,
       deps.clock,
       input.reason,
+      { taskId: input.taskId },
     );
     const objective = loadOriginalTaskObjective(deps.db, input.taskId);
     const prBaseBranch = loadTaskPrBaseBranch(deps.db, input.taskId);

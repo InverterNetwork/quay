@@ -1,6 +1,7 @@
 import type { DB } from "../../db/connection.ts";
 import type { Clock } from "../../ports/clock.ts";
 import { QuayError } from "../errors.ts";
+import { assertPreambleKind } from "../preamble.ts";
 import { parseOrThrow } from "../zod_helpers.ts";
 import {
   repoAddInputSchema,
@@ -24,6 +25,8 @@ export interface RepoRow {
   agent_reviewer: string | null;
   model_worker: string | null;
   model_reviewer: string | null;
+  preamble_worker: number | null;
+  preamble_reviewer: number | null;
   archived_at: string | null;
   created_at: string;
 }
@@ -56,6 +59,7 @@ const SELECT_REPO_COLUMNS = `
   repo_id, repo_url, base_branch, package_manager, install_cmd,
   test_cmd, ci_workflow_name, contribution_guide_path,
   agent_worker, agent_reviewer, model_worker, model_reviewer,
+  preamble_worker, preamble_reviewer,
   archived_at, created_at
 `;
 
@@ -85,6 +89,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
 
   function add(rawInput: unknown): RepoRow {
     const parsed = parseOrThrow(repoAddInputSchema, rawInput, "repo add");
+    validatePreambleOverrides(parsed);
     const existing = get(parsed.repo_id);
     if (existing && existing.archived_at === null) {
       throw new QuayError(
@@ -102,6 +107,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
                test_cmd = ?, ci_workflow_name = ?, contribution_guide_path = ?,
                agent_worker = ?, agent_reviewer = ?,
                model_worker = ?, model_reviewer = ?,
+               preamble_worker = ?, preamble_reviewer = ?,
                archived_at = NULL
          WHERE repo_id = ?`,
       ).run(
@@ -116,6 +122,8 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         parsed.agent_reviewer ?? null,
         parsed.model_worker ?? null,
         parsed.model_reviewer ?? null,
+        parsed.preamble_worker ?? null,
+        parsed.preamble_reviewer ?? null,
         parsed.repo_id,
       );
     } else {
@@ -123,8 +131,9 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         `INSERT INTO repos (
            repo_id, repo_url, base_branch, package_manager, install_cmd,
            test_cmd, ci_workflow_name, contribution_guide_path,
-           agent_worker, agent_reviewer, model_worker, model_reviewer, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           agent_worker, agent_reviewer, model_worker, model_reviewer,
+           preamble_worker, preamble_reviewer, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         parsed.repo_id,
         parsed.repo_url,
@@ -138,6 +147,8 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         parsed.agent_reviewer ?? null,
         parsed.model_worker ?? null,
         parsed.model_reviewer ?? null,
+        parsed.preamble_worker ?? null,
+        parsed.preamble_reviewer ?? null,
         clock.nowISO(),
       );
     }
@@ -146,6 +157,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
 
   function update(repoId: string, rawPatch: unknown): RepoRow {
     const patch = parseOrThrow(repoUpdateInputSchema, rawPatch, "repo update");
+    validatePreambleOverrides(patch);
     const existing = get(repoId);
     if (!existing) {
       throw new QuayError("unknown_repo", `repo "${repoId}" not found`, {
@@ -245,6 +257,18 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
       parsed.model_reviewer !== undefined
         ? parsed.model_reviewer
         : (existing?.model_reviewer ?? null);
+    const preambleWorker =
+      parsed.preamble_worker !== undefined
+        ? parsed.preamble_worker
+        : (existing?.preamble_worker ?? null);
+    const preambleReviewer =
+      parsed.preamble_reviewer !== undefined
+        ? parsed.preamble_reviewer
+        : (existing?.preamble_reviewer ?? null);
+    validatePreambleOverrides({
+      preamble_worker: preambleWorker,
+      preamble_reviewer: preambleReviewer,
+    });
     if (existing) {
       db.query(
         `UPDATE repos
@@ -252,6 +276,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
                test_cmd = ?, ci_workflow_name = ?, contribution_guide_path = ?,
                agent_worker = ?, agent_reviewer = ?,
                model_worker = ?, model_reviewer = ?,
+               preamble_worker = ?, preamble_reviewer = ?,
                archived_at = ?, created_at = ?
          WHERE repo_id = ?`,
       ).run(
@@ -266,6 +291,8 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         agentReviewer,
         modelWorker,
         modelReviewer,
+        preambleWorker,
+        preambleReviewer,
         archivedAt,
         createdAt,
         parsed.repo_id,
@@ -276,8 +303,8 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
            repo_id, repo_url, base_branch, package_manager, install_cmd,
            test_cmd, ci_workflow_name, contribution_guide_path,
            agent_worker, agent_reviewer, model_worker, model_reviewer,
-           archived_at, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           preamble_worker, preamble_reviewer, archived_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         parsed.repo_id,
         parsed.repo_url,
@@ -291,11 +318,25 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         agentReviewer,
         modelWorker,
         modelReviewer,
+        preambleWorker,
+        preambleReviewer,
         archivedAt,
         createdAt,
       );
     }
     return get(parsed.repo_id)!;
+  }
+
+  function validatePreambleOverrides(input: {
+    preamble_worker?: number | null | undefined;
+    preamble_reviewer?: number | null | undefined;
+  }): void {
+    if (input.preamble_worker !== undefined && input.preamble_worker !== null) {
+      assertPreambleKind(db, input.preamble_worker, "code", "repo worker");
+    }
+    if (input.preamble_reviewer !== undefined && input.preamble_reviewer !== null) {
+      assertPreambleKind(db, input.preamble_reviewer, "review", "repo reviewer");
+    }
   }
 
   return { add, update, remove, get, list, upsert };

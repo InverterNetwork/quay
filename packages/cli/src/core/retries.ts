@@ -91,6 +91,7 @@ export function scheduleDeterministicRetry(
     deps.db,
     deps.clock,
     input.reason,
+    { taskId: input.taskId },
   );
   const objective = loadOriginalTaskObjective(deps.db, input.taskId);
   const goalContext = loadGoalPromptContext(deps.db, input.taskId);
@@ -320,6 +321,7 @@ export function scheduleCleanSpawnRetry(
     deps.db,
     deps.clock,
     input.prevAttempt.reason,
+    { taskId: input.taskId },
   );
   const goalId =
     input.prevAttempt.reason === "review_only"

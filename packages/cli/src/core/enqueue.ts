@@ -262,6 +262,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       deps.db,
       deps.clock,
       "initial",
+      { repoId: repo.repo_id },
     );
     const preambleBody = loadPreambleBody(deps.db, preambleId);
     const now = deps.clock.nowISO();
