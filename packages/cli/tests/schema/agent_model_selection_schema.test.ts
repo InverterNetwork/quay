@@ -12,6 +12,8 @@ test("agent/model selection columns exist after migration", () => {
   const repoColumns = columnNames("repos");
   expect(repoColumns.has("model_worker")).toBe(true);
   expect(repoColumns.has("model_reviewer")).toBe(true);
+  expect(repoColumns.has("preamble_worker")).toBe(true);
+  expect(repoColumns.has("preamble_reviewer")).toBe(true);
 
   const taskColumns = columnNames("tasks");
   expect(taskColumns.has("worker_agent")).toBe(true);

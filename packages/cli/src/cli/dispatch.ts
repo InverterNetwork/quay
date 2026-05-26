@@ -1204,17 +1204,26 @@ const REPO_FLAGS: Array<{ flag: string; key: string }> = [
   { flag: "--agent-reviewer", key: "agent_reviewer" },
   { flag: "--model-worker", key: "model_worker" },
   { flag: "--model-reviewer", key: "model_reviewer" },
+  { flag: "--preamble-worker", key: "preamble_worker" },
+  { flag: "--preamble-reviewer", key: "preamble_reviewer" },
 ];
 
-// On `repo update`, an empty string for an agent override means "clear
-// it" — fall back to the deployment default. We translate that here
+// On `repo update`, an empty string for a repo override means "clear it" and
+// fall back to the deployment/global default. We translate that here
 // rather than burdening every call site, and only on update (add does
 // not accept clearing a field that was never set).
-function normalizeAgentClearing(
+function normalizeRepoOverrideClearing(
   patch: Record<string, string>,
 ): Record<string, string | null> {
   const out: Record<string, string | null> = { ...patch };
-  for (const key of ["agent_worker", "agent_reviewer", "model_worker", "model_reviewer"] as const) {
+  for (const key of [
+    "agent_worker",
+    "agent_reviewer",
+    "model_worker",
+    "model_reviewer",
+    "preamble_worker",
+    "preamble_reviewer",
+  ] as const) {
     if (out[key] === "") out[key] = null;
   }
   return out;
@@ -1314,7 +1323,7 @@ function handleRepoUpdate(
   // shim. Validation runs after the rewrite so it never rejects "".
   const patch = json.value !== undefined
     ? (json.value as Record<string, unknown>)
-    : (normalizeAgentClearing(
+    : (normalizeRepoOverrideClearing(
         flagsToObject(
           argv,
           REPO_FLAGS.filter((f) => f.flag !== "--id"),

@@ -1,5 +1,6 @@
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
+import { QuayError } from "./errors.ts";
 
 export const DEFAULT_PREAMBLE_BODY = `Quay protocol preamble (v1)
 
@@ -214,6 +215,15 @@ export const DEFAULT_REVIEWER_PREAMBLE_BODY = [
 
 export type PreambleKind = "code" | "review";
 
+export interface PreambleResolutionOptions {
+  // Task-level override hook for callers that have already chosen an explicit
+  // preamble. Repo-level overrides are ignored when this is present.
+  overridePreambleId?: number | null;
+  // Either repoId or taskId is enough to consult repo-level overrides.
+  repoId?: string | null;
+  taskId?: string | null;
+}
+
 export function preambleKindForAttemptReason(reason: string): PreambleKind {
   return reason === "review_only" ? "review" : "code";
 }
@@ -245,8 +255,25 @@ export function ensurePreambleIdForAttemptReason(
   db: DB,
   clock: Clock,
   reason: string,
+  options: PreambleResolutionOptions = {},
 ): number {
-  return ensurePreambleId(db, clock, preambleKindForAttemptReason(reason));
+  const kind = preambleKindForAttemptReason(reason);
+  if (options.overridePreambleId !== undefined && options.overridePreambleId !== null) {
+    assertPreambleKind(db, options.overridePreambleId, kind, "task override");
+    return options.overridePreambleId;
+  }
+
+  const repoId =
+    options.repoId ?? (options.taskId ? lookupTaskRepoId(db, options.taskId) : null);
+  if (repoId !== null && repoId !== undefined) {
+    const repoOverride = lookupRepoPreambleOverride(db, repoId, kind);
+    if (repoOverride !== null) {
+      assertPreambleKind(db, repoOverride, kind, `repo ${repoId}`);
+      return repoOverride;
+    }
+  }
+
+  return ensurePreambleId(db, clock, kind);
 }
 
 export function ensureReviewerPreambleId(db: DB, clock: Clock): number {
@@ -261,4 +288,67 @@ export function loadPreambleBody(db: DB, preambleId: number): string {
     .get(preambleId);
   if (!row) throw new Error(`preamble ${preambleId} not found`);
   return row.body;
+}
+
+export function loadPreambleKind(db: DB, preambleId: number): PreambleKind | null {
+  const row = db
+    .query<{ kind: string }, [number]>(
+      "SELECT kind FROM preambles WHERE preamble_id = ?",
+    )
+    .get(preambleId);
+  if (!row) return null;
+  if (row.kind === "code" || row.kind === "review") return row.kind;
+  throw new Error(`preamble ${preambleId} has unsupported kind ${row.kind}`);
+}
+
+export function assertPreambleKind(
+  db: DB,
+  preambleId: number,
+  expected: PreambleKind,
+  context: string,
+): void {
+  const actual = loadPreambleKind(db, preambleId);
+  if (actual === null) {
+    throw new QuayError(
+      "validation_error",
+      `${context} preamble ${preambleId} does not exist`,
+      { preamble_id: preambleId, expected_kind: expected },
+    );
+  }
+  if (actual !== expected) {
+    throw new QuayError(
+      "validation_error",
+      `${context} preamble ${preambleId} has kind ${actual}; expected ${expected}`,
+      { preamble_id: preambleId, actual_kind: actual, expected_kind: expected },
+    );
+  }
+}
+
+function lookupTaskRepoId(db: DB, taskId: string): string | null {
+  return (
+    db
+      .query<{ repo_id: string }, [string]>(
+        "SELECT repo_id FROM tasks WHERE task_id = ?",
+      )
+      .get(taskId)?.repo_id ?? null
+  );
+}
+
+function lookupRepoPreambleOverride(
+  db: DB,
+  repoId: string,
+  kind: PreambleKind,
+): number | null {
+  const row = db
+    .query<
+      { preamble_worker: number | null; preamble_reviewer: number | null },
+      [string]
+    >(
+      `SELECT preamble_worker, preamble_reviewer
+         FROM repos
+        WHERE repo_id = ?`,
+    )
+    .get(repoId);
+  if (!row) return null;
+  return kind === "review" ? row.preamble_reviewer : row.preamble_worker;
 }

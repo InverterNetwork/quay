@@ -14,12 +14,12 @@ export function insertRepo(db: DB, repoId = "repo-1"): string {
   return repoId;
 }
 
-export function insertPreamble(db: DB): number {
+export function insertPreamble(db: DB, body = "preamble body", kind = "code"): number {
   const row = db
-    .query<{ preamble_id: number }, [string, string]>(
-      `INSERT INTO preambles (body, created_at) VALUES (?, ?) RETURNING preamble_id`,
+    .query<{ preamble_id: number }, [string, string, string]>(
+      `INSERT INTO preambles (body, kind, created_at) VALUES (?, ?, ?) RETURNING preamble_id`,
     )
-    .get("preamble body", NOW);
+    .get(body, kind, NOW);
   if (!row) throw new Error("preamble insert returned no row");
   return row.preamble_id;
 }

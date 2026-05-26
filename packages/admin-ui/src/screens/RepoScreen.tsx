@@ -9,7 +9,7 @@ import { ComposedPreview } from './ComposedPreview';
 import { Field } from './Field';
 import { Section, SubGroup } from './Section';
 import { Toc, type TocItem } from './Toc';
-import type { GlobalConfigSummary, PreambleSummary, RepoSummary } from '../store/data';
+import type { GlobalConfigSummary, PreambleSummary, RepoEffectivePreamble, RepoSummary } from '../store/data';
 import type { ChangeEntry, RepoUpdateChange } from '../store/dirty';
 import { TagNamespaceEditor } from './TagNamespaceEditor';
 
@@ -115,9 +115,19 @@ interface BodyProps {
 }
 
 function Body({ repo, global, changes, onChange, active, setActive }: BodyProps) {
-  const workerPreamble = global.preambles.find((preamble) => preamble.kind === 'code') ?? null;
-  const reviewerPreamble = global.preambles.find((preamble) => preamble.kind === 'review') ?? null;
   const field = createRepoFieldAccess(repo, changes, onChange);
+  const globalWorkerPreamble = global.preambles.find((preamble) => preamble.kind === 'code') ?? null;
+  const globalReviewerPreamble = global.preambles.find((preamble) => preamble.kind === 'review') ?? null;
+  const workerPreamble = effectiveWithPending(
+    repo.effectivePreambles.worker,
+    field.value('preamble_worker', idString(repo.preambleWorker)),
+    globalWorkerPreamble,
+  );
+  const reviewerPreamble = effectiveWithPending(
+    repo.effectivePreambles.reviewer,
+    field.value('preamble_reviewer', idString(repo.preambleReviewer)),
+    globalReviewerPreamble,
+  );
 
   return (
     <div
@@ -282,11 +292,37 @@ function Body({ repo, global, changes, onChange, active, setActive }: BodyProps)
         </Section>
 
         {/* 04 · Prompts */}
-        <Section n="04" id="prompts" title="Prompts" hint="inherit · extend · replace · per kind">
+        <Section n="04" id="prompts" title="Prompts" hint="repo override · global fallback · per kind">
           <div style={{ display: 'flex', gap: 18, alignItems: 'stretch' }}>
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {workerPreamble && <RepoPreambleCard preamble={workerPreamble} role="worker" />}
-              {reviewerPreamble && <RepoPreambleCard preamble={reviewerPreamble} role="reviewer" />}
+              <SubGroup title="Worker">
+                <Field
+                  label="PREAMBLE_ID"
+                  value={field.value('preamble_worker', idString(repo.preambleWorker))}
+                  source={field.value('preamble_worker', idString(repo.preambleWorker)) ? 'override' : 'inherits'}
+                  inheritedValue={repo.effectivePreambles.worker.source === 'global'
+                    ? `global v${repo.effectivePreambles.worker.effectivePreambleId}`
+                    : 'global fallback'}
+                  dirty={field.dirty('preamble_worker')}
+                  editable
+                  onCommit={(next) => field.commit('preamble_worker', next)}
+                />
+                <RepoPreambleCard preamble={workerPreamble} />
+              </SubGroup>
+              <SubGroup title="Reviewer">
+                <Field
+                  label="PREAMBLE_ID"
+                  value={field.value('preamble_reviewer', idString(repo.preambleReviewer))}
+                  source={field.value('preamble_reviewer', idString(repo.preambleReviewer)) ? 'override' : 'inherits'}
+                  inheritedValue={repo.effectivePreambles.reviewer.source === 'global'
+                    ? `global v${repo.effectivePreambles.reviewer.effectivePreambleId}`
+                    : 'global fallback'}
+                  dirty={field.dirty('preamble_reviewer')}
+                  editable
+                  onCommit={(next) => field.commit('preamble_reviewer', next)}
+                />
+                <RepoPreambleCard preamble={reviewerPreamble} />
+              </SubGroup>
             </div>
             <ComposedPreview preamble={workerPreamble} guidanceTemplates={global.retryTemplates} repoId={repo.id} />
           </div>
@@ -337,6 +373,8 @@ function createRepoFieldAccess(
     agent_reviewer: repo.agentReviewer ?? null,
     model_worker: repo.modelWorker ?? null,
     model_reviewer: repo.modelReviewer ?? null,
+    preamble_worker: idString(repo.preambleWorker),
+    preamble_reviewer: idString(repo.preambleReviewer),
   };
 
   function changeId(key: RepoPatchKey): string {
@@ -346,7 +384,8 @@ function createRepoFieldAccess(
   function pendingValue(key: RepoPatchKey): string | null | undefined {
     const entry = changes.find((change) => change.id === changeId(key));
     if (entry?.change.type !== 'repo.update') return undefined;
-    return entry.change.patch[key];
+    const pending = entry.change.patch[key];
+    return typeof pending === 'number' ? String(pending) : pending;
   }
 
   function normalize(key: RepoPatchKey, value: string): string | null {
@@ -389,13 +428,51 @@ const NULLABLE_REPO_FIELDS = new Set<RepoPatchKey>([
   'agent_reviewer',
   'model_worker',
   'model_reviewer',
+  'preamble_worker',
+  'preamble_reviewer',
 ]);
 
 function formatFieldValue(value: string | null): string {
   return value === null || value === '' ? 'not configured' : value;
 }
 
-function RepoPreambleCard({ preamble, role }: { preamble: PreambleSummary; role: 'worker' | 'reviewer' }) {
+function idString(value: number | null | undefined): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+function effectiveWithPending(
+  preamble: RepoEffectivePreamble,
+  pendingId: string | null,
+  globalPreamble: PreambleSummary | null,
+): RepoEffectivePreamble {
+  if (pendingId === idString(preamble.configuredPreambleId)) return preamble;
+  if (pendingId === null || pendingId === '') {
+    return globalPreamble === null
+      ? { ...preamble, source: 'global', configuredPreambleId: null }
+      : {
+          ...preamble,
+          source: 'global',
+          configuredPreambleId: null,
+          effectivePreambleId: globalPreamble.version,
+          body: globalPreamble.body,
+          refs: globalPreamble.refs,
+          lastEdited: globalPreamble.lastEdited,
+        };
+  }
+  const parsed = Number(pendingId);
+  return Number.isInteger(parsed) && parsed > 0
+    ? {
+        ...preamble,
+        source: 'repo',
+        configuredPreambleId: parsed,
+        effectivePreambleId: parsed,
+      }
+    : preamble;
+}
+
+function RepoPreambleCard({ preamble }: { preamble: RepoEffectivePreamble }) {
+  const role = preamble.role;
+  const version = preamble.effectivePreambleId === 0 ? 'default' : `v${preamble.effectivePreambleId}`;
   return (
     <Card padding={18}>
       <HStack gap={10} style={{ marginBottom: 12 }}>
@@ -404,13 +481,10 @@ function RepoPreambleCard({ preamble, role }: { preamble: PreambleSummary; role:
           {role === 'worker' ? 'Worker preamble' : 'Reviewer preamble'}
         </T>
         <Badge tone={role === 'worker' ? 'accent' : 'neutral'} size="sm" variant={role === 'worker' ? 'solid' : 'outline'}>
-          inherits global v{preamble.version}
+          {preamble.source === 'repo' ? `repo override ${version}` : `global fallback ${version}`}
         </Badge>
         <span style={{ flex: 1 }} />
       </HStack>
-      <T kind="body-sm" color="var(--ink-3)" style={{ display: 'block', marginBottom: 10, lineHeight: 1.5 }}>
-        No repo-specific preamble override is exposed by the read-only Admin API v1.
-      </T>
       <div
         style={{
           background: 'var(--surface-2)',
@@ -428,7 +502,7 @@ function RepoPreambleCard({ preamble, role }: { preamble: PreambleSummary; role:
       </div>
       <HStack gap={6} style={{ marginTop: 10 }}>
         <T kind="mono-sm" color="var(--ink-3)">
-          {preamble.body.length} bytes · {preamble.body.split('\n').length} lines
+          preambles.preamble_id={preamble.effectivePreambleId} · {preamble.body.length} bytes · {preamble.body.split('\n').length} lines
         </T>
         <span style={{ flex: 1 }} />
       </HStack>

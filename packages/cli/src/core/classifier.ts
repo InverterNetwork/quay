@@ -659,6 +659,7 @@ function scheduleGoalProtocolRepairInOpenTxn(
     deps.db,
     deps.clock,
     "malformed_goal_report",
+    { repoId: task.repo_id },
   );
   const objective = loadOriginalTaskObjective(deps.db, task.task_id);
   const goalContext = loadGoalPromptContext(deps.db, task.task_id);
@@ -913,6 +914,7 @@ function ingestActiveGoalReport(
       deps.db,
       deps.clock,
       GOAL_CONTINUE_ATTEMPT_REASON,
+      { repoId: task.repo_id },
     );
     const objective = loadOriginalTaskObjective(deps.db, task.task_id);
     const goalContext = loadGoalPromptContext(deps.db, task.task_id);

@@ -100,7 +100,9 @@ quay repo add \
   [--agent-worker <name>] \
   [--agent-reviewer <name>] \
   [--model-worker <model>] \
-  [--model-reviewer <model>]
+  [--model-reviewer <model>] \
+  [--preamble-worker <preamble_id>] \
+  [--preamble-reviewer <preamble_id>]
 
 quay repo update <repo_id> [flags]
 quay repo update --id <repo_id> [flags]
@@ -117,9 +119,13 @@ quay repo apply-tags <repo_id> --from <path>
 
 `repo add` and `repo update` also accept `--input <json>` for structured
 automation. Agent/model flags set per-repo worker and reviewer defaults.
+Preamble flags pin that repo role to a specific `preambles.preamble_id`;
+when omitted, attempts continue using the latest global preamble for their
+role.
 Use `repo update --agent-worker ""`, `--agent-reviewer ""`,
-`--model-worker ""`, or `--model-reviewer ""` to clear an override and fall
-back to deployment defaults.
+`--model-worker ""`, `--model-reviewer ""`, `--preamble-worker ""`, or
+`--preamble-reviewer ""` to clear an override and fall back to deployment or
+global defaults.
 
 `repo list` and `repo export` default to returning every row, archived
 included, so operators debugging "where did my repo go?" still see

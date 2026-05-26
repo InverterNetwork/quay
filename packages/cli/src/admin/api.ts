@@ -14,6 +14,7 @@ import {
   type AdminRequestAuditContext,
 } from "./auth.ts";
 import {
+  assertPreambleKind,
   DEFAULT_PREAMBLE_BODY,
   DEFAULT_REVIEWER_PREAMBLE_BODY,
   type PreambleKind,
@@ -131,6 +132,18 @@ interface AdminMatrixRow {
   key: string;
   default_value: string | null;
   values: Record<string, string | null>;
+}
+
+interface AdminRepoEffectivePreamble {
+  role: "worker" | "reviewer";
+  kind: PreambleKind;
+  source: "repo" | "global";
+  configured_preamble_id: number | null;
+  effective_preamble_id: number;
+  title: string;
+  body: string;
+  refs: number;
+  last_edited: string | null;
 }
 
 type RepoPatch = z.infer<typeof repoUpdateInputSchema>;
@@ -605,6 +618,10 @@ function buildRepoDetail(runtime: AdminApiRuntime, row: RepoRow): Record<string,
     revision: computeAdminRevision(runtime),
     ...row,
     active_task_count: countActiveTasks(runtime.db, row.repo_id),
+    effective_preambles: {
+      worker: buildRepoEffectivePreamble(runtime, row, "worker"),
+      reviewer: buildRepoEffectivePreamble(runtime, row, "reviewer"),
+    },
     tag_namespaces: tagNamespacesFromVocab(runtime.tagService.getVocab("repo", row.repo_id)),
     inherited_tag_namespaces: deploymentTagNamespaces(runtime),
   };
@@ -645,6 +662,22 @@ function buildMatrixReadModel(runtime: AdminApiRuntime): Record<string, unknown>
       agentSelection.defaultModels?.reviewer ?? null,
       repos,
       (repo) => repo.model_reviewer,
+    ),
+    matrixRow(
+      "PROMPTS",
+      "worker preamble",
+      "preamble_worker",
+      latestPreamble(runtime.db, "code")?.preamble_id.toString() ?? null,
+      repos,
+      (repo) => repo.preamble_worker?.toString() ?? null,
+    ),
+    matrixRow(
+      "PROMPTS",
+      "reviewer preamble",
+      "preamble_reviewer",
+      latestPreamble(runtime.db, "review")?.preamble_id.toString() ?? null,
+      repos,
+      (repo) => repo.preamble_reviewer?.toString() ?? null,
     ),
     matrixRow(
       "CHECKOUT",
@@ -1069,6 +1102,7 @@ function repoUpdateOperations(
 ): AdminChangeOperation[] {
   const repo = assertActiveRepo(runtime, change.repo_id);
   validateAgentPatch(runtime, change.repo_id, change.patch);
+  validatePreamblePatch(runtime, change.repo_id, change.patch);
   const operations: AdminChangeOperation[] = [];
   for (const field of REPO_PATCH_FIELDS) {
     if (!(field in change.patch)) continue;
@@ -1129,6 +1163,7 @@ function tagReplaceOperations(
 function applyOneChange(runtime: AdminApiRuntime, change: AdminChange): void {
   if (change.type === "repo.update") {
     validateAgentPatch(runtime, change.repo_id, change.patch);
+    validatePreamblePatch(runtime, change.repo_id, change.patch);
     runtime.repoService.update(change.repo_id, change.patch);
     return;
   }
@@ -1148,6 +1183,8 @@ const REPO_PATCH_FIELDS = [
   "agent_reviewer",
   "model_worker",
   "model_reviewer",
+  "preamble_worker",
+  "preamble_reviewer",
 ] as const satisfies readonly (keyof RepoPatch)[];
 
 function assertActiveRepo(runtime: AdminApiRuntime, repoId: string): RepoRow {
@@ -1184,6 +1221,31 @@ function validateAgentPatch(
         `agent "${agentName}" is not registered for ${role} role`,
         { repo_id: repoId, role, agent: agentName },
       );
+    }
+  }
+}
+
+function validatePreamblePatch(
+  runtime: AdminApiRuntime,
+  repoId: string,
+  patch: RepoPatch,
+): void {
+  const entries = [
+    ["worker", "code", patch.preamble_worker],
+    ["reviewer", "review", patch.preamble_reviewer],
+  ] as const;
+  for (const [role, kind, preambleId] of entries) {
+    if (preambleId === undefined || preambleId === null) continue;
+    try {
+      assertPreambleKind(runtime.db, preambleId, kind, `repo ${repoId} ${role}`);
+    } catch (err) {
+      if (err instanceof QuayError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      throw new QuayError("validation_error", message, {
+        repo_id: repoId,
+        role,
+        preamble_id: preambleId,
+      });
     }
   }
 }
@@ -1450,6 +1512,9 @@ function buildPreambleSummaries(
     const body = row?.body ??
       (kind === "review" ? DEFAULT_REVIEWER_PREAMBLE_BODY : DEFAULT_PREAMBLE_BODY);
     const preambleId = row?.preamble_id ?? 0;
+    const overrideRepos = preambleId === 0
+      ? 0
+      : countRepoPreambleOverrides(runtime.db, kind, preambleId);
     return {
       kind,
       title: kind === "review" ? "Reviewer preamble" : "Worker preamble",
@@ -1457,10 +1522,37 @@ function buildPreambleSummaries(
       body,
       refs: preambleId === 0 ? 0 : countPreambleRefs(runtime.db, preambleId),
       last_edited: row?.created_at ?? null,
-      used_by_repos: repoCount,
-      override_repos: 0,
+      used_by_repos: repoCount - countReposWithAnyPreambleOverride(runtime.db, kind) + overrideRepos,
+      override_repos: overrideRepos,
     };
   });
+}
+
+function buildRepoEffectivePreamble(
+  runtime: AdminApiRuntime,
+  repo: RepoRow,
+  role: "worker" | "reviewer",
+): AdminRepoEffectivePreamble {
+  const kind: PreambleKind = role === "worker" ? "code" : "review";
+  const configured =
+    role === "worker" ? repo.preamble_worker : repo.preamble_reviewer;
+  const row = configured === null
+    ? latestPreamble(runtime.db, kind)
+    : preambleById(runtime.db, configured);
+  const body = row?.body ??
+    (kind === "review" ? DEFAULT_REVIEWER_PREAMBLE_BODY : DEFAULT_PREAMBLE_BODY);
+  const effectiveId = row?.preamble_id ?? 0;
+  return {
+    role,
+    kind,
+    source: configured === null ? "global" : "repo",
+    configured_preamble_id: configured,
+    effective_preamble_id: effectiveId,
+    title: kind === "review" ? "Reviewer preamble" : "Worker preamble",
+    body,
+    refs: effectiveId === 0 ? 0 : countPreambleRefs(runtime.db, effectiveId),
+    last_edited: row?.created_at ?? null,
+  };
 }
 
 function latestPreamble(
@@ -1483,12 +1575,58 @@ function latestPreamble(
   );
 }
 
+function preambleById(
+  db: DB,
+  preambleId: number,
+): { preamble_id: number; body: string; created_at: string } | null {
+  return (
+    db
+      .query<
+        { preamble_id: number; body: string; created_at: string },
+        [number]
+      >(
+        `SELECT preamble_id, body, created_at
+           FROM preambles
+          WHERE preamble_id = ?`,
+      )
+      .get(preambleId) ?? null
+  );
+}
+
 function countPreambleRefs(db: DB, preambleId: number): number {
   return db
     .query<{ n: number }, [number]>(
       "SELECT COUNT(*) AS n FROM attempts WHERE preamble_id = ?",
     )
     .get(preambleId)?.n ?? 0;
+}
+
+function countRepoPreambleOverrides(
+  db: DB,
+  kind: PreambleKind,
+  preambleId: number,
+): number {
+  const column = kind === "review" ? "preamble_reviewer" : "preamble_worker";
+  return db
+    .query<{ n: number }, [number]>(
+      `SELECT COUNT(*) AS n
+         FROM repos
+        WHERE archived_at IS NULL
+          AND ${column} = ?`,
+    )
+    .get(preambleId)?.n ?? 0;
+}
+
+function countReposWithAnyPreambleOverride(db: DB, kind: PreambleKind): number {
+  const column = kind === "review" ? "preamble_reviewer" : "preamble_worker";
+  return db
+    .query<{ n: number }, []>(
+      `SELECT COUNT(*) AS n
+         FROM repos
+        WHERE archived_at IS NULL
+          AND ${column} IS NOT NULL`,
+    )
+    .get()?.n ?? 0;
 }
 
 function buildRetryTemplates(runtime: AdminApiRuntime): Array<Record<string, unknown>> {

@@ -10,7 +10,7 @@ import {
 import { createRepoService } from "../../src/core/repos/service.ts";
 import { createTagService } from "../../src/core/tags/service.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertTask } from "../support/fixtures.ts";
+import { insertPreamble, insertTask } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -602,6 +602,41 @@ test("GET /v1/repos/:id returns detail tags and active task count", async () => 
   ]);
 });
 
+test("GET /v1/repos/:id exposes effective repo preamble provenance", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  const preambleId = insertPreamble(h.db, "repo worker preamble", "code");
+  repoService.add({
+    repo_id: "repo-a",
+    repo_url: "git@example.com:owner/repo-a.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+    preamble_worker: preambleId,
+  });
+  const handler = createHandler({ repoService });
+
+  const response = await handler(new Request("http://quay.local/v1/repos/repo-a"));
+  const body = await responseJson(response) as {
+    effective_preambles: {
+      worker: Record<string, unknown>;
+      reviewer: Record<string, unknown>;
+    };
+  };
+
+  expect(response.status).toBe(200);
+  expect(body.effective_preambles.worker).toMatchObject({
+    source: "repo",
+    configured_preamble_id: preambleId,
+    effective_preamble_id: preambleId,
+    body: "repo worker preamble",
+  });
+  expect(body.effective_preambles.reviewer).toMatchObject({
+    source: "global",
+    configured_preamble_id: null,
+  });
+});
+
 test("GET /v1/matrix returns repo override rows", async () => {
   h = createHarness();
   const repoService = createRepoService({ db: h.db, clock: h.clock });
@@ -636,6 +671,39 @@ test("GET /v1/matrix returns repo override rows", async () => {
     default_value: "claude",
     values: { "repo-a": "codex" },
   });
+});
+
+test("POST /v1/changes/apply writes repo preamble override changes", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  const preambleId = insertPreamble(h.db, "repo worker preamble", "code");
+  repoService.add({
+    repo_id: "repo-a",
+    repo_url: "git@example.com:owner/repo-a.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  const handler = createHandler({ repoService });
+  const revision = await currentRevision(handler);
+
+  const response = await handler(postJson("/v1/changes/apply", {
+    base_revision: revision,
+    changes: [
+      {
+        type: "repo.update",
+        repo_id: "repo-a",
+        patch: { preamble_worker: preambleId },
+      },
+    ],
+  }));
+  const body = await responseJson(response) as { preview: { summary: string[] } };
+
+  expect(response.status).toBe(200);
+  expect(repoService.get("repo-a")?.preamble_worker).toBe(preambleId);
+  expect(body.preview.summary).toEqual([
+    `repo repo-a: set preamble_worker from unset to ${preambleId}`,
+  ]);
 });
 
 test("POST /v1/changes/preview validates changes and returns deterministic operations", async () => {

@@ -27,6 +27,12 @@ const agentName = z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/, {
   message: "agent name must match [A-Za-z0-9._-]+",
 });
 const modelName = z.string().min(1).max(128);
+const preambleId = z.preprocess((value) => {
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) {
+    return Number(value);
+  }
+  return value;
+}, z.number().int().positive());
 
 export const repoAddInputSchema = z
   .object({
@@ -42,6 +48,8 @@ export const repoAddInputSchema = z
     agent_reviewer: agentName.optional(),
     model_worker: modelName.optional(),
     model_reviewer: modelName.optional(),
+    preamble_worker: preambleId.optional(),
+    preamble_reviewer: preambleId.optional(),
   })
   .strict();
 
@@ -60,6 +68,8 @@ export const repoUpdateInputSchema = z
     agent_reviewer: agentName.nullable().optional(),
     model_worker: modelName.nullable().optional(),
     model_reviewer: modelName.nullable().optional(),
+    preamble_worker: preambleId.nullable().optional(),
+    preamble_reviewer: preambleId.nullable().optional(),
   })
   .strict();
 
@@ -84,6 +94,8 @@ export const repoImportInputSchema = z
     agent_reviewer: agentName.nullable().optional(),
     model_worker: modelName.nullable().optional(),
     model_reviewer: modelName.nullable().optional(),
+    preamble_worker: preambleId.nullable().optional(),
+    preamble_reviewer: preambleId.nullable().optional(),
     archived_at: z.string().nullable().optional(),
     created_at: nonEmptyString.optional(),
   })
