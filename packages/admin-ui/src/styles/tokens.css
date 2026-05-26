@@ -1,5 +1,4 @@
-/* Quay hi-fi tokens — light first, full dark mode.
-   Source of truth: design_handoff_configuration/hifi.css. */
+/* Quay UI tokens — light first, full dark mode. */
 
 :root {
   /* Ink scale (warm near-black to mid-gray) */
@@ -52,9 +51,9 @@
   --r-xl: 14px;
 
   /* Type */
-  --sans:  'General Sans', 'Söhne', -apple-system, 'Segoe UI', system-ui, sans-serif;
-  --mono:  'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-  --serif: 'Instrument Serif', 'Times New Roman', Times, serif;
+  --sans:  ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono:  ui-monospace, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+  --serif: Georgia, 'Times New Roman', Times, serif;
 
   /* Shadows */
   --shadow-sm:  0 1px 0 rgba(14, 14, 12, 0.04);
