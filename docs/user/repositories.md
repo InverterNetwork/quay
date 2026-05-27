@@ -73,6 +73,29 @@ input. For shell flag use, prefer setting a new non-empty value. Use
 `repo export`, edit JSON, and `repo import` if you need to clear optional
 fields precisely.
 
+## Assign Preamble Overrides
+
+Register preamble bodies through the catalog commands, then store the returned
+ID on the repo role that should use it:
+
+```bash
+worker_id=$(quay preamble create --kind code --body-file worker-preamble.md | jq -r .preamble_id)
+quay repo update myrepo --preamble-worker "$worker_id"
+
+reviewer_id=$(quay preamble create --kind review --body-file reviewer-preamble.md | jq -r .preamble_id)
+quay repo update myrepo --preamble-reviewer "$reviewer_id"
+```
+
+Use `quay preamble list` to see available IDs and
+`quay preamble show <preamble_id>` to inspect the stored body. Pass an empty
+string to clear a repo override and fall back to the latest global preamble
+for that role:
+
+```bash
+quay repo update myrepo --preamble-worker ""
+quay repo update myrepo --preamble-reviewer ""
+```
+
 ## List, Export, And Import
 
 ```bash
