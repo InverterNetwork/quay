@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { PrimarySidebar, type AppRoute } from './app/PrimarySidebar';
 import { useQuayAdminReadModel } from './api/quayAdmin';
-import { MissionControlPage, missionControlSidebarSummary } from './mission-control/MissionControlPage';
-import { SAMPLE_TASKS } from './mission-control/sampleTasks';
+import { MissionControlPage } from './mission-control/MissionControlPage';
+import { useMissionControlTasks } from './mission-control/useMissionControlTasks';
 import { ApiErrorScreen, ApiLoadingScreen } from './screens/ApiStateScreen';
 import { ArchiveConfirmDialog } from './screens/ArchiveConfirmDialog';
 import { EmptyScreen } from './screens/EmptyScreen';
@@ -65,6 +65,7 @@ export function App() {
   const [empty, setEmpty] = useState(false);
   const [mode, setMode] = useState<Mode>(readModeFromStorage);
   const admin = useQuayAdminReadModel();
+  const missionControl = useMissionControlTasks();
   const store = useChangeStore();
   const { route, scope } = routeState;
   const repos = empty ? [] : admin.repos;
@@ -77,7 +78,6 @@ export function App() {
         : reviewerPreamble
       : null;
   const selectedRepo = scope === 'global' ? null : repos.find((repo) => repo.id === scope) ?? null;
-  const missionSummary = missionControlSidebarSummary(SAMPLE_TASKS);
 
   const navigateTo = useCallback(
     (nextRoute: AppRoute, nextScope: Scope = 'global', opts: { replace?: boolean } = {}) => {
@@ -193,12 +193,18 @@ export function App() {
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <PrimarySidebar
           route={route}
-          missionControlCount={missionSummary.activeCount}
-          missionControlAttention={missionSummary.hasAttention}
+          missionControlCount={missionControl.activeTaskCount}
+          missionControlAttention={missionControl.hasAttention}
           onNavigate={(nextRoute) => navigateTo(nextRoute, 'global')}
         />
         {route === 'mission-control' ? (
-          <MissionControlPage />
+          <MissionControlPage
+            tasks={missionControl.tasks}
+            loading={missionControl.loading}
+            error={missionControl.error}
+            lastRefreshAt={missionControl.lastRefreshAt}
+            onRefresh={missionControl.refresh}
+          />
         ) : (
           <>
             <LeftRail
