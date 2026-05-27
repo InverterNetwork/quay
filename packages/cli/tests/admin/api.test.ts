@@ -10,7 +10,12 @@ import {
 import { createRepoService } from "../../src/core/repos/service.ts";
 import { createTagService } from "../../src/core/tags/service.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
-import { insertPreamble, insertTask } from "../support/fixtures.ts";
+import {
+  insertPreamble,
+  insertRepo,
+  insertTask,
+  seedTaskObjective,
+} from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -65,6 +70,44 @@ async function currentRevision(
   return body.revision as string;
 }
 
+interface MissionControlResponse {
+  refreshedAt: string;
+  activeTaskCount: number;
+  hasAttention: boolean;
+  tasks: Array<{
+    id: string;
+    ext: string;
+    repo: string;
+    title: string;
+    branch: string;
+    state: string;
+    pr: number | null;
+    budget: number;
+    total: number;
+    latest: string;
+    agent: string;
+    age: string;
+    updatedAt: string;
+    authors: string[];
+    attn?: string;
+    attnTone?: string;
+  }>;
+}
+
+function insertTaskEvent(
+  taskId: string,
+  eventType: string,
+  occurredAt = "2026-01-01T00:00:10.000Z",
+): void {
+  if (h === null) throw new Error("harness not initialized");
+  h.db
+    .query(
+      `INSERT INTO events (task_id, event_type, from_state, to_state, occurred_at)
+       VALUES (?, ?, NULL, NULL, ?)`,
+    )
+    .run(taskId, eventType, occurredAt);
+}
+
 test("GET /v1/meta returns API and Quay version metadata", async () => {
   h = createHarness();
   const handler = createHandler();
@@ -78,6 +121,104 @@ test("GET /v1/meta returns API and Quay version metadata", async () => {
     api_version: "v1",
     quay_version: "test-version",
   });
+});
+
+test("GET /v1/tasks returns Mission Control task cards with latest event and attention", async () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  const taskId = insertTask(h.db, { taskId: "task-ci", repoId: "repo-a", state: "pr-open" });
+  seedTaskObjective(h, taskId, "Fix checkout flow after retry regression.\n\nFull brief follows.");
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'ITRY-1001',
+              branch_name = 'quay/itry-1001-checkout',
+              pr_number = 42,
+              attempts_consumed = 3,
+              retry_budget = 5,
+              worker_model = 'gpt-5.3',
+              authors_json = '[{"name":"Mira Tonio","slack_id":"U123"}]',
+              updated_at = '2026-01-01T00:00:12.000Z'
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+  insertTaskEvent(taskId, "spawned", "2026-01-01T00:00:01.000Z");
+  insertTaskEvent(taskId, "ci_failed", "2026-01-01T00:00:11.000Z");
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+
+  expect(response.status).toBe(200);
+  expect(body.refreshedAt).toEqual(expect.any(String));
+  expect(body.activeTaskCount).toBe(1);
+  expect(body.hasAttention).toBe(true);
+  expect(body.tasks).toHaveLength(1);
+  const task = body.tasks[0];
+  if (task === undefined) throw new Error("expected task");
+  expect(task).toMatchObject({
+    id: "task-ci",
+    ext: "ITRY-1001",
+    repo: "repo-a",
+    title: "Fix checkout flow after retry regression.",
+    branch: "quay/itry-1001-checkout",
+    state: "pr-open",
+    pr: 42,
+    budget: 3,
+    total: 5,
+    latest: "CI failed",
+    agent: "gpt-5.3",
+    updatedAt: "2026-01-01T00:00:12.000Z",
+    authors: ["Mira Tonio"],
+    attn: "ci",
+    attnTone: "danger",
+  });
+  expect(task.age).toEqual(expect.any(String));
+});
+
+test("GET /v1/tasks derives attention from stuck and human states", async () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  insertTask(h.db, { taskId: "task-worktree", repoId: "repo-a", state: "worktree_error" });
+  insertTask(h.db, { taskId: "task-human", repoId: "repo-a", state: "waiting_human" });
+  insertTask(h.db, { taskId: "task-brief", repoId: "repo-a", state: "awaiting-next-brief" });
+  insertTask(h.db, { taskId: "task-review", repoId: "repo-a", state: "pr-review" });
+  insertTaskEvent("task-review", "changes_requested");
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+  const byId = new Map(body.tasks.map((task) => [task.id, task]));
+
+  expect(response.status).toBe(200);
+  expect(byId.get("task-worktree")).toMatchObject({ attn: "worktree", attnTone: "danger" });
+  expect(byId.get("task-human")).toMatchObject({ attn: "slack", attnTone: "warn" });
+  expect(byId.get("task-brief")).toMatchObject({ attn: "brief", attnTone: "warn" });
+  expect(byId.get("task-review")).toMatchObject({ attn: "changes", attnTone: "warn" });
+});
+
+test("GET /v1/tasks excludes terminal tasks from sidebar count and handles empty lists", async () => {
+  h = createHarness();
+  let handler = createHandler();
+  let response = await handler(new Request("http://quay.local/v1/tasks"));
+  let body = (await responseJson(response)) as unknown as MissionControlResponse;
+  expect(response.status).toBe(200);
+  expect(body.tasks).toEqual([]);
+  expect(body.activeTaskCount).toBe(0);
+  expect(body.hasAttention).toBe(false);
+
+  insertRepo(h.db, "repo-a");
+  insertTask(h.db, { taskId: "task-running", repoId: "repo-a", state: "running" });
+  insertTask(h.db, { taskId: "task-merged", repoId: "repo-a", state: "merged" });
+  insertTask(h.db, { taskId: "task-cancelled", repoId: "repo-a", state: "cancelled" });
+  handler = createHandler();
+  response = await handler(new Request("http://quay.local/v1/tasks"));
+  body = (await responseJson(response)) as unknown as MissionControlResponse;
+
+  expect(response.status).toBe(200);
+  expect(body.tasks).toHaveLength(3);
+  expect(body.activeTaskCount).toBe(1);
+  expect(body.hasAttention).toBe(false);
 });
 
 test("admin bearer auth protects reads and writes when configured", async () => {

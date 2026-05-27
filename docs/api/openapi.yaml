@@ -154,6 +154,31 @@ paths:
           $ref: "#/components/responses/CorsPreflight"
         "403":
           $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/tasks:
+    get:
+      summary: Read Mission Control task cards.
+      operationId: listMissionControlTasks
+      responses:
+        "200":
+          description: Task board read model for the Mission Control UI.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionControlReadModel"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for Mission Control task cards.
+      operationId: optionsMissionControlTasks
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
   /v1/matrix:
     get:
       summary: Read the cross-repo resolved settings matrix.
@@ -354,6 +379,117 @@ components:
           const: v1
         quay_version:
           type: string
+    MissionControlReadModel:
+      type: object
+      additionalProperties: false
+      required:
+        - refreshedAt
+        - activeTaskCount
+        - hasAttention
+        - tasks
+      properties:
+        refreshedAt:
+          type: string
+          format: date-time
+        activeTaskCount:
+          type: integer
+          minimum: 0
+        hasAttention:
+          type: boolean
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/MissionControlTask"
+    MissionControlTask:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - ext
+        - repo
+        - title
+        - branch
+        - state
+        - pr
+        - budget
+        - total
+        - latest
+        - agent
+        - age
+        - updatedAt
+        - authors
+      properties:
+        id:
+          type: string
+        ext:
+          type: string
+        repo:
+          type: string
+        title:
+          type: string
+        branch:
+          type: string
+        state:
+          $ref: "#/components/schemas/TaskState"
+        pr:
+          type:
+            - integer
+            - "null"
+        budget:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+        latest:
+          type: string
+        agent:
+          type: string
+        age:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+        authors:
+          type: array
+          items:
+            type: string
+        attn:
+          $ref: "#/components/schemas/MissionControlAttentionReason"
+        attnTone:
+          type: string
+          enum:
+            - warn
+            - danger
+    TaskState:
+      type: string
+      enum:
+        - queued
+        - running
+        - goal-completion-pending
+        - pr-open
+        - pr-review
+        - done
+        - awaiting-next-brief
+        - claimed-by-orchestrator
+        - waiting_human
+        - waiting_external_changes
+        - non_budget_loop
+        - worktree_error
+        - orchestrator_loop
+        - cancelled
+        - merged
+        - closed_unmerged
+    MissionControlAttentionReason:
+      type: string
+      enum:
+        - changes
+        - ci
+        - slack
+        - brief
+        - budget
+        - loop
+        - worktree
     Repo:
       type: object
       additionalProperties: false
