@@ -65,6 +65,14 @@ test("Quay-owned pr-review approval enqueues one pr_ready_approved outbox item",
       prUrl: "https://github.example/repo/pull/152",
     }),
   );
+  built.github.setPrView(repoId, 152, {
+    number: 152,
+    title: "fix: improve ready-approved Slack notification",
+    body: "",
+    url: "https://github.example/repo/pull/152",
+    headRefName: `quay/${taskId}`,
+    headSha: "head-approved",
+  });
   built.github.setPostedReview(repoId, 152, "head-approved", {
     reviewId: "R_ready",
     decision: "APPROVED",
@@ -94,6 +102,8 @@ test("Quay-owned pr-review approval enqueues one pr_ready_approved outbox item",
     review_id: "R_ready",
     review_attempt_id: attemptId,
     branch_name: `quay/${taskId}`,
+    pr_title: "fix: improve ready-approved Slack notification",
+    approval_status: "approved",
   });
   expect(payload).not.toHaveProperty("title");
   expect(JSON.parse(rows[0]!.route_hint_json!)).toEqual({
@@ -181,7 +191,92 @@ test("approved before CI pass enqueues when ci_passed later reaches done", async
     slack_thread_ref: null,
     fallback: "deployment_default_slack_channel",
   });
+  expect(JSON.parse(rows[0]!.payload_json!)).toMatchObject({
+    pr_title: "feat: AST-152",
+    approval_status: "approved",
+  });
   expect(sourceEventType(rows[0]!.source_event_id)).toBe("ci_passed");
+});
+
+test("later approval for a new head_sha is marked reapproved", () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-ready-approved-reapproval");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-ready-approved-reapproval",
+    state: "done",
+  });
+  seedQuayOwnedReviewTask(h, taskId, {
+    prNumber: 155,
+    prUrl: "https://github.example/repo/pull/155",
+    headSha: "head-first",
+    slackThreadRef: null,
+    externalRef: "AST-155",
+  });
+  const firstAttempt = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'head-first',
+              ended_at = ?,
+              review_verdict = 'approved',
+              review_id = 'R_first'
+        WHERE attempt_id = ?`,
+    )
+    .run("2026-01-01T00:00:00.000Z", firstAttempt);
+
+  expect(
+    enqueuePrReadyApprovedOutboxItem(
+      { db: h.db, clock: h.clock },
+      { taskId },
+    ),
+  ).not.toBeNull();
+
+  seedQuayOwnedReviewTask(h, taskId, {
+    prNumber: 155,
+    prUrl: "https://github.example/repo/pull/155",
+    headSha: "head-second",
+    slackThreadRef: null,
+    externalRef: "AST-155",
+  });
+  const secondAttempt = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'head-second',
+              ended_at = ?,
+              review_verdict = 'approved',
+              review_id = 'R_second'
+        WHERE attempt_id = ?`,
+    )
+    .run("2026-01-01T00:01:00.000Z", secondAttempt);
+
+  expect(
+    enqueuePrReadyApprovedOutboxItem(
+      { db: h.db, clock: h.clock },
+      { taskId },
+    ),
+  ).not.toBeNull();
+
+  const payloads = pendingReadyApprovedRows().map((row) =>
+    JSON.parse(row.payload_json!),
+  );
+  expect(payloads).toHaveLength(2);
+  expect(payloads.map((payload) => payload.approval_status)).toEqual([
+    "approved",
+    "reapproved",
+  ]);
 });
 
 test("latest current-head review verdict must be approved", () => {
