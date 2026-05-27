@@ -106,6 +106,14 @@ export const Icon = {
       <path d="M6 8v8M8 9c4 0 8 1 8 8" />
     </IconBase>
   ),
+  GitPR: ({ size, style }: IconProps) => (
+    <IconBase size={size} style={style}>
+      <circle cx="6" cy="6" r="2" />
+      <circle cx="6" cy="18" r="2" />
+      <circle cx="18" cy="12" r="2" />
+      <path d="M6 8v8M8 6h4a6 6 0 0 1 6 6" />
+    </IconBase>
+  ),
   Repo: ({ size, style }: IconProps) => (
     <IconBase size={size} style={style}>
       <path d="M4 5a2 2 0 0 1 2-2h13v18H6a2 2 0 0 1-2-2V5z" />

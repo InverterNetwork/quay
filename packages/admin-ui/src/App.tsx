@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
+import { PrimarySidebar, type AppRoute } from './app/PrimarySidebar';
 import { useQuayAdminReadModel } from './api/quayAdmin';
+import { MissionControlPage, missionControlSidebarSummary } from './mission-control/MissionControlPage';
+import { SAMPLE_TASKS } from './mission-control/sampleTasks';
 import { ApiErrorScreen, ApiLoadingScreen } from './screens/ApiStateScreen';
 import { ArchiveConfirmDialog } from './screens/ArchiveConfirmDialog';
 import { EmptyScreen } from './screens/EmptyScreen';
@@ -13,6 +16,13 @@ import { TopBar } from './screens/TopBar';
 import { useChangeStore } from './store/dirty';
 
 type Scope = 'global' | string;
+interface RouteState {
+  route: AppRoute;
+  scope: Scope;
+  basePath: string;
+  hasRoute: boolean;
+}
+
 type Overlay =
   | null
   | { type: 'save-preview' }
@@ -27,13 +37,36 @@ function readModeFromStorage(): Mode {
   return stored === 'dark' ? 'dark' : 'light';
 }
 
+function readRouteState(): RouteState {
+  const parts = window.location.pathname.split('/').filter(Boolean);
+  const routeIndex = parts.findIndex((part) => part === 'mission-control' || part === 'configuration');
+  const hasRoute = routeIndex >= 0;
+  const route = parts[routeIndex] === 'configuration' ? 'configuration' : 'mission-control';
+  const scope = route === 'configuration' && parts[routeIndex + 1] ? decodeURIComponent(parts[routeIndex + 1]!) : 'global';
+  const baseParts = hasRoute ? parts.slice(0, routeIndex) : parts;
+  return {
+    route,
+    scope,
+    basePath: baseParts.length > 0 ? `/${baseParts.join('/')}` : '',
+    hasRoute,
+  };
+}
+
+function routePath(basePath: string, route: AppRoute, scope: Scope = 'global'): string {
+  const prefix = basePath === '' ? '' : basePath;
+  if (route === 'mission-control') return `${prefix}/mission-control`;
+  if (scope === 'global') return `${prefix}/configuration`;
+  return `${prefix}/configuration/${encodeURIComponent(scope)}`;
+}
+
 export function App() {
-  const [scope, setScope] = useState<Scope>('global');
+  const [routeState, setRouteState] = useState<RouteState>(readRouteState);
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [empty, setEmpty] = useState(false);
   const [mode, setMode] = useState<Mode>(readModeFromStorage);
   const admin = useQuayAdminReadModel();
   const store = useChangeStore();
+  const { route, scope } = routeState;
   const repos = empty ? [] : admin.repos;
   const workerPreamble = admin.global?.preambles.find((preamble) => preamble.kind === 'code') ?? null;
   const reviewerPreamble = admin.global?.preambles.find((preamble) => preamble.kind === 'review') ?? null;
@@ -44,6 +77,22 @@ export function App() {
         : reviewerPreamble
       : null;
   const selectedRepo = scope === 'global' ? null : repos.find((repo) => repo.id === scope) ?? null;
+  const missionSummary = missionControlSidebarSummary(SAMPLE_TASKS);
+
+  const navigateTo = useCallback(
+    (nextRoute: AppRoute, nextScope: Scope = 'global', opts: { replace?: boolean } = {}) => {
+      const nextPath = routePath(routeState.basePath, nextRoute, nextRoute === 'configuration' ? nextScope : 'global');
+      if (window.location.pathname !== nextPath) {
+        if (opts.replace) {
+          window.history.replaceState(null, '', nextPath);
+        } else {
+          window.history.pushState(null, '', nextPath);
+        }
+      }
+      setRouteState(readRouteState());
+    },
+    [routeState.basePath],
+  );
 
   useEffect(() => {
     document.documentElement.dataset.mode = mode;
@@ -51,10 +100,24 @@ export function App() {
   }, [mode]);
 
   useEffect(() => {
-    if (scope !== 'global' && !admin.loading && !selectedRepo) {
-      setScope('global');
+    if (!routeState.hasRoute) {
+      navigateTo('mission-control', 'global', { replace: true });
     }
-  }, [admin.loading, scope, selectedRepo]);
+  }, [navigateTo, routeState.hasRoute]);
+
+  useEffect(() => {
+    function onPopState() {
+      setRouteState(readRouteState());
+    }
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (route === 'configuration' && scope !== 'global' && !admin.loading && !selectedRepo) {
+      navigateTo('configuration', 'global', { replace: true });
+    }
+  }, [admin.loading, navigateTo, route, scope, selectedRepo]);
 
   // Cmd/Ctrl + Enter → preview diff (opens the save-preview modal)
   useEffect(() => {
@@ -98,6 +161,7 @@ export function App() {
 
   const isEmpty = !admin.loading && !admin.error && repos.length === 0;
   const scopeLabel = scope === 'global' ? 'Global' : scope;
+  const crumbs = route === 'configuration' ? ['prod', 'configuration', scopeLabel] : ['prod', 'mission control'];
   const status =
     admin.loading
       ? { tone: 'warn' as const, label: 'connecting to Quay', pulse: true }
@@ -121,87 +185,99 @@ export function App() {
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--paper)' }}>
       <TopBar
-        scope={scopeLabel}
+        crumbs={crumbs}
         mode={mode}
         backendStatus={status}
         onModeToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
       />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        <LeftRail
-          active={scope}
-          repos={repos}
-          empty={isEmpty}
-          loading={admin.loading}
-          error={admin.error}
-          readOnly
-          onSelect={setScope}
-          onAddRepo={handleAddRepo}
+        <PrimarySidebar
+          route={route}
+          missionControlCount={missionSummary.activeCount}
+          missionControlAttention={missionSummary.hasAttention}
+          onNavigate={(nextRoute) => navigateTo(nextRoute, 'global')}
         />
-        <main
-          style={{
-            flex: 1,
-            display: 'flex',
-            flexDirection: 'column',
-            minWidth: 0,
-            background: 'var(--paper-2)',
-            position: 'relative',
-          }}
-        >
-          {admin.loading ? (
-            <ApiLoadingScreen baseUrl={admin.baseUrl} />
-          ) : admin.error ? (
-            <ApiErrorScreen baseUrl={admin.baseUrl} error={admin.error} onRetry={admin.reload} />
-          ) : isEmpty ? (
-            <EmptyScreen quayVersion={admin.meta?.quay_version} readOnly onRegisterRepo={handleAddRepo} />
-          ) : scope === 'global' && admin.global && admin.matrix ? (
-            <GlobalScreen
-              global={admin.global}
-              matrix={admin.matrix}
+        {route === 'mission-control' ? (
+          <MissionControlPage />
+        ) : (
+          <>
+            <LeftRail
+              active={scope}
               repos={repos}
-              quayVersion={admin.meta?.quay_version}
-              changes={store.changes}
-              onChange={store.set}
-              onOpenPreamble={handleOpenPreamble}
+              empty={isEmpty}
+              loading={admin.loading}
+              error={admin.error}
+              readOnly
+              onSelect={(nextScope) => navigateTo('configuration', nextScope)}
+              onAddRepo={handleAddRepo}
             />
-          ) : selectedRepo && admin.global ? (
-            <RepoScreen
-              repo={selectedRepo}
-              global={admin.global}
-              changes={store.changes}
-              onChange={store.set}
-              onArchive={handleArchive}
-            />
-          ) : admin.global && admin.matrix ? (
-            <GlobalScreen
-              global={admin.global}
-              matrix={admin.matrix}
-              repos={repos}
-              quayVersion={admin.meta?.quay_version}
-              changes={store.changes}
-              onChange={store.set}
-              onOpenPreamble={handleOpenPreamble}
-            />
-          ) : (
-            <ApiErrorScreen
-              baseUrl={admin.baseUrl}
-              error="Quay Admin API returned an incomplete read model."
-              onRetry={admin.reload}
-            />
-          )}
+            <main
+              style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                minWidth: 0,
+                background: 'var(--paper-2)',
+                position: 'relative',
+              }}
+            >
+              {admin.loading ? (
+                <ApiLoadingScreen baseUrl={admin.baseUrl} />
+              ) : admin.error ? (
+                <ApiErrorScreen baseUrl={admin.baseUrl} error={admin.error} onRetry={admin.reload} />
+              ) : isEmpty ? (
+                <EmptyScreen quayVersion={admin.meta?.quay_version} readOnly onRegisterRepo={handleAddRepo} />
+              ) : scope === 'global' && admin.global && admin.matrix ? (
+                <GlobalScreen
+                  global={admin.global}
+                  matrix={admin.matrix}
+                  repos={repos}
+                  quayVersion={admin.meta?.quay_version}
+                  changes={store.changes}
+                  onChange={store.set}
+                  onOpenPreamble={handleOpenPreamble}
+                />
+              ) : selectedRepo && admin.global ? (
+                <RepoScreen
+                  repo={selectedRepo}
+                  global={admin.global}
+                  changes={store.changes}
+                  onChange={store.set}
+                  onArchive={handleArchive}
+                />
+              ) : admin.global && admin.matrix ? (
+                <GlobalScreen
+                  global={admin.global}
+                  matrix={admin.matrix}
+                  repos={repos}
+                  quayVersion={admin.meta?.quay_version}
+                  changes={store.changes}
+                  onChange={store.set}
+                  onOpenPreamble={handleOpenPreamble}
+                />
+              ) : (
+                <ApiErrorScreen
+                  baseUrl={admin.baseUrl}
+                  error="Quay Admin API returned an incomplete read model."
+                  onRetry={admin.reload}
+                />
+              )}
 
-          {store.changes.length > 0 && (
-            <SaveFooter
-              count={store.changes.length}
-              summary={dirtySummary}
-              onDiscard={store.discardAll}
-              onPreview={() => setOverlay({ type: 'save-preview' })}
-              onSave={onSaveDirect}
-            />
-          )}
-        </main>
+              {store.changes.length > 0 && (
+                <SaveFooter
+                  count={store.changes.length}
+                  summary={dirtySummary}
+                  onDiscard={store.discardAll}
+                  onPreview={() => setOverlay({ type: 'save-preview' })}
+                  onSave={onSaveDirect}
+                />
+              )}
+            </main>
+          </>
+        )}
       </div>
 
-      {import.meta.env.DEV && <DevToggle empty={empty} onToggle={() => setEmpty((e) => !e)} />}
+      {import.meta.env.DEV && route === 'configuration' && <DevToggle empty={empty} onToggle={() => setEmpty((e) => !e)} />}
 
       {overlay?.type === 'save-preview' && (
         <SavePreviewModal
