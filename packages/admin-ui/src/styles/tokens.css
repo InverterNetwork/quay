@@ -51,9 +51,9 @@
   --r-xl: 14px;
 
   /* Type */
-  --sans:  'General Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --mono:  'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
-  --serif: 'Instrument Serif', Georgia, 'Times New Roman', Times, serif;
+  --sans:  ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono:  ui-monospace, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+  --serif: Georgia, 'Times New Roman', Times, serif;
 
   /* Shadows */
   --shadow-sm:  0 1px 0 rgba(14, 14, 12, 0.04);

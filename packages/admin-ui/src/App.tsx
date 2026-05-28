@@ -56,7 +56,7 @@ function routePath(basePath: string, route: AppRoute, scope: Scope = 'global'): 
   const prefix = basePath === '' ? '' : basePath;
   if (route === 'mission-control') return `${prefix}/mission-control`;
   if (scope === 'global') return `${prefix}/configuration`;
-  return `${prefix}/configuration/${encodeURIComponent(scope)}`;
+  return `${prefix}/configuration/${encodeURIComponent(scope)}/`;
 }
 
 export function App() {

@@ -221,6 +221,48 @@ test("GET /v1/tasks excludes terminal tasks from sidebar count and handles empty
   expect(body.hasAttention).toBe(false);
 });
 
+test("GET /v1/tasks caps terminal cards and keeps active count accurate", async () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  insertTask(h.db, { taskId: "task-running", repoId: "repo-a", state: "running" });
+
+  for (let i = 0; i < 55; i += 1) {
+    const suffix = String(i).padStart(2, "0");
+    const taskId = `task-terminal-${suffix}`;
+    insertTask(h.db, { taskId, repoId: "repo-a", state: "merged" });
+    h.db
+      .query(`UPDATE tasks SET updated_at = ? WHERE task_id = ?`)
+      .run(`2026-01-01T00:00:${suffix}.000Z`, taskId);
+  }
+
+  const handler = createHandler();
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+  const ids = body.tasks.map((task) => task.id);
+
+  expect(response.status).toBe(200);
+  expect(body.activeTaskCount).toBe(1);
+  expect(body.tasks).toHaveLength(51);
+  expect(body.tasks.filter((task) => task.state === "merged")).toHaveLength(50);
+  expect(ids).not.toContain("task-terminal-00");
+  expect(ids).toContain("task-terminal-54");
+});
+
+test("GET /v1/tasks skips rows with unknown task states", async () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-a");
+  insertTask(h.db, { taskId: "task-running", repoId: "repo-a", state: "running" });
+  insertTask(h.db, { taskId: "task-invalid", repoId: "repo-a", state: "unexpected_state" });
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+
+  expect(response.status).toBe(200);
+  expect(body.activeTaskCount).toBe(1);
+  expect(body.tasks.map((task) => task.id)).toEqual(["task-running"]);
+});
+
 test("admin bearer auth protects reads and writes when configured", async () => {
   h = createHarness();
   const repoService = createRepoService({ db: h.db, clock: h.clock });

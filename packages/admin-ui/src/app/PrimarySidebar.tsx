@@ -56,13 +56,13 @@ export function PrimarySidebar({
       />
       <Divider dashed style={{ margin: '8px 0' }} />
       <HStack gap={10} style={{ padding: '0 8px' }}>
-        <Avatar name="Mira Tonio" size={22} tone="accent" />
+        <Avatar name="Quay Admin" size={22} tone="accent" />
         <div style={{ flex: 1, minWidth: 0 }}>
           <T kind="body-sm" style={{ display: 'block' }}>
-            Mira Tonio
+            Quay Admin
           </T>
           <T kind="mono-sm" color="var(--ink-3)" style={{ display: 'block' }}>
-            mira@acme.co
+            local session
           </T>
         </div>
       </HStack>

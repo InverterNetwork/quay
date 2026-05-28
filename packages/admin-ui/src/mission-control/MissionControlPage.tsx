@@ -9,9 +9,7 @@ import { StatusDot } from '../components/StatusDot';
 import { T } from '../components/Typography';
 import { Icon } from '../icons/Icon';
 import type { Tone } from '../styles/tones';
-import { SAMPLE_TASKS } from './sampleTasks';
 import {
-  activeTaskCount,
   ATTN_LABEL,
   LANE_DEFINITIONS,
   needsAttention,
@@ -30,7 +28,7 @@ interface MissionControlPageProps {
 }
 
 export function MissionControlPage({
-  tasks = SAMPLE_TASKS,
+  tasks = [],
   loading = false,
   error = null,
   lastRefreshAt,
@@ -449,11 +447,4 @@ function formatRelativeAge(date: Date | null, now: number): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h`;
   return `${Math.floor(hours / 24)}d`;
-}
-
-export function missionControlSidebarSummary(tasks: readonly MissionControlTask[]) {
-  return {
-    activeCount: activeTaskCount(tasks),
-    hasAttention: tasks.some(needsAttention),
-  };
 }

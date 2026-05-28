@@ -146,7 +146,7 @@ function createStaticUiHandler(runtime: AdminApiRuntime, uiDir: string) {
     );
     if (response !== null) return response;
 
-    if (target.assetRequest) {
+    if (target.assetRequest && !isAdminUiSpaRoute(target.segments)) {
       return textResponse(
         404,
         `static asset not found: ${url.pathname}`,
@@ -201,7 +201,7 @@ function createEmbeddedStaticUiHandler(
       return embeddedAssetResponse(targetAsset, url.pathname, request.method, runtime);
     }
 
-    if (target.assetRequest) {
+    if (target.assetRequest && !isAdminUiSpaRoute(target.segments)) {
       return textResponse(
         404,
         `static asset not found: ${url.pathname}`,
@@ -216,6 +216,10 @@ function createEmbeddedStaticUiHandler(
 
 function isAdminApiPath(pathname: string): boolean {
   return pathname === "/v1" || pathname.startsWith("/v1/");
+}
+
+function isAdminUiSpaRoute(segments: readonly string[]): boolean {
+  return segments[0] === "mission-control" || segments[0] === "configuration";
 }
 
 type StaticTargetResult =

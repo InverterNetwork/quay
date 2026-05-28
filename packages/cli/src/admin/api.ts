@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import type { SQLQueryBindings } from "bun:sqlite";
 import { z } from "zod";
 import type { QuayConfig } from "../cli/config.ts";
 import { DEFAULT_RETRY_BUDGET } from "../core/enqueue.ts";
@@ -443,7 +444,7 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
 
     if (segments.length === 2 && segments[0] === "v1" && segments[1] === "tasks") {
       return jsonResponse(
-        buildMissionControlReadModel(runtime),
+        await buildMissionControlReadModel(runtime),
         200,
         cors.headers,
       );
@@ -572,65 +573,135 @@ interface MissionControlTaskRow {
 }
 
 interface MissionControlEventRow {
+  task_id: string;
   event_type: string;
   occurred_at: string;
 }
 
 const TASK_STATE_SET = new Set<string>(TASK_STATES);
-const MISSION_CONTROL_TERMINAL_STATES = new Set<TaskState>([
+const MISSION_CONTROL_TERMINAL_STATE_LIST = [
   "merged",
   "cancelled",
   "closed_unmerged",
-]);
+] as const satisfies readonly TaskState[];
+const MISSION_CONTROL_TERMINAL_STATES = new Set<TaskState>(MISSION_CONTROL_TERMINAL_STATE_LIST);
+const MISSION_CONTROL_ACTIVE_STATES = TASK_STATES.filter(
+  (state) => !MISSION_CONTROL_TERMINAL_STATES.has(state),
+);
+const MISSION_CONTROL_ACTIVE_TASK_LIMIT = 200;
+const MISSION_CONTROL_TERMINAL_TASK_LIMIT = 50;
+const MISSION_CONTROL_EVENTS_PER_TASK = 5;
 
-function buildMissionControlReadModel(runtime: AdminApiRuntime): AdminMissionControlReadModel {
-  const rows = runtime.db
-    .query<MissionControlTaskRow, []>(
-      `SELECT t.task_id, t.repo_id, t.external_ref, t.state, t.branch_name,
-              t.pr_number, t.attempts_consumed, t.retry_budget, t.authors_json,
-              t.worker_agent, t.worker_model, t.reviewer_agent, t.reviewer_model,
-              tg.objective AS goal_objective,
-              (
-                SELECT ar.file_path
-                  FROM artifacts ar
-                 WHERE ar.task_id = t.task_id
-                   AND ar.kind = 'task_objective'
-                   AND ar.attempt_id IS NULL
-                 ORDER BY ar.artifact_id ASC
-                 LIMIT 1
-              ) AS objective_file_path,
-              t.updated_at, t.created_at
-         FROM tasks t
-         JOIN repos r ON r.repo_id = t.repo_id
-         LEFT JOIN task_goals tg ON tg.task_id = t.task_id
-        WHERE r.archived_at IS NULL
-        ORDER BY t.updated_at DESC, t.task_id ASC`,
-    )
-    .all();
+function sqlPlaceholders(values: readonly unknown[]): string {
+  if (values.length === 0) throw new Error("SQL placeholder list cannot be empty");
+  return values.map(() => "?").join(", ");
+}
 
+async function buildMissionControlReadModel(
+  runtime: AdminApiRuntime,
+): Promise<AdminMissionControlReadModel> {
+  const rows = missionControlTaskRows(runtime.db);
+  const eventsByTask = recentMissionControlEventsByTask(
+    runtime.db,
+    rows.map((row) => row.task_id),
+  );
   const now = new Date();
-  const tasks = rows.map((row) => missionControlTaskFromRow(runtime, row, now));
+  const tasks = (
+    await Promise.all(
+      rows.map((row) =>
+        missionControlTaskFromRow(row, now, eventsByTask.get(row.task_id) ?? []),
+      ),
+    )
+  ).filter((task): task is AdminMissionControlTask => task !== null);
+
   return {
     refreshedAt: now.toISOString(),
-    activeTaskCount: tasks.filter((task) => !MISSION_CONTROL_TERMINAL_STATES.has(task.state)).length,
+    activeTaskCount: missionControlActiveTaskCount(runtime.db),
     hasAttention: tasks.some((task) => task.attn !== undefined),
     tasks,
   };
 }
 
-function missionControlTaskFromRow(
-  runtime: AdminApiRuntime,
+function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
+  return db
+    .query<MissionControlTaskRow, SQLQueryBindings[]>(
+      `WITH candidate_tasks AS (
+         SELECT t.task_id, t.repo_id, t.external_ref, t.state, t.branch_name,
+                t.pr_number, t.attempts_consumed, t.retry_budget, t.authors_json,
+                t.worker_agent, t.worker_model, t.reviewer_agent, t.reviewer_model,
+                tg.objective AS goal_objective,
+                (
+                  SELECT ar.file_path
+                    FROM artifacts ar
+                   WHERE ar.task_id = t.task_id
+                     AND ar.kind = 'task_objective'
+                     AND ar.attempt_id IS NULL
+                   ORDER BY ar.artifact_id ASC
+                   LIMIT 1
+                ) AS objective_file_path,
+                t.updated_at, t.created_at,
+                CASE
+                  WHEN t.state IN (${sqlPlaceholders(MISSION_CONTROL_TERMINAL_STATE_LIST)})
+                  THEN 1
+                  ELSE 0
+                END AS terminal_bucket
+           FROM tasks t
+           JOIN repos r ON r.repo_id = t.repo_id
+           LEFT JOIN task_goals tg ON tg.task_id = t.task_id
+          WHERE r.archived_at IS NULL
+            AND t.state IN (${sqlPlaceholders(TASK_STATES)})
+       ),
+       ranked_tasks AS (
+         SELECT candidate_tasks.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY terminal_bucket
+                  ORDER BY updated_at DESC, task_id ASC
+                ) AS bucket_rank
+           FROM candidate_tasks
+       )
+       SELECT task_id, repo_id, external_ref, state, branch_name,
+              pr_number, attempts_consumed, retry_budget, authors_json,
+              worker_agent, worker_model, reviewer_agent, reviewer_model,
+              goal_objective, objective_file_path, updated_at, created_at
+         FROM ranked_tasks
+        WHERE (terminal_bucket = 0 AND bucket_rank <= ?)
+           OR (terminal_bucket = 1 AND bucket_rank <= ?)
+        ORDER BY terminal_bucket ASC, updated_at DESC, task_id ASC`,
+    )
+    .all(
+      ...MISSION_CONTROL_TERMINAL_STATE_LIST,
+      ...TASK_STATES,
+      MISSION_CONTROL_ACTIVE_TASK_LIMIT,
+      MISSION_CONTROL_TERMINAL_TASK_LIMIT,
+    );
+}
+
+function missionControlActiveTaskCount(db: DB): number {
+  const row = db
+    .query<{ count: number }, SQLQueryBindings[]>(
+      `SELECT COUNT(*) AS count
+         FROM tasks t
+         JOIN repos r ON r.repo_id = t.repo_id
+        WHERE r.archived_at IS NULL
+          AND t.state IN (${sqlPlaceholders(MISSION_CONTROL_ACTIVE_STATES)})`,
+    )
+    .get(...MISSION_CONTROL_ACTIVE_STATES);
+  return row?.count ?? 0;
+}
+
+async function missionControlTaskFromRow(
   row: MissionControlTaskRow,
   now: Date,
-): AdminMissionControlTask {
-  const state = toTaskState(row.state, row.task_id);
-  const recentEvents = recentMissionControlEvents(runtime.db, row.task_id);
+  recentEvents: readonly MissionControlEventRow[],
+): Promise<AdminMissionControlTask | null> {
+  const state = toTaskState(row.state);
+  if (state === null) return null;
   const attention = deriveMissionControlAttention(state, recentEvents);
   const task: AdminMissionControlTask = {
     id: row.task_id,
     ext: row.external_ref ?? "—",
     repo: row.repo_id,
-    title: titleForMissionControl(row),
+    title: await titleForMissionControl(row),
     branch: row.branch_name.trim() === "" ? "—" : row.branch_name,
     state,
     pr: row.pr_number,
@@ -649,25 +720,43 @@ function missionControlTaskFromRow(
   return task;
 }
 
-function toTaskState(state: string, taskId: string): TaskState {
+function toTaskState(state: string): TaskState | null {
   if (TASK_STATE_SET.has(state)) return state as TaskState;
-  throw new AdminHttpError(
-    500,
-    "invalid_task_state",
-    `task ${taskId} has invalid state "${state}"`,
-  );
+  return null;
 }
 
-function recentMissionControlEvents(db: DB, taskId: string): MissionControlEventRow[] {
-  return db
-    .query<MissionControlEventRow, [string]>(
-      `SELECT event_type, occurred_at
-         FROM events
-        WHERE task_id = ?
-        ORDER BY occurred_at DESC, event_id DESC
-        LIMIT 5`,
+function recentMissionControlEventsByTask(
+  db: DB,
+  taskIds: readonly string[],
+): Map<string, MissionControlEventRow[]> {
+  if (taskIds.length === 0) return new Map();
+  const rows = db
+    .query<MissionControlEventRow, SQLQueryBindings[]>(
+      `WITH ranked_events AS (
+         SELECT task_id, event_type, occurred_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY task_id
+                  ORDER BY occurred_at DESC, event_id DESC
+                ) AS event_rank
+           FROM events
+          WHERE task_id IN (${sqlPlaceholders(taskIds)})
+       )
+       SELECT task_id, event_type, occurred_at
+         FROM ranked_events
+        WHERE event_rank <= ?
+        ORDER BY task_id ASC, event_rank ASC`,
     )
-    .all(taskId);
+    .all(...taskIds, MISSION_CONTROL_EVENTS_PER_TASK);
+  const byTask = new Map<string, MissionControlEventRow[]>();
+  for (const row of rows) {
+    const events = byTask.get(row.task_id);
+    if (events === undefined) {
+      byTask.set(row.task_id, [row]);
+    } else {
+      events.push(row);
+    }
+  }
+  return byTask;
 }
 
 function deriveMissionControlAttention(
@@ -688,10 +777,10 @@ function deriveMissionControlAttention(
   return null;
 }
 
-function titleForMissionControl(row: MissionControlTaskRow): string {
+async function titleForMissionControl(row: MissionControlTaskRow): Promise<string> {
   const fromGoal = summarizeTaskObjective(row.goal_objective);
   if (fromGoal !== null) return fromGoal;
-  const fromArtifact = summarizeTaskObjective(readOptionalTextFile(row.objective_file_path));
+  const fromArtifact = summarizeTaskObjective(await readOptionalTextFile(row.objective_file_path));
   if (fromArtifact !== null) return fromArtifact;
   return row.external_ref ?? row.task_id;
 }
@@ -708,10 +797,10 @@ function summarizeTaskObjective(value: string | null): string | null {
   return null;
 }
 
-function readOptionalTextFile(path: string | null): string | null {
+async function readOptionalTextFile(path: string | null): Promise<string | null> {
   if (path === null) return null;
   try {
-    return readFileSync(path, "utf8");
+    return await readFile(path, "utf8");
   } catch {
     return null;
   }
