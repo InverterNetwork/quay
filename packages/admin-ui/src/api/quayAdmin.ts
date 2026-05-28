@@ -12,6 +12,7 @@ import type {
   TagNamespace,
 } from '../store/data';
 import type { AdminChange } from '../store/dirty';
+import type { MissionControlTask } from '../mission-control/taskState';
 
 const DEFAULT_API_BASE_URL = 'http://127.0.0.1:9731';
 const EXPECTED_API_VERSION = 'v1';
@@ -203,6 +204,13 @@ export interface QuayAdminApplyResponse {
   read_model: unknown;
 }
 
+export interface QuayAdminMissionControlReadModel {
+  refreshedAt: string;
+  activeTaskCount: number;
+  hasAttention: boolean;
+  tasks: MissionControlTask[];
+}
+
 export class QuayAdminRequestError extends Error {
   readonly status: number;
   readonly code: string;
@@ -305,6 +313,10 @@ export function fetchGlobal(signal: AbortSignal): Promise<QuayAdminGlobal> {
 
 export function fetchMatrix(signal: AbortSignal): Promise<QuayAdminMatrix> {
   return readJson<QuayAdminMatrix>('/v1/matrix', signal);
+}
+
+export function fetchMissionControlTasks(signal: AbortSignal): Promise<QuayAdminMissionControlReadModel> {
+  return readJson<QuayAdminMissionControlReadModel>('/v1/tasks', signal);
 }
 
 export function previewChanges(

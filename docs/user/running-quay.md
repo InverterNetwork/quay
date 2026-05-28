@@ -65,6 +65,7 @@ return 404 instead of falling back to the SPA entrypoint.
 Initial endpoints:
 
 - `GET /v1/meta`
+- `GET /v1/tasks`
 - `GET /v1/repos`
 - `GET /v1/repos/<repo_id>`
 - `GET /v1/global`

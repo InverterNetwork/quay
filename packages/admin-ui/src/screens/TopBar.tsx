@@ -17,13 +17,13 @@ interface BackendStatus {
 }
 
 interface TopBarProps {
-  scope: string;
+  crumbs: string[];
   mode: 'light' | 'dark';
   backendStatus: BackendStatus;
   onModeToggle: () => void;
 }
 
-export function TopBar({ scope, mode, backendStatus, onModeToggle }: TopBarProps) {
+export function TopBar({ crumbs, mode, backendStatus, onModeToggle }: TopBarProps) {
   return (
     <header
       style={{
@@ -39,21 +39,18 @@ export function TopBar({ scope, mode, backendStatus, onModeToggle }: TopBarProps
     >
       <QuayWordmark size={20} />
       <HStack gap={6} style={{ marginLeft: 4 }}>
-        <T kind="mono-sm" color="var(--ink-3)">
-          prod
-        </T>
-        <T kind="mono-sm" color="var(--ink-4)">
-          /
-        </T>
-        <T kind="mono-sm" color="var(--ink-3)">
-          configuration
-        </T>
-        <T kind="mono-sm" color="var(--ink-4)">
-          /
-        </T>
-        <T kind="mono-sm" color="var(--ink)">
-          {scope}
-        </T>
+        {crumbs.map((crumb, index) => (
+          <span key={`${crumb}-${index}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            {index > 0 && (
+              <T kind="mono-sm" color="var(--ink-4)">
+                /
+              </T>
+            )}
+            <T kind="mono-sm" color={index === crumbs.length - 1 ? 'var(--ink)' : 'var(--ink-3)'}>
+              {crumb}
+            </T>
+          </span>
+        ))}
       </HStack>
       <span style={{ flex: 1 }} />
       <HStack gap={6}>
