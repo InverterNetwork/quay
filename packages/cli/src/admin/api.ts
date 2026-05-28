@@ -9,6 +9,7 @@ import {
   type AgentRole,
 } from "../core/agents.ts";
 import { QuayError } from "../core/errors.ts";
+import { ciPolicyFromConfig, resolveCiIgnorePolicy } from "../core/ci_policy.ts";
 import { TASK_STATES, type TaskState } from "../core/task_state.ts";
 import {
   adminAuthAllowedHeaders,
@@ -964,6 +965,10 @@ function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown>
         derivedField("artifacts_root", "ARTIFACTS_ROOT", runtime.paths.artifactsRoot),
       ],
     },
+    ci_policy: {
+      ignored_check_names: ciPolicyFromConfig(runtime.config).ignoredCheckNames,
+      ignored_workflow_names: ciPolicyFromConfig(runtime.config).ignoredWorkflowNames,
+    },
     adapters: buildAdapterSummaries(runtime),
     agents: {
       defaults: {
@@ -981,6 +986,8 @@ function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown>
 }
 
 function buildRepoDetail(runtime: AdminApiRuntime, row: RepoRow): Record<string, unknown> {
+  const globalCiPolicy = ciPolicyFromConfig(runtime.config);
+  const effectiveCiPolicy = resolveCiIgnorePolicy(globalCiPolicy, row);
   return {
     revision: computeAdminRevision(runtime),
     ...row,
@@ -988,6 +995,13 @@ function buildRepoDetail(runtime: AdminApiRuntime, row: RepoRow): Record<string,
     effective_preambles: {
       worker: buildRepoEffectivePreamble(runtime, row, "worker"),
       reviewer: buildRepoEffectivePreamble(runtime, row, "reviewer"),
+    },
+    ci_policy: {
+      ignore_mode: row.ci_ignore_mode,
+      ignored_check_names: row.ignored_check_names,
+      ignored_workflow_names: row.ignored_workflow_names,
+      effective_ignored_check_names: effectiveCiPolicy.ignoredCheckNames,
+      effective_ignored_workflow_names: effectiveCiPolicy.ignoredWorkflowNames,
     },
     tag_namespaces: tagNamespacesFromVocab(runtime.tagService.getVocab("repo", row.repo_id)),
     inherited_tag_namespaces: deploymentTagNamespaces(runtime),
@@ -1552,6 +1566,9 @@ const REPO_PATCH_FIELDS = [
   "model_reviewer",
   "preamble_worker",
   "preamble_reviewer",
+  "ci_ignore_mode",
+  "ignored_check_names",
+  "ignored_workflow_names",
 ] as const satisfies readonly (keyof RepoPatch)[];
 
 function assertActiveRepo(runtime: AdminApiRuntime, repoId: string): RepoRow {
@@ -1659,6 +1676,7 @@ function buildAdminReadModel(runtime: AdminApiRuntime): Record<string, unknown> 
 function computeAdminRevision(runtime: AdminApiRuntime): string {
   const state = {
     version: 1,
+    ci_policy: ciPolicyFromConfig(runtime.config),
     repos: runtime.repoService.list({ activeOnly: true }),
     deployment_tags: runtime.tagService.getVocab("deployment"),
     repo_tags: Object.fromEntries(

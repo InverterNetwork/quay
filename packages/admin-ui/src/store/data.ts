@@ -20,12 +20,21 @@ export interface RepoSummary {
   modelReviewer?: string | null;
   preambleWorker?: number | null;
   preambleReviewer?: number | null;
+  ciPolicy: RepoCiPolicySummary;
   effectivePreambles: {
     worker: RepoEffectivePreamble;
     reviewer: RepoEffectivePreamble;
   };
   tagNamespaces: TagNamespace[];
   inheritedTagNamespaces: TagNamespace[];
+}
+
+export interface RepoCiPolicySummary {
+  ignoreMode: 'inherit' | 'extend' | 'replace';
+  ignoredCheckNames: string[];
+  ignoredWorkflowNames: string[];
+  effectiveIgnoredCheckNames: string[];
+  effectiveIgnoredWorkflowNames: string[];
 }
 
 export interface RepoEffectivePreamble {
@@ -123,6 +132,10 @@ export interface GlobalConfigSummary {
     liveWorkerThresholds: ConfigFieldSummary[];
     claims: ConfigFieldSummary[];
     paths: ConfigFieldSummary[];
+  };
+  ciPolicy: {
+    ignoredCheckNames: string[];
+    ignoredWorkflowNames: string[];
   };
   adapters: AdapterSummary[];
   agents: {

@@ -27,6 +27,7 @@ import { TagNamespaceEditor } from './TagNamespaceEditor';
 
 const TOC: TocItem[] = [
   { id: 'ops', label: 'Operations' },
+  { id: 'ci-policy', label: 'CI Policy' },
   { id: 'adapters', label: 'Adapters' },
   { id: 'registry', label: 'Agent registry' },
   { id: 'agents', label: 'Default agents' },
@@ -201,14 +202,33 @@ function SettingsBody({ global, changes, onChange, onOpenPreamble, active, setAc
           </SubGroup>
         </Section>
 
-        <Section n="02" id="adapters" title="Adapters" hint="how Quay reaches the outside world">
+        <Section n="02" id="ci-policy" title="CI Policy" hint="checks excluded from product-CI classification">
+          <SubGroup title="Ignored checks" columns={2}>
+            <Field
+              label="IGNORED_CHECK_NAMES"
+              value={formatList(global.ciPolicy.ignoredCheckNames)}
+              source="global-only"
+              helper="config"
+              computed
+            />
+            <Field
+              label="IGNORED_WORKFLOW_NAMES"
+              value={formatList(global.ciPolicy.ignoredWorkflowNames)}
+              source="global-only"
+              helper="config"
+              computed
+            />
+          </SubGroup>
+        </Section>
+
+        <Section n="03" id="adapters" title="Adapters" hint="how Quay reaches the outside world">
           {global.adapters.map((adapter) => (
             <AdapterCard key={adapter.name} adapter={adapter} />
           ))}
         </Section>
 
         <Section
-          n="03"
+          n="04"
           id="registry"
           title="Agent registry"
           hint="invocations available to all repos · each defines how to spawn"
@@ -257,7 +277,7 @@ function SettingsBody({ global, changes, onChange, onOpenPreamble, active, setAc
           ))}
         </Section>
 
-        <Section n="04" id="agents" title="Default agents" hint="what runs unless a repo overrides">
+        <Section n="05" id="agents" title="Default agents" hint="what runs unless a repo overrides">
           <SubGroup title="Worker">
             <Field label="AGENT" value={global.agents.defaults.worker} source="global-only" />
             <Field label="MODEL" value={global.agents.defaults.workerModel ?? 'not configured'} source="global-only" />
@@ -269,7 +289,7 @@ function SettingsBody({ global, changes, onChange, onOpenPreamble, active, setAc
         </Section>
 
         <Section
-          n="05"
+          n="06"
           id="prompts"
           title="Default prompts"
           hint="preambles + attempt guidance · referenced by every spawn"
@@ -356,7 +376,7 @@ function SettingsBody({ global, changes, onChange, onOpenPreamble, active, setAc
         </Section>
 
         <Section
-          n="06"
+          n="07"
           id="tags"
           title="Default tags"
           hint="deployment-wide namespaces · every repo inherits these"
@@ -448,6 +468,10 @@ function ReadOnlyField({ field }: { field: ConfigFieldSummary }) {
       computed={field.source === 'derived'}
     />
   );
+}
+
+function formatList(values: string[]): string {
+  return values.length === 0 ? '[]' : values.join(', ');
 }
 
 function AdapterCard({ adapter }: { adapter: AdapterSummary }) {

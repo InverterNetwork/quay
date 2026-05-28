@@ -240,6 +240,35 @@ function Body({ repo, global, changes, onChange, active, setActive }: BodyProps)
               onCommit={(next) => field.commit('contribution_guide_path', next)}
             />
           </SubGroup>
+          <SubGroup title="CI Policy" hint="read-only ignore policy resolved for this repo" columns={2}>
+            <Field label="IGNORE_MODE" value={repo.ciPolicy.ignoreMode} source="repo-only" computed />
+            <Field
+              label="IGNORED_CHECK_NAMES"
+              value={formatList(repo.ciPolicy.ignoredCheckNames)}
+              source="repo-only"
+              computed
+            />
+            <Field
+              label="IGNORED_WORKFLOW_NAMES"
+              value={formatList(repo.ciPolicy.ignoredWorkflowNames)}
+              source="repo-only"
+              computed
+            />
+            <Field
+              label="EFFECTIVE_CHECK_NAMES"
+              value={formatList(repo.ciPolicy.effectiveIgnoredCheckNames)}
+              source="repo-only"
+              helper="derived"
+              computed
+            />
+            <Field
+              label="EFFECTIVE_WORKFLOW_NAMES"
+              value={formatList(repo.ciPolicy.effectiveIgnoredWorkflowNames)}
+              source="repo-only"
+              helper="derived"
+              computed
+            />
+          </SubGroup>
         </Section>
 
         {/* 03 · Agents */}
@@ -438,6 +467,10 @@ function formatFieldValue(value: string | null): string {
 
 function idString(value: number | null | undefined): string | null {
   return value === null || value === undefined ? null : String(value);
+}
+
+function formatList(values: string[]): string {
+  return values.length === 0 ? '[]' : values.join(', ');
 }
 
 function effectiveWithPending(

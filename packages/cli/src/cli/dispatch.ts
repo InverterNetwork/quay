@@ -1056,6 +1056,7 @@ function handleReviewPr(
       reviewerAgent?: string;
       reviewerModel?: string;
       referenceReposRoot?: string | undefined;
+      ciIgnorePolicy?: TickOptions["ciIgnorePolicy"] | undefined;
     } = {
       repoId,
       prNumber: parsedPr.prNumber,
@@ -1063,6 +1064,7 @@ function handleReviewPr(
       reviewerEnabled: deps.tickOptions?.reviewerEnabled === true,
       gateQuayOwnedDone: deps.tickOptions?.gateQuayOwnedDone === true,
       referenceReposRoot: deps.tickOptions?.referenceReposRoot,
+      ciIgnorePolicy: deps.tickOptions?.ciIgnorePolicy,
     };
     if (headSha !== null) input.headSha = headSha;
     const reviewerAgent = readFlag(argv, "--reviewer-agent");

@@ -71,6 +71,10 @@ reference_repos_root = "/home/hermes/.hermes/code"
 [reviewer]
 enabled = true
 gate_quay_owned_done = false
+
+[ci]
+ignored_check_names = [" FE PR Review "]
+ignored_workflow_names = ["Quay review"]
 `,
   );
   const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
@@ -90,6 +94,10 @@ gate_quay_owned_done = false
   expect(result.config.context?.reference_repos_root).toBe(
     "/home/hermes/.hermes/code",
   );
+  expect(result.config.ci).toEqual({
+    ignored_check_names: ["FE PR Review"],
+    ignored_workflow_names: ["Quay review"],
+  });
 });
 
 test("rejects a non-positive integer for retry_budget", () => {
@@ -294,6 +302,42 @@ test("tickOptionsFromConfig only forwards keys that are present", () => {
     reviewerEnabled: true,
     referenceReposRoot: "/home/hermes/.hermes/code",
   });
+});
+
+test("loads optional [ci] ignored check policy", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[ci]
+ignored_check_names = ["FE PR Review"]
+ignored_workflow_names = ["Quay review"]
+`,
+  );
+  const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
+  expect(result.config.ci).toEqual({
+    ignored_check_names: ["FE PR Review"],
+    ignored_workflow_names: ["Quay review"],
+  });
+  expect(tickOptionsFromConfig(result.config).ciIgnorePolicy).toEqual({
+    ignoredCheckNames: ["FE PR Review"],
+    ignoredWorkflowNames: ["Quay review"],
+  });
+});
+
+test("[ci] rejects invalid ignored check policy values", () => {
+  const dir = tempDir();
+  const nonList = join(dir, "non-list.toml");
+  writeFileSync(nonList, `[ci]\nignored_check_names = "FE PR Review"\n`);
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: nonList } })).toThrow(
+    /ignored_check_names/i,
+  );
+
+  const empty = join(dir, "empty.toml");
+  writeFileSync(empty, `[ci]\nignored_workflow_names = ["   "]\n`);
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: empty } })).toThrow(
+    /ignored_workflow_names|non-empty/i,
+  );
 });
 
 test("loads [adapters.linear] and [adapters.slack] sections", () => {

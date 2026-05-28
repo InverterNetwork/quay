@@ -88,6 +88,50 @@ test("AST-120: non-required failing check blocks pr-review and schedules ci_fail
   );
 });
 
+test("global ignored failing check allows otherwise green product CI", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-ci-ignore-global");
+  const taskId = insertTask(h.db, {
+    taskId: "task-ci-ignore-global",
+    repoId,
+    state: "pr-open",
+  });
+  seedTaskObjective(h, taskId);
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-05-14T06:20:00.000Z",
+  });
+
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+    prNumber: 92,
+    state: "open",
+    headSha: "head-green-with-review-failure",
+    baseSha: "base",
+    mergeable: "mergeable",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: {
+      checkSha: "head-green-with-review-failure",
+      items: [
+        { name: "build", workflow: "ci", bucket: "pass", required: true },
+        { name: "FE PR Review", workflow: "review", bucket: "fail", required: false },
+      ],
+    },
+  });
+
+  const results = await tick_once(built.deps, {
+    reviewerEnabled: false,
+    gateQuayOwnedDone: false,
+    ciIgnorePolicy: {
+      ignoredCheckNames: ["FE PR Review"],
+      ignoredWorkflowNames: [],
+    },
+  });
+
+  expect(results).toEqual([{ task_id: taskId, action: "ci_passed" }]);
+});
+
 test("AST-120: approved Quay-owned review cannot mark done with failing checks", async () => {
   h = createHarness();
   const built = buildTickDeps(h);

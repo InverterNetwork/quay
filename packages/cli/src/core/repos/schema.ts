@@ -27,6 +27,11 @@ const agentName = z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/, {
   message: "agent name must match [A-Za-z0-9._-]+",
 });
 const modelName = z.string().min(1).max(128);
+const ciIgnoreMode = z.enum(["inherit", "extend", "replace"]);
+const ciIgnoredName = z.string().refine((value) => value.trim().length > 0, {
+  message: "ignored CI names must be non-empty strings",
+}).transform((value) => value.trim());
+const ciIgnoredNameList = z.array(ciIgnoredName);
 const preambleId = z.preprocess((value) => {
   if (typeof value === "string" && /^[1-9]\d*$/.test(value)) {
     return Number(value);
@@ -50,6 +55,9 @@ export const repoAddInputSchema = z
     model_reviewer: modelName.optional(),
     preamble_worker: preambleId.optional(),
     preamble_reviewer: preambleId.optional(),
+    ci_ignore_mode: ciIgnoreMode.optional(),
+    ignored_check_names: ciIgnoredNameList.optional(),
+    ignored_workflow_names: ciIgnoredNameList.optional(),
   })
   .strict();
 
@@ -70,6 +78,9 @@ export const repoUpdateInputSchema = z
     model_reviewer: modelName.nullable().optional(),
     preamble_worker: preambleId.nullable().optional(),
     preamble_reviewer: preambleId.nullable().optional(),
+    ci_ignore_mode: ciIgnoreMode.optional(),
+    ignored_check_names: ciIgnoredNameList.optional(),
+    ignored_workflow_names: ciIgnoredNameList.optional(),
   })
   .strict();
 
@@ -96,6 +107,9 @@ export const repoImportInputSchema = z
     model_reviewer: modelName.nullable().optional(),
     preamble_worker: preambleId.nullable().optional(),
     preamble_reviewer: preambleId.nullable().optional(),
+    ci_ignore_mode: ciIgnoreMode.optional(),
+    ignored_check_names: ciIgnoredNameList.optional(),
+    ignored_workflow_names: ciIgnoredNameList.optional(),
     archived_at: z.string().nullable().optional(),
     created_at: nonEmptyString.optional(),
   })
