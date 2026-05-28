@@ -154,9 +154,11 @@ finished reviewer attempt. Defaults to whatever `gh api user --jq .login`
 returns in the tick process. Set it explicitly when the reviewer worker
 authenticates as a different gh identity than tick (for example, when tick
 runs as the deployment service account and the worker posts under a dedicated
-bot account); leaving it unset in that setup will silently never match the
-posted review and park the task in `non_budget_loop` after the infra-failure
-retry budget runs out.
+bot account); leaving it unset in that setup will never match the posted
+review and can park the task in `non_budget_loop` after the infra-failure
+retry budget runs out. When Quay sees reviews at the same head SHA from a
+different author, the task error reports the configured login and observed
+review author identities so operators can correct the drift.
 
 Both regular user accounts and GitHub App identities are supported. Use the
 form that matches the reviewer's actual GitHub identity:
