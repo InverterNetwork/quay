@@ -162,6 +162,21 @@ The task exceeded the configured cap for review/conflict respawns. Inspect the
 latest `review_comments` or `conflict_slice` artifact and decide whether to
 cancel or recover manually.
 
+For PR review tasks, a `tick_error` containing `reviewer identity mismatch`
+means Quay found a review at the PR head SHA, but it was authored by a
+different GitHub identity than `[reviewer].login`. Check the actual review
+authors with:
+
+```bash
+gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
+  --jq '.[] | select(.commit_id == "{head_sha}") | {state, login: .user.login, type: .user.type, node_id}'
+```
+
+Then update `[reviewer].login` to the identity that posts reviews. Use
+`login = "app/<slug>"` for GitHub App bot reviews whose API type is `Bot`
+and `login = "<slug>"` for regular user reviews whose API type is `User`.
+Restart or tick the Quay process after deploying the corrected config.
+
 ## Tick Shows `tick_error`
 
 Tick isolates errors per task and continues. Inspect:

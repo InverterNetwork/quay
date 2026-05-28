@@ -1031,6 +1031,87 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
   ]);
 });
 
+test("reviewer identity mismatch reports configured and observed identities", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-identity-mismatch");
+  const taskId = "pr-review-repo-review-identity-mismatch-9";
+  const worktreePath = `${h.dataDir}/worktrees/review-identity-mismatch-9`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, review_infra_failures_consecutive,
+         review_infra_failure_head_sha, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/9', 'quay-review-repo-review-identity-mismatch-9',
+                 ?, 9, 'sha-9', 1, 2, 'sha-9', ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-9', tmux_session = 'quay-review-session-9'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "brief",
+    content: "review brief",
+    extension: "md",
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "final_prompt",
+    content: "review prompt",
+    extension: "md",
+  });
+  built.github.setPostedReviewAuthorsAtHead(repoId, 9, "sha-9", [
+    {
+      login: "quay-reviewer[bot]",
+      type: "Bot",
+      reviewId: "PRR_mismatch",
+      decision: "CHANGES_REQUESTED",
+    },
+  ]);
+
+  const results = await tick_once(
+    built.deps,
+    reviewerTickOptions({ reviewerLogin: "app/didier-reviewer" }),
+  );
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "non_budget_loop_parked",
+  });
+  const task = h.db
+    .query<{ state: string; tick_error: string | null }, [string]>(
+      `SELECT state, tick_error FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task?.state).toBe("non_budget_loop");
+  expect(task?.tick_error).toContain("reviewer identity mismatch");
+  expect(task?.tick_error).toContain("app/didier-reviewer");
+  expect(task?.tick_error).toContain("quay-reviewer[bot] (Bot");
+  expect(task?.tick_error).toContain("Update [reviewer].login");
+  expect(task?.tick_error).not.toContain("no Quay-authored review found");
+});
+
 test("live stale reviewer is killed then retried on the same head", async () => {
   h = createHarness();
   const built = buildTickDeps(h);

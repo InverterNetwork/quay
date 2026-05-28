@@ -199,6 +199,21 @@ test("review against an older head_sha is ignored", () => {
   expect(posted).toBeNull();
 });
 
+test("review authors at head SHA are available for identity mismatch diagnostics", () => {
+  installGhStub(stubReviewsRest(BOT_APPROVED));
+  const { reposRoot, repoId } = makeBareDir();
+  const adapter = new GitHubCliAdapter(reposRoot);
+  const authors = adapter.fetchPostedReviewAuthorsAtHead(repoId, 42, "abc123");
+  expect(authors).toEqual([
+    {
+      login: "didier-reviewer[bot]",
+      type: "Bot",
+      reviewId: "PRR_bot",
+      decision: "APPROVED",
+    },
+  ]);
+});
+
 test("most recent matching review wins when several share the author and SHA", () => {
   // Iteration is newest-first; the adapter must return PRR_third (the
   // last row), not PRR_first.

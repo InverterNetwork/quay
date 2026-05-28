@@ -61,6 +61,14 @@ export interface GitHubPort {
     headSha: string,
     expectedLogin?: string,
   ): PostedReview | null;
+  // Diagnostic read used only after `fetchPostedReview` misses. It reports
+  // review authors that did post a recognizable review at the same head SHA,
+  // so tick can distinguish "no review posted" from "reviewer.login drifted".
+  fetchPostedReviewAuthorsAtHead(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+  ): PostedReviewAuthor[];
   // Validate an explicit reviewer GH_TOKEN before handing it to a reviewer
   // pane. Throws when the token is invalid, expired, or cannot access the
   // target repository. Kept repo-scoped so GitHub App installation tokens are
@@ -176,4 +184,11 @@ export interface PostedReview {
   decision: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED";
   body: string;
   comments: string;
+}
+
+export interface PostedReviewAuthor {
+  login: string;
+  type: string;
+  reviewId: string;
+  decision: PostedReview["decision"];
 }
