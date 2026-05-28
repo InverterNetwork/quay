@@ -45,6 +45,7 @@ import type {
   PrLatestReview,
   PrMergeableState,
   PostedReview,
+  PostedReviewAuthor,
   PrReviewDecision,
   PrSnapshot,
   PrTerminalState,
@@ -357,27 +358,7 @@ export class GitHubCliAdapter implements GitHubPort {
     // far beyond any real reviewer-bot workload, but the failure mode is
     // a transient "no posted review yet" (a retry, not a wrong accept),
     // so we don't paginate at the cost of a multi-call code path.
-    const path = `repos/{owner}/{repo}/pulls/${prNumber}/reviews?per_page=100`;
-    const result = this.run(repoId, ["gh", "api", path]);
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `gh api ${path} failed: ${result.stderr.trim() || result.stdout.trim()}`,
-      );
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(result.stdout);
-    } catch (err) {
-      throw new Error(
-        `gh api returned unparseable review JSON for PR #${prNumber}: ${(err as Error).message}`,
-      );
-    }
-    if (!Array.isArray(parsed)) {
-      throw new Error(
-        `gh api returned non-array review JSON for PR #${prNumber}: ${result.stdout.trim().slice(0, 200)}`,
-      );
-    }
-    const reviews = parsed as Array<Record<string, unknown>>;
+    const reviews = this.fetchPullRequestReviews(repoId, prNumber);
     // A Bot's `user.login` carries the `[bot]` suffix in the REST API
     // (e.g. `didier-reviewer[bot]`). Strip only for Bot rows so a
     // collision with a real user named `didier-reviewer[bot]`-literal
@@ -410,7 +391,61 @@ export class GitHubCliAdapter implements GitHubPort {
     return null;
   }
 
+  fetchPostedReviewAuthorsAtHead(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+  ): PostedReviewAuthor[] {
+    const reviews = this.fetchPullRequestReviews(repoId, prNumber);
+    const authors = new Map<string, PostedReviewAuthor>();
+    for (let i = reviews.length - 1; i >= 0; i -= 1) {
+      const r = reviews[i] ?? {};
+      const commitId = String(r.commit_id ?? "");
+      if (commitId !== headSha) continue;
+      const decision = mapPostedReviewDecision(r.state);
+      if (decision === null) continue;
+      const reviewId = String(r.node_id ?? "");
+      if (reviewId === "") continue;
+      const user = (r.user ?? {}) as Record<string, unknown>;
+      const login = String(user.login ?? "");
+      const type = String(user.type ?? "");
+      if (login === "" && type === "") continue;
+      const key = `${type}\0${login}`;
+      if (!authors.has(key)) {
+        authors.set(key, { login, type, reviewId, decision });
+      }
+    }
+    return [...authors.values()];
+  }
+
   // -- helpers ------------------------------------------------------------
+
+  private fetchPullRequestReviews(
+    repoId: string,
+    prNumber: number,
+  ): Array<Record<string, unknown>> {
+    const path = `repos/{owner}/{repo}/pulls/${prNumber}/reviews?per_page=100`;
+    const result = this.run(repoId, ["gh", "api", path]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh api ${path} failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch (err) {
+      throw new Error(
+        `gh api returned unparseable review JSON for PR #${prNumber}: ${(err as Error).message}`,
+      );
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error(
+        `gh api returned non-array review JSON for PR #${prNumber}: ${result.stdout.trim().slice(0, 200)}`,
+      );
+    }
+    return parsed as Array<Record<string, unknown>>;
+  }
 
   private listPrs(
     repoId: string,

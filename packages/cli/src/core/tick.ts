@@ -10,6 +10,7 @@ import type {
   GitHubPort,
   OpenBranchPr,
   PostedReview,
+  PostedReviewAuthor,
   PrCheckStatus,
   PrSnapshot,
   PullRequestView,
@@ -498,6 +499,14 @@ class TickGithubCache implements GitHubPort {
       );
     }
     return this.postedReviews.get(key) ?? null;
+  }
+
+  fetchPostedReviewAuthorsAtHead(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+  ): PostedReviewAuthor[] {
+    return this.inner.fetchPostedReviewAuthorsAtHead(repoId, prNumber, headSha);
   }
 
   probeTokenAccess(repoId: string, token: string): void {
@@ -1714,10 +1723,15 @@ function processRunningReviewAttempt(
     options.reviewerLogin,
   );
   if (posted === null) {
+    const observed = deps.github.fetchPostedReviewAuthorsAtHead(
+      task.repo_id,
+      task.pr_number,
+      task.head_sha,
+    );
     return markReviewInfraFailure(
       deps,
       task,
-      `no Quay-authored review found at head SHA ${task.head_sha}`,
+      missingPostedReviewDiagnostic(task.head_sha, options.reviewerLogin, observed),
       exitInfo,
       options,
     );
@@ -1739,6 +1753,29 @@ function processRunningReviewAttempt(
     if (ciGate !== null) return ciGate;
   }
   return finalizePostedReview(deps, task, posted, exitInfo, options);
+}
+
+function missingPostedReviewDiagnostic(
+  headSha: string,
+  reviewerLogin: string | undefined,
+  observed: PostedReviewAuthor[],
+): string {
+  if (observed.length === 0) {
+    return `no Quay-authored review found at head SHA ${headSha}`;
+  }
+  const expected = reviewerLogin ?? "the tick gh identity";
+  const observedText = observed
+    .slice(0, 5)
+    .map((a) => `${a.login || "<unknown login>"} (${a.type || "unknown type"}, ${a.decision}, ${a.reviewId})`)
+    .join("; ");
+  const suffix =
+    observed.length > 5 ? `; plus ${observed.length - 5} more review(s)` : "";
+  return (
+    `reviewer identity mismatch at head SHA ${headSha}: ` +
+    `configured reviewer login ${JSON.stringify(expected)} did not match observed review author(s): ` +
+    `${observedText}${suffix}. ` +
+    `Update [reviewer].login to the identity that posts reviews, using app/<slug> for GitHub App bot identities.`
+  );
 }
 
 function reviewKillIntentDiagnostic(intent: "wall_clock" | "stale"): string {

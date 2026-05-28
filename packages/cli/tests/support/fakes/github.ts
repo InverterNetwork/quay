@@ -3,6 +3,7 @@ import type {
   GitHubGraphqlRateLimit,
   OpenBranchPr,
   PostedReview,
+  PostedReviewAuthor,
   PrCheckStatus,
   PrSnapshot,
   PullRequestView,
@@ -30,6 +31,7 @@ export class FakeGitHub implements GitHubPort {
   readonly lightweightSnapshotsByNumber = new Map<string, PrSnapshot | null>();
   readonly prViews = new Map<string, PullRequestView | null>();
   readonly postedReviews = new Map<string, PostedReview | null>();
+  readonly postedReviewAuthorsAtHead = new Map<string, PostedReviewAuthor[]>();
   readonly tokenAccessCalls: { repoId: string; token: string }[] = [];
   private graphqlRateLimit: GitHubGraphqlRateLimit | null = null;
   private prSnapshotHandler:
@@ -185,6 +187,16 @@ export class FakeGitHub implements GitHubPort {
     return this.postedReviews.get(`${repoId}\0${prNumber}\0${headSha}`) ?? null;
   }
 
+  fetchPostedReviewAuthorsAtHead(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+  ): PostedReviewAuthor[] {
+    return [
+      ...(this.postedReviewAuthorsAtHead.get(`${repoId}\0${prNumber}\0${headSha}`) ?? []),
+    ];
+  }
+
   setPostedReview(
     repoId: string,
     prNumber: number,
@@ -192,6 +204,17 @@ export class FakeGitHub implements GitHubPort {
     review: PostedReview | null,
   ): void {
     this.postedReviews.set(`${repoId}\0${prNumber}\0${headSha}`, review);
+  }
+
+  setPostedReviewAuthorsAtHead(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+    authors: PostedReviewAuthor[],
+  ): void {
+    this.postedReviewAuthorsAtHead.set(`${repoId}\0${prNumber}\0${headSha}`, [
+      ...authors,
+    ]);
   }
 
   probeTokenAccess(repoId: string, token: string): void {
