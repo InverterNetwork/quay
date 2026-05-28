@@ -179,6 +179,7 @@ export type TickAction =
   | "ci_failed"
   | "ci_pending"
   | "ci_passed"
+  | "adopted_pr_reconciled"
   | "pr_merged"
   | "pr_closed_unmerged"
   | "review_respawn_scheduled"
@@ -277,6 +278,7 @@ interface ParkedPrTerminalTaskRow {
   branch_name: string;
   worktree_path: string;
   pr_number: number | null;
+  head_sha: string | null;
   cancel_requested_at: string | null;
   github_pr_polled_at: string | null;
 }
@@ -1462,7 +1464,7 @@ function readParkedPrTerminal(db: DB): ParkedPrTerminalTaskRow[] {
                 THEN 'synthetic_review'
                 ELSE authoring_mode
               END AS authoring_mode,
-              pr_number, cancel_requested_at, github_pr_polled_at
+              pr_number, head_sha, cancel_requested_at, github_pr_polled_at
          FROM tasks
         WHERE state IN (
           'awaiting-next-brief',
@@ -2175,11 +2177,151 @@ function processParkedPrTerminal(
   const snapshot = loadParkedPrSnapshot(deps, task);
   if (snapshot === null) return null;
   if (snapshot.state !== "merged" && snapshot.state !== "closed_unmerged") {
+    const reconciled = reconcileParkedAdoptedOpenPr(deps, task, attempt);
+    if (reconciled !== null) return reconciled;
     return null;
   }
 
   persistPrMetadata(deps, task.task_id, snapshot);
   return finalizePrTerminal(deps, task, attempt, snapshot.state, task.state);
+}
+
+function reconcileParkedAdoptedOpenPr(
+  deps: TickDeps,
+  task: ParkedPrTerminalTaskRow,
+  attempt: CurrentAttemptRow,
+): TickTaskResult | null {
+  if (task.authoring_mode !== "adopted_external_pr") return null;
+  if (
+    task.state !== "awaiting-next-brief" &&
+    task.state !== "claimed-by-orchestrator" &&
+    task.state !== "waiting_human" &&
+    task.state !== "orchestrator_loop"
+  ) {
+    return null;
+  }
+  const snapshot = loadParkedPrFullSnapshot(deps, task);
+  if (snapshot === null) return null;
+  if (snapshot.state !== "open") return null;
+  if (task.head_sha !== null && snapshot.headSha === task.head_sha) return null;
+
+  persistPrMetadata(deps, task.task_id, snapshot);
+
+  if (snapshot.mergeable === "conflicting") {
+    return transitionParkedAdoptedToPrOpen(deps, task, "adopted_pr_reconciled");
+  }
+
+  const repo = loadRepoForTask(deps.db, task.task_id);
+  const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
+  if (ci === "stale") {
+    return recordTickError(
+      deps,
+      task.task_id,
+      new Error(
+        `PR head SHA (${snapshot.headSha}) and check-run SHA (${snapshot.checks.checkSha}) disagree; skipping adopted PR reconciliation this tick`,
+      ),
+    );
+  }
+  if (ci === "pending" || ci === "fail") {
+    return transitionParkedAdoptedToPrOpen(
+      deps,
+      task,
+      ci === "pending" ? "ci_pending" : "ci_failed",
+    );
+  }
+  if (snapshot.latestReview.decision === "CHANGES_REQUESTED") {
+    return transitionParkedAdoptedToPrOpen(
+      deps,
+      task,
+      "adopted_pr_reconciled",
+    );
+  }
+
+  return transitionParkedAdoptedReady(deps, task, attempt, snapshot);
+}
+
+function transitionParkedAdoptedToPrOpen(
+  deps: TickDeps,
+  task: ParkedPrTerminalTaskRow,
+  action: Extract<TickAction, "adopted_pr_reconciled" | "ci_pending" | "ci_failed">,
+): TickTaskResult | null {
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: task.state,
+      to: "pr-open",
+      eventType: "existing_pr_attached",
+      now,
+      updates: {
+        clearClaim: true,
+        resetClaimExpirations: true,
+        clearTickError: true,
+        budgetExhausted: 0,
+      },
+    });
+    if (!transition.applied) {
+      deps.db.exec("ROLLBACK");
+      return null;
+    }
+    cancelOpenOrchestratorHandoffs(deps, task.task_id);
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+  return { task_id: task.task_id, action };
+}
+
+function transitionParkedAdoptedReady(
+  deps: TickDeps,
+  task: ParkedPrTerminalTaskRow,
+  attempt: CurrentAttemptRow,
+  snapshot: PrSnapshot,
+): TickTaskResult | null {
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: task.state,
+      to: "done",
+      eventType: "ci_passed",
+      attemptId: attempt.attempt_id,
+      now,
+      updates: {
+        clearClaim: true,
+        resetClaimExpirations: true,
+        clearTickError: true,
+        budgetExhausted: 0,
+      },
+    });
+    if (!transition.applied) {
+      deps.db.exec("ROLLBACK");
+      return null;
+    }
+    cancelOpenOrchestratorHandoffs(deps, task.task_id);
+    if (
+      snapshot.latestReview.decision === "APPROVED" &&
+      snapshot.latestReview.latestReviewId !== null
+    ) {
+      enqueuePrReadyApprovedOutboxItem(deps, {
+        taskId: task.task_id,
+        sourceEventId: transition.eventId,
+        externalReview: { reviewId: snapshot.latestReview.latestReviewId },
+      });
+    }
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+  return { task_id: task.task_id, action: "ci_passed" };
 }
 
 function loadParkedPrSnapshot(
@@ -2194,6 +2336,17 @@ function loadParkedPrSnapshot(
     if (byNumber !== null) return byNumber;
   }
   return deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
+}
+
+function loadParkedPrFullSnapshot(
+  deps: TickDeps,
+  task: Pick<ParkedPrTerminalTaskRow, "repo_id" | "branch_name" | "pr_number">,
+): PrSnapshot | null {
+  if (task.pr_number !== null) {
+    const byNumber = deps.github.prSnapshotByNumber(task.repo_id, task.pr_number);
+    if (byNumber !== null) return byNumber;
+  }
+  return deps.github.prSnapshot(task.repo_id, task.branch_name);
 }
 
 function finalizePrTerminal(

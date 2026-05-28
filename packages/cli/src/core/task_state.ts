@@ -101,6 +101,30 @@ export const TASK_TRANSITIONS = [
     "worker produced or attached a PR",
   ),
   transition(
+    "awaiting-next-brief",
+    "pr-open",
+    ["existing_pr_attached"],
+    "stale human handoff reconciled to open PR polling",
+  ),
+  transition(
+    "claimed-by-orchestrator",
+    "pr-open",
+    ["existing_pr_attached"],
+    "stale claimed handoff reconciled to open PR polling",
+  ),
+  transition(
+    "waiting_human",
+    "pr-open",
+    ["existing_pr_attached"],
+    "stale human wait reconciled to open PR polling",
+  ),
+  transition(
+    "orchestrator_loop",
+    "pr-open",
+    ["existing_pr_attached"],
+    "stale orchestrator-loop handoff reconciled to open PR polling",
+  ),
+  transition(
     "running",
     "worktree_error",
     ["worktree_error"],
@@ -111,6 +135,30 @@ export const TASK_TRANSITIONS = [
     "done",
     ["ci_passed"],
     "PR checks passed and task is ready for review",
+  ),
+  transition(
+    "awaiting-next-brief",
+    "done",
+    ["ci_passed"],
+    "stale human handoff reconciled to a ready PR",
+  ),
+  transition(
+    "claimed-by-orchestrator",
+    "done",
+    ["ci_passed"],
+    "stale claimed handoff reconciled to a ready PR",
+  ),
+  transition(
+    "waiting_human",
+    "done",
+    ["ci_passed"],
+    "stale human wait reconciled to a ready PR",
+  ),
+  transition(
+    "orchestrator_loop",
+    "done",
+    ["ci_passed"],
+    "stale orchestrator-loop handoff reconciled to a ready PR",
   ),
   transition(
     "pr-open",

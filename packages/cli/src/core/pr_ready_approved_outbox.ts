@@ -32,6 +32,9 @@ export interface PrReadyApprovedOutboxDeps {
 export interface EnqueuePrReadyApprovedInput {
   taskId: string;
   sourceEventId?: number | null;
+  externalReview?: {
+    reviewId: string;
+  };
 }
 
 export function enqueuePrReadyApprovedOutboxItem(
@@ -46,7 +49,19 @@ export function enqueuePrReadyApprovedOutboxItem(
     task.task_id,
     task.head_sha,
   );
-  if (review === null || review.review_verdict !== "approved") return null;
+  let approvedReview: { attemptId: number | null; reviewId: string } | null = null;
+  if (review !== null && review.review_verdict === "approved") {
+    approvedReview = {
+      attemptId: review.attempt_id,
+      reviewId: review.review_id,
+    };
+  } else if (input.externalReview !== undefined) {
+    approvedReview = {
+      attemptId: null,
+      reviewId: input.externalReview.reviewId,
+    };
+  }
+  if (approvedReview === null) return null;
 
   const prTitle = loadPrTitle(deps, task);
   const approvalStatus = hasPriorReadyApprovedEmission(
@@ -63,8 +78,8 @@ export function enqueuePrReadyApprovedOutboxItem(
     pr_number: task.pr_number,
     pr_url: task.pr_url,
     head_sha: task.head_sha,
-    review_id: review.review_id,
-    review_attempt_id: review.attempt_id,
+    review_id: approvedReview.reviewId,
+    review_attempt_id: approvedReview.attemptId,
     branch_name: task.branch_name,
     approval_status: approvalStatus,
   };
@@ -79,7 +94,7 @@ export function enqueuePrReadyApprovedOutboxItem(
       PR_READY_APPROVED_OUTBOX_KIND,
       task.task_id,
       task.head_sha,
-      review.review_id,
+      approvedReview.reviewId,
     ].join(":"),
     payload,
     routeHint: {
@@ -98,7 +113,7 @@ function loadEligibleTask(db: DB, taskId: string): PrReadyApprovedTaskRow | null
            FROM tasks
           WHERE task_id = ?
             AND state = 'done'
-            AND authoring_mode = 'quay_owned'
+            AND authoring_mode IN ('quay_owned', 'adopted_external_pr')
             AND task_id NOT LIKE 'pr-review-%'`,
       )
       .get(taskId) ?? null;
