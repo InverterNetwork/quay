@@ -336,8 +336,9 @@ must be an ISO-8601 instant and is stored in canonical UTC form.
 `pr_ready_approved` is a delivery item for Slack notification loops. Quay emits
 one when a Quay-owned task reaches `done` and the latest review-only attempt for
 the current `head_sha` is approved. The payload fields are `task_id`,
-`external_ref`, `repo_id`, `pr_number`, `pr_url`, `head_sha`, `review_id`,
-`review_attempt_id`, and `branch_name`. The route hint fields are
+`external_ref`, `repo_id`, `pr_number`, `pr_url`, optional `pr_title`,
+`head_sha`, `review_id`, `review_attempt_id`, `branch_name`, and
+`approval_status` (`approved` or `reapproved`). The route hint fields are
 `slack_thread_ref` and `fallback`, where `fallback` is
 `deployment_default_slack_channel`.
 
