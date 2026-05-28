@@ -141,3 +141,66 @@ test("test_review_feedback_schedules_non_budget_respawn", async () => {
   expect(event?.to_state).toBe("queued");
   expect(event?.payload_artifact_id).toBeGreaterThan(0);
 });
+
+test("done polling ignores stale requested-changes reviews from older head", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-29T15:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-review-stale");
+  const taskId = insertTask(h.db, {
+    taskId: "task-review-stale",
+    repoId,
+    state: "done",
+  });
+  seedTaskObjective(h, taskId);
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-04-29T13:00:00.000Z",
+  });
+  h.db
+    .query(`UPDATE tasks SET attempts_consumed = 1 WHERE task_id = ?`)
+    .run(taskId);
+
+  const built = buildTickDeps(h);
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+    state: "open",
+    headSha: "head-new",
+    baseSha: "base-rev",
+    mergeable: "mergeable",
+    latestReview: {
+      decision: "CHANGES_REQUESTED",
+      latestReviewId: "review-old",
+      submittedHeadSha: "head-old",
+      comments: "Old feedback that is no longer on the PR head.",
+    },
+    checks: {
+      checkSha: "head-new",
+      items: [
+        { name: "build", workflow: null, bucket: "pass", required: true },
+      ],
+    },
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([]);
+
+  const task = h.db
+    .query<
+      {
+        state: string;
+        last_review_id_acted_on: string | null;
+        non_budget_respawns_consumed: number;
+      },
+      [string]
+    >(
+      `SELECT state, last_review_id_acted_on, non_budget_respawns_consumed
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    state: "done",
+    last_review_id_acted_on: null,
+    non_budget_respawns_consumed: 0,
+  });
+});

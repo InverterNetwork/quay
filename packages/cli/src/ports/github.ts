@@ -117,6 +117,7 @@ export interface PrCheck {
 export interface PrLatestReview {
   decision: PrReviewDecision;
   latestReviewId: string | null;
+  submittedHeadSha?: string | null;
   comments: string;
 }
 

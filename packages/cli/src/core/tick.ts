@@ -2483,6 +2483,9 @@ function hasActionableReviewFeedback(
   return (
     snapshot.latestReview.decision === "CHANGES_REQUESTED" &&
     snapshot.latestReview.latestReviewId !== null &&
+    (snapshot.latestReview.submittedHeadSha === undefined ||
+      snapshot.latestReview.submittedHeadSha === null ||
+      snapshot.latestReview.submittedHeadSha === snapshot.headSha) &&
     task.last_review_id_acted_on !== snapshot.latestReview.latestReviewId
   );
 }

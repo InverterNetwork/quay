@@ -143,6 +143,36 @@ export const TASK_TRANSITIONS = [
     "external PR adopted for code-worker ownership",
   ),
   transition(
+    "waiting_external_changes",
+    "pr-open",
+    ["pr_adopted"],
+    "external PR adopted for PR polling",
+  ),
+  transition(
+    "pr-review",
+    "pr-open",
+    ["pr_adopted"],
+    "external PR adopted for PR polling",
+  ),
+  transition(
+    "done",
+    "pr-open",
+    ["pr_adopted"],
+    "adopted PR returned to open PR polling",
+  ),
+  transition(
+    "waiting_external_changes",
+    "done",
+    ["pr_adopted_ready"],
+    "external PR adopted with green CI and no current requested changes",
+  ),
+  transition(
+    "pr-review",
+    "done",
+    ["pr_adopted_ready"],
+    "external PR adopted with green CI and no current requested changes",
+  ),
+  transition(
     "pr-review",
     "pr-open",
     ["ci_failed", "review_approved", "review_superseded"],

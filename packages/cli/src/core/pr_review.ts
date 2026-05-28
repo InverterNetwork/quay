@@ -5,7 +5,7 @@ import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
-import type { GitHubPort, PullRequestView } from "../ports/github.ts";
+import type { GitHubPort, PrSnapshot, PullRequestView } from "../ports/github.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
 import type { AgentResolver } from "./agents.ts";
 import { baseBranchNameSchema } from "./base_branch.ts";
@@ -104,9 +104,12 @@ export interface AdoptPrDeps {
   clock: Clock;
   github: GitHubPort;
   git: GitPort;
+  tmux: TmuxPort;
   artifactStore: ArtifactStore;
   paths: { reposRoot: string; worktreesRoot: string; artifactsRoot: string };
   agentResolver?: AgentResolver;
+  reviewerEnabled?: boolean;
+  gateQuayOwnedDone?: boolean;
   referenceReposRoot?: string | undefined;
 }
 
@@ -121,7 +124,12 @@ export interface AdoptPrResult {
   state: string;
   adopted: boolean;
   scheduled: boolean;
-  skipped_reason: "active_code_attempt_exists" | null;
+  skipped_reason:
+    | "active_code_attempt_exists"
+    | "ci_pending"
+    | "review_requested"
+    | "ready"
+    | null;
 }
 
 interface TaskLookupRow {
@@ -551,10 +559,9 @@ export function adoptPr(
     );
   }
 
-  const snapshot = deps.github.prLightweightSnapshotByNumber(
-    input.repoId,
-    input.prNumber,
-  );
+  const snapshot =
+    deps.github.prSnapshotByNumber(input.repoId, input.prNumber) ??
+    deps.github.prLightweightSnapshotByNumber(input.repoId, input.prNumber);
   if (snapshot === null) {
     throw new AdoptPrError(
       "pr_not_found",
@@ -622,31 +629,73 @@ export function adoptPr(
     };
   }
 
-  let worktreePrepared = false;
-  try {
-    deps.git.fetch(repo.repo_id, headBranch);
-    if (existsSync(task.worktree_path)) {
-      deps.git.worktreeRemove(task.worktree_path);
-    }
-    deps.git.worktreeAddExistingBranch(
-      repo.repo_id,
-      task.worktree_path,
-      headBranch,
-      `origin/${headBranch}`,
+  const ci = classifyCi(snapshot, null);
+  const actionableReview = hasActionableRequestedChanges(snapshot);
+  const needsWorker = actionableReview || ci === "fail";
+
+  if (!needsWorker) {
+    ensureTaskObjectiveArtifact(
+      deps,
+      task.task_id,
+      composeAdoptedTaskObjective(pr, headBranch, baseBranch),
     );
-    worktreePrepared = true;
-  } catch (err) {
-    if (worktreePrepared) {
-      try {
-        deps.git.worktreeRemove(task.worktree_path);
-      } catch {
-        try {
-          rmSync(task.worktree_path, { recursive: true, force: true });
-        } catch {}
+    ensureAdoptedPollingState(deps, {
+      task,
+      pr,
+      headBranch,
+      baseBranch,
+      headSha: pr.headSha,
+      now,
+      state: ci === "pass" ? "done" : "pr-open",
+      eventType: ci === "pass" ? "pr_adopted_ready" : "pr_adopted",
+    });
+    if (
+      ci === "pass" &&
+      deps.reviewerEnabled === true &&
+      deps.gateQuayOwnedDone === true
+    ) {
+      const reviewDeps: EnterReviewDeps = {
+        db: deps.db,
+        clock: deps.clock,
+        github: deps.github,
+        artifactStore: deps.artifactStore,
+        tmux: deps.tmux,
+        paths: { worktreesRoot: deps.paths.worktreesRoot },
+      };
+      if (deps.agentResolver !== undefined) {
+        reviewDeps.agentResolver = deps.agentResolver;
       }
+      const review = enterReview(
+        reviewDeps,
+        {
+          repoId: input.repoId,
+          prNumber: input.prNumber,
+          headSha: snapshot.headSha,
+          reviewerEnabled: true,
+          gateQuayOwnedDone: true,
+          referenceReposRoot: deps.referenceReposRoot,
+        },
+      );
+      return {
+        task_id: task.task_id,
+        attempt_id: review.attempt_id,
+        state: review.state,
+        adopted: true,
+        scheduled: false,
+        skipped_reason: "review_requested",
+      };
     }
-    throw err;
+    return {
+      task_id: task.task_id,
+      attempt_id: null,
+      state: ci === "pass" ? "done" : "pr-open",
+      adopted: true,
+      scheduled: false,
+      skipped_reason: ci === "pending" || ci === "stale" ? "ci_pending" : "ready",
+    };
   }
+
+  prepareAdoptedWorktree(deps, repo.repo_id, task.worktree_path, headBranch);
 
   const attempt = scheduleAdoptedWorkerAttempt(deps, {
     task,
@@ -920,6 +969,54 @@ function findActiveCodeAttempt(
   );
 }
 
+function hasActionableRequestedChanges(snapshot: PrSnapshot): boolean {
+  if (
+    snapshot.latestReview.decision !== "CHANGES_REQUESTED" ||
+    snapshot.latestReview.latestReviewId === null
+  ) {
+    return false;
+  }
+  const submitted = snapshot.latestReview.submittedHeadSha;
+  return (
+    submitted === undefined ||
+    submitted === null ||
+    submitted === snapshot.headSha
+  );
+}
+
+function prepareAdoptedWorktree(
+  deps: AdoptPrDeps,
+  repoId: string,
+  worktreePath: string,
+  headBranch: string,
+): void {
+  let worktreePrepared = false;
+  try {
+    deps.git.fetch(repoId, headBranch);
+    if (existsSync(worktreePath)) {
+      deps.git.worktreeRemove(worktreePath);
+    }
+    deps.git.worktreeAddExistingBranch(
+      repoId,
+      worktreePath,
+      headBranch,
+      `origin/${headBranch}`,
+    );
+    worktreePrepared = true;
+  } catch (err) {
+    if (worktreePrepared) {
+      try {
+        deps.git.worktreeRemove(worktreePath);
+      } catch {
+        try {
+          rmSync(worktreePath, { recursive: true, force: true });
+        } catch {}
+      }
+    }
+    throw err;
+  }
+}
+
 function ensureAdoptionMetadata(
   db: DB,
   input: {
@@ -951,6 +1048,91 @@ function ensureAdoptionMetadata(
     input.now,
     input.taskId,
   );
+}
+
+function ensureAdoptedPollingState(
+  deps: AdoptPrDeps,
+  input: {
+    task: TaskLookupRow;
+    pr: PullRequestView;
+    headBranch: string;
+    baseBranch: string;
+    headSha: string;
+    now: string;
+    state: "pr-open" | "done";
+    eventType: "pr_adopted" | "pr_adopted_ready";
+  },
+): void {
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    ensureAdoptionMetadata(deps.db, {
+      taskId: input.task.task_id,
+      branchName: input.headBranch,
+      baseBranch: input.baseBranch,
+      pr: input.pr,
+      headSha: input.headSha,
+      now: input.now,
+    });
+    deps.db
+      .query(
+        `UPDATE attempts
+            SET ended_at = ?,
+                review_verdict = 'superseded',
+                kill_intent = COALESCE(kill_intent, 'superseded')
+          WHERE task_id = ?
+            AND reason = 'review_only'
+            AND spawned_at IS NULL
+            AND ended_at IS NULL`,
+      )
+      .run(input.now, input.task.task_id);
+    deps.db
+      .query(
+        `UPDATE review_requests
+            SET status = 'superseded',
+                updated_at = ?
+          WHERE task_id = ?
+            AND status IN ('pending_ci', 'scheduled')`,
+      )
+      .run(input.now, input.task.task_id);
+
+    if (input.task.state !== input.state) {
+      assertTaskState(input.task.state);
+      const transition = transitionTaskState(deps, {
+        taskId: input.task.task_id,
+        from: input.task.state,
+        to: input.state,
+        eventType: input.eventType,
+        now: input.now,
+        updates: {
+          clearTickError: true,
+          pr: {
+            number: input.pr.number,
+            numberCoalesce: "existing",
+            url: input.pr.url,
+            urlCoalesce: "existing",
+            headSha: input.headSha,
+          },
+        },
+        eventData: {
+          pr_number: input.pr.number,
+          head_branch: input.headBranch,
+          base_branch: input.baseBranch,
+        },
+      });
+      if (!transition.applied) {
+        deps.db.exec("ROLLBACK");
+        throw new Error(
+          `cannot adopt task ${input.task.task_id} from state ${transition.currentState ?? input.task.state}`,
+        );
+      }
+    }
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
 }
 
 function scheduleAdoptedWorkerAttempt(
