@@ -2205,12 +2205,6 @@ function reconcileParkedAdoptedOpenPr(
   if (snapshot.state !== "open") return null;
   if (task.head_sha !== null && snapshot.headSha === task.head_sha) return null;
 
-  persistPrMetadata(deps, task.task_id, snapshot);
-
-  if (snapshot.mergeable === "conflicting") {
-    return transitionParkedAdoptedToPrOpen(deps, task, "adopted_pr_reconciled");
-  }
-
   const repo = loadRepoForTask(deps.db, task.task_id);
   const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
   if (ci === "stale") {
@@ -2221,6 +2215,12 @@ function reconcileParkedAdoptedOpenPr(
         `PR head SHA (${snapshot.headSha}) and check-run SHA (${snapshot.checks.checkSha}) disagree; skipping adopted PR reconciliation this tick`,
       ),
     );
+  }
+
+  persistPrMetadata(deps, task.task_id, snapshot);
+
+  if (snapshot.mergeable === "conflicting") {
+    return transitionParkedAdoptedToPrOpen(deps, task, "adopted_pr_reconciled");
   }
   if (ci === "pending" || ci === "fail") {
     return transitionParkedAdoptedToPrOpen(

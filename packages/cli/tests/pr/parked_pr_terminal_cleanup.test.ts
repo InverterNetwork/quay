@@ -348,6 +348,90 @@ test("adopted PR reconciliation evaluates full snapshot instead of lightweight m
   expect(readyApprovedOutboxCount(taskId)).toBe(0);
 });
 
+test("adopted PR stale CI snapshot does not advance head retry gate", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-15T08:57:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-parked-adopted-stale-then-ready");
+  const taskId = insertTask(h.db, {
+    taskId: "task-parked-adopted-stale-then-ready",
+    repoId,
+    state: "waiting_human",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET authoring_mode = 'adopted_external_pr',
+              branch_name = 'feature/human-stale-then-ready',
+              pr_number = 966,
+              head_sha = 'stale-head',
+              budget_exhausted = 1,
+              claim_id = 'claim-stale',
+              claimed_at = ?
+        WHERE task_id = ?`,
+    )
+    .run(h.clock.nowISO(), taskId);
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 5,
+    spawnedAt: "2026-05-15T07:57:00.000Z",
+  });
+  const eventId = insertEvent(
+    taskId,
+    "budget_exhausted",
+    "running",
+    "awaiting-next-brief",
+  );
+  enqueueHandoff(taskId, "budget_exhausted", eventId);
+
+  const built = buildTickDeps(h);
+  built.github.setPrSnapshotByNumber(
+    repoId,
+    966,
+    staleCheckSnapshot(966, "current-head", "previous-head"),
+  );
+
+  const firstResults = await tick_once(built.deps);
+
+  expect(firstResults[0]?.action).toBe("tick_error");
+  expect(taskState(taskId)).toMatchObject({
+    state: "waiting_human",
+    claim_id: "claim-stale",
+  });
+  expect(taskPrMetadata(taskId)).toMatchObject({
+    head_sha: "stale-head",
+    budget_exhausted: 1,
+  });
+  expect(readyApprovedOutboxCount(taskId)).toBe(0);
+
+  built.github.setPrSnapshotByNumber(
+    repoId,
+    966,
+    readyApprovedSnapshot(966, "current-head"),
+  );
+  h.clock.set("2026-05-15T09:12:00.000Z");
+
+  const secondResults = await tick_once(built.deps);
+
+  expect(secondResults).toEqual([{ task_id: taskId, action: "ci_passed" }]);
+  expect(taskState(taskId)).toMatchObject({
+    state: "done",
+    claim_id: null,
+    claimed_at: null,
+  });
+  expect(taskPrMetadata(taskId)).toMatchObject({
+    head_sha: "current-head",
+    base_sha: "base-966",
+    budget_exhausted: 0,
+  });
+  expect(outboxPayload(taskId)).toMatchObject({
+    task_id: taskId,
+    pr_number: 966,
+    head_sha: "current-head",
+    approval_status: "approved",
+  });
+});
+
 test("non_budget_loop task with externally closed PR transitions terminal and deletes remote branch", async () => {
   h = createHarness();
   h.clock.set("2026-05-15T09:00:00.000Z");
@@ -603,6 +687,22 @@ function pendingSnapshot(prNumber: number, headSha: string): PrSnapshot {
       checkSha: headSha,
       items: [
         { name: "build", workflow: null, bucket: "pending", required: true },
+      ],
+    },
+  };
+}
+
+function staleCheckSnapshot(
+  prNumber: number,
+  headSha: string,
+  checkSha: string,
+): PrSnapshot {
+  return {
+    ...readyApprovedSnapshot(prNumber, headSha),
+    checks: {
+      checkSha,
+      items: [
+        { name: "build", workflow: null, bucket: "pass", required: true },
       ],
     },
   };
