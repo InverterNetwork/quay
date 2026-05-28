@@ -32,6 +32,11 @@ import { parseImportToml, planImport } from "../core/tags/import_toml.ts";
 import { QuayError } from "../core/errors.ts";
 import type { PreambleKind } from "../core/preamble.ts";
 import {
+  createPreamble,
+  getPreamble,
+  listPreambles,
+} from "../core/preamble.ts";
+import {
   cancel_task,
   type CancelDeps,
   type CancelResult,
@@ -193,6 +198,8 @@ export async function dispatch(
         return await handleAdoptPr(rest, deps, io);
       case "repo":
         return handleRepo(rest, deps, io);
+      case "preamble":
+        return handlePreamble(rest, deps, io);
       case "tags":
         return handleTags(rest, deps, io);
       case "cancel":
@@ -220,6 +227,137 @@ export async function dispatch(
     io.stderr(`${JSON.stringify(payload)}\n`);
     return { exitCode: 1 };
   }
+}
+
+function handlePreamble(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  if (argv.length === 0) {
+    return writeErrorWithUsage(
+      io,
+      ["preamble"],
+      "usage_error",
+      "preamble subcommand required",
+    );
+  }
+  const [sub, ...rest] = argv;
+  if (isHelpToken(sub as string)) return printHelp(io, ["preamble"]);
+  switch (sub) {
+    case "list":
+      if (wantsHelp(rest)) return printHelp(io, ["preamble", "list"]);
+      return handlePreambleList(rest, deps, io);
+    case "show":
+      if (wantsHelp(rest)) return printHelp(io, ["preamble", "show"]);
+      return handlePreambleShow(rest, deps, io);
+    case "create":
+      if (wantsHelp(rest)) return printHelp(io, ["preamble", "create"]);
+      return handlePreambleCreate(rest, deps, io);
+    default:
+      return writeErrorWithUsage(
+        io,
+        ["preamble"],
+        "usage_error",
+        `unknown preamble subcommand: ${sub}`,
+      );
+  }
+}
+
+function handlePreambleList(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--kind"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const kindRaw = readFlag(argv, "--kind");
+  const kind = kindRaw === null
+    ? undefined
+    : parsePreambleKind(kindRaw, io);
+  if (kind === null) return { exitCode: 1 };
+  io.stdout(`${JSON.stringify(listPreambles(deps.db, kind))}\n`);
+  return { exitCode: 0 };
+}
+
+function handlePreambleShow(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--id"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const rawId = readFlag(argv, "--id") ?? positional(argv);
+  if (rawId === null) {
+    return writeError(io, "usage_error", "preamble show requires <preamble_id>");
+  }
+  const parsed = parsePositiveIntArg(rawId, "preamble show", "preamble_id");
+  if (!parsed.ok) return writeError(io, "usage_error", parsed.message);
+  const row = getPreamble(deps.db, parsed.value);
+  if (row === null) {
+    return writeError(io, "not_found", `preamble ${parsed.value} not found`, {
+      preamble_id: parsed.value,
+    });
+  }
+  io.stdout(`${JSON.stringify(row)}\n`);
+  return { exitCode: 0 };
+}
+
+function parsePreambleKind(raw: string, io: CliIO): PreambleKind | null {
+  if (raw === "code" || raw === "review") return raw;
+  writeError(io, "usage_error", `preamble kind must be code or review (got ${raw})`, {
+    kind: raw,
+  });
+  return null;
+}
+
+function handlePreambleCreate(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {
+    valued: ["--kind", "--body-file", "--body"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const kindRaw = readFlag(argv, "--kind");
+  if (kindRaw === null) {
+    return writeError(io, "usage_error", "preamble create requires --kind <code|review>");
+  }
+  const kind = parsePreambleKind(kindRaw, io);
+  if (kind === null) return { exitCode: 1 };
+
+  const bodyFlag = readFlag(argv, "--body");
+  const bodyFile = readFlag(argv, "--body-file");
+  if ((bodyFlag === null && bodyFile === null) || (bodyFlag !== null && bodyFile !== null)) {
+    return writeError(
+      io,
+      "usage_error",
+      "preamble create requires exactly one of --body or --body-file",
+    );
+  }
+  let body: string;
+  if (bodyFlag !== null) {
+    body = bodyFlag;
+  } else if (bodyFile === "-") {
+    if (io.stdin === undefined) {
+      return writeError(io, "usage_error", "stdin is not available");
+    }
+    body = io.stdin();
+  } else {
+    const fileRead = tryReadFile(bodyFile as string);
+    if (!fileRead.ok) return writeError(io, "usage_error", fileRead.message);
+    body = fileRead.value;
+  }
+  const row = createPreamble(deps.db, deps.clock, kind, body);
+  io.stdout(`${JSON.stringify(row)}\n`);
+  return { exitCode: 0 };
 }
 
 function writeError(
@@ -2189,14 +2327,15 @@ function parseGoalTokenBudget(
 function parsePositiveIntArg(
   raw: string | null,
   command: string,
+  noun = "outbox_item_id",
 ): { ok: true; value: number } | { ok: false; message: string } {
   if (raw === null) {
-    return { ok: false, message: `${command} requires <outbox_item_id>` };
+    return { ok: false, message: `${command} requires <${noun}>` };
   }
   if (!/^[1-9]\d*$/.test(raw)) {
     return {
       ok: false,
-      message: `${command} requires a positive integer outbox_item_id (got ${raw})`,
+      message: `${command} requires a positive integer ${noun} (got ${raw})`,
     };
   }
   return { ok: true, value: Number(raw) };

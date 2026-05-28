@@ -376,6 +376,44 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--from <path>", desc: "Path to a JSON file (required). Use - for stdin." },
     ],
   },
+  preamble: {
+    path: "preamble",
+    synopsis: "quay preamble <subcommand> [options]",
+    summary: "Manage worker and reviewer preamble catalog entries",
+    subcommands: [
+      "preamble list",
+      "preamble show",
+      "preamble create",
+    ],
+  },
+  "preamble list": {
+    path: "preamble list",
+    synopsis: "quay preamble list [--kind <code|review>]",
+    summary:
+      "List preamble catalog rows as JSON with preamble_id, kind, and created_at.",
+    flags: [
+      { flag: "--kind <code|review>", desc: "Optional kind filter." },
+    ],
+  },
+  "preamble show": {
+    path: "preamble show",
+    synopsis: "quay preamble show <preamble_id>",
+    summary: "Print one preamble row, including body, as JSON.",
+  },
+  "preamble create": {
+    path: "preamble create",
+    synopsis:
+      "quay preamble create --kind <code|review> (--body-file <path>|--body <text>)",
+    summary:
+      "Append a new preamble row and print the created record as JSON.",
+    details:
+      "Use --body-file - to read the body from stdin. Preambles are append-only; assign a created preamble to a repo with `quay repo update <repo_id> --preamble-worker <id>` or `--preamble-reviewer <id>`.",
+    flags: [
+      { flag: "--kind <code|review>", desc: "Preamble kind to create (required)." },
+      { flag: "--body-file <path>", desc: "Read body from a file, or '-' for stdin." },
+      { flag: "--body <text>", desc: "Inline body text. Mutually exclusive with --body-file." },
+    ],
+  },
   tags: {
     path: "tags",
     synopsis: "quay tags <subcommand> [options]",
@@ -527,6 +565,7 @@ const TOP_LEVEL_ORDER: string[] = [
   "review-pr",
   "adopt-pr",
   "repo",
+  "preamble",
   "tags",
   "cancel",
   "submit-brief",

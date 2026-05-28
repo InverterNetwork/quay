@@ -85,6 +85,35 @@ files, serves existing assets with content-type and cache headers, injects
 same-origin API runtime config into `index.html`, returns `index.html` for
 non-API SPA routes, and returns 404 for missing asset-like paths.
 
+## Preamble
+
+```bash
+quay preamble list [--kind <code|review>]
+quay preamble show <preamble_id>
+quay preamble create --kind <code|review> --body-file <path>
+quay preamble create --kind <code|review> --body-file -
+quay preamble create --kind <code|review> --body <text>
+```
+
+`preamble list` prints a JSON array of catalog summaries with
+`preamble_id`, `kind`, and `created_at`. `preamble show` prints one row,
+including `body`. `preamble create` appends a new row and prints the created
+record, including its `preamble_id`, so operators can register preambles
+without direct SQL access.
+
+Preambles are split by kind: `code` for worker attempts and `review` for
+reviewer attempts. Use `--body-file -` to read the body from stdin. After
+creating a preamble, assign it to a repo role with the existing override
+flags:
+
+```bash
+worker_id=$(quay preamble create --kind code --body-file worker.md | jq -r .preamble_id)
+quay repo update myrepo --preamble-worker "$worker_id"
+
+reviewer_id=$(quay preamble create --kind review --body-file reviewer.md | jq -r .preamble_id)
+quay repo update myrepo --preamble-reviewer "$reviewer_id"
+```
+
 ## Repo
 
 ```bash

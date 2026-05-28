@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import type { SQLQueryBindings } from "bun:sqlite";
 import { z } from "zod";
 import type { QuayConfig } from "../cli/config.ts";
 import { DEFAULT_RETRY_BUDGET } from "../core/enqueue.ts";
@@ -7,6 +9,7 @@ import {
   type AgentRole,
 } from "../core/agents.ts";
 import { QuayError } from "../core/errors.ts";
+import { TASK_STATES, type TaskState } from "../core/task_state.ts";
 import {
   adminAuthAllowedHeaders,
   adminAuthErrorResponse,
@@ -132,6 +135,41 @@ interface AdminMatrixRow {
   key: string;
   default_value: string | null;
   values: Record<string, string | null>;
+}
+
+type AdminMissionControlAttnReason =
+  | "changes"
+  | "ci"
+  | "slack"
+  | "brief"
+  | "budget"
+  | "loop"
+  | "worktree";
+
+interface AdminMissionControlTask {
+  id: string;
+  ext: string;
+  repo: string;
+  title: string;
+  branch: string;
+  state: TaskState;
+  pr: number | null;
+  budget: number;
+  total: number;
+  latest: string;
+  agent: string;
+  age: string;
+  updatedAt: string;
+  authors: string[];
+  attn?: AdminMissionControlAttnReason;
+  attnTone?: "warn" | "danger";
+}
+
+interface AdminMissionControlReadModel {
+  refreshedAt: string;
+  activeTaskCount: number;
+  hasAttention: boolean;
+  tasks: AdminMissionControlTask[];
 }
 
 interface AdminRepoEffectivePreamble {
@@ -404,6 +442,14 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
       );
     }
 
+    if (segments.length === 2 && segments[0] === "v1" && segments[1] === "tasks") {
+      return jsonResponse(
+        await buildMissionControlReadModel(runtime),
+        200,
+        cors.headers,
+      );
+    }
+
     if (segments.length === 2 && segments[0] === "v1" && segments[1] === "matrix") {
       const body = buildMatrixReadModel(runtime);
       return jsonResponse(
@@ -483,6 +529,7 @@ function allowedMethodsForRoute(segments: string[]): string | null {
       "meta",
       "repos",
       "tags",
+      "tasks",
     ].includes(segments[1] ?? "") ? "GET, OPTIONS" : null;
   }
   if (segments.length === 3 && segments[1] === "changes") {
@@ -503,6 +550,326 @@ function isWriteRoute(
     segments[0] === "v1" &&
     segments[1] === "changes" &&
     segments[2] === action;
+}
+
+interface MissionControlTaskRow {
+  task_id: string;
+  repo_id: string;
+  external_ref: string | null;
+  state: string;
+  branch_name: string;
+  pr_number: number | null;
+  attempts_consumed: number;
+  retry_budget: number;
+  authors_json: string | null;
+  worker_agent: string | null;
+  worker_model: string | null;
+  reviewer_agent: string | null;
+  reviewer_model: string | null;
+  goal_objective: string | null;
+  objective_file_path: string | null;
+  updated_at: string;
+  created_at: string;
+}
+
+interface MissionControlEventRow {
+  task_id: string;
+  event_type: string;
+  occurred_at: string;
+}
+
+const TASK_STATE_SET = new Set<string>(TASK_STATES);
+const MISSION_CONTROL_TERMINAL_STATE_LIST = [
+  "merged",
+  "cancelled",
+  "closed_unmerged",
+] as const satisfies readonly TaskState[];
+const MISSION_CONTROL_TERMINAL_STATES = new Set<TaskState>(MISSION_CONTROL_TERMINAL_STATE_LIST);
+const MISSION_CONTROL_ACTIVE_STATES = TASK_STATES.filter(
+  (state) => !MISSION_CONTROL_TERMINAL_STATES.has(state),
+);
+const MISSION_CONTROL_ACTIVE_TASK_LIMIT = 200;
+const MISSION_CONTROL_TERMINAL_TASK_LIMIT = 50;
+const MISSION_CONTROL_EVENTS_PER_TASK = 5;
+
+function sqlPlaceholders(values: readonly unknown[]): string {
+  if (values.length === 0) throw new Error("SQL placeholder list cannot be empty");
+  return values.map(() => "?").join(", ");
+}
+
+async function buildMissionControlReadModel(
+  runtime: AdminApiRuntime,
+): Promise<AdminMissionControlReadModel> {
+  const rows = missionControlTaskRows(runtime.db);
+  const eventsByTask = recentMissionControlEventsByTask(
+    runtime.db,
+    rows.map((row) => row.task_id),
+  );
+  const now = new Date();
+  const tasks = (
+    await Promise.all(
+      rows.map((row) =>
+        missionControlTaskFromRow(row, now, eventsByTask.get(row.task_id) ?? []),
+      ),
+    )
+  ).filter((task): task is AdminMissionControlTask => task !== null);
+
+  return {
+    refreshedAt: now.toISOString(),
+    activeTaskCount: missionControlActiveTaskCount(runtime.db),
+    hasAttention: tasks.some((task) => task.attn !== undefined),
+    tasks,
+  };
+}
+
+function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
+  return db
+    .query<MissionControlTaskRow, SQLQueryBindings[]>(
+      `WITH candidate_tasks AS (
+         SELECT t.task_id, t.repo_id, t.external_ref, t.state, t.branch_name,
+                t.pr_number, t.attempts_consumed, t.retry_budget, t.authors_json,
+                t.worker_agent, t.worker_model, t.reviewer_agent, t.reviewer_model,
+                tg.objective AS goal_objective,
+                (
+                  SELECT ar.file_path
+                    FROM artifacts ar
+                   WHERE ar.task_id = t.task_id
+                     AND ar.kind = 'task_objective'
+                     AND ar.attempt_id IS NULL
+                   ORDER BY ar.artifact_id ASC
+                   LIMIT 1
+                ) AS objective_file_path,
+                t.updated_at, t.created_at,
+                CASE
+                  WHEN t.state IN (${sqlPlaceholders(MISSION_CONTROL_TERMINAL_STATE_LIST)})
+                  THEN 1
+                  ELSE 0
+                END AS terminal_bucket
+           FROM tasks t
+           JOIN repos r ON r.repo_id = t.repo_id
+           LEFT JOIN task_goals tg ON tg.task_id = t.task_id
+          WHERE r.archived_at IS NULL
+            AND t.state IN (${sqlPlaceholders(TASK_STATES)})
+       ),
+       ranked_tasks AS (
+         SELECT candidate_tasks.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY terminal_bucket
+                  ORDER BY updated_at DESC, task_id ASC
+                ) AS bucket_rank
+           FROM candidate_tasks
+       )
+       SELECT task_id, repo_id, external_ref, state, branch_name,
+              pr_number, attempts_consumed, retry_budget, authors_json,
+              worker_agent, worker_model, reviewer_agent, reviewer_model,
+              goal_objective, objective_file_path, updated_at, created_at
+         FROM ranked_tasks
+        WHERE (terminal_bucket = 0 AND bucket_rank <= ?)
+           OR (terminal_bucket = 1 AND bucket_rank <= ?)
+        ORDER BY terminal_bucket ASC, updated_at DESC, task_id ASC`,
+    )
+    .all(
+      ...MISSION_CONTROL_TERMINAL_STATE_LIST,
+      ...TASK_STATES,
+      MISSION_CONTROL_ACTIVE_TASK_LIMIT,
+      MISSION_CONTROL_TERMINAL_TASK_LIMIT,
+    );
+}
+
+function missionControlActiveTaskCount(db: DB): number {
+  const row = db
+    .query<{ count: number }, SQLQueryBindings[]>(
+      `SELECT COUNT(*) AS count
+         FROM tasks t
+         JOIN repos r ON r.repo_id = t.repo_id
+        WHERE r.archived_at IS NULL
+          AND t.state IN (${sqlPlaceholders(MISSION_CONTROL_ACTIVE_STATES)})`,
+    )
+    .get(...MISSION_CONTROL_ACTIVE_STATES);
+  return row?.count ?? 0;
+}
+
+async function missionControlTaskFromRow(
+  row: MissionControlTaskRow,
+  now: Date,
+  recentEvents: readonly MissionControlEventRow[],
+): Promise<AdminMissionControlTask | null> {
+  const state = toTaskState(row.state);
+  if (state === null) return null;
+  const attention = deriveMissionControlAttention(state, recentEvents);
+  const task: AdminMissionControlTask = {
+    id: row.task_id,
+    ext: row.external_ref ?? "—",
+    repo: row.repo_id,
+    title: await titleForMissionControl(row),
+    branch: row.branch_name.trim() === "" ? "—" : row.branch_name,
+    state,
+    pr: row.pr_number,
+    budget: row.attempts_consumed,
+    total: row.retry_budget,
+    latest: formatLatestMissionControlEvent(recentEvents[0]),
+    agent: missionControlAgent(row, state),
+    age: formatAge(row.updated_at, now),
+    updatedAt: row.updated_at,
+    authors: parseMissionControlAuthors(row.authors_json),
+  };
+  if (attention !== null) {
+    task.attn = attention.reason;
+    task.attnTone = attention.tone;
+  }
+  return task;
+}
+
+function toTaskState(state: string): TaskState | null {
+  if (TASK_STATE_SET.has(state)) return state as TaskState;
+  return null;
+}
+
+function recentMissionControlEventsByTask(
+  db: DB,
+  taskIds: readonly string[],
+): Map<string, MissionControlEventRow[]> {
+  if (taskIds.length === 0) return new Map();
+  const rows = db
+    .query<MissionControlEventRow, SQLQueryBindings[]>(
+      `WITH ranked_events AS (
+         SELECT task_id, event_type, occurred_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY task_id
+                  ORDER BY occurred_at DESC, event_id DESC
+                ) AS event_rank
+           FROM events
+          WHERE task_id IN (${sqlPlaceholders(taskIds)})
+       )
+       SELECT task_id, event_type, occurred_at
+         FROM ranked_events
+        WHERE event_rank <= ?
+        ORDER BY task_id ASC, event_rank ASC`,
+    )
+    .all(...taskIds, MISSION_CONTROL_EVENTS_PER_TASK);
+  const byTask = new Map<string, MissionControlEventRow[]>();
+  for (const row of rows) {
+    const events = byTask.get(row.task_id);
+    if (events === undefined) {
+      byTask.set(row.task_id, [row]);
+    } else {
+      events.push(row);
+    }
+  }
+  return byTask;
+}
+
+function deriveMissionControlAttention(
+  state: TaskState,
+  recentEvents: readonly MissionControlEventRow[],
+): { reason: AdminMissionControlAttnReason; tone: "warn" | "danger" } | null {
+  if (state === "worktree_error") return { reason: "worktree", tone: "danger" };
+  if (state === "non_budget_loop") return { reason: "loop", tone: "danger" };
+  if (state === "orchestrator_loop") return { reason: "loop", tone: "danger" };
+
+  const latest = recentEvents[0]?.event_type;
+  if (latest === "ci_failed") return { reason: "ci", tone: "danger" };
+  if (latest === "budget_exhausted") return { reason: "budget", tone: "danger" };
+  if (state === "waiting_human") return { reason: "slack", tone: "warn" };
+  if (state === "awaiting-next-brief") return { reason: "brief", tone: "warn" };
+  if (latest === "changes_requested") return { reason: "changes", tone: "warn" };
+
+  return null;
+}
+
+async function titleForMissionControl(row: MissionControlTaskRow): Promise<string> {
+  const fromGoal = summarizeTaskObjective(row.goal_objective);
+  if (fromGoal !== null) return fromGoal;
+  const fromArtifact = summarizeTaskObjective(await readOptionalTextFile(row.objective_file_path));
+  if (fromArtifact !== null) return fromArtifact;
+  return row.external_ref ?? row.task_id;
+}
+
+function summarizeTaskObjective(value: string | null): string | null {
+  if (value === null) return null;
+  for (const rawLine of value.split(/\r?\n/)) {
+    const line = rawLine
+      .trim()
+      .replace(/^#+\s*/, "")
+      .replace(/^[-*]\s*/, "");
+    if (line !== "") return line.length > 120 ? `${line.slice(0, 117)}...` : line;
+  }
+  return null;
+}
+
+async function readOptionalTextFile(path: string | null): Promise<string | null> {
+  if (path === null) return null;
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function formatLatestMissionControlEvent(event: MissionControlEventRow | undefined): string {
+  if (event === undefined) return "no events recorded";
+  switch (event.event_type) {
+    case "ci_failed":
+      return "CI failed";
+    case "budget_exhausted":
+      return "budget exhausted";
+    case "changes_requested":
+      return "changes requested";
+    case "review_requested":
+      return "review requested";
+    case "spawned":
+      return "worker spawned";
+    case "pr_opened":
+      return "PR opened";
+    case "ci_passed":
+      return "CI passed";
+    case "pr_merged":
+      return "PR merged";
+    default:
+      return event.event_type.replace(/_/g, " ");
+  }
+}
+
+function missionControlAgent(row: MissionControlTaskRow, state: TaskState): string {
+  if (state === "pr-review") {
+    return row.reviewer_model ?? row.reviewer_agent ?? row.worker_model ?? row.worker_agent ?? "—";
+  }
+  return row.worker_model ?? row.worker_agent ?? row.reviewer_model ?? row.reviewer_agent ?? "—";
+}
+
+function parseMissionControlAuthors(authorsJson: string | null): string[] {
+  if (authorsJson === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(authorsJson);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const authors: string[] = [];
+  for (const entry of parsed) {
+    if (typeof entry === "string" && entry.trim() !== "") {
+      authors.push(entry.trim());
+      continue;
+    }
+    if (entry !== null && typeof entry === "object") {
+      const name = (entry as { name?: unknown }).name;
+      if (typeof name === "string" && name.trim() !== "") authors.push(name.trim());
+    }
+  }
+  return authors;
+}
+
+function formatAge(timestamp: string, now: Date): string {
+  const parsed = Date.parse(timestamp);
+  if (Number.isNaN(parsed)) return "—";
+  const seconds = Math.max(0, Math.floor((now.getTime() - parsed) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
 }
 
 function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown> {

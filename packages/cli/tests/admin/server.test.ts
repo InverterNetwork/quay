@@ -272,6 +272,32 @@ test("embedded handler returns index.html for root and non-api SPA routes", asyn
   expect(await route.text()).toContain("window.location.origin");
 });
 
+test("static UI handlers treat dotted configuration scopes as SPA routes", async () => {
+  h = createHarness();
+  const uiDir = makeUiDir();
+  try {
+    const hosted = createHostedAdminApiHandler(createRuntime(), uiDir);
+    const hostedRoute = await hosted(
+      new Request("http://quay.local/configuration/owner.repo"),
+    );
+    expect(hostedRoute.status).toBe(200);
+    expect(hostedRoute.headers.get("content-type")).toContain("text/html");
+    expect(await hostedRoute.text()).toContain("<div id=\"root\"></div>");
+
+    const embedded = createEmbeddedAdminApiHandler(createRuntime(), makeEmbeddedAssets({
+      "index.html": "<!doctype html><div id=\"root\"></div>",
+    }));
+    const embeddedRoute = await embedded(
+      new Request("http://quay.local/configuration/owner.repo"),
+    );
+    expect(embeddedRoute.status).toBe(200);
+    expect(embeddedRoute.headers.get("content-type")).toContain("text/html");
+    expect(await embeddedRoute.text()).toContain("window.location.origin");
+  } finally {
+    rmSync(uiDir, { recursive: true, force: true });
+  }
+});
+
 test("hosted handler returns a clear 404 for missing static assets", async () => {
   h = createHarness();
   const uiDir = makeUiDir();
