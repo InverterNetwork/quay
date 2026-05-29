@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { SpawnedValidatorRunner } from "../../src/core/validator_runner.ts";
+import type { LinearBlockedByRelation } from "../../src/ports/linear.ts";
 import type { LinearIssue } from "../../src/ports/linear.ts";
 import type { SlackThreadMessage } from "../../src/ports/slack.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
@@ -139,6 +140,56 @@ async function addRepo(built: ReturnType<typeof buildCliDeps>): Promise<void> {
   built.git.seedBareClone(REPO_ID);
 }
 
+function insertTrackedTask(
+  state: string,
+  externalRef: string,
+  repoId = REPO_ID,
+): string {
+  if (h === null) throw new Error("harness not initialized");
+  const taskId = `task-${externalRef.toLowerCase()}`;
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, external_ref, state, branch_name, tmux_id, worktree_path,
+         retry_budget, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 5, ?, ?)`,
+    )
+    .run(
+      taskId,
+      repoId,
+      externalRef,
+      state,
+      `quay/${externalRef.toLowerCase()}`,
+      `quay-task-${externalRef.toLowerCase()}`,
+      `/tmp/${taskId}`,
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+    );
+  return taskId;
+}
+
+function blockedByRelation(
+  identifier: string,
+  stateType: string | null,
+  opts: { repo?: string; relationId?: string } = {},
+): LinearBlockedByRelation {
+  return {
+    relationId: opts.relationId ?? `rel-${identifier}`,
+    blocker: {
+      identifier,
+      url: `https://linear.app/inverter/issue/${identifier}`,
+      title: `Blocker ${identifier}`,
+      body: `Blocker context\n\n${quayConfigBlock({
+        repo: opts.repo ?? REPO_ID,
+        tags: ["dependency"],
+        slack_thread: null,
+        authors: [{ name: "Fabian Scherer", slack_id: "U06TDC56VJB" }],
+      })}`,
+      stateType,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 
 test("test_enqueue_linear_issue_end_to_end", async () => {
@@ -208,6 +259,121 @@ test("test_enqueue_linear_issue_end_to_end", async () => {
     )
     .all(enqResult.task_id);
   expect(tags.map((r) => r.tag)).toEqual(["auth-session", "cache"]);
+});
+
+test("complete Linear blocker is snapshotted but does not create dependency row", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2000" }));
+  built.linear.setBlockedByRelations("ENG-2000", [
+    blockedByRelation("ENG-1999", "completed"),
+  ]);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2000"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const enqResult = JSON.parse(io.out().trim());
+  expect(enqResult.state).toBe("queued");
+  const deps = h.db
+    .query(`SELECT dependency_id FROM task_dependencies WHERE dependent_task_id = ?`)
+    .all(enqResult.task_id);
+  expect(deps).toHaveLength(0);
+  const snapshot = h.db
+    .query<{ file_path: string }, [string]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND kind = 'ticket_snapshot'
+        ORDER BY artifact_id DESC LIMIT 1`,
+    )
+    .get(enqResult.task_id);
+  const parsed = JSON.parse(readFileSync(snapshot!.file_path, "utf8"));
+  expect(parsed.linear_blocked_by_relations[0]).toMatchObject({
+    blocker_identifier: "ENG-1999",
+    complete_in_linear: true,
+    persisted: false,
+  });
+});
+
+test("incomplete tracked Linear blocker creates dependency and waits", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+  const blockerTaskId = insertTrackedTask("pr-open", "ENG-2100");
+
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2101" }));
+  built.linear.setBlockedByRelations("ENG-2101", [
+    blockedByRelation("ENG-2100", "started"),
+  ]);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2101"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const enqResult = JSON.parse(io.out().trim());
+  expect(enqResult.state).toBe("waiting_dependencies");
+  const task = h.db
+    .query<{ state: string }, [string]>(`SELECT state FROM tasks WHERE task_id = ?`)
+    .get(enqResult.task_id);
+  expect(task?.state).toBe("waiting_dependencies");
+  const dep = h.db
+    .query<
+      {
+        dependency_task_id: string;
+        dependency_external_ref: string;
+        dependency_repo_id: string;
+        satisfied_at: string | null;
+      },
+      [string]
+    >(
+      `SELECT dependency_task_id, dependency_external_ref, dependency_repo_id, satisfied_at
+         FROM task_dependencies WHERE dependent_task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(dep).toEqual({
+    dependency_task_id: blockerTaskId,
+    dependency_external_ref: "ENG-2100",
+    dependency_repo_id: REPO_ID,
+    satisfied_at: null,
+  });
+});
+
+test("incomplete untracked Linear blocker fails before substrate side effects", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2201" }));
+  built.linear.setBlockedByRelations("ENG-2201", [
+    blockedByRelation("ENG-2200", "started"),
+  ]);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2201"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err());
+  expect(err.error).toBe("dependency_not_tracked");
+  expect(
+    built.git.calls.some((call) => call.op === "worktreeAdd"),
+  ).toBe(false);
+  const taskCount = h.db
+    .query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM tasks`)
+    .get();
+  expect(taskCount?.count).toBe(0);
 });
 
 test("enqueue linear issue forwards PR screenshot request flag", async () => {
