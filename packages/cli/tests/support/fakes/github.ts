@@ -33,11 +33,19 @@ export class FakeGitHub implements GitHubPort {
   readonly postedReviews = new Map<string, PostedReview | null>();
   readonly postedReviewAuthorsAtHead = new Map<string, PostedReviewAuthor[]>();
   readonly tokenAccessCalls: { repoId: string; token: string }[] = [];
+  readonly mergePullRequestCalls: {
+    repoId: string;
+    prNumber: number;
+    expectedHeadSha: string;
+  }[] = [];
   private graphqlRateLimit: GitHubGraphqlRateLimit | null = null;
   private prSnapshotHandler:
     | ((repoId: string, branch: string) => PrSnapshot | null)
     | null = null;
   private tokenAccessHandler: (repoId: string, token: string) => void = () => {};
+  private mergePullRequestHandler:
+    | ((repoId: string, prNumber: number, expectedHeadSha: string) => void)
+    | null = null;
 
   prExistsForBranch(repoId: string, branch: string): boolean {
     this.calls.push({ repoId, branch });
@@ -152,6 +160,31 @@ export class FakeGitHub implements GitHubPort {
       return this.lightweightSnapshotsByNumber.get(key) ?? null;
     }
     return this.prSnapshotByNumber(repoId, prNumber);
+  }
+
+  freshPrSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null {
+    return this.prSnapshotByNumber(repoId, prNumber);
+  }
+
+  freshPrView(repoId: string, prNumber: number): PullRequestView | null {
+    return this.prView(repoId, prNumber);
+  }
+
+  mergePullRequest(
+    repoId: string,
+    prNumber: number,
+    expectedHeadSha: string,
+  ): void {
+    this.mergePullRequestCalls.push({ repoId, prNumber, expectedHeadSha });
+    this.mergePullRequestHandler?.(repoId, prNumber, expectedHeadSha);
+  }
+
+  setMergePullRequestHandler(
+    handler:
+      | ((repoId: string, prNumber: number, expectedHeadSha: string) => void)
+      | null,
+  ): void {
+    this.mergePullRequestHandler = handler;
   }
 
   setPrLightweightSnapshotByNumber(

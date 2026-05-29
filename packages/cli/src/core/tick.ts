@@ -5,6 +5,7 @@ import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
+import { GitHubMergeError } from "../ports/github.ts";
 import type {
   GitHubGraphqlRateLimit,
   GitHubPort,
@@ -356,6 +357,12 @@ interface DoneTaskRow {
   github_pr_polled_at: string | null;
 }
 
+interface UmbrellaSubtaskIntegrationRow {
+  umbrella_workflow_id: number;
+  feature_branch: string;
+  final_pr_task_id: string | null;
+}
+
 type SyntheticReviewLifecycleState =
   | "pr-review"
   | "done"
@@ -487,6 +494,29 @@ class TickGithubCache implements GitHubPort {
       this.rememberSnapshotAliases(repoId, String(prNumber), snapshot, true);
     }
     return this.lightweightByNumber.get(key) ?? null;
+  }
+
+  freshPrSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null {
+    const snapshot = this.inner.freshPrSnapshotByNumber(repoId, prNumber);
+    this.prSnapshotByNumberCache.set(`${repoId}\0${prNumber}`, snapshot);
+    this.rememberSnapshotAliases(repoId, String(prNumber), snapshot, false);
+    return snapshot;
+  }
+
+  freshPrView(repoId: string, prNumber: number): PullRequestView | null {
+    const view = this.inner.freshPrView(repoId, prNumber);
+    this.prViews.set(`${repoId}\0${prNumber}`, view);
+    return view;
+  }
+
+  mergePullRequest(
+    repoId: string,
+    prNumber: number,
+    expectedHeadSha: string,
+  ): void {
+    this.inner.mergePullRequest(repoId, prNumber, expectedHeadSha);
+    this.prSnapshotByNumberCache.delete(`${repoId}\0${prNumber}`);
+    this.lightweightByNumber.delete(`${repoId}\0${prNumber}`);
   }
 
   getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null {
@@ -2071,8 +2101,221 @@ function processDoneTask(
     );
   }
 
+  const umbrellaIntegration = loadUmbrellaSubtaskIntegration(deps.db, task.task_id);
+  if (umbrellaIntegration !== null) {
+    return processUmbrellaSubtaskAutoMerge(
+      deps,
+      task,
+      attempt,
+      snapshot,
+      umbrellaIntegration,
+      options,
+    );
+  }
+
   clearTickError(deps, task.task_id);
   return null;
+}
+
+function processUmbrellaSubtaskAutoMerge(
+  deps: TickDeps,
+  task: DoneTaskRow,
+  attempt: CurrentAttemptRow,
+  observedSnapshot: PrSnapshot,
+  umbrella: UmbrellaSubtaskIntegrationRow,
+  options: TickOptions,
+): TickTaskResult | null {
+  if (umbrella.final_pr_task_id === task.task_id) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      "task is the umbrella final PR task; Quay may only auto-merge subtasks into the feature branch",
+    );
+  }
+
+  const prNumber = task.pr_number ?? observedSnapshot.prNumber ?? null;
+  if (prNumber === null) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR number is unavailable for branch ${task.branch_name}`,
+    );
+  }
+
+  const liveView = deps.github.freshPrView(task.repo_id, prNumber);
+  const liveSnapshot = deps.github.freshPrSnapshotByNumber(task.repo_id, prNumber);
+  if (liveView === null || liveSnapshot === null) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `live PR #${prNumber} could not be read before guarded umbrella auto-merge`,
+    );
+  }
+  persistPrMetadata(deps, task.task_id, liveSnapshot);
+
+  if (liveSnapshot.state === "merged" || liveSnapshot.state === "closed_unmerged") {
+    return finalizePrTerminal(deps, task, attempt, liveSnapshot.state, "done");
+  }
+  if (liveView.headRefName !== task.branch_name) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} head branch ${liveView.headRefName || "<unknown>"} does not match subtask branch ${task.branch_name}`,
+    );
+  }
+  if (liveView.isCrossRepository === true) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} head branch is from a fork`,
+    );
+  }
+  if (liveView.headSha !== "" && liveView.headSha !== liveSnapshot.headSha) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} head SHA changed during guarded read (${liveView.headSha} -> ${liveSnapshot.headSha})`,
+    );
+  }
+  if (
+    liveView.baseRef !== umbrella.feature_branch ||
+    liveSnapshot.baseRef !== umbrella.feature_branch
+  ) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} base branch ${liveView.baseRef ?? liveSnapshot.baseRef ?? "<unknown>"} does not exactly match umbrella feature branch ${umbrella.feature_branch}`,
+    );
+  }
+  if (liveSnapshot.isDraft === true) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} is still a draft`,
+    );
+  }
+  if (liveSnapshot.mergeable === "conflicting") {
+    ensureUmbrellaSubtaskBaseBranch(deps, task.task_id, umbrella.feature_branch);
+    const observation = formatConflictObservation(liveSnapshot);
+    if (task.last_conflict_observation !== observation) {
+      return scheduleConflictNonBudget(
+        deps,
+        task.task_id,
+        attempt,
+        liveSnapshot,
+        observation,
+        "done",
+        options,
+      );
+    }
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} is not mergeable and the conflict observation has already been acted on`,
+    );
+  }
+  if (liveSnapshot.mergeable !== "mergeable") {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} mergeable state is ${liveSnapshot.mergeable}`,
+    );
+  }
+
+  const repo = loadRepoForTask(deps.db, task.task_id);
+  const ci = classifyCi(
+    liveSnapshot,
+    repo?.ci_workflow_name ?? null,
+    resolveCiIgnorePolicy(options.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repo),
+  );
+  if (ci === "stale") {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} head SHA (${liveSnapshot.headSha}) and check-run SHA (${liveSnapshot.checks.checkSha}) disagree`,
+    );
+  }
+  if (ci !== "pass") {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} required CI is ${ci}`,
+    );
+  }
+  if (
+    liveSnapshot.latestReview.decision !== "APPROVED" ||
+    liveSnapshot.latestReview.latestReviewId === null ||
+    !reviewAppliesToHead(liveSnapshot)
+  ) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} latest applicable review is not approved`,
+    );
+  }
+
+  try {
+    deps.github.mergePullRequest(task.repo_id, prNumber, liveSnapshot.headSha);
+  } catch (err) {
+    if (err instanceof GitHubMergeError && err.kind === "not_mergeable") {
+      ensureUmbrellaSubtaskBaseBranch(deps, task.task_id, umbrella.feature_branch);
+      const conflictSnapshot: PrSnapshot = {
+        ...liveSnapshot,
+        mergeable: "conflicting",
+      };
+      const observation = formatConflictObservation(conflictSnapshot);
+      if (task.last_conflict_observation !== observation) {
+        return scheduleConflictNonBudget(
+          deps,
+          task.task_id,
+          attempt,
+          conflictSnapshot,
+          observation,
+          "done",
+          options,
+        );
+      }
+    }
+    throw err;
+  }
+
+  return finalizePrTerminal(deps, task, attempt, "merged", "done");
+}
+
+function reviewAppliesToHead(snapshot: PrSnapshot): boolean {
+  return (
+    snapshot.latestReview.submittedHeadSha === undefined ||
+    snapshot.latestReview.submittedHeadSha === null ||
+    snapshot.latestReview.submittedHeadSha === snapshot.headSha
+  );
+}
+
+function recordUmbrellaMergeGuardFailure(
+  deps: TickDeps,
+  taskId: string,
+  reason: string,
+): TickTaskResult {
+  return recordTickError(
+    deps,
+    taskId,
+    new Error(`umbrella auto-merge guard failed: ${reason}`),
+  );
+}
+
+function ensureUmbrellaSubtaskBaseBranch(
+  deps: TickDeps,
+  taskId: string,
+  featureBranch: string,
+): void {
+  deps.db
+    .query(
+      `UPDATE tasks
+          SET base_branch = ?,
+              updated_at = ?
+        WHERE task_id = ?
+          AND (base_branch IS NULL OR base_branch <> ?)`,
+    )
+    .run(featureBranch, deps.clock.nowISO(), taskId, featureBranch);
 }
 
 function processSyntheticReviewLifecycle(
@@ -2511,6 +2754,26 @@ function isUmbrellaTask(db: DB, taskId: string): boolean {
     )
     .get(taskId);
   return row !== null && row !== undefined;
+}
+
+function loadUmbrellaSubtaskIntegration(
+  db: DB,
+  taskId: string,
+): UmbrellaSubtaskIntegrationRow | null {
+  const row = db
+    .query<UmbrellaSubtaskIntegrationRow, [string]>(
+      `SELECT uw.umbrella_workflow_id,
+              uw.feature_branch,
+              uw.final_pr_task_id
+         FROM umbrella_tasks ut
+         JOIN umbrella_workflows uw
+           ON uw.umbrella_workflow_id = ut.umbrella_workflow_id
+        WHERE ut.task_id = ?
+          AND uw.state = 'active'
+        LIMIT 1`,
+    )
+    .get(taskId);
+  return row ?? null;
 }
 
 function releaseDependentsForMergedTask(

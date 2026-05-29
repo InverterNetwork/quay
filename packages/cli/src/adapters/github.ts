@@ -34,6 +34,7 @@
 //   - Closing the PR:     `gh pr close <branch>`  (idempotent: tolerates "already closed"
 //                                                  and "no PR" by inspecting stderr)
 import { join, resolve } from "node:path";
+import { GitHubMergeError } from "../ports/github.ts";
 import type {
   GitHubPort,
   GitHubGraphqlRateLimit,
@@ -157,6 +158,47 @@ export class GitHubCliAdapter implements GitHubPort {
     prNumber: number,
   ): PrSnapshot | null {
     return this.prLightweightSnapshotBySelector(repoId, String(prNumber));
+  }
+
+  freshPrSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null {
+    return this.prSnapshotBySelector(repoId, String(prNumber));
+  }
+
+  freshPrView(repoId: string, prNumber: number): PullRequestView | null {
+    return this.prView(repoId, prNumber);
+  }
+
+  mergePullRequest(
+    repoId: string,
+    prNumber: number,
+    expectedHeadSha: string,
+  ): void {
+    const result = this.run(repoId, [
+      "gh",
+      "pr",
+      "merge",
+      String(prNumber),
+      "--merge",
+      "--match-head-commit",
+      expectedHeadSha,
+    ]);
+    if (result.exitCode === 0) return;
+    const msg = `${result.stdout}\n${result.stderr}`;
+    const lower = msg.toLowerCase();
+    const kind =
+      lower.includes("head branch was modified") ||
+      lower.includes("head sha") ||
+      lower.includes("head commit")
+        ? "head_mismatch"
+        : lower.includes("not mergeable") ||
+            lower.includes("merge conflict") ||
+            lower.includes("cannot be merged")
+          ? "not_mergeable"
+          : "unknown";
+    throw new GitHubMergeError(
+      `gh pr merge ${prNumber} failed: ${msg.trim()}`,
+      kind,
+    );
   }
 
   getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null {
