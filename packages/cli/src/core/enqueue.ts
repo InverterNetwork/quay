@@ -28,9 +28,11 @@ import {
 } from "./goals.ts";
 import {
   createTaskDependency,
+  enqueueDependencyWaitingOutboxItem,
   TASK_DEPENDENCY_REQUIRED_STATES,
   TASK_DEPENDENCY_SCOPES,
   TASK_DEPENDENCY_SOURCES,
+  type TaskDependencyRow,
   type TaskDependencyRequiredState,
   type TaskDependencyScope,
   type TaskDependencySource,
@@ -343,6 +345,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           now,
         );
 
+      const createdDependencies: TaskDependencyRow[] = [];
       for (const dep of dependencies) {
         const dependencyInput: Parameters<typeof createTaskDependency>[1] = {
           dependentTaskId: taskId,
@@ -357,7 +360,32 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         if (dep.required_state !== undefined) {
           dependencyInput.requiredState = dep.required_state;
         }
-        createTaskDependency(deps.db, dependencyInput);
+        createdDependencies.push(createTaskDependency(deps.db, dependencyInput));
+      }
+
+      if (initialState === "waiting_dependencies") {
+        const eventRow = deps.db
+          .query<{ event_id: number }, [string, string, string]>(
+            `INSERT INTO events (
+               task_id, event_type, to_state, occurred_at, event_data
+             ) VALUES (?, 'dependency_waiting', 'waiting_dependencies', ?, ?)
+             RETURNING event_id`,
+          )
+          .get(
+            taskId,
+            now,
+            JSON.stringify({ dependency_count: createdDependencies.length }),
+          );
+        if (!eventRow) throw new Error("dependency_waiting event insert returned no row");
+        enqueueDependencyWaitingOutboxItem(
+          { db: deps.db, clock: deps.clock },
+          {
+            taskId,
+            sourceEventId: eventRow.event_id,
+            dependencyCount: createdDependencies.length,
+            dependencies: createdDependencies,
+          },
+        );
       }
 
       if (deps.retargetIntent !== undefined) {

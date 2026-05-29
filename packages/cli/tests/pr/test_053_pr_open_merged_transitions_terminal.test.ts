@@ -120,11 +120,11 @@ test("test_053_pr_open_merged_transitions_terminal", async () => {
       [string]
     >(
       `SELECT event_type, from_state, to_state FROM events
-        WHERE task_id = ? AND event_type = 'dependency_satisfied'`,
+        WHERE task_id = ? AND event_type = 'dependencies_satisfied'`,
     )
     .get(dependentTaskId);
   expect(dependencyEvt).toEqual({
-    event_type: "dependency_satisfied",
+    event_type: "dependencies_satisfied",
     from_state: "waiting_dependencies",
     to_state: "queued",
   });
