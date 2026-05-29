@@ -48,6 +48,17 @@ export interface GitHubPort {
     repoId: string,
     prNumber: number,
   ): PrSnapshot | null;
+  // Uncached reads used immediately before authority-sensitive write calls.
+  // Tick's normal GitHub wrapper memoizes PR reads for efficiency; guarded
+  // merges must re-read live state and verify all guards against that fresh
+  // state in the same call path.
+  freshPrSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null;
+  freshPrView(repoId: string, prNumber: number): PullRequestView | null;
+  mergePullRequest(
+    repoId: string,
+    prNumber: number,
+    expectedHeadSha: string,
+  ): void;
   // Best-effort observability for GraphQL quota burn. Returning null means
   // telemetry was unavailable and must not block the caller.
   getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null;
@@ -192,4 +203,14 @@ export interface PostedReviewAuthor {
   type: string;
   reviewId: string;
   decision: PostedReview["decision"];
+}
+
+export class GitHubMergeError extends Error {
+  constructor(
+    message: string,
+    readonly kind: "not_mergeable" | "head_mismatch" | "unknown",
+  ) {
+    super(message);
+    this.name = "GitHubMergeError";
+  }
 }

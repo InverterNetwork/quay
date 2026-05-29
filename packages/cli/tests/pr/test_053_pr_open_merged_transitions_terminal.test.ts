@@ -266,3 +266,223 @@ test("umbrella pr merge marks blocker merged to feature branch and releases depe
     to_state: "merged_to_feature_branch",
   });
 });
+
+test("approved green umbrella subtask auto-merges into feature branch", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-29T13:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-umbrella-auto-merge");
+  const taskId = insertTask(h.db, {
+    taskId: "task-umbrella-auto-merge",
+    repoId,
+    state: "done",
+  });
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-04-29T12:30:00.000Z",
+  });
+
+  const workflow = h.db
+    .query<{ umbrella_workflow_id: number }, [string, string, string, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id`,
+    )
+    .get(
+      "BRIX-1510",
+      repoId,
+      "dev",
+      "feature/brix-1510",
+      "2026-04-29T12:20:00.000Z",
+      "2026-04-29T12:20:00.000Z",
+    );
+  h.db
+    .query(
+      `INSERT INTO umbrella_tasks (
+         umbrella_workflow_id, task_id, external_ref, created_at
+       ) VALUES (?, ?, ?, ?)`,
+    )
+    .run(workflow!.umbrella_workflow_id, taskId, "BRIX-1511", "2026-04-29T12:25:00.000Z");
+
+  const worktreePath = h.db
+    .query<{ worktree_path: string }, [string]>(
+      `SELECT worktree_path FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId)!.worktree_path;
+  mkdirSync(worktreePath, { recursive: true });
+
+  const built = buildTickDeps(h);
+  built.git.setLocalBranches(repoId, [`quay/${taskId}`]);
+  const snapshot = {
+    prNumber: 1510,
+    state: "open" as const,
+    headSha: "head-auto-merge",
+    baseSha: "base-auto-merge",
+    baseRef: "feature/brix-1510",
+    mergeable: "mergeable" as const,
+    latestReview: {
+      decision: "APPROVED" as const,
+      latestReviewId: "R_auto_approved",
+      submittedHeadSha: "head-auto-merge",
+      comments: "",
+    },
+    checks: {
+      checkSha: "head-auto-merge",
+      items: [{ name: "build", workflow: null, bucket: "pass" as const, required: true }],
+    },
+  };
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, snapshot);
+  built.github.setPrSnapshotByNumber(repoId, 1510, snapshot);
+  built.github.setPrView(repoId, 1510, {
+    number: 1510,
+    title: "fix: umbrella subtask",
+    body: "",
+    url: "https://github.example/pr/1510",
+    headRefName: `quay/${taskId}`,
+    headSha: "head-auto-merge",
+    baseRef: "feature/brix-1510",
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([{ task_id: taskId, action: "pr_merged" }]);
+  expect(built.github.mergePullRequestCalls).toEqual([
+    { repoId, prNumber: 1510, expectedHeadSha: "head-auto-merge" },
+  ]);
+
+  const task = h.db
+    .query<{ state: string; tick_error: string | null }, [string]>(
+      `SELECT state, tick_error FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({ state: "merged_to_feature_branch", tick_error: null });
+  expect(existsSync(worktreePath)).toBe(false);
+});
+
+test("normal done task is not auto-merged even when approved and green", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-29T13:30:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-normal-no-auto-merge");
+  const taskId = insertTask(h.db, {
+    taskId: "task-normal-no-auto-merge",
+    repoId,
+    state: "done",
+  });
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-04-29T13:00:00.000Z",
+  });
+
+  const built = buildTickDeps(h);
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+    prNumber: 1512,
+    state: "open",
+    headSha: "head-normal",
+    baseSha: "base-normal",
+    baseRef: "dev",
+    mergeable: "mergeable",
+    latestReview: {
+      decision: "APPROVED",
+      latestReviewId: "R_normal_approved",
+      submittedHeadSha: "head-normal",
+      comments: "",
+    },
+    checks: {
+      checkSha: "head-normal",
+      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+    },
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([]);
+  expect(built.github.mergePullRequestCalls).toEqual([]);
+  const task = h.db
+    .query<{ state: string }, [string]>(`SELECT state FROM tasks WHERE task_id = ?`)
+    .get(taskId);
+  expect(task?.state).toBe("done");
+});
+
+test("umbrella subtask auto-merge guard blocks wrong PR base", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-29T14:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-umbrella-auto-merge-guard");
+  const taskId = insertTask(h.db, {
+    taskId: "task-umbrella-auto-merge-guard",
+    repoId,
+    state: "done",
+  });
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-04-29T13:30:00.000Z",
+  });
+  const workflow = h.db
+    .query<{ umbrella_workflow_id: number }, [string, string, string, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id`,
+    )
+    .get(
+      "BRIX-1510",
+      repoId,
+      "dev",
+      "feature/brix-1510",
+      "2026-04-29T13:20:00.000Z",
+      "2026-04-29T13:20:00.000Z",
+    );
+  h.db
+    .query(
+      `INSERT INTO umbrella_tasks (
+         umbrella_workflow_id, task_id, external_ref, created_at
+       ) VALUES (?, ?, ?, ?)`,
+    )
+    .run(workflow!.umbrella_workflow_id, taskId, "BRIX-1511", "2026-04-29T13:25:00.000Z");
+
+  const built = buildTickDeps(h);
+  const snapshot = {
+    prNumber: 1513,
+    state: "open" as const,
+    headSha: "head-wrong-base",
+    baseSha: "base-wrong-base",
+    baseRef: "dev",
+    mergeable: "mergeable" as const,
+    latestReview: {
+      decision: "APPROVED" as const,
+      latestReviewId: "R_wrong_base",
+      submittedHeadSha: "head-wrong-base",
+      comments: "",
+    },
+    checks: {
+      checkSha: "head-wrong-base",
+      items: [{ name: "build", workflow: null, bucket: "pass" as const, required: true }],
+    },
+  };
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, snapshot);
+  built.github.setPrSnapshotByNumber(repoId, 1513, snapshot);
+  built.github.setPrView(repoId, 1513, {
+    number: 1513,
+    title: "fix: wrong base",
+    body: "",
+    url: null,
+    headRefName: `quay/${taskId}`,
+    headSha: "head-wrong-base",
+    baseRef: "dev",
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([{ task_id: taskId, action: "tick_error", error: expect.any(String) }]);
+  expect(built.github.mergePullRequestCalls).toEqual([]);
+  const task = h.db
+    .query<{ state: string; tick_error: string | null }, [string]>(
+      `SELECT state, tick_error FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task?.state).toBe("done");
+  expect(task?.tick_error).toContain("umbrella auto-merge guard failed");
+  expect(task?.tick_error).toContain("does not exactly match umbrella feature branch");
+});
