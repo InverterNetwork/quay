@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { Fragment, forwardRef, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Avatar } from '../components/Avatar';
 import { Button } from '../components/Button';
 import { Kbd } from '../components/Kbd';
@@ -49,10 +49,22 @@ interface AgentDrawerProps {
 }
 
 export function AgentDrawer({ open, onClose, adapter, ctx }: AgentDrawerProps) {
+  const drawerRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const drawer = drawerRef.current;
+    if (!drawer) return;
+    if (open) {
+      drawer.removeAttribute('inert');
+    } else {
+      drawer.setAttribute('inert', '');
+    }
+  }, [open]);
+
   return (
     <>
       <div className="qa-backdrop" data-open={open ? '1' : '0'} onClick={onClose} />
-      <aside className="qa-drawer" data-open={open ? '1' : '0'} aria-hidden={!open}>
+      <aside ref={drawerRef} className="qa-drawer" data-open={open ? '1' : '0'} aria-hidden={!open}>
         <AgentPanel adapter={adapter} ctx={ctx} onClose={onClose} />
       </aside>
     </>
@@ -64,9 +76,10 @@ interface AgentTriggerProps {
   onToggle: () => void;
 }
 
-export function AgentTrigger({ open, onToggle }: AgentTriggerProps) {
+export const AgentTrigger = forwardRef<HTMLButtonElement, AgentTriggerProps>(function AgentTrigger({ open, onToggle }, ref) {
   return (
     <button
+      ref={ref}
       type="button"
       onClick={onToggle}
       title="Quay Agent (Cmd+J)"
@@ -91,7 +104,7 @@ export function AgentTrigger({ open, onToggle }: AgentTriggerProps) {
       <Kbd size={10}>⌘J</Kbd>
     </button>
   );
-}
+});
 
 function AgentPanel({ adapter, ctx, onClose }: { adapter: AgentAdapter; ctx: AgentContext; onClose: () => void }) {
   const thread = useAgentThread(adapter, ctx);

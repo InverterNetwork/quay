@@ -1,3 +1,4 @@
+import type { RefObject } from 'react';
 import { Avatar } from '../components/Avatar';
 import { Divider } from '../components/Divider';
 import { Input } from '../components/Input';
@@ -22,11 +23,12 @@ interface TopBarProps {
   mode: 'light' | 'dark';
   backendStatus: BackendStatus;
   agentOpen: boolean;
+  agentTriggerRef: RefObject<HTMLButtonElement>;
   onAgentToggle: () => void;
   onModeToggle: () => void;
 }
 
-export function TopBar({ crumbs, mode, backendStatus, agentOpen, onAgentToggle, onModeToggle }: TopBarProps) {
+export function TopBar({ crumbs, mode, backendStatus, agentOpen, agentTriggerRef, onAgentToggle, onModeToggle }: TopBarProps) {
   return (
     <header
       style={{
@@ -69,7 +71,7 @@ export function TopBar({ crumbs, mode, backendStatus, agentOpen, onAgentToggle, 
         trailing={<Kbd>⌘K</Kbd>}
         shellStyle={{ width: 280 }}
       />
-      <AgentTrigger open={agentOpen} onToggle={onAgentToggle} />
+      <AgentTrigger ref={agentTriggerRef} open={agentOpen} onToggle={onAgentToggle} />
       <Button
         variant="ghost"
         size="sm"

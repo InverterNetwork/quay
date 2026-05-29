@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AgentDrawer } from './agent/AgentDrawer';
 import { AGENT_CTX, hermesAdapter } from './agent/agentData';
 import { PrimarySidebar, type AppRoute } from './app/PrimarySidebar';
@@ -67,6 +67,7 @@ export function App() {
   const [agentOpen, setAgentOpen] = useState(true);
   const [empty, setEmpty] = useState(false);
   const [mode, setMode] = useState<Mode>(readModeFromStorage);
+  const agentTriggerRef = useRef<HTMLButtonElement>(null);
   const admin = useQuayAdminReadModel();
   const missionControl = useMissionControlTasks();
   const store = useChangeStore();
@@ -122,16 +123,31 @@ export function App() {
     }
   }, [admin.loading, navigateTo, route, scope, selectedRepo]);
 
+  const closeAgent = useCallback(() => {
+    setAgentOpen(false);
+    window.requestAnimationFrame(() => agentTriggerRef.current?.focus());
+  }, []);
+
+  const toggleAgent = useCallback(() => {
+    setAgentOpen((open) => {
+      const nextOpen = !open;
+      if (!nextOpen) {
+        window.requestAnimationFrame(() => agentTriggerRef.current?.focus());
+      }
+      return nextOpen;
+    });
+  }, []);
+
   // Cmd/Ctrl + Enter → preview diff (opens the save-preview modal)
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'j') {
         e.preventDefault();
-        setAgentOpen((open) => !open);
+        toggleAgent();
         return;
       }
       if (e.key === 'Escape') {
-        setAgentOpen(false);
+        closeAgent();
         return;
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -143,7 +159,7 @@ export function App() {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [store.changes.length]);
+  }, [closeAgent, store.changes.length, toggleAgent]);
 
   const handleAddRepo = useCallback(() => undefined, []);
   const handleArchive = useCallback(
@@ -201,7 +217,8 @@ export function App() {
         mode={mode}
         backendStatus={status}
         agentOpen={agentOpen}
-        onAgentToggle={() => setAgentOpen((open) => !open)}
+        agentTriggerRef={agentTriggerRef}
+        onAgentToggle={toggleAgent}
         onModeToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
       />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
@@ -299,7 +316,7 @@ export function App() {
 
       <AgentDrawer
         open={agentOpen}
-        onClose={() => setAgentOpen(false)}
+        onClose={closeAgent}
         adapter={hermesAdapter}
         ctx={AGENT_CTX}
       />
