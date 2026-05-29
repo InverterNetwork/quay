@@ -98,6 +98,8 @@ export const DEFAULT_MAX_NON_BUDGET_RESPAWNS = 20;
 export const DEFAULT_LOW_PRIORITY_PR_POLL_INTERVAL_MINUTES = 5;
 export const DEFAULT_PARKED_PR_POLL_INTERVAL_MINUTES = 15;
 export const DEFAULT_GITHUB_GRAPHQL_BACKOFF_MINUTES = 10;
+export const DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS = 24;
+export const DEFAULT_RETAINED_CANCELLED_WORKTREE_GC_BATCH_SIZE = 10;
 export const REVIEWER_GH_TOKEN_ENV = "QUAY_REVIEWER_GH_TOKEN";
 const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Canonical claude worker template, kept here as a named re-export so
@@ -214,6 +216,7 @@ export type TickAction =
   | "claim_expired"
   | "orchestrator_loop_parked"
   | "cancel_finalized"
+  | "retained_worktree_cleaned"
   | "slack_fence_captured"
   | "slack_post_recovered"
   | "slack_posted"
@@ -833,6 +836,22 @@ export async function tick_once(
       active: readActiveGithubGraphqlBackoff(deps.db, nowISO),
     };
 
+    for (const task of readRetainedCancelledWorktreeGcCandidates(
+      deps.db,
+      retainedCancelledWorktreeGcCutoff(nowISO),
+      DEFAULT_RETAINED_CANCELLED_WORKTREE_GC_BATCH_SIZE,
+    )) {
+      try {
+        cleanupRetainedCancelledWorktree(deps, task);
+        results.push({
+          task_id: task.task_id,
+          action: "retained_worktree_cleaned",
+        });
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
     if (options.reviewerEnabled === true) {
       for (const req of readPendingReviewRequests(deps.db)) {
         const skipped = githubBackoffSkipResult(githubBackoff, req.task_id);
@@ -1391,6 +1410,81 @@ function processPendingReviewRequest(
 
 interface CancelTargetRow {
   task_id: string;
+}
+
+interface RetainedCancelledWorktreeGcRow {
+  task_id: string;
+  worktree_path: string;
+}
+
+function retainedCancelledWorktreeGcCutoff(nowISO: string): string {
+  const now = new Date(nowISO).getTime();
+  return new Date(
+    now -
+      DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS * 60 * 60 * 1000,
+  ).toISOString();
+}
+
+function readRetainedCancelledWorktreeGcCandidates(
+  db: DB,
+  cutoffISO: string,
+  limit: number,
+): RetainedCancelledWorktreeGcRow[] {
+  return db
+    .query<RetainedCancelledWorktreeGcRow, [string, number]>(
+      `SELECT task_id, worktree_path
+         FROM tasks
+        WHERE state = 'cancelled'
+          AND cancel_keep_worktree = 1
+          AND worktree_cleaned_at IS NULL
+          AND COALESCE(cancel_requested_at, updated_at) <= ?
+        ORDER BY COALESCE(cancel_requested_at, updated_at), task_id
+        LIMIT ?`,
+    )
+    .all(cutoffISO, limit);
+}
+
+function cleanupRetainedCancelledWorktree(
+  deps: TickDeps,
+  task: RetainedCancelledWorktreeGcRow,
+): void {
+  if (existsSync(task.worktree_path)) {
+    deps.git.worktreeRemove(task.worktree_path);
+    if (existsSync(task.worktree_path)) {
+      throw new Error(
+        `retained cancelled worktree cleanup did not remove ${task.worktree_path}`,
+      );
+    }
+  }
+
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN");
+  try {
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET worktree_cleaned_at = ?,
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ?
+            AND state = 'cancelled'
+            AND cancel_keep_worktree = 1
+            AND worktree_cleaned_at IS NULL`,
+      )
+      .run(now, now, task.task_id);
+    deps.db
+      .query(
+        `INSERT INTO events (task_id, event_type, occurred_at)
+         VALUES (?, 'retained_worktree_cleaned', ?)`,
+      )
+      .run(task.task_id, now);
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
 }
 
 function readCancelTargets(db: DB): CancelTargetRow[] {

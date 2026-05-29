@@ -142,6 +142,15 @@ test("tasks table has PR screenshot requirement flag with default off", () => {
   expect(col?.dflt_value).toBe("0");
 });
 
+test("tasks table tracks retained cancelled worktree cleanup", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(tasks)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toContain("worktree_cleaned_at");
+});
+
 test("orchestrator handoffs carry next eligibility timestamp", () => {
   h = createHarness();
   const cols = h.db
