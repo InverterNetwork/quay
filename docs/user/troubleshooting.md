@@ -82,6 +82,28 @@ Fix the ticket body and retry `quay enqueue --linear-issue`.
 
 The Linear issue exists but is a draft. Quay rejects draft tickets.
 
+## `dependency_not_tracked`
+
+`quay enqueue --linear-issue` found an incomplete Linear blocked-by issue that
+does not have a matching Quay task. Quay stops before creating the dependent
+task because it cannot later observe that blocker reaching `merged`.
+
+Inspect the error payload:
+
+```json
+{
+  "error": "dependency_not_tracked",
+  "dependencies": [{ "external_ref": "BRIX-1505", "repo_id": "myrepo" }]
+}
+```
+
+Fix one of:
+
+- Enqueue the blocker issue first, then enqueue the dependent issue again.
+- Mark the blocker complete in Linear if it is already done; complete Linear
+  blockers do not block enqueue.
+- Remove the Linear blocked-by relation if it is not a real dependency.
+
 ## `branch_collision_unresolvable`
 
 Quay could not find an unused `quay/<slug>` branch for the task. Check local
@@ -189,6 +211,41 @@ quay task events <task_id>
 Many tick errors clear automatically after the next successful observation.
 Persistent tick errors usually point to adapter auth, GitHub CLI setup, missing
 tmux, or repo/worktree state.
+
+If the error contains `umbrella auto-merge guard failed`, Quay refused to
+auto-merge an umbrella subtask PR because the live PR no longer matched the
+guarded shape. Common causes are a changed PR base, a missing or stale PR
+snapshot, an unapproved review state, or failing checks.
+
+Inspect:
+
+```bash
+quay task get <task_id>
+gh pr view <pr_number> --repo <owner/repo> --json baseRefName,headRefName,reviewDecision,mergeStateStatus,statusCheckRollup
+```
+
+For an auto-mergeable umbrella subtask, the PR base must exactly match
+`umbrella_status.feature_branch`, the PR must be approved, and required checks
+must be green. Correct the PR base or review/CI state, then run `quay tick`
+again. If the task is the final umbrella PR, Quay will not auto-merge it; merge
+observation follows the normal final PR lifecycle.
+
+## Failed Blockers With Waiting Dependents
+
+Failed or cancelled blockers do not auto-unblock and do not auto-cancel their
+dependents. Waiting dependents remain in `waiting_dependencies` with
+unsatisfied rows.
+
+Inspect the dependent and blocker:
+
+```bash
+quay task get <dependent_task_id>
+quay task get <blocker_task_id>
+```
+
+Then decide whether to retry or recover the blocker, cancel the dependent, or
+create replacement work and retarget manually. Quay releases the dependent only
+when the persisted dependency row is satisfied by the required blocker state.
 
 ## Tick Shows `github_backoff_skipped`
 

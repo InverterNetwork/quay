@@ -42,10 +42,50 @@ The flow is:
    enabled.
 5. Compose a canonical brief and ticket snapshot.
 6. Run `quay validate-ticket`.
-7. Enqueue through the normal substrate path.
+7. Read native Linear blocked-by relations.
+8. Enqueue through the normal substrate path.
 
 If Linear is disabled, the command fails with `adapter_not_enabled`. If the
 token env var is missing, it fails with `adapter_not_configured`.
+
+## Linear Blocked-By Dependencies
+
+At enqueue time, Quay reads Linear's native blocked-by relations for the issue.
+After enqueue, Quay schedules from its own `task_dependencies` rows only; it
+does not use future Linear state changes as the scheduler source of truth.
+
+Complete Linear blockers are recorded in the ticket snapshot but do not block
+enqueue. Incomplete blockers must already be tracked by Quay. If an incomplete
+blocker has a Quay task, the new task is created in `waiting_dependencies` and
+waits until that blocker reaches `merged`. If an incomplete blocker is not
+tracked, enqueue fails with `dependency_not_tracked` and does not create the
+dependent task.
+
+The ticket snapshot artifact includes `linear_blocked_by_relations`, including
+whether each relation was complete in Linear, whether Quay persisted a
+dependency row, and the tracked blocker task id when available.
+
+## Umbrella Tickets
+
+Linear tickets can include an `umbrella` object in `quay-config`:
+
+```yaml
+umbrella:
+  external_ref: BRIX-1500
+  base_branch: dev
+  feature_branch: quay/umbrella/BRIX-1500
+  depends_on:
+    - BRIX-1498
+```
+
+All subtasks for the same one-repo umbrella workflow target the shared feature
+branch. Quay may auto-merge only approved and green umbrella subtask PRs into
+that branch. It never auto-merges normal task PRs or the final umbrella PR into
+the repository base branch.
+
+When all umbrella subtasks have reached `merged_to_feature_branch`, tick creates
+or reuses the final umbrella PR and records a final Quay-owned task at
+`pr-open`. The final task then follows the ordinary Quay PR lifecycle.
 
 ## Slack Context At Enqueue
 
