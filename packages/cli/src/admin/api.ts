@@ -37,6 +37,7 @@ import {
   DEFAULT_MAX_SPAWN_FAILURES,
   DEFAULT_STALENESS_THRESHOLD_SECONDS,
   REVIEWER_GH_TOKEN_ENV,
+  WORKER_GH_TOKEN_ENV,
 } from "../core/tick.ts";
 import type { DB } from "../db/connection.ts";
 
@@ -1763,6 +1764,9 @@ function buildAdapterSummaries(runtime: AdminApiRuntime): AdminAdapterSummary[] 
   const slackEnabled = runtime.config.adapters?.slack?.enabled === true;
   const slackEnv = runtime.config.adapters?.slack?.bot_token_env ?? "SLACK_TOKEN";
   const reviewerEnabled = runtime.config.reviewer?.enabled === true;
+  const workerReady =
+    hasEnv(env, WORKER_GH_TOKEN_ENV) ||
+    runtime.config.worker?.gh_token_file !== undefined;
   const reviewerReady =
     hasEnv(env, REVIEWER_GH_TOKEN_ENV) ||
     runtime.config.reviewer?.gh_token_file !== undefined;
@@ -1787,6 +1791,24 @@ function buildAdapterSummaries(runtime: AdminApiRuntime): AdminAdapterSummary[] 
         {
           label: "MAX_THREAD_MESSAGES",
           value: String(runtime.config.adapters?.slack?.max_thread_messages ?? 200),
+        },
+      ],
+    },
+    {
+      name: "github_worker",
+      title: "GitHub worker",
+      enabled: true,
+      ...adapterStatus(
+        true,
+        workerReady,
+        "worker token source configured",
+        `${WORKER_GH_TOKEN_ENV} or worker.gh_token_file not set`,
+      ),
+      fields: [
+        {
+          label: "WORKER_TOKEN_ENV",
+          value: WORKER_GH_TOKEN_ENV,
+          dot_tone: hasEnv(env, WORKER_GH_TOKEN_ENV) ? "good" : "warn",
         },
       ],
     },

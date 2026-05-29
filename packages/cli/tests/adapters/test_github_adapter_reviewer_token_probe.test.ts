@@ -15,6 +15,7 @@ class RecordingAdapter extends GitHubCliAdapter {
     stdout: "lafawnduh1966/quay\n",
     stderr: "",
   };
+  nextResults: RunResult[] = [];
 
   constructor() {
     super("/tmp/quay-stub-reviewer-token-probe");
@@ -26,13 +27,16 @@ class RecordingAdapter extends GitHubCliAdapter {
     env: Record<string, string | undefined> = process.env,
   ): RunResult {
     this.calls.push({ repoId, cmd, env });
+    if (this.nextResults.length > 0) {
+      return this.nextResults.shift()!;
+    }
     return this.next;
   }
 }
 
 test("reviewer token probe uses an App-compatible repo-scoped endpoint", () => {
   const adapter = new RecordingAdapter();
-  adapter.probeTokenAccess("repo-x", "ghs_installation_token");
+  adapter.probeTokenAccess("repo-x", "ghs_installation_token", "reviewer");
 
   expect(adapter.calls).toHaveLength(1);
   expect(adapter.calls[0]!.cmd).toEqual([
@@ -43,10 +47,13 @@ test("reviewer token probe uses an App-compatible repo-scoped endpoint", () => {
     ".full_name",
   ]);
   expect(adapter.calls[0]!.env.GH_TOKEN).toBe("ghs_installation_token");
+  expect(adapter.calls[0]!.env.GITHUB_TOKEN).toBeUndefined();
+  expect(adapter.calls[0]!.env.QUAY_WORKER_GH_TOKEN).toBeUndefined();
+  expect(adapter.calls[0]!.env.QUAY_REVIEWER_GH_TOKEN).toBeUndefined();
   expect(adapter.calls[0]!.cmd.join(" ")).not.toContain(" user");
 });
 
-test("reviewer token probe throws a repo-scoped diagnostic on auth failure", () => {
+test("actor token probe throws a repo-scoped diagnostic on auth failure", () => {
   const adapter = new RecordingAdapter();
   adapter.next = {
     exitCode: 1,
@@ -54,7 +61,37 @@ test("reviewer token probe throws a repo-scoped diagnostic on auth failure", () 
     stderr: "HTTP 401: Bad credentials",
   };
 
-  expect(() => adapter.probeTokenAccess("repo-x", "stale")).toThrow(
+  expect(() => adapter.probeTokenAccess("repo-x", "stale", "reviewer")).toThrow(
     /gh api repos\/\{owner\}\/\{repo\} failed: HTTP 401/i,
   );
+});
+
+test("worker token probe rejects tokens that cannot create pull requests", () => {
+  const adapter = new RecordingAdapter();
+  adapter.nextResults = [
+    { exitCode: 0, stdout: "lafawnduh1966/quay\n", stderr: "" },
+    { exitCode: 0, stdout: "false\n", stderr: "" },
+  ];
+
+  expect(() =>
+    adapter.probeTokenAccess("repo-x", "ghs_readonly_token", "worker"),
+  ).toThrow(/worker token cannot create pull requests/i);
+  expect(adapter.calls).toHaveLength(2);
+  expect(adapter.calls[1]!.cmd).toEqual([
+    "gh",
+    "api",
+    "graphql",
+    "-f",
+    expect.stringContaining("viewerCanCreatePullRequest"),
+    "-F",
+    "owner=lafawnduh1966",
+    "-F",
+    "name=quay",
+    "--jq",
+    ".data.repository.viewerCanCreatePullRequest",
+  ]);
+  expect(adapter.calls[1]!.env.GH_TOKEN).toBe("ghs_readonly_token");
+  expect(adapter.calls[1]!.env.GITHUB_TOKEN).toBeUndefined();
+  expect(adapter.calls[1]!.env.QUAY_WORKER_GH_TOKEN).toBeUndefined();
+  expect(adapter.calls[1]!.env.QUAY_REVIEWER_GH_TOKEN).toBeUndefined();
 });

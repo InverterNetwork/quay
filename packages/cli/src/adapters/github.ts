@@ -1121,20 +1121,82 @@ export class GitHubCliAdapter implements GitHubPort {
     return login;
   }
 
-  probeTokenAccess(repoId: string, token: string): void {
+  probeTokenAccess(
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ): void {
     const path = "repos/{owner}/{repo}";
     const result = this.run(
       repoId,
       ["gh", "api", path, "--jq", ".full_name"],
-      { ...process.env, GH_TOKEN: token },
+      {
+        ...process.env,
+        GH_TOKEN: token,
+        GITHUB_TOKEN: undefined,
+        QUAY_WORKER_GH_TOKEN: undefined,
+        QUAY_REVIEWER_GH_TOKEN: undefined,
+      },
     );
     if (result.exitCode !== 0) {
       throw new Error(
         `gh api ${path} failed: ${result.stderr.trim() || result.stdout.trim()}`,
       );
     }
-    if (result.stdout.trim() === "") {
+    const fullName = result.stdout.trim();
+    if (fullName === "") {
       throw new Error(`gh api ${path} returned an empty repository name`);
+    }
+    if (actor === "worker") {
+      this.probeWorkerPullRequestWrite(repoId, token, fullName);
+    }
+  }
+
+  private probeWorkerPullRequestWrite(
+    repoId: string,
+    token: string,
+    fullName: string,
+  ): void {
+    const [owner, name, ...extra] = fullName.split("/");
+    if (!owner || !name || extra.length > 0) {
+      throw new Error(
+        `gh api repos/{owner}/{repo} returned invalid repository name ${fullName}`,
+      );
+    }
+    const query =
+      "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { viewerCanCreatePullRequest } }";
+    const result = this.run(
+      repoId,
+      [
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        `query=${query}`,
+        "-F",
+        `owner=${owner}`,
+        "-F",
+        `name=${name}`,
+        "--jq",
+        ".data.repository.viewerCanCreatePullRequest",
+      ],
+      {
+        ...process.env,
+        GH_TOKEN: token,
+        GITHUB_TOKEN: undefined,
+        QUAY_WORKER_GH_TOKEN: undefined,
+        QUAY_REVIEWER_GH_TOKEN: undefined,
+      },
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh api graphql viewerCanCreatePullRequest failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    if (result.stdout.trim() !== "true") {
+      throw new Error(
+        `worker token cannot create pull requests in ${fullName}; grant pull request write access before spawning worker attempts`,
+      );
     }
   }
 

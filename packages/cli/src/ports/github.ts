@@ -88,11 +88,15 @@ export interface GitHubPort {
     prNumber: number,
     headSha: string,
   ): PostedReviewAuthor[];
-  // Validate an explicit reviewer GH_TOKEN before handing it to a reviewer
-  // pane. Throws when the token is invalid, expired, or cannot access the
+  // Validate an explicit actor GH_TOKEN before handing it to a worker or
+  // reviewer pane. Throws when the token is invalid, expired, or cannot access the
   // target repository. Kept repo-scoped so GitHub App installation tokens are
   // supported; installation tokens cannot use the authenticated-user endpoint.
-  probeTokenAccess(repoId: string, token: string): void;
+  probeTokenAccess(
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ): void;
 }
 
 export interface GitHubGraphqlRateLimit {

@@ -6,7 +6,7 @@ import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { createAgentResolver } from "../../src/core/agents.ts";
 import type { SupervisorLock } from "../../src/core/supervisor_lock.ts";
-import { tick_once } from "../../src/core/tick.ts";
+import { WORKER_GH_TOKEN_ENV, tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
 import { insertRepo, insertTask } from "../support/fixtures.ts";
@@ -225,7 +225,7 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
   built.git.setRemoteHeadSha("quay", "feature/human-adopt", "head-51");
   built.github.setPrExists("quay", "feature/human-adopt", true);
   const tickResults = await tick_once(built.deps, {
-    env: { GH_TOKEN: "ghs_worker_runtime_test" },
+    env: { [WORKER_GH_TOKEN_ENV]: "ghs_worker_runtime_test" },
   });
 
   expect(tickResults).toContainEqual({

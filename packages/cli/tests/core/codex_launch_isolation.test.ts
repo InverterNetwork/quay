@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { createAgentResolver } from "../../src/core/agents.ts";
-import { REVIEWER_GH_TOKEN_ENV, tick_once } from "../../src/core/tick.ts";
+import {
+  REVIEWER_GH_TOKEN_ENV,
+  WORKER_GH_TOKEN_ENV,
+  tick_once,
+} from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 import {
@@ -55,7 +60,7 @@ test("codex worker spawn gets isolated CODEX_HOME and canonical fresh GH_TOKEN",
   const results = await tick_once(built.deps, {
     agentResolver: resolver,
     env: {
-      GH_TOKEN: "ghs_fresh_worker_token",
+      [WORKER_GH_TOKEN_ENV]: "ghs_fresh_worker_token",
       GITHUB_TOKEN: "ghs_stale_secondary_token",
       [REVIEWER_GH_TOKEN_ENV]: "ghs_reviewer_should_not_leak",
     },
@@ -67,6 +72,7 @@ test("codex worker spawn gets isolated CODEX_HOME and canonical fresh GH_TOKEN",
   expect(call.env).toEqual({
     GH_TOKEN: "ghs_fresh_worker_token",
     GITHUB_TOKEN: undefined,
+    [WORKER_GH_TOKEN_ENV]: undefined,
     [REVIEWER_GH_TOKEN_ENV]: undefined,
     QUAY_CODEX_SOURCE_HOME: "",
     CODEX_HOME: join(
@@ -78,10 +84,10 @@ test("codex worker spawn gets isolated CODEX_HOME and canonical fresh GH_TOKEN",
   });
   expect(call.env!.CODEX_HOME!.startsWith(call.worktreePath)).toBe(false);
   expect(call.envFiles).toBeUndefined();
-  expect(spawnedTokenSource(h, taskId)).toBe("env:GH_TOKEN");
+  expect(spawnedTokenSource(h, taskId)).toBe(`env:${WORKER_GH_TOKEN_ENV}`);
 });
 
-test("worker GITHUB_TOKEN is promoted to GH_TOKEN and cleared before spawn", async () => {
+test("worker QUAY_WORKER_GH_TOKEN is promoted to GH_TOKEN and cleared before spawn", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
   const repoId = insertRepo(h.db, "repo-github-token");
@@ -101,16 +107,140 @@ test("worker GITHUB_TOKEN is promoted to GH_TOKEN and cleared before spawn", asy
   );
 
   const results = await tick_once(built.deps, {
-    env: { GITHUB_TOKEN: "ghs_only_github_token" },
+    env: { [WORKER_GH_TOKEN_ENV]: "ghs_only_worker_token" },
   });
 
   expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
   expect(built.tmux.spawnCalls).toHaveLength(1);
   const call = built.tmux.spawnCalls[0]!;
-  expect(call.env?.GH_TOKEN).toBe("ghs_only_github_token");
+  expect(call.env?.GH_TOKEN).toBe("ghs_only_worker_token");
   expect(call.env?.GITHUB_TOKEN).toBeUndefined();
-  expect(spawnedTokenSource(h, taskId)).toBe("env:GITHUB_TOKEN");
+  expect(call.env?.[WORKER_GH_TOKEN_ENV]).toBeUndefined();
+  expect(spawnedTokenSource(h, taskId)).toBe(`env:${WORKER_GH_TOKEN_ENV}`);
 });
+
+test("worker spawn fails before tmux when actor token is invalid", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-worker-invalid-token");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-worker-invalid-token",
+    state: "queued",
+  });
+  const attemptId = insertAttempt(h.db, { taskId, consumedBudget: 0 });
+  insertFinalPromptArtifact(
+    h.db,
+    h.artifactRoot,
+    h.clock,
+    taskId,
+    attemptId,
+    "worker prompt",
+  );
+  const token = "ghs_WORKER_BAD_TOKEN_MARKER";
+  built.github.setTokenAccessHandler(() => {
+    throw new Error(`HTTP 401: Bad credentials for ${token}`);
+  });
+
+  const results = await tick_once(built.deps, {
+    env: { [WORKER_GH_TOKEN_ENV]: token },
+  });
+
+  const match = results.find((r) => r.task_id === taskId);
+  expect(match?.action).toBe("spawn_substrate_failed");
+  expect(match?.error).toContain("worker GitHub token");
+  expect(match?.error).toContain("HTTP 401");
+  expect(match?.error).not.toContain(token);
+  expect(built.github.tokenAccessCalls).toEqual([
+    { repoId, token, actor: "worker" },
+  ]);
+  expect(built.tmux.spawnCalls).toHaveLength(0);
+  expect(attemptSpawnedAt(h, attemptId)).toBeNull();
+});
+
+test("worker empty token fails with clear error", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-worker-empty-token");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-worker-empty-token",
+    state: "queued",
+  });
+  const attemptId = insertAttempt(h.db, { taskId, consumedBudget: 0 });
+  insertFinalPromptArtifact(
+    h.db,
+    h.artifactRoot,
+    h.clock,
+    taskId,
+    attemptId,
+    "worker prompt",
+  );
+
+  const results = await tick_once(built.deps, {
+    env: { [WORKER_GH_TOKEN_ENV]: "  " },
+  });
+
+  const match = results.find((r) => r.task_id === taskId);
+  expect(match?.action).toBe("spawn_substrate_failed");
+  expect(match?.error).toContain(WORKER_GH_TOKEN_ENV);
+  expect(match?.error).toMatch(/empty/i);
+  expect(built.github.tokenAccessCalls).toHaveLength(0);
+  expect(built.tmux.spawnCalls).toHaveLength(0);
+});
+
+test("worker token file is exported as pane GH_TOKEN without exposing token bytes", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-worker-token-file");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-worker-token-file",
+    state: "queued",
+  });
+  const attemptId = insertAttempt(h.db, { taskId, consumedBudget: 0 });
+  insertFinalPromptArtifact(
+    h.db,
+    h.artifactRoot,
+    h.clock,
+    taskId,
+    attemptId,
+    "worker prompt",
+  );
+  const tokenPath = join(h.dataDir, "worker-gh-token");
+  const token = "ghs_WORKER_FILE_TOKEN_MARKER";
+  mkdirSync(h.dataDir, { recursive: true });
+  writeFileSync(tokenPath, `${token}\n`);
+
+  const results = await tick_once(built.deps, {
+    workerGhTokenFile: tokenPath,
+    env: {},
+  });
+
+  expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
+  expect(built.github.tokenAccessCalls).toEqual([
+    { repoId, token, actor: "worker" },
+  ]);
+  const call = built.tmux.spawnCalls[0]!;
+  expect(call.env).toEqual({
+    GH_TOKEN: undefined,
+    GITHUB_TOKEN: undefined,
+    [WORKER_GH_TOKEN_ENV]: undefined,
+    [REVIEWER_GH_TOKEN_ENV]: undefined,
+  });
+  expect(call.envFiles).toEqual([{ name: "GH_TOKEN", path: tokenPath }]);
+  expect(JSON.stringify(call)).not.toContain(token);
+  expect(spawnedTokenSource(h, taskId)).toBe("file:worker.gh_token_file");
+});
+
+function attemptSpawnedAt(harness: Harness, attemptId: number): string | null {
+  const row = harness.db
+    .query<{ spawned_at: string | null }, [number]>(
+      `SELECT spawned_at FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  return row?.spawned_at ?? null;
+}
 
 function spawnedTokenSource(harness: Harness, taskId: string): string | null {
   const row = harness.db
