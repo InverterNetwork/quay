@@ -3,6 +3,7 @@ import type { DB } from "../db/connection.ts";
 
 export const TASK_STATES = [
   "queued",
+  "waiting_dependencies",
   "running",
   "goal-completion-pending",
   "pr-open",
@@ -31,6 +32,7 @@ export interface TaskTransition {
 
 const TERMINAL_FROM_STATES = [
   "queued",
+  "waiting_dependencies",
   "running",
   "goal-completion-pending",
   "pr-open",
@@ -53,6 +55,24 @@ const CANCEL_FROM_STATES = [
 
 export const TASK_TRANSITIONS = [
   transition("queued", "running", ["spawned"], "worker attempt spawned"),
+  transition(
+    "queued",
+    "waiting_dependencies",
+    ["dependency_waiting"],
+    "task is prepared but blocked by dependencies",
+  ),
+  transition(
+    "waiting_dependencies",
+    "queued",
+    ["dependency_satisfied"],
+    "dependencies are satisfied and task can spawn",
+  ),
+  transition(
+    "waiting_dependencies",
+    "awaiting-next-brief",
+    ["dependency_failed"],
+    "dependency failed and task needs orchestrator input",
+  ),
   transition(
     "queued",
     "queued",

@@ -103,3 +103,37 @@ test("test_001_tick_promotes_queued_to_running", async () => {
     attempt_id: attemptId,
   });
 });
+
+test("tick does not spawn tasks waiting on dependencies", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-26T10:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-tick-waiting-deps");
+  const taskId = insertTask(h.db, {
+    taskId: "task-waiting-deps",
+    repoId,
+    state: "waiting_dependencies",
+  });
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+  });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, attemptId);
+
+  const built = buildTickDeps(h);
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([]);
+  expect(built.tmux.spawnCalls).toHaveLength(0);
+  const task = h.db
+    .query<{ state: string; attempts_consumed: number }, [string]>(
+      "SELECT state, attempts_consumed FROM tasks WHERE task_id = ?",
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    state: "waiting_dependencies",
+    attempts_consumed: 0,
+  });
+});

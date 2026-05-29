@@ -27,6 +27,7 @@ test("test_schema_creates_required_tables", () => {
     "attempts",
     "artifacts",
     "events",
+    "task_dependencies",
     "orchestrator_handoffs",
     "outbox_items",
     "review_requests",
@@ -40,6 +41,28 @@ test("test_schema_creates_required_tables", () => {
   for (const t of required) {
     expect(names.has(t)).toBe(true);
   }
+});
+
+test("task_dependencies table has generic dependency fields", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(task_dependencies)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toEqual([
+    "dependency_id",
+    "dependent_task_id",
+    "dependency_task_id",
+    "dependency_source",
+    "dependency_external_ref",
+    "dependency_repo_id",
+    "kind",
+    "scope",
+    "required_state",
+    "satisfied_at",
+    "created_at",
+    "updated_at",
+  ]);
 });
 
 test("tasks table has effective base_branch column", () => {

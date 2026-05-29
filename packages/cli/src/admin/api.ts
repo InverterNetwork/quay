@@ -143,6 +143,7 @@ type AdminMissionControlAttnReason =
   | "ci"
   | "slack"
   | "brief"
+  | "dependency"
   | "budget"
   | "loop"
   | "worktree";
@@ -298,6 +299,7 @@ const changeRequestSchema = z
 
 const ACTIVE_TASK_STATES = [
   "queued",
+  "waiting_dependencies",
   "running",
   "goal-completion-pending",
   "pr-open",
@@ -771,6 +773,7 @@ function deriveMissionControlAttention(
   const latest = recentEvents[0]?.event_type;
   if (latest === "ci_failed") return { reason: "ci", tone: "danger" };
   if (latest === "budget_exhausted") return { reason: "budget", tone: "danger" };
+  if (state === "waiting_dependencies") return { reason: "dependency", tone: "warn" };
   if (state === "waiting_human") return { reason: "slack", tone: "warn" };
   if (state === "awaiting-next-brief") return { reason: "brief", tone: "warn" };
   if (latest === "changes_requested") return { reason: "changes", tone: "warn" };

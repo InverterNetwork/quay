@@ -218,6 +218,7 @@ test("transition metadata documents every known task state", () => {
   }
   for (const state of [
     "queued",
+    "waiting_dependencies",
     "running",
     "goal-completion-pending",
     "pr-open",
