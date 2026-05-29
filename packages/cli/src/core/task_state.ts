@@ -17,6 +17,7 @@ export const TASK_STATES = [
   "worktree_error",
   "orchestrator_loop",
   "cancelled",
+  "merged_to_feature_branch",
   "merged",
   "closed_unmerged",
 ] as const;

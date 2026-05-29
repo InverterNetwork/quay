@@ -37,6 +37,11 @@ import {
   type TaskDependencyScope,
   type TaskDependencySource,
 } from "./task_dependencies.ts";
+import {
+  createOrVerifyUmbrellaWorkflow,
+  deriveUmbrellaFeatureBranch,
+  linkUmbrellaTask,
+} from "./umbrella_workflows.ts";
 
 export const DEFAULT_RETRY_BUDGET = 5;
 
@@ -90,7 +95,7 @@ export const enqueueInputSchema = z
       .array(
         z
           .object({
-            dependency_task_id: z.string().min(1),
+            dependency_task_id: z.string().min(1).nullable().optional(),
             dependency_source: z.enum(TASK_DEPENDENCY_SOURCES),
             dependency_external_ref: z.string().min(1).nullable().optional(),
             dependency_repo_id: z.string().min(1).nullable().optional(),
@@ -98,8 +103,27 @@ export const enqueueInputSchema = z
             required_state: z.enum(TASK_DEPENDENCY_REQUIRED_STATES).optional(),
             satisfied_at: z.string().min(1).nullable().optional(),
           })
-          .strict(),
+          .strict()
+          .refine(
+            (dep) =>
+              (dep.dependency_task_id !== null &&
+                dep.dependency_task_id !== undefined) ||
+              (dep.dependency_external_ref !== null &&
+                dep.dependency_external_ref !== undefined),
+            {
+              message:
+                "dependency_task_id or dependency_external_ref is required",
+            },
+          ),
       )
+      .optional(),
+    umbrella: z
+      .object({
+        external_ref: z.string().min(1),
+        base_branch: baseBranchNameSchema.nullable().optional(),
+        feature_branch: baseBranchNameSchema.nullable().optional(),
+      })
+      .strict()
       .optional(),
   })
   .strict();
@@ -116,7 +140,7 @@ export interface EnqueueResult {
 }
 
 export interface EnqueueResolvedDependency {
-  dependency_task_id: string;
+  dependency_task_id?: string | null;
   dependency_source: TaskDependencySource;
   dependency_external_ref?: string | null;
   dependency_repo_id?: string | null;
@@ -162,7 +186,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     );
   }
 
-  const effectiveBaseBranch = input.base_branch ?? repo.base_branch;
+  let effectiveBaseBranch = input.base_branch ?? repo.base_branch;
   const prScreenshotsRequired = input.require_pr_screenshots === true;
   const prScreenshotsRequested =
     input.request_pr_screenshots === true || prScreenshotsRequired;
@@ -255,6 +279,32 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       );
     }
 
+    let resolvedUmbrella:
+      | {
+          externalRef: string;
+          baseBranch: string;
+          featureBranch: string;
+        }
+      | null = null;
+    if (input.umbrella !== undefined) {
+      const umbrellaBaseBranch =
+        input.umbrella.base_branch ?? effectiveBaseBranch;
+      const umbrellaFeatureBranch =
+        input.umbrella.feature_branch ??
+        deriveUmbrellaFeatureBranch(deps.git, input.umbrella.external_ref);
+      deps.git.ensureRemoteBranchFromBase(
+        repo.repo_id,
+        umbrellaFeatureBranch,
+        umbrellaBaseBranch,
+      );
+      resolvedUmbrella = {
+        externalRef: input.umbrella.external_ref,
+        baseBranch: umbrellaBaseBranch,
+        featureBranch: umbrellaFeatureBranch,
+      };
+      effectiveBaseBranch = umbrellaFeatureBranch;
+    }
+
     // Step 2: fetch the effective base branch. A task-level override does
     // not mutate the repo default; it is copied onto the task row below.
     deps.git.fetch(repo.repo_id, effectiveBaseBranch);
@@ -345,17 +395,39 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           now,
         );
 
+      if (resolvedUmbrella !== null) {
+        const umbrellaWorkflow = createOrVerifyUmbrellaWorkflow(
+          { db: deps.db, git: deps.git },
+          {
+            repoId: repo.repo_id,
+            externalRef: resolvedUmbrella.externalRef,
+            baseBranch: resolvedUmbrella.baseBranch,
+            featureBranch: resolvedUmbrella.featureBranch,
+            now,
+            ensureBranch: false,
+          },
+        );
+        linkUmbrellaTask(deps.db, {
+          umbrellaWorkflowId: umbrellaWorkflow.umbrella_workflow_id,
+          taskId,
+          externalRef: input.external_ref ?? taskId,
+          now,
+        });
+      }
+
       const createdDependencies: TaskDependencyRow[] = [];
       for (const dep of dependencies) {
         const dependencyInput: Parameters<typeof createTaskDependency>[1] = {
           dependentTaskId: taskId,
-          dependencyTaskId: dep.dependency_task_id,
           dependencySource: dep.dependency_source,
           dependencyExternalRef: dep.dependency_external_ref ?? null,
           dependencyRepoId: dep.dependency_repo_id ?? null,
           satisfiedAt: dep.satisfied_at ?? null,
           now,
         };
+        if (dep.dependency_task_id !== undefined) {
+          dependencyInput.dependencyTaskId = dep.dependency_task_id;
+        }
         if (dep.scope !== undefined) dependencyInput.scope = dep.scope;
         if (dep.required_state !== undefined) {
           dependencyInput.requiredState = dep.required_state;

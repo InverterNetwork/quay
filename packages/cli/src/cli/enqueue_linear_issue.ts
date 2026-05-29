@@ -171,6 +171,16 @@ export async function handleEnqueueLinearIssue(
       resolvedRepoId,
       deps.enqueueDeps.clock.nowISO(),
     );
+    if (ctx.umbrella !== null) {
+      dependencyResolution.dependencies.push(
+        ...resolveUmbrellaDependencies(
+          deps.enqueueDeps.db,
+          ctx.umbrella.depends_on,
+          resolvedRepoId,
+          deps.enqueueDeps.clock.nowISO(),
+        ),
+      );
+    }
     ctx = {
       ...ctx,
       ticket_snapshot: augmentTicketSnapshotWithDependencies(
@@ -195,6 +205,15 @@ export async function handleEnqueueLinearIssue(
       tags: mergedTags,
       worker_execution: ctx.worker_execution,
       base_branch: resolvedBaseBranch ?? undefined,
+      umbrella:
+        ctx.umbrella === null
+          ? undefined
+          : {
+              external_ref: ctx.umbrella.external_ref,
+              base_branch:
+                ctx.umbrella.base_branch ?? resolvedBaseBranch ?? undefined,
+              feature_branch: ctx.umbrella.feature_branch ?? undefined,
+            },
       request_pr_screenshots: args.requestPrScreenshots,
       require_pr_screenshots: args.requirePrScreenshots,
       dependencies: dependencyResolution.dependencies,
@@ -228,6 +247,32 @@ export async function handleEnqueueLinearIssue(
 
   io.stdout(`${JSON.stringify(result)}\n`);
   return { exitCode: 0 };
+}
+
+function resolveUmbrellaDependencies(
+  db: DB,
+  externalRefs: string[],
+  repoId: string,
+  now: string,
+): EnqueueResolvedDependency[] {
+  const dependencies: EnqueueResolvedDependency[] = [];
+  const seen = new Set<string>();
+  for (const rawExternalRef of externalRefs) {
+    const externalRef = rawExternalRef.toUpperCase();
+    if (seen.has(externalRef)) continue;
+    seen.add(externalRef);
+    const tracked = lookupDependencyTask(db, repoId, externalRef);
+    dependencies.push({
+      dependency_task_id: tracked?.task_id ?? null,
+      dependency_source: "quay",
+      dependency_external_ref: externalRef,
+      dependency_repo_id: repoId,
+      scope: "umbrella",
+      required_state: "merged_to_feature_branch",
+      satisfied_at: tracked?.state === "merged_to_feature_branch" ? now : null,
+    });
+  }
+  return dependencies;
 }
 
 interface DependencyTaskRow {

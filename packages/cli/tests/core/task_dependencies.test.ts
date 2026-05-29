@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   createTaskDependency,
   markTaskDependencySatisfied,
+  reconcileWaitingDependencyTask,
   releaseTaskIfDependenciesSatisfied,
   taskDependencyStatus,
 } from "../../src/core/task_dependencies.ts";
@@ -99,6 +100,66 @@ test("task dependencies persist status and release waiting task when satisfied",
         to_state: "queued",
       },
     ]);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("umbrella dependencies wait for merged_to_feature_branch", () => {
+  const h = createHarness();
+  try {
+    const repoId = insertRepo(h.db, "repo-umbrella-deps");
+    const dependencyTaskId = insertTask(h.db, {
+      taskId: "task-umbrella-dependency",
+      repoId,
+      state: "merged",
+    });
+    const dependentTaskId = insertTask(h.db, {
+      taskId: "task-umbrella-dependent",
+      repoId,
+      state: "waiting_dependencies",
+    });
+
+    createTaskDependency(h.db, {
+      dependentTaskId,
+      dependencyTaskId,
+      dependencySource: "quay",
+      dependencyExternalRef: "BRIX-1508",
+      dependencyRepoId: repoId,
+      scope: "umbrella",
+      requiredState: "merged_to_feature_branch",
+      now: "2026-05-29T10:00:00.000Z",
+    });
+
+    reconcileWaitingDependencyTask(
+      { db: h.db, clock: h.clock },
+      dependentTaskId,
+      "2026-05-29T10:00:01.000Z",
+    );
+    expect(taskDependencyStatus(h.db, dependentTaskId)).toMatchObject({
+      satisfied: 0,
+      unsatisfied: 1,
+    });
+
+    h.db
+      .query(`UPDATE tasks SET state = 'merged_to_feature_branch' WHERE task_id = ?`)
+      .run(dependencyTaskId);
+    reconcileWaitingDependencyTask(
+      { db: h.db, clock: h.clock },
+      dependentTaskId,
+      "2026-05-29T10:00:02.000Z",
+    );
+
+    expect(taskDependencyStatus(h.db, dependentTaskId)).toMatchObject({
+      satisfied: 1,
+      unsatisfied: 0,
+    });
+    const row = h.db
+      .query<{ state: string }, [string]>(
+        `SELECT state FROM tasks WHERE task_id = ?`,
+      )
+      .get(dependentTaskId);
+    expect(row?.state).toBe("queued");
   } finally {
     h.cleanup();
   }
