@@ -66,32 +66,46 @@ test("actor token probe throws a repo-scoped diagnostic on auth failure", () => 
   );
 });
 
-test("worker token probe rejects tokens that cannot create pull requests", () => {
+test("worker token probe rejects tokens without repository write access", () => {
   const adapter = new RecordingAdapter();
   adapter.nextResults = [
     { exitCode: 0, stdout: "lafawnduh1966/quay\n", stderr: "" },
-    { exitCode: 0, stdout: "false\n", stderr: "" },
+    { exitCode: 0, stdout: "READ\n", stderr: "" },
   ];
 
   expect(() =>
     adapter.probeTokenAccess("repo-x", "ghs_readonly_token", "worker"),
-  ).toThrow(/worker token cannot create pull requests/i);
+  ).toThrow(/worker token does not have write access/i);
   expect(adapter.calls).toHaveLength(2);
   expect(adapter.calls[1]!.cmd).toEqual([
     "gh",
     "api",
     "graphql",
     "-f",
-    expect.stringContaining("viewerCanCreatePullRequest"),
+    expect.stringContaining("viewerPermission"),
     "-F",
     "owner=lafawnduh1966",
     "-F",
     "name=quay",
     "--jq",
-    ".data.repository.viewerCanCreatePullRequest",
+    ".data.repository.viewerPermission",
   ]);
   expect(adapter.calls[1]!.env.GH_TOKEN).toBe("ghs_readonly_token");
   expect(adapter.calls[1]!.env.GITHUB_TOKEN).toBeUndefined();
   expect(adapter.calls[1]!.env.QUAY_WORKER_GH_TOKEN).toBeUndefined();
   expect(adapter.calls[1]!.env.QUAY_REVIEWER_GH_TOKEN).toBeUndefined();
+});
+
+test("worker token probe accepts writable repository permissions", () => {
+  for (const permission of ["WRITE", "MAINTAIN", "ADMIN"]) {
+    const adapter = new RecordingAdapter();
+    adapter.nextResults = [
+      { exitCode: 0, stdout: "lafawnduh1966/quay\n", stderr: "" },
+      { exitCode: 0, stdout: `${permission}\n`, stderr: "" },
+    ];
+
+    expect(() =>
+      adapter.probeTokenAccess("repo-x", `ghs_${permission}`, "worker"),
+    ).not.toThrow();
+  }
 });

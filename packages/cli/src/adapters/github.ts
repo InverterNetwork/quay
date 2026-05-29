@@ -1180,7 +1180,7 @@ export class GitHubCliAdapter implements GitHubPort {
       );
     }
     const query =
-      "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { viewerCanCreatePullRequest } }";
+      "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { viewerPermission } }";
     const result = this.run(
       repoId,
       [
@@ -1194,7 +1194,7 @@ export class GitHubCliAdapter implements GitHubPort {
         "-F",
         `name=${name}`,
         "--jq",
-        ".data.repository.viewerCanCreatePullRequest",
+        ".data.repository.viewerPermission",
       ],
       {
         ...process.env,
@@ -1206,12 +1206,13 @@ export class GitHubCliAdapter implements GitHubPort {
     );
     if (result.exitCode !== 0) {
       throw new Error(
-        `gh api graphql viewerCanCreatePullRequest failed: ${result.stderr.trim() || result.stdout.trim()}`,
+        `gh api graphql viewerPermission failed: ${result.stderr.trim() || result.stdout.trim()}`,
       );
     }
-    if (result.stdout.trim() !== "true") {
+    const permission = result.stdout.trim();
+    if (!["ADMIN", "MAINTAIN", "WRITE"].includes(permission)) {
       throw new Error(
-        `worker token cannot create pull requests in ${fullName}; grant pull request write access before spawning worker attempts`,
+        `worker token does not have write access to ${fullName}; grant repository write access before spawning worker attempts`,
       );
     }
   }
