@@ -50,6 +50,11 @@ export class FakeGitHub implements GitHubPort {
     token: string;
     actor: "worker" | "reviewer";
   }[] = [];
+  readonly prExistsWithTokenCalls: {
+    repoId: string;
+    branch: string;
+    token: string;
+  }[] = [];
   readonly mergePullRequestCalls: {
     repoId: string;
     prNumber: number;
@@ -70,6 +75,15 @@ export class FakeGitHub implements GitHubPort {
 
   prExistsForBranch(repoId: string, branch: string): boolean {
     this.calls.push({ repoId, branch });
+    return this.prExisting.get(`${repoId}\0${branch}`) ?? false;
+  }
+
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean {
+    this.prExistsWithTokenCalls.push({ repoId, branch, token });
     return this.prExisting.get(`${repoId}\0${branch}`) ?? false;
   }
 

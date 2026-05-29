@@ -119,6 +119,55 @@ test("worker QUAY_WORKER_GH_TOKEN is promoted to GH_TOKEN and cleared before spa
   expect(spawnedTokenSource(h, taskId)).toBe(`env:${WORKER_GH_TOKEN_ENV}`);
 });
 
+test("worker PR existence snapshot uses resolved actor token", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-worker-pr-exists-token");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-worker-pr-exists-token",
+    state: "queued",
+  });
+  const attemptId = insertAttempt(h.db, { taskId, consumedBudget: 0 });
+  insertFinalPromptArtifact(
+    h.db,
+    h.artifactRoot,
+    h.clock,
+    taskId,
+    attemptId,
+    "worker prompt",
+  );
+  built.github.setPrExists(repoId, "quay/task-worker-pr-exists-token", true);
+  const token = "ghs_worker_pr_exists_token";
+  built.github.setTokenAccessHandler(() => {
+    expect(built.github.calls).toHaveLength(0);
+  });
+
+  const results = await tick_once(built.deps, {
+    env: {
+      [WORKER_GH_TOKEN_ENV]: token,
+      GH_TOKEN: "ghs_ambient_should_not_be_used",
+      GITHUB_TOKEN: "ghs_secondary_should_not_be_used",
+    },
+  });
+
+  expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
+  expect(built.github.calls).toHaveLength(0);
+  expect(built.github.prExistsWithTokenCalls).toEqual([
+    {
+      repoId,
+      branch: "quay/task-worker-pr-exists-token",
+      token,
+    },
+  ]);
+  const row = h.db
+    .query<{ pr_existed_at_spawn: number }, [number]>(
+      `SELECT pr_existed_at_spawn FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(row?.pr_existed_at_spawn).toBe(1);
+});
+
 test("worker spawn fails before tmux when actor token is invalid", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
@@ -154,6 +203,8 @@ test("worker spawn fails before tmux when actor token is invalid", async () => {
   expect(built.github.tokenAccessCalls).toEqual([
     { repoId, token, actor: "worker" },
   ]);
+  expect(built.github.calls).toHaveLength(0);
+  expect(built.github.prExistsWithTokenCalls).toHaveLength(0);
   expect(built.tmux.spawnCalls).toHaveLength(0);
   expect(attemptSpawnedAt(h, attemptId)).toBeNull();
 });

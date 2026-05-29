@@ -465,6 +465,14 @@ class TickGithubCache implements GitHubPort {
     return this.inner.prExistsForBranch(repoId, branch);
   }
 
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean {
+    return this.inner.prExistsForBranchWithToken(repoId, branch, token);
+  }
+
   openPrsForBranchBase(
     repoId: string,
     branch: string,
@@ -5586,13 +5594,6 @@ function promoteAndSpawn(
   // that case and lets `remoteHeadSha` return null — the spec records
   // `remote_sha_at_spawn = null` for the first attempt, so a missing remote
   // is the *expected* state, not a tick error.
-  deps.git.fetchBranchIfExists(task.repo_id, task.branch_name);
-  const remoteSha = deps.git.remoteHeadSha(task.repo_id, task.branch_name);
-  const prExisted = deps.github.prExistsForBranch(task.repo_id, task.branch_name)
-    ? 1
-    : 0;
-  const now = deps.clock.nowISO();
-
   // Probe agent identity and compute the canonical session name BEFORE the
   // promotion transaction so the `spawned` event can carry both in
   // `event_data`. The probe is documented as in-process and never throws;
@@ -5609,6 +5610,16 @@ function promoteAndSpawn(
       error: githubToken.error,
     };
   }
+  deps.git.fetchBranchIfExists(task.repo_id, task.branch_name);
+  const remoteSha = deps.git.remoteHeadSha(task.repo_id, task.branch_name);
+  const prExisted = deps.github.prExistsForBranchWithToken(
+    task.repo_id,
+    task.branch_name,
+    githubToken.token,
+  )
+    ? 1
+    : 0;
+  const now = deps.clock.nowISO();
   const spawnEnv = addCodexLaunchIsolation(
     githubToken.env,
     task.worktree_path,
@@ -5698,9 +5709,12 @@ type GithubActorTokenResult =
       ok: true;
       env?: TmuxSpawnInput["env"];
       envFiles?: TmuxSpawnInput["envFiles"];
+      token: string;
       source: string;
     }
   | { ok: false; error: string };
+
+type GithubActorTokenProbeResult = { ok: true } | { ok: false; error: string };
 
 function resolveGithubActorToken(
   actor: GithubActor,
@@ -5728,6 +5742,7 @@ function resolveGithubActorToken(
     return {
       ok: true,
       env: githubActorPaneEnv(envToken),
+      token: envToken,
       source: `env:${envName}`,
     };
   }
@@ -5751,6 +5766,7 @@ function resolveGithubActorToken(
       return {
         ok: true,
         env: githubActorPaneEnv(testDefaultWorkerToken),
+        token: testDefaultWorkerToken,
         source: "test:defaultWorkerToken",
       };
     }
@@ -5785,6 +5801,7 @@ function resolveGithubActorToken(
     ok: true,
     env: githubActorPaneEnv(),
     envFiles: [{ name: "GH_TOKEN", path: fileOption }],
+    token,
     source: `file:${fileConfigName}`,
   };
 }
@@ -5804,7 +5821,7 @@ function probeGithubActorToken(
   actor: GithubActor,
   source: string,
   token: string,
-): GithubActorTokenResult {
+): GithubActorTokenProbeResult {
   try {
     deps.github.probeTokenAccess(repoId, token, actor);
   } catch (err) {
@@ -5817,7 +5834,7 @@ function probeGithubActorToken(
       error: `${actor} GitHub token ${source} is invalid, expired, or cannot access the repository: ${message}`,
     };
   }
-  return { ok: true, source };
+  return { ok: true };
 }
 
 function addCodexLaunchIsolation(

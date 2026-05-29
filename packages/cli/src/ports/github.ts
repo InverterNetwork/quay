@@ -12,6 +12,14 @@
 // plain-text `gh pr checks ...` output.
 export interface GitHubPort {
   prExistsForBranch(repoId: string, branch: string): boolean;
+  // Same spawn-time read as `prExistsForBranch`, but forced through an explicit
+  // actor token so worker/reviewer launch paths never depend on ambient gh auth
+  // after resolving role-specific credentials.
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean;
   // Exact reconciliation read for a dead worker that reports an already-open
   // PR before Quay has attached PR metadata to the task row. The adapter must
   // filter by both head branch and base branch, and return only currently open

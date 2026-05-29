@@ -69,6 +69,21 @@ export class GitHubCliAdapter implements GitHubPort {
     return list.length > 0;
   }
 
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean {
+    const list = this.listPrs(
+      repoId,
+      branch,
+      "all",
+      undefined,
+      githubActorCommandEnv(token),
+    );
+    return list.length > 0;
+  }
+
   openPrsForBranchBase(
     repoId: string,
     branch: string,
@@ -548,6 +563,7 @@ export class GitHubCliAdapter implements GitHubPort {
     branch: string,
     state: "open" | "closed" | "all",
     baseBranch?: string,
+    env?: Record<string, string | undefined>,
   ): Array<{ number: number }> {
     const args = [
       "gh",
@@ -562,7 +578,7 @@ export class GitHubCliAdapter implements GitHubPort {
       args.push("--base", baseBranch);
     }
     args.push("--json", "number");
-    const result = this.run(repoId, args);
+    const result = this.run(repoId, args, env);
     if (result.exitCode !== 0) {
       throw new Error(
         `gh pr list --head ${branch}${baseBranch !== undefined ? ` --base ${baseBranch}` : ""} --state ${state} failed: ${result.stderr.trim()}`,
@@ -1373,6 +1389,16 @@ export function markRequired(items: PrCheck[], requiredKeys: Set<string>): PrChe
       requiredKeys.has(requiredKeyOf(c)) ||
       requiredKeys.has(requiredNameKeyOf(c.name)),
   }));
+}
+
+function githubActorCommandEnv(token: string): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    GH_TOKEN: token,
+    GITHUB_TOKEN: undefined,
+    QUAY_WORKER_GH_TOKEN: undefined,
+    QUAY_REVIEWER_GH_TOKEN: undefined,
+  };
 }
 
 function mapCheckRow(row: unknown): PrCheck {
