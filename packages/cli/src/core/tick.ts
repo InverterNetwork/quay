@@ -74,6 +74,7 @@ import {
   releaseTaskIfDependenciesSatisfied,
   reconcileWaitingDependencyTask,
   satisfyDependenciesForMergedTask,
+  satisfyDependenciesForMergedToFeatureBranchTask,
 } from "./task_dependencies.ts";
 import {
   scheduleCleanSpawnRetry,
@@ -1241,7 +1242,12 @@ function readPendingReviewRequests(db: DB): PendingReviewRequestRow[] {
          JOIN tasks t ON t.task_id = rr.task_id
         WHERE rr.status = 'pending_ci'
           AND t.cancel_requested_at IS NULL
-          AND t.state NOT IN ('merged', 'closed_unmerged', 'cancelled')
+          AND t.state NOT IN (
+            'merged_to_feature_branch',
+            'merged',
+            'closed_unmerged',
+            'cancelled'
+          )
         ORDER BY rr.created_at ASC, rr.request_id ASC`,
     )
     .all();
@@ -1305,7 +1311,12 @@ function readCancelTargets(db: DB): CancelTargetRow[] {
     .query<CancelTargetRow, []>(
       `SELECT task_id FROM tasks
         WHERE cancel_requested_at IS NOT NULL
-          AND state NOT IN ('cancelled', 'merged', 'closed_unmerged')
+          AND state NOT IN (
+            'cancelled',
+            'merged_to_feature_branch',
+            'merged',
+            'closed_unmerged'
+          )
         ORDER BY task_id`,
     )
     .all();
@@ -2393,6 +2404,10 @@ function finalizePrTerminal(
   fromState: PrTerminalFromState,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
+  const taskTerminalState =
+    terminal === "merged" && isUmbrellaTask(deps.db, task.task_id)
+      ? "merged_to_feature_branch"
+      : terminal;
   const activeReviewers =
     fromState === "pr-review"
       ? loadActiveReviewersForTask(deps.db, task.task_id)
@@ -2412,7 +2427,7 @@ function finalizePrTerminal(
     const transition = transitionTaskState(deps, {
       taskId: task.task_id,
       from: fromState,
-      to: terminal,
+      to: taskTerminalState,
       eventType: terminal === "merged" ? "merged" : "closed",
       attemptId: attempt.attempt_id,
       now,
@@ -2463,7 +2478,11 @@ function finalizePrTerminal(
     }
     cancelOpenOrchestratorHandoffs(deps, task.task_id);
     if (terminal === "merged") {
-      releaseDependentsForMergedTask(deps, task.task_id, now);
+      if (taskTerminalState === "merged_to_feature_branch") {
+        releaseDependentsForMergedToFeatureBranchTask(deps, task.task_id, now);
+      } else {
+        releaseDependentsForMergedTask(deps, task.task_id, now);
+      }
     }
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -2485,12 +2504,39 @@ function finalizePrTerminal(
   };
 }
 
+function isUmbrellaTask(db: DB, taskId: string): boolean {
+  const row = db
+    .query<{ n: number }, [string]>(
+      `SELECT 1 AS n FROM umbrella_tasks WHERE task_id = ? LIMIT 1`,
+    )
+    .get(taskId);
+  return row !== null && row !== undefined;
+}
+
 function releaseDependentsForMergedTask(
   deps: Pick<TickDeps, "db">,
   taskId: string,
   now: string,
 ): void {
   const satisfiedDependencies = satisfyDependenciesForMergedTask(
+    deps.db,
+    taskId,
+    now,
+  );
+  const dependentTaskIds = new Set(
+    satisfiedDependencies.map((dep) => dep.dependent_task_id),
+  );
+  for (const dependentTaskId of dependentTaskIds) {
+    releaseTaskIfDependenciesSatisfied(deps.db, dependentTaskId, now);
+  }
+}
+
+function releaseDependentsForMergedToFeatureBranchTask(
+  deps: Pick<TickDeps, "db">,
+  taskId: string,
+  now: string,
+): void {
+  const satisfiedDependencies = satisfyDependenciesForMergedToFeatureBranchTask(
     deps.db,
     taskId,
     now,

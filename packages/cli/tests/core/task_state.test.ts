@@ -232,6 +232,7 @@ test("transition metadata documents every known task state", () => {
     "worktree_error",
     "orchestrator_loop",
     "cancelled",
+    "merged_to_feature_branch",
     "merged",
     "closed_unmerged",
   ]) {

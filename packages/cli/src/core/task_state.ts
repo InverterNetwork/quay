@@ -352,6 +352,12 @@ export const TASK_TRANSITIONS = [
     transition(from, "merged", ["merged"], "PR reached merged terminal state"),
     transition(
       from,
+      "merged_to_feature_branch",
+      ["merged"],
+      "umbrella task PR reached merged terminal state on the feature branch",
+    ),
+    transition(
+      from,
       "closed_unmerged",
       ["closed"],
       "PR reached closed-unmerged terminal state",

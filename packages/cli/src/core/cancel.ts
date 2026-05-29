@@ -106,7 +106,11 @@ interface RetargetCloneRow {
   repo_base_branch: string | null;
 }
 
-const TERMINAL_NON_CANCELLED = new Set(["merged", "closed_unmerged"]);
+const TERMINAL_NON_CANCELLED = new Set([
+  "merged_to_feature_branch",
+  "merged",
+  "closed_unmerged",
+]);
 
 function loadTaskRow(db: DB, taskId: string): TaskRow | null {
   return (
