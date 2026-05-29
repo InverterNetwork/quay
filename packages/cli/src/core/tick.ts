@@ -41,6 +41,7 @@ import {
   enqueueOrchestratorHandoff,
   reopenClaimedOrchestratorHandoffs,
 } from "./orchestrator_handoffs.ts";
+import { ensurePreambleIdForAttemptReason } from "./preamble.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact, persistResolvedAttemptModel } from "./usage.ts";
 import {
@@ -199,6 +200,7 @@ export type TickAction =
   | "ci_pending"
   | "ci_passed"
   | "adopted_pr_reconciled"
+  | "umbrella_final_pr_reconciled"
   | "pr_merged"
   | "pr_closed_unmerged"
   | "review_respawn_scheduled"
@@ -363,6 +365,24 @@ interface UmbrellaSubtaskIntegrationRow {
   final_pr_task_id: string | null;
 }
 
+interface ReadyUmbrellaFinalPrWorkflowRow {
+  umbrella_workflow_id: number;
+  external_ref: string;
+  repo_id: string;
+  base_branch: string;
+  feature_branch: string;
+  final_pr_task_id: string | null;
+  final_pr_number: number | null;
+  final_pr_url: string | null;
+}
+
+interface UmbrellaIntegratedSubtaskRow {
+  task_id: string;
+  external_ref: string;
+  pr_url: string | null;
+  objective_path: string | null;
+}
+
 type SyntheticReviewLifecycleState =
   | "pr-review"
   | "done"
@@ -439,6 +459,24 @@ class TickGithubCache implements GitHubPort {
     baseBranch: string,
   ): OpenBranchPr[] {
     return this.inner.openPrsForBranchBase(repoId, branch, baseBranch);
+  }
+
+  createPullRequest(input: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }): OpenBranchPr {
+    const pr = this.inner.createPullRequest(input);
+    this.prSnapshotByBranch.delete(`${input.repoId}\0${input.headBranch}`);
+    this.lightweightByBranch.delete(`${input.repoId}\0${input.headBranch}`);
+    return pr;
+  }
+
+  updatePullRequestBody(repoId: string, prNumber: number, body: string): void {
+    this.inner.updatePullRequestBody(repoId, prNumber, body);
+    this.prViews.delete(`${repoId}\0${prNumber}`);
   }
 
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {
@@ -987,6 +1025,25 @@ export async function tick_once(
       }
     }
 
+    for (const workflow of readReadyUmbrellaFinalPrWorkflows(deps.db)) {
+      try {
+        results.push(reconcileUmbrellaFinalPr(deps, workflow));
+      } catch (err) {
+        const taskId =
+          workflow.final_pr_task_id ??
+          `umbrella-final-pr-${workflow.umbrella_workflow_id}`;
+        results.push(
+          recordTickErrorWithGithubBackoff(
+            deps,
+            githubBackoff,
+            taskId,
+            err,
+            workflow.repo_id,
+          ),
+        );
+      }
+    }
+
     for (const task of prOpenSnapshot) {
       const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
       if (skipped !== null) {
@@ -1457,6 +1514,36 @@ function readDone(db: DB): DoneTaskRow[] {
          FROM tasks
         WHERE state = 'done'
         ORDER BY created_at, task_id`,
+    )
+    .all();
+}
+
+function readReadyUmbrellaFinalPrWorkflows(
+  db: DB,
+): ReadyUmbrellaFinalPrWorkflowRow[] {
+  return db
+    .query<ReadyUmbrellaFinalPrWorkflowRow, []>(
+      `SELECT uw.umbrella_workflow_id, uw.external_ref, uw.repo_id,
+              uw.base_branch, uw.feature_branch, uw.final_pr_task_id,
+              uw.final_pr_number, uw.final_pr_url
+         FROM umbrella_workflows uw
+        WHERE uw.state = 'active'
+          AND (
+               uw.final_pr_task_id IS NULL
+            OR uw.final_pr_number IS NULL
+          )
+          AND EXISTS (
+            SELECT 1 FROM umbrella_tasks ut
+             WHERE ut.umbrella_workflow_id = uw.umbrella_workflow_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM umbrella_tasks ut
+              JOIN tasks t ON t.task_id = ut.task_id
+             WHERE ut.umbrella_workflow_id = uw.umbrella_workflow_id
+               AND t.state <> 'merged_to_feature_branch'
+          )
+        ORDER BY uw.created_at, uw.umbrella_workflow_id`,
     )
     .all();
 }
@@ -2117,6 +2204,69 @@ function processDoneTask(
   return null;
 }
 
+function reconcileUmbrellaFinalPr(
+  deps: TickDeps,
+  workflow: ReadyUmbrellaFinalPrWorkflowRow,
+): TickTaskResult {
+  const subtasks = loadUmbrellaIntegratedSubtasks(
+    deps.db,
+    workflow.umbrella_workflow_id,
+  );
+  const title = renderUmbrellaFinalPrTitle(workflow);
+  const managedSection = renderUmbrellaFinalPrManagedSection(workflow, subtasks);
+  const existingPrs = deps.github.openPrsForBranchBase(
+    workflow.repo_id,
+    workflow.feature_branch,
+    workflow.base_branch,
+  );
+  if (existingPrs.length > 1) {
+    throw new Error(
+      `umbrella final PR reconciliation found ${existingPrs.length} open PRs for ${workflow.feature_branch} -> ${workflow.base_branch}`,
+    );
+  }
+
+  const pr =
+    existingPrs[0] ??
+    deps.github.createPullRequest({
+      repoId: workflow.repo_id,
+      headBranch: workflow.feature_branch,
+      baseBranch: workflow.base_branch,
+      title,
+      body: managedSection,
+    });
+
+  if (existingPrs.length === 1) {
+    const view = deps.github.prView(workflow.repo_id, pr.number);
+    const nextBody = replaceUmbrellaFinalPrManagedSection(
+      view?.body ?? "",
+      managedSection,
+    );
+    if (view === null || view.body !== nextBody) {
+      deps.github.updatePullRequestBody(workflow.repo_id, pr.number, nextBody);
+    }
+  }
+
+  const taskId = ensureUmbrellaFinalPrTask(deps, workflow, pr, managedSection);
+  deps.db
+    .query(
+      `UPDATE umbrella_workflows
+          SET final_pr_task_id = ?,
+              final_pr_number = ?,
+              final_pr_url = COALESCE(?, final_pr_url),
+              updated_at = ?
+        WHERE umbrella_workflow_id = ?`,
+    )
+    .run(
+      taskId,
+      pr.number,
+      pr.url,
+      deps.clock.nowISO(),
+      workflow.umbrella_workflow_id,
+    );
+  clearTickError(deps, taskId);
+  return { task_id: taskId, action: "umbrella_final_pr_reconciled" };
+}
+
 function processUmbrellaSubtaskAutoMerge(
   deps: TickDeps,
   task: DoneTaskRow,
@@ -2774,6 +2924,292 @@ function loadUmbrellaSubtaskIntegration(
     )
     .get(taskId);
   return row ?? null;
+}
+
+function loadUmbrellaIntegratedSubtasks(
+  db: DB,
+  umbrellaWorkflowId: number,
+): UmbrellaIntegratedSubtaskRow[] {
+  return db
+    .query<UmbrellaIntegratedSubtaskRow, [number]>(
+      `SELECT ut.task_id,
+              ut.external_ref,
+              t.pr_url,
+              ao.file_path AS objective_path
+         FROM umbrella_tasks ut
+         JOIN tasks t ON t.task_id = ut.task_id
+         LEFT JOIN artifacts ao
+           ON ao.task_id = ut.task_id
+          AND ao.kind = 'task_objective'
+          AND ao.attempt_id IS NULL
+        WHERE ut.umbrella_workflow_id = ?
+        ORDER BY ut.umbrella_task_id`,
+    )
+    .all(umbrellaWorkflowId);
+}
+
+const UMBRELLA_FINAL_PR_START = "<!-- quay:umbrella-final-pr:start -->";
+const UMBRELLA_FINAL_PR_END = "<!-- quay:umbrella-final-pr:end -->";
+
+function renderUmbrellaFinalPrTitle(
+  workflow: ReadyUmbrellaFinalPrWorkflowRow,
+): string {
+  const ticket = normalizeTicketRef(workflow.external_ref);
+  return ticket === null
+    ? "feat: reconcile umbrella workflow"
+    : `feat: reconcile umbrella workflow (${ticket})`;
+}
+
+function renderUmbrellaFinalPrManagedSection(
+  workflow: ReadyUmbrellaFinalPrWorkflowRow,
+  subtasks: UmbrellaIntegratedSubtaskRow[],
+): string {
+  const displayRef = normalizeTicketRef(workflow.external_ref) ?? workflow.external_ref;
+  const lines = [
+    UMBRELLA_FINAL_PR_START,
+    "## Quay Umbrella Final PR",
+    "",
+    `Umbrella external ref: ${displayRef}`,
+    `Linear ticket: ${displayRef}`,
+    `Source branch: ${workflow.feature_branch}`,
+    `Target branch: ${workflow.base_branch}`,
+    "",
+    "Quay opened this PR after all umbrella subtasks were integrated into the feature branch.",
+    "",
+    "### Integrated Subtasks",
+  ];
+  for (const subtask of subtasks) {
+    const subtaskRef = normalizeTicketRef(subtask.external_ref) ?? subtask.external_ref;
+    const title = extractObjectiveTitle(subtask.objective_path);
+    const titlePart = title === null ? "" : ` - ${title}`;
+    const prPart =
+      subtask.pr_url === null || subtask.pr_url === ""
+        ? "subtask PR: unavailable"
+        : `subtask PR: ${subtask.pr_url}`;
+    lines.push(
+      `- ${subtaskRef}${titlePart} (task ${subtask.task_id}; ${prPart})`,
+    );
+  }
+  if (subtasks.length === 0) {
+    lines.push("- No integrated subtasks recorded.");
+  }
+  lines.push("", UMBRELLA_FINAL_PR_END);
+  return lines.join("\n");
+}
+
+function replaceUmbrellaFinalPrManagedSection(
+  existingBody: string,
+  managedSection: string,
+): string {
+  const start = existingBody.indexOf(UMBRELLA_FINAL_PR_START);
+  const end = existingBody.indexOf(UMBRELLA_FINAL_PR_END);
+  if (start !== -1 && end !== -1 && end >= start) {
+    const afterEnd = end + UMBRELLA_FINAL_PR_END.length;
+    return `${existingBody.slice(0, start).trimEnd()}\n\n${managedSection}\n\n${existingBody.slice(afterEnd).trimStart()}`.trim();
+  }
+  if (existingBody.trim() === "") return managedSection;
+  return `${existingBody.trimEnd()}\n\n${managedSection}`;
+}
+
+function normalizeTicketRef(externalRef: string): string | null {
+  const trimmed = externalRef.trim();
+  if (trimmed === "") return null;
+  const match = trimmed.match(/^([A-Za-z]+)-(\d+)$/);
+  if (match === null) return trimmed;
+  const prefix = match[1]!.toUpperCase() === "ITRY" ? "BRIX" : match[1]!.toUpperCase();
+  return `${prefix}-${match[2]}`;
+}
+
+function extractObjectiveTitle(path: string | null): string | null {
+  if (path === null || path === "") return null;
+  let body: string;
+  try {
+    body = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  for (const line of body.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#")) {
+      const title = trimmed.replace(/^#+\s*/, "").trim();
+      return title === "" ? null : title;
+    }
+  }
+  const first = body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (first === undefined) return null;
+  return first.length > 80 ? `${first.slice(0, 77)}...` : first;
+}
+
+function ensureUmbrellaFinalPrTask(
+  deps: TickDeps,
+  workflow: ReadyUmbrellaFinalPrWorkflowRow,
+  pr: OpenBranchPr,
+  managedSection: string,
+): string {
+  const existingTaskId = workflow.final_pr_task_id ?? lookupUmbrellaFinalTaskId(
+    deps.db,
+    workflow.repo_id,
+    workflow.external_ref,
+  );
+  const now = deps.clock.nowISO();
+  const taskId =
+    existingTaskId ?? `umbrella-final-pr-${workflow.umbrella_workflow_id}`;
+  if (existingTaskId === null) {
+    const worktreesRoot = inferUmbrellaWorktreesRoot(
+      deps.db,
+      workflow.umbrella_workflow_id,
+    );
+    const worktreePath = join(worktreesRoot, taskId);
+    const preambleId = ensurePreambleIdForAttemptReason(
+      deps.db,
+      deps.clock,
+      "initial",
+      { repoId: workflow.repo_id },
+    );
+    deps.db.exec("BEGIN");
+    try {
+      deps.db
+        .query(
+          `INSERT INTO tasks (
+             task_id, repo_id, external_ref, state, authoring_mode,
+             branch_name, base_branch, tmux_id, worktree_path,
+             pr_number, pr_url, head_sha, base_sha, retry_budget,
+             created_at, updated_at
+           ) VALUES (?, ?, ?, 'pr-open', 'quay_owned', ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, ?)`,
+        )
+        .run(
+          taskId,
+          workflow.repo_id,
+          workflow.external_ref,
+          workflow.feature_branch,
+          workflow.base_branch,
+          `quay-umbrella-final-${workflow.umbrella_workflow_id}`,
+          worktreePath,
+          pr.number,
+          pr.url,
+          pr.headSha,
+          pr.baseSha,
+          now,
+          now,
+        );
+      const attempt = deps.db
+        .query<{ attempt_id: number }, [string, number, string, string, string | null]>(
+          `INSERT INTO attempts (
+             task_id, attempt_number, preamble_id, reason, consumed_budget,
+             spawned_at, ended_at, exit_kind, remote_sha_at_exit,
+             pr_existed_at_spawn
+           ) VALUES (?, 1, ?, 'umbrella_final_pr', 0, ?, ?, 'pr_opened', ?, 1)
+           RETURNING attempt_id`,
+        )
+        .get(taskId, preambleId, now, now, pr.headSha);
+      if (!attempt) throw new Error("umbrella final PR attempt insert returned no row");
+      deps.artifactStore.writeArtifact({
+        taskId,
+        attemptId: null,
+        kind: "task_objective",
+        content: managedSection,
+        extension: "md",
+      });
+      deps.artifactStore.writeArtifact({
+        taskId,
+        attemptId: attempt.attempt_id,
+        kind: "brief",
+        content: managedSection,
+        extension: "md",
+      });
+      deps.artifactStore.writeArtifact({
+        taskId,
+        attemptId: attempt.attempt_id,
+        kind: "final_prompt",
+        content: managedSection,
+        extension: "md",
+      });
+      deps.db
+        .query(
+          `INSERT INTO events (
+             task_id, attempt_id, event_type, to_state, occurred_at, event_data
+           ) VALUES (?, ?, 'umbrella_final_pr_reconciled', 'pr-open', ?, ?)`,
+        )
+        .run(
+          taskId,
+          attempt.attempt_id,
+          now,
+          JSON.stringify({
+            umbrella_workflow_id: workflow.umbrella_workflow_id,
+            pr_number: pr.number,
+            source_branch: workflow.feature_branch,
+            target_branch: workflow.base_branch,
+          }),
+        );
+      deps.db.exec("COMMIT");
+    } catch (err) {
+      try {
+        deps.db.exec("ROLLBACK");
+      } catch {}
+      throw err;
+    }
+    return taskId;
+  }
+
+  deps.db
+    .query(
+      `UPDATE tasks
+          SET branch_name = ?,
+              base_branch = ?,
+              pr_number = ?,
+              pr_url = COALESCE(?, pr_url),
+              head_sha = COALESCE(?, head_sha),
+              base_sha = COALESCE(?, base_sha),
+              updated_at = ?
+        WHERE task_id = ?`,
+    )
+    .run(
+      workflow.feature_branch,
+      workflow.base_branch,
+      pr.number,
+      pr.url,
+      pr.headSha,
+      pr.baseSha,
+      now,
+      existingTaskId,
+    );
+  return existingTaskId;
+}
+
+function lookupUmbrellaFinalTaskId(
+  db: DB,
+  repoId: string,
+  externalRef: string,
+): string | null {
+  const row = db
+    .query<{ task_id: string }, [string, string]>(
+      `SELECT task_id
+         FROM tasks
+        WHERE repo_id = ?
+          AND external_ref = ?
+        ORDER BY created_at, task_id
+        LIMIT 1`,
+    )
+    .get(repoId, externalRef);
+  return row?.task_id ?? null;
+}
+
+function inferUmbrellaWorktreesRoot(db: DB, umbrellaWorkflowId: number): string {
+  const row = db
+    .query<{ worktree_path: string }, [number]>(
+      `SELECT t.worktree_path
+         FROM umbrella_tasks ut
+         JOIN tasks t ON t.task_id = ut.task_id
+        WHERE ut.umbrella_workflow_id = ?
+        ORDER BY ut.umbrella_task_id
+        LIMIT 1`,
+    )
+    .get(umbrellaWorkflowId);
+  if (row === undefined || row === null) return "/tmp";
+  return dirname(row.worktree_path);
 }
 
 function releaseDependentsForMergedTask(

@@ -1,0 +1,193 @@
+import { afterEach, expect, test } from "bun:test";
+import { tick_once } from "../../src/core/tick.ts";
+import { createHarness, type Harness } from "../support/harness.ts";
+import {
+  insertAttempt,
+  insertRepo,
+  insertTask,
+  seedTaskObjective,
+} from "../support/fixtures.ts";
+import { buildTickDeps } from "../support/tick_deps.ts";
+
+let h: Harness | null = null;
+afterEach(() => {
+  h?.cleanup();
+  h = null;
+});
+
+function insertIntegratedUmbrellaWorkflow(repoId: string): {
+  workflowId: number;
+  taskId: string;
+} {
+  if (h === null) throw new Error("harness not initialized");
+  const taskId = insertTask(h.db, {
+    taskId: "task-integrated-subtask",
+    repoId,
+    state: "merged_to_feature_branch",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1512',
+              pr_url = 'https://github.example/repo/pull/12',
+              worktree_path = ?
+        WHERE task_id = ?`,
+    )
+    .run(`${h.dataDir}/worktrees/${taskId}`, taskId);
+  seedTaskObjective(h, taskId, "# Subtask title\n\nImplement one slice.");
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-05-29T11:00:00.000Z",
+  });
+  const row = h.db
+    .query<{ umbrella_workflow_id: number }, [string, string, string, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id`,
+    )
+    .get(
+      "BRIX-1511",
+      repoId,
+      "dev",
+      "quay/umbrella/BRIX-1511",
+      "2026-05-29T10:00:00.000Z",
+      "2026-05-29T10:00:00.000Z",
+    );
+  if (!row) throw new Error("workflow insert failed");
+  h.db
+    .query(
+      `INSERT INTO umbrella_tasks (
+         umbrella_workflow_id, task_id, external_ref, created_at
+       ) VALUES (?, ?, ?, ?)`,
+    )
+    .run(
+      row.umbrella_workflow_id,
+      taskId,
+      "BRIX-1512",
+      "2026-05-29T10:05:00.000Z",
+    );
+  return { workflowId: row.umbrella_workflow_id, taskId };
+}
+
+test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T12:00:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-final");
+  const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
+  const built = buildTickDeps(h);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    {
+      task_id: `umbrella-final-pr-${workflowId}`,
+      action: "umbrella_final_pr_reconciled",
+    },
+  ]);
+  expect(built.github.createPullRequestCalls).toHaveLength(1);
+  expect(built.github.createPullRequestCalls[0]).toMatchObject({
+    repoId,
+    headBranch: "quay/umbrella/BRIX-1511",
+    baseBranch: "dev",
+    title: "feat: reconcile umbrella workflow (BRIX-1511)",
+  });
+  expect(built.github.createPullRequestCalls[0]!.body).toContain(
+    "<!-- quay:umbrella-final-pr:start -->",
+  );
+  expect(built.github.createPullRequestCalls[0]!.body).toContain(
+    "- BRIX-1512 - Subtask title (task task-integrated-subtask; subtask PR: https://github.example/repo/pull/12)",
+  );
+
+  const workflow = h.db
+    .query<
+      { final_pr_task_id: string | null; final_pr_number: number | null; final_pr_url: string | null },
+      []
+    >(`SELECT final_pr_task_id, final_pr_number, final_pr_url FROM umbrella_workflows`)
+    .get();
+  expect(workflow).toEqual({
+    final_pr_task_id: `umbrella-final-pr-${workflowId}`,
+    final_pr_number: 1001,
+    final_pr_url: "https://github.example/repo-umbrella-final/pull/1001",
+  });
+  const task = h.db
+    .query<
+      { state: string; authoring_mode: string; branch_name: string; base_branch: string | null; external_ref: string | null },
+      [string]
+    >(
+      `SELECT state, authoring_mode, branch_name, base_branch, external_ref
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(`umbrella-final-pr-${workflowId}`);
+  expect(task).toEqual({
+    state: "pr-open",
+    authoring_mode: "quay_owned",
+    branch_name: "quay/umbrella/BRIX-1511",
+    base_branch: "dev",
+    external_ref: "BRIX-1511",
+  });
+  const finalLinkedAsSubtask = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM umbrella_tasks WHERE task_id = ?`,
+    )
+    .get(`umbrella-final-pr-${workflowId}`);
+  expect(finalLinkedAsSubtask?.n).toBe(0);
+  expect(built.github.mergePullRequestCalls).toEqual([]);
+});
+
+test("tick reuses existing final umbrella PR and replaces managed body section", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T12:30:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-final-reuse");
+  const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
+  const built = buildTickDeps(h);
+  built.github.setOpenPrsForBranchBase(
+    repoId,
+    "quay/umbrella/BRIX-1511",
+    "dev",
+    [
+      {
+        number: 77,
+        url: "https://github.example/repo/pull/77",
+        headSha: "head-77",
+        baseSha: "base-77",
+        baseRef: "dev",
+      },
+    ],
+  );
+  built.github.setPrView(repoId, 77, {
+    number: 77,
+    title: "human title",
+    body: [
+      "Human intro.",
+      "",
+      "<!-- quay:umbrella-final-pr:start -->",
+      "stale managed text",
+      "<!-- quay:umbrella-final-pr:end -->",
+      "",
+      "Human footer.",
+    ].join("\n"),
+    url: "https://github.example/repo/pull/77",
+    headRefName: "quay/umbrella/BRIX-1511",
+    headSha: "head-77",
+    baseRef: "dev",
+    isCrossRepository: false,
+  });
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    {
+      task_id: `umbrella-final-pr-${workflowId}`,
+      action: "umbrella_final_pr_reconciled",
+    },
+  ]);
+  expect(built.github.createPullRequestCalls).toEqual([]);
+  expect(built.github.updatePullRequestBodyCalls).toHaveLength(1);
+  const body = built.github.updatePullRequestBodyCalls[0]!.body;
+  expect(body.startsWith("Human intro.")).toBe(true);
+  expect(body).toContain("Umbrella external ref: BRIX-1511");
+  expect(body).toContain("Human footer.");
+  expect(body).not.toContain("stale managed text");
+});
