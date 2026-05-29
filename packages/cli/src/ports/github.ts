@@ -22,6 +22,14 @@ export interface GitHubPort {
     branch: string,
     baseBranch: string,
   ): OpenBranchPr[];
+  createPullRequest(input: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }): OpenBranchPr;
+  updatePullRequestBody(repoId: string, prNumber: number, body: string): void;
   prCheckStatus(repoId: string, branch: string): PrCheckStatus;
   // Returns true iff a PR for the branch is currently open. Used by the cancel
   // finalizer to decide whether to retain the remote branch in the default

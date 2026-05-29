@@ -161,6 +161,11 @@ export class FakeGit implements GitPort {
     });
   }
 
+  worktreeCurrentBranch(worktreePath: string): string | null {
+    this.record("worktreeCurrentBranch", { worktreePath });
+    return this.worktreeBranches.get(worktreePath)?.branch ?? null;
+  }
+
   worktreeDetach(worktreePath: string): void {
     this.record("worktreeDetach", { worktreePath });
     if (this.fail.worktreeDetach?.(worktreePath)) {

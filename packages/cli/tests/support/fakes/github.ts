@@ -23,6 +23,18 @@ export class FakeGitHub implements GitHubPort {
   readonly openPrsByBranchBase = new Map<string, OpenBranchPr[]>();
   readonly prOpen = new Map<string, boolean>();
   readonly checkStatuses = new Map<string, PrCheckStatus>();
+  readonly createPullRequestCalls: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }[] = [];
+  readonly updatePullRequestBodyCalls: {
+    repoId: string;
+    prNumber: number;
+    body: string;
+  }[] = [];
   // Explicit per-(repo, branch) PR snapshots take precedence over the legacy
   // `setPrCheckStatus`-derived synthesis.
   readonly snapshots = new Map<string, PrSnapshot | null>();
@@ -73,6 +85,46 @@ export class FakeGitHub implements GitHubPort {
     prs: OpenBranchPr[],
   ): void {
     this.openPrsByBranchBase.set(`${repoId}\0${branch}\0${baseBranch}`, [...prs]);
+  }
+
+  createPullRequest(input: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }): OpenBranchPr {
+    this.createPullRequestCalls.push({ ...input });
+    const prNumber = 1000 + this.createPullRequestCalls.length;
+    const pr: OpenBranchPr = {
+      number: prNumber,
+      url: `https://github.example/${input.repoId}/pull/${prNumber}`,
+      headSha: `head-${prNumber}`,
+      baseSha: `base-${prNumber}`,
+      baseRef: input.baseBranch,
+    };
+    this.setOpenPrsForBranchBase(input.repoId, input.headBranch, input.baseBranch, [
+      pr,
+    ]);
+    this.setPrView(input.repoId, prNumber, {
+      number: prNumber,
+      title: input.title,
+      body: input.body,
+      url: pr.url,
+      headRefName: input.headBranch,
+      headSha: pr.headSha,
+      baseRef: input.baseBranch,
+      isCrossRepository: false,
+    });
+    return pr;
+  }
+
+  updatePullRequestBody(repoId: string, prNumber: number, body: string): void {
+    this.updatePullRequestBodyCalls.push({ repoId, prNumber, body });
+    const existing = this.prView(repoId, prNumber);
+    if (existing !== null) {
+      this.setPrView(repoId, prNumber, { ...existing, body });
+    }
   }
 
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {

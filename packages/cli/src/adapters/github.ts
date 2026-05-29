@@ -97,6 +97,60 @@ export class GitHubCliAdapter implements GitHubPort {
     });
   }
 
+  createPullRequest(input: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }): OpenBranchPr {
+    const result = this.run(input.repoId, [
+      "gh",
+      "pr",
+      "create",
+      "--head",
+      input.headBranch,
+      "--base",
+      input.baseBranch,
+      "--title",
+      input.title,
+      "--body",
+      input.body,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh pr create ${input.headBranch} -> ${input.baseBranch} failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    const listed = this.openPrsForBranchBase(
+      input.repoId,
+      input.headBranch,
+      input.baseBranch,
+    );
+    if (listed.length !== 1) {
+      throw new Error(
+        `gh pr create ${input.headBranch} -> ${input.baseBranch} did not reconcile to exactly one open PR (found ${listed.length})`,
+      );
+    }
+    return listed[0]!;
+  }
+
+  updatePullRequestBody(repoId: string, prNumber: number, body: string): void {
+    const result = this.run(repoId, [
+      "gh",
+      "pr",
+      "edit",
+      String(prNumber),
+      "--body",
+      body,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh pr edit ${prNumber} --body failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+  }
+
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {
     // `prCheckStatus` is the convenience read that does not flow through the
     // tick-side `classifyCi`. Keep the same fail-closed semantics here:
