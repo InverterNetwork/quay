@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AgentDrawer } from './agent/AgentDrawer';
+import { AGENT_CTX, hermesAdapter } from './agent/agentData';
 import { PrimarySidebar, type AppRoute } from './app/PrimarySidebar';
 import { useQuayAdminReadModel } from './api/quayAdmin';
 import { MissionControlPage } from './mission-control/MissionControlPage';
@@ -62,8 +64,10 @@ function routePath(basePath: string, route: AppRoute, scope: Scope = 'global'): 
 export function App() {
   const [routeState, setRouteState] = useState<RouteState>(readRouteState);
   const [overlay, setOverlay] = useState<Overlay>(null);
+  const [agentOpen, setAgentOpen] = useState(true);
   const [empty, setEmpty] = useState(false);
   const [mode, setMode] = useState<Mode>(readModeFromStorage);
+  const agentTriggerRef = useRef<HTMLButtonElement>(null);
   const admin = useQuayAdminReadModel();
   const missionControl = useMissionControlTasks();
   const store = useChangeStore();
@@ -119,9 +123,33 @@ export function App() {
     }
   }, [admin.loading, navigateTo, route, scope, selectedRepo]);
 
+  const closeAgent = useCallback(() => {
+    setAgentOpen(false);
+    window.requestAnimationFrame(() => agentTriggerRef.current?.focus());
+  }, []);
+
+  const toggleAgent = useCallback(() => {
+    setAgentOpen((open) => {
+      const nextOpen = !open;
+      if (!nextOpen) {
+        window.requestAnimationFrame(() => agentTriggerRef.current?.focus());
+      }
+      return nextOpen;
+    });
+  }, []);
+
   // Cmd/Ctrl + Enter → preview diff (opens the save-preview modal)
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'j') {
+        e.preventDefault();
+        toggleAgent();
+        return;
+      }
+      if (e.key === 'Escape') {
+        closeAgent();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         if (store.changes.length > 0) {
           e.preventDefault();
@@ -131,7 +159,7 @@ export function App() {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [store.changes.length]);
+  }, [closeAgent, store.changes.length, toggleAgent]);
 
   const handleAddRepo = useCallback(() => undefined, []);
   const handleArchive = useCallback(
@@ -188,6 +216,9 @@ export function App() {
         crumbs={crumbs}
         mode={mode}
         backendStatus={status}
+        agentOpen={agentOpen}
+        agentTriggerRef={agentTriggerRef}
+        onAgentToggle={toggleAgent}
         onModeToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
       />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
@@ -282,6 +313,13 @@ export function App() {
           </>
         )}
       </div>
+
+      <AgentDrawer
+        open={agentOpen}
+        onClose={closeAgent}
+        adapter={hermesAdapter}
+        ctx={AGENT_CTX}
+      />
 
       {import.meta.env.DEV && route === 'configuration' && <DevToggle empty={empty} onToggle={() => setEmpty((e) => !e)} />}
 
