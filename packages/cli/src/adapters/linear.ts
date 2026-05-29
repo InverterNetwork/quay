@@ -709,7 +709,7 @@ function extractBlockingIssue(
 
   if (type === "blockedby") {
     if (issueIdentifier === currentIdentifier && related !== null) return related;
-    if (relatedIdentifier === currentIdentifier && issue !== null) return issue;
+    if (relatedIdentifier === currentIdentifier && issue !== null) return null;
   }
 
   if (type === "blocks") {

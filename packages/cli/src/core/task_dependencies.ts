@@ -150,6 +150,26 @@ export function markTaskDependencySatisfied(
   );
 }
 
+export function satisfyDependenciesForMergedTask(
+  db: DB,
+  dependencyTaskId: string,
+  now: string,
+): TaskDependencyRow[] {
+  return db
+    .query<TaskDependencyRow, [string, string, string]>(
+      `UPDATE task_dependencies
+          SET satisfied_at = ?,
+              updated_at = ?
+        WHERE dependency_task_id = ?
+          AND required_state = 'merged'
+          AND satisfied_at IS NULL
+        RETURNING dependency_id, dependent_task_id, dependency_task_id,
+                  dependency_source, dependency_external_ref, dependency_repo_id,
+                  kind, scope, required_state, satisfied_at, created_at, updated_at`,
+    )
+    .all(now, now, dependencyTaskId);
+}
+
 export function releaseTaskIfDependenciesSatisfied(
   db: DB,
   taskId: string,

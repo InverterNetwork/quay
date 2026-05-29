@@ -5,6 +5,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, existsSync } from "node:fs";
 import { tick_once } from "../../src/core/tick.ts";
+import { createTaskDependency } from "../../src/core/task_dependencies.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
@@ -29,6 +30,20 @@ test("test_053_pr_open_merged_transitions_terminal", async () => {
     taskId,
     attemptNumber: 1,
     spawnedAt: "2026-04-29T11:00:00.000Z",
+  });
+  const dependentTaskId = insertTask(h.db, {
+    taskId: "task-waiting-on-pr-merged",
+    repoId,
+    state: "waiting_dependencies",
+  });
+  createTaskDependency(h.db, {
+    dependentTaskId,
+    dependencyTaskId: taskId,
+    dependencySource: "linear",
+    dependencyExternalRef: "ENG-2100",
+    dependencyRepoId: repoId,
+    requiredState: "merged",
+    now: "2026-04-29T11:30:00.000Z",
   });
 
   // Place a real worktree on disk so cleanup observably removes it.
@@ -67,6 +82,18 @@ test("test_053_pr_open_merged_transitions_terminal", async () => {
     )
     .get(taskId);
   expect(task?.state).toBe("merged");
+  const dependent = h.db
+    .query<{ state: string }, [string]>(
+      `SELECT state FROM tasks WHERE task_id = ?`,
+    )
+    .get(dependentTaskId);
+  expect(dependent?.state).toBe("queued");
+  const dep = h.db
+    .query<{ satisfied_at: string | null }, [string]>(
+      `SELECT satisfied_at FROM task_dependencies WHERE dependent_task_id = ?`,
+    )
+    .get(dependentTaskId);
+  expect(dep?.satisfied_at).toBe("2026-04-29T12:00:00.000Z");
 
   // Worktree removed; local branch deleted; remote branch left to GitHub.
   expect(existsSync(worktreePath)).toBe(false);
@@ -86,5 +113,19 @@ test("test_053_pr_open_merged_transitions_terminal", async () => {
     event_type: "merged",
     from_state: "pr-open",
     to_state: "merged",
+  });
+  const dependencyEvt = h.db
+    .query<
+      { event_type: string; from_state: string; to_state: string },
+      [string]
+    >(
+      `SELECT event_type, from_state, to_state FROM events
+        WHERE task_id = ? AND event_type = 'dependency_satisfied'`,
+    )
+    .get(dependentTaskId);
+  expect(dependencyEvt).toEqual({
+    event_type: "dependency_satisfied",
+    from_state: "waiting_dependencies",
+    to_state: "queued",
   });
 });

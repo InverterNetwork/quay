@@ -69,6 +69,10 @@ import {
 } from "./goal_audit.ts";
 import { transitionTaskState } from "./task_state.ts";
 import {
+  releaseTaskIfDependenciesSatisfied,
+  satisfyDependenciesForMergedTask,
+} from "./task_dependencies.ts";
+import {
   scheduleCleanSpawnRetry,
   scheduleDeterministicRetry,
   type BudgetRetryReason,
@@ -2444,6 +2448,9 @@ function finalizePrTerminal(
         .run(now, attempt.attempt_id);
     }
     cancelOpenOrchestratorHandoffs(deps, task.task_id);
+    if (terminal === "merged") {
+      releaseDependentsForMergedTask(deps, task.task_id, now);
+    }
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -2462,6 +2469,24 @@ function finalizePrTerminal(
     task_id: task.task_id,
     action: terminal === "merged" ? "pr_merged" : "pr_closed_unmerged",
   };
+}
+
+function releaseDependentsForMergedTask(
+  deps: Pick<TickDeps, "db">,
+  taskId: string,
+  now: string,
+): void {
+  const satisfiedDependencies = satisfyDependenciesForMergedTask(
+    deps.db,
+    taskId,
+    now,
+  );
+  const dependentTaskIds = new Set(
+    satisfiedDependencies.map((dep) => dep.dependent_task_id),
+  );
+  for (const dependentTaskId of dependentTaskIds) {
+    releaseTaskIfDependenciesSatisfied(deps.db, dependentTaskId, now);
+  }
 }
 
 interface ActiveReviewerAttemptRow {

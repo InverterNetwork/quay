@@ -175,6 +175,42 @@ test("linear adapter returns native blocked-by relations with blocker metadata",
         },
         {
           id: "rel-2",
+          type: "blockedBy",
+          issue: {
+            identifier: "ENG-2000",
+            url: "https://linear.app/inverter/issue/ENG-2000",
+            title: "Dependent",
+            description: "dependent body",
+            state: { type: "started" },
+          },
+          relatedIssue: {
+            identifier: "ENG-1500",
+            url: "https://linear.app/inverter/issue/ENG-1500",
+            title: "Earlier prerequisite",
+            description: "earlier blocker body",
+            state: { type: "completed" },
+          },
+        },
+        {
+          id: "rel-3",
+          type: "blockedBy",
+          issue: {
+            identifier: "ENG-3000",
+            url: "https://linear.app/inverter/issue/ENG-3000",
+            title: "Downstream dependent",
+            description: "downstream body",
+            state: { type: "started" },
+          },
+          relatedIssue: {
+            identifier: "ENG-2000",
+            url: "https://linear.app/inverter/issue/ENG-2000",
+            title: "Current issue",
+            description: "current body",
+            state: { type: "started" },
+          },
+        },
+        {
+          id: "rel-4",
           type: "related",
           issue: {
             identifier: "ENG-2000",
@@ -202,6 +238,16 @@ test("linear adapter returns native blocked-by relations with blocker metadata",
   const relations = await adapter.getBlockedByRelations("ENG-2000");
 
   expect(relations).toEqual([
+    {
+      relationId: "rel-2",
+      blocker: {
+        identifier: "ENG-1500",
+        url: "https://linear.app/inverter/issue/ENG-1500",
+        title: "Earlier prerequisite",
+        body: "earlier blocker body",
+        stateType: "completed",
+      },
+    },
     {
       relationId: "rel-1",
       blocker: {
