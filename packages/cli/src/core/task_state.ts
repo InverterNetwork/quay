@@ -17,6 +17,7 @@ export const TASK_STATES = [
   "worktree_error",
   "orchestrator_loop",
   "cancelled",
+  "merged_to_feature_branch",
   "merged",
   "closed_unmerged",
 ] as const;
@@ -349,6 +350,12 @@ export const TASK_TRANSITIONS = [
   ),
   ...TERMINAL_FROM_STATES.flatMap((from) => [
     transition(from, "merged", ["merged"], "PR reached merged terminal state"),
+    transition(
+      from,
+      "merged_to_feature_branch",
+      ["merged"],
+      "umbrella task PR reached merged terminal state on the feature branch",
+    ),
     transition(
       from,
       "closed_unmerged",

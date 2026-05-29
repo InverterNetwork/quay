@@ -54,6 +54,12 @@ interface BlockOpts {
   tags?: string[];
   slack_thread?: string | null;
   authors?: { name: string; slack_id: string }[];
+  umbrella?: {
+    external_ref: string;
+    base_branch?: string;
+    feature_branch?: string;
+    depends_on?: string[];
+  };
 }
 
 function quayConfigBlock(opts: BlockOpts = {}): string {
@@ -75,6 +81,20 @@ function quayConfigBlock(opts: BlockOpts = {}): string {
   for (const a of authors) {
     lines.push(`  - name: ${a.name}`);
     lines.push(`    slack_id: ${a.slack_id}`);
+  }
+  if (opts.umbrella !== undefined) {
+    lines.push("umbrella:");
+    lines.push(`  external_ref: ${opts.umbrella.external_ref}`);
+    if (opts.umbrella.base_branch !== undefined) {
+      lines.push(`  base_branch: ${opts.umbrella.base_branch}`);
+    }
+    if (opts.umbrella.feature_branch !== undefined) {
+      lines.push(`  feature_branch: ${opts.umbrella.feature_branch}`);
+    }
+    if (opts.umbrella.depends_on !== undefined) {
+      lines.push("  depends_on:");
+      for (const dep of opts.umbrella.depends_on) lines.push(`    - ${dep}`);
+    }
   }
   lines.push(FENCE);
   return lines.join("\n");
@@ -362,6 +382,85 @@ test("incomplete tracked Linear blocker creates dependency and waits", async () 
     dependencies: [{ dependency_task_id: blockerTaskId }],
   });
   expect(JSON.parse(outbox!.route_hint_json!)).toEqual({ attention: "normal" });
+});
+
+test("umbrella Linear issue retargets subtask and creates umbrella dependency", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+  const blockerTaskId = insertTrackedTask("pr-open", "ENG-2199");
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2200",
+      block: {
+        umbrella: {
+          external_ref: "BRIX-1509",
+          base_branch: "dev",
+          feature_branch: "feature/brix-1509",
+          depends_on: ["ENG-2199"],
+        },
+      },
+    }),
+  );
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2200"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const enqResult = JSON.parse(io.out().trim());
+  expect(enqResult.state).toBe("waiting_dependencies");
+
+  const task = h.db
+    .query<{ base_branch: string }, [string]>(
+      `SELECT base_branch FROM tasks WHERE task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(task?.base_branch).toBe("feature/brix-1509");
+
+  const workflow = h.db
+    .query<
+      { external_ref: string; base_branch: string; feature_branch: string },
+      []
+    >(
+      `SELECT external_ref, base_branch, feature_branch
+         FROM umbrella_workflows`,
+    )
+    .get();
+  expect(workflow).toEqual({
+    external_ref: "BRIX-1509",
+    base_branch: "dev",
+    feature_branch: "feature/brix-1509",
+  });
+
+  const dep = h.db
+    .query<
+      {
+        dependency_task_id: string | null;
+        dependency_external_ref: string | null;
+        scope: string;
+        required_state: string;
+        satisfied_at: string | null;
+      },
+      [string]
+    >(
+      `SELECT dependency_task_id, dependency_external_ref, scope,
+              required_state, satisfied_at
+         FROM task_dependencies
+        WHERE dependent_task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(dep).toEqual({
+    dependency_task_id: blockerTaskId,
+    dependency_external_ref: "ENG-2199",
+    scope: "umbrella",
+    required_state: "merged_to_feature_branch",
+    satisfied_at: null,
+  });
 });
 
 test("incomplete untracked Linear blocker fails before substrate side effects", async () => {

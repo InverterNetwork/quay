@@ -12,6 +12,11 @@ export interface GitPort {
   hasLocalBranch(repoId: string, branch: string): boolean;
   hasRemoteBranch(repoId: string, branch: string): boolean;
   hasOpenPullRequestForBranch(repoId: string, branch: string): boolean;
+  ensureRemoteBranchFromBase(
+    repoId: string,
+    branch: string,
+    baseBranch: string,
+  ): void;
   worktreeAdd(
     repoId: string,
     worktreePath: string,

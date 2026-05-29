@@ -583,6 +583,7 @@ interface MissionControlEventRow {
 
 const TASK_STATE_SET = new Set<string>(TASK_STATES);
 const MISSION_CONTROL_TERMINAL_STATE_LIST = [
+  "merged_to_feature_branch",
   "merged",
   "cancelled",
   "closed_unmerged",

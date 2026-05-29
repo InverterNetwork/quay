@@ -105,7 +105,12 @@ interface ActiveAttemptRow {
   tmux_session: string | null;
 }
 
-const TERMINAL_STATES = new Set(["cancelled", "merged", "closed_unmerged"]);
+const TERMINAL_STATES = new Set([
+  "cancelled",
+  "merged_to_feature_branch",
+  "merged",
+  "closed_unmerged",
+]);
 
 export async function task_retarget(
   deps: RetargetDeps,

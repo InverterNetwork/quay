@@ -31,6 +31,8 @@ test("test_schema_creates_required_tables", () => {
     "orchestrator_handoffs",
     "outbox_items",
     "review_requests",
+    "umbrella_workflows",
+    "umbrella_tasks",
   ];
   const rows = h.db
     .query<{ name: string }, []>(
@@ -41,6 +43,39 @@ test("test_schema_creates_required_tables", () => {
   for (const t of required) {
     expect(names.has(t)).toBe(true);
   }
+});
+
+test("umbrella workflow tables capture workflow and task links", () => {
+  h = createHarness();
+  const workflowCols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(umbrella_workflows)`)
+    .all()
+    .map((r) => r.name);
+  expect(workflowCols).toEqual([
+    "umbrella_workflow_id",
+    "external_ref",
+    "repo_id",
+    "base_branch",
+    "feature_branch",
+    "state",
+    "final_pr_task_id",
+    "final_pr_number",
+    "final_pr_url",
+    "created_at",
+    "updated_at",
+  ]);
+
+  const taskCols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(umbrella_tasks)`)
+    .all()
+    .map((r) => r.name);
+  expect(taskCols).toEqual([
+    "umbrella_task_id",
+    "umbrella_workflow_id",
+    "task_id",
+    "external_ref",
+    "created_at",
+  ]);
 });
 
 test("task_dependencies table has generic dependency fields", () => {

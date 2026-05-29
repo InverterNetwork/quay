@@ -125,9 +125,37 @@ test("test_quay_config_block_ignores_unknown_keys", () => {
       "repo",
       "slack_thread_ref",
       "tags",
+      "umbrella",
       "worker_execution",
     ].sort(),
   );
+});
+
+test("test_quay_config_block_parses_umbrella_metadata", () => {
+  const body = block(
+    [
+      "repo: test-repo",
+      "tags:",
+      "  - foo",
+      "authors:",
+      "  - name: A",
+      "    slack_id: U001",
+      "umbrella:",
+      "  external_ref: brix-1509",
+      "  base_branch: dev",
+      "  feature_branch: feature/brix-1509",
+      "  depends_on:",
+      "    - brix-1508",
+      "    - BRIX-1507",
+    ].join("\n"),
+  );
+  const parsed = parseQuayConfigBlock(body);
+  expect(parsed!.umbrella).toEqual({
+    external_ref: "BRIX-1509",
+    base_branch: "dev",
+    feature_branch: "feature/brix-1509",
+    depends_on: ["BRIX-1508", "BRIX-1507"],
+  });
 });
 
 test("test_quay_config_block_parses_base_branch_override", () => {

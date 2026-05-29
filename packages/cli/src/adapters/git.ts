@@ -192,6 +192,36 @@ export class LocalGitAdapter implements GitPort {
     );
   }
 
+  ensureRemoteBranchFromBase(
+    repoId: string,
+    branch: string,
+    baseBranch: string,
+  ): void {
+    if (this.hasRemoteBranch(repoId, branch)) {
+      this.fetchBranchIfExists(repoId, branch);
+      return;
+    }
+
+    this.fetch(repoId, baseBranch);
+    const result = runIn(this.bareDir(repoId), [
+      "git",
+      "push",
+      "origin",
+      `refs/remotes/origin/${baseBranch}:refs/heads/${branch}`,
+    ]);
+    if (result.exitCode === 0) {
+      this.fetchBranchIfExists(repoId, branch);
+      return;
+    }
+    if (result.stderr.toLowerCase().includes("already exists")) {
+      this.fetchBranchIfExists(repoId, branch);
+      return;
+    }
+    throw new Error(
+      `git push origin ${baseBranch}:${branch} failed for ${repoId}: ${result.stderr.trim()}`,
+    );
+  }
+
   worktreeAdd(
     repoId: string,
     worktreePath: string,
