@@ -100,6 +100,7 @@ export const DEFAULT_PARKED_PR_POLL_INTERVAL_MINUTES = 15;
 export const DEFAULT_GITHUB_GRAPHQL_BACKOFF_MINUTES = 10;
 export const DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS = 24;
 export const DEFAULT_RETAINED_CANCELLED_WORKTREE_GC_BATCH_SIZE = 10;
+export const WORKER_GH_TOKEN_ENV = "QUAY_WORKER_GH_TOKEN";
 export const REVIEWER_GH_TOKEN_ENV = "QUAY_REVIEWER_GH_TOKEN";
 const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Canonical claude worker template, kept here as a named re-export so
@@ -149,6 +150,10 @@ export interface TickOptions {
   // ingest matches the right author when tick and worker authenticate as
   // different identities. Defaults to whatever `gh api user` reports.
   reviewerLogin?: string;
+  // Absolute path to a fallback file (expected mode 0600) whose contents
+  // are exported as `GH_TOKEN` in the worker tmux pane's environment.
+  // `QUAY_WORKER_GH_TOKEN` in the tick process environment wins when present.
+  workerGhTokenFile?: string;
   // Absolute path to a fallback file (expected mode 0600) whose contents
   // are exported as `GH_TOKEN` in the reviewer tmux pane's environment.
   // `QUAY_REVIEWER_GH_TOKEN` in the tick process environment wins when
@@ -452,8 +457,20 @@ class TickGithubCache implements GitHubPort {
 
   constructor(private readonly inner: GitHubPort) {}
 
+  get defaultWorkerToken(): string | undefined {
+    return (this.inner as { defaultWorkerToken?: string }).defaultWorkerToken;
+  }
+
   prExistsForBranch(repoId: string, branch: string): boolean {
     return this.inner.prExistsForBranch(repoId, branch);
+  }
+
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean {
+    return this.inner.prExistsForBranchWithToken(repoId, branch, token);
   }
 
   openPrsForBranchBase(
@@ -600,8 +617,12 @@ class TickGithubCache implements GitHubPort {
     return this.inner.fetchPostedReviewAuthorsAtHead(repoId, prNumber, headSha);
   }
 
-  probeTokenAccess(repoId: string, token: string): void {
-    this.inner.probeTokenAccess(repoId, token);
+  probeTokenAccess(
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ): void {
+    this.inner.probeTokenAccess(repoId, token, actor);
   }
 
   private rememberSnapshotAliases(
@@ -5573,13 +5594,6 @@ function promoteAndSpawn(
   // that case and lets `remoteHeadSha` return null — the spec records
   // `remote_sha_at_spawn = null` for the first attempt, so a missing remote
   // is the *expected* state, not a tick error.
-  deps.git.fetchBranchIfExists(task.repo_id, task.branch_name);
-  const remoteSha = deps.git.remoteHeadSha(task.repo_id, task.branch_name);
-  const prExisted = deps.github.prExistsForBranch(task.repo_id, task.branch_name)
-    ? 1
-    : 0;
-  const now = deps.clock.nowISO();
-
   // Probe agent identity and compute the canonical session name BEFORE the
   // promotion transaction so the `spawned` event can carry both in
   // `event_data`. The probe is documented as in-process and never throws;
@@ -5588,7 +5602,24 @@ function promoteAndSpawn(
   // (paired with `tmux_session`) — this earlier probe is event-only.
   const sessionName = `quay-task-${task.tmux_id}-${pending.attempt_number}`;
   const agentIdentity = probeAgentIdentity(agentInvocation);
-  const githubToken = resolveWorkerGithubToken(options);
+  const githubToken = resolveGithubActorToken("worker", deps, task.repo_id, options);
+  if (!githubToken.ok) {
+    return {
+      task_id: task.task_id,
+      action: "spawn_substrate_failed",
+      error: githubToken.error,
+    };
+  }
+  deps.git.fetchBranchIfExists(task.repo_id, task.branch_name);
+  const remoteSha = deps.git.remoteHeadSha(task.repo_id, task.branch_name);
+  const prExisted = deps.github.prExistsForBranchWithToken(
+    task.repo_id,
+    task.branch_name,
+    githubToken.token,
+  )
+    ? 1
+    : 0;
+  const now = deps.clock.nowISO();
   const spawnEnv = addCodexLaunchIsolation(
     githubToken.env,
     task.worktree_path,
@@ -5628,6 +5659,9 @@ function promoteAndSpawn(
       promptContent,
       agentInvocation,
       env: spawnEnv,
+      ...(githubToken.envFiles !== undefined
+        ? { envFiles: githubToken.envFiles }
+        : {}),
     });
   } catch (err) {
     return {
@@ -5668,45 +5702,139 @@ function promoteAndSpawn(
   return { task_id: task.task_id, action: "spawned" };
 }
 
-type ReviewerGhTokenPreflightResult =
+type GithubActor = "worker" | "reviewer";
+
+type GithubActorTokenResult =
   | {
       ok: true;
       env?: TmuxSpawnInput["env"];
       envFiles?: TmuxSpawnInput["envFiles"];
+      token: string;
       source: string;
     }
   | { ok: false; error: string };
 
-function resolveWorkerGithubToken(options: TickOptions): {
-  env: NonNullable<TmuxSpawnInput["env"]>;
-  source: string;
-} {
+type GithubActorTokenProbeResult = { ok: true } | { ok: false; error: string };
+
+function resolveGithubActorToken(
+  actor: GithubActor,
+  deps: TickDeps,
+  repoId: string,
+  options: TickOptions,
+): GithubActorTokenResult {
   const env = options.env ?? process.env;
-  const overrides: NonNullable<TmuxSpawnInput["env"]> = {
-    GH_TOKEN: undefined,
+  const envName =
+    actor === "worker" ? WORKER_GH_TOKEN_ENV : REVIEWER_GH_TOKEN_ENV;
+  const fileOption =
+    actor === "worker" ? options.workerGhTokenFile : options.reviewerGhTokenFile;
+  const fileConfigName = `${actor}.gh_token_file`;
+
+  const envToken = env[envName];
+  if (envToken !== undefined) {
+    if (envToken.trim().length === 0) {
+      return {
+        ok: false,
+        error: `${actor} GitHub token env ${envName} is empty`,
+      };
+    }
+    const probed = probeGithubActorToken(deps, repoId, actor, envName, envToken);
+    if (!probed.ok) return probed;
+    return {
+      ok: true,
+      env: githubActorPaneEnv(envToken),
+      token: envToken,
+      source: `env:${envName}`,
+    };
+  }
+
+  if (fileOption === undefined) {
+    // Unit tests use FakeGitHub without constructing operator auth config in
+    // every spawn fixture. Production adapters do not expose this property.
+    const testDefaultWorkerToken =
+      actor === "worker" && options.env === undefined
+        ? (deps.github as { defaultWorkerToken?: string }).defaultWorkerToken
+        : undefined;
+    if (testDefaultWorkerToken !== undefined) {
+      const probed = probeGithubActorToken(
+        deps,
+        repoId,
+        actor,
+        "test:defaultWorkerToken",
+        testDefaultWorkerToken,
+      );
+      if (!probed.ok) return probed;
+      return {
+        ok: true,
+        env: githubActorPaneEnv(testDefaultWorkerToken),
+        token: testDefaultWorkerToken,
+        source: "test:defaultWorkerToken",
+      };
+    }
+    return {
+      ok: false,
+      error: `${actor} GitHub token missing: set ${envName} or ${fileConfigName} before spawning ${actor} attempts`,
+    };
+  }
+
+  let token: string;
+  try {
+    token = readFileSync(fileOption, "utf8").trim();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `${actor} gh_token_file (${fileOption}) missing or unreadable: ${message}`,
+    };
+  }
+
+  if (token.length === 0) {
+    return {
+      ok: false,
+      error: `${actor} gh_token_file (${fileOption}) is empty`,
+    };
+  }
+
+  const probed = probeGithubActorToken(deps, repoId, actor, fileConfigName, token);
+  if (!probed.ok) return probed;
+
+  return {
+    ok: true,
+    env: githubActorPaneEnv(),
+    envFiles: [{ name: "GH_TOKEN", path: fileOption }],
+    token,
+    source: `file:${fileConfigName}`,
+  };
+}
+
+function githubActorPaneEnv(token?: string): NonNullable<TmuxSpawnInput["env"]> {
+  return {
+    GH_TOKEN: token,
     GITHUB_TOKEN: undefined,
+    [WORKER_GH_TOKEN_ENV]: undefined,
     [REVIEWER_GH_TOKEN_ENV]: undefined,
   };
-  const token = env.GH_TOKEN?.trim();
-  if (token !== undefined && token.length > 0) {
-    overrides.GH_TOKEN = token;
+}
+
+function probeGithubActorToken(
+  deps: TickDeps,
+  repoId: string,
+  actor: GithubActor,
+  source: string,
+  token: string,
+): GithubActorTokenProbeResult {
+  try {
+    deps.github.probeTokenAccess(repoId, token, actor);
+  } catch (err) {
+    const message = redactSecret(
+      err instanceof Error ? err.message : String(err),
+      token,
+    );
     return {
-      env: overrides,
-      source: "env:GH_TOKEN",
+      ok: false,
+      error: `${actor} GitHub token ${source} is invalid, expired, or cannot access the repository: ${message}`,
     };
   }
-  const githubToken = env.GITHUB_TOKEN?.trim();
-  if (githubToken !== undefined && githubToken.length > 0) {
-    overrides.GH_TOKEN = githubToken;
-    return {
-      env: overrides,
-      source: "env:GITHUB_TOKEN",
-    };
-  }
-  return {
-    env: overrides,
-    source: "ambient_gh_auth",
-  };
+  return { ok: true };
 }
 
 function addCodexLaunchIsolation(
@@ -5750,93 +5878,6 @@ function usesCodexRuntime(agentName: string, agentInvocation: string): boolean {
   return basename.toLowerCase() === "codex";
 }
 
-function preflightReviewerGhToken(
-  deps: TickDeps,
-  task: ReviewAttemptTaskRow,
-  options: TickOptions,
-): ReviewerGhTokenPreflightResult {
-  const env = options.env ?? process.env;
-  const envToken = env[REVIEWER_GH_TOKEN_ENV];
-  if (envToken !== undefined) {
-    if (envToken.trim().length === 0) {
-      return {
-        ok: false,
-        error: `reviewer GitHub token env ${REVIEWER_GH_TOKEN_ENV} is empty`,
-      };
-    }
-    try {
-      deps.github.probeTokenAccess(task.repo_id, envToken);
-    } catch (err) {
-      const message = redactSecret(
-        err instanceof Error ? err.message : String(err),
-        envToken,
-      );
-      return {
-        ok: false,
-        error: `reviewer GitHub token env ${REVIEWER_GH_TOKEN_ENV} is invalid, expired, or cannot access the repository: ${message}`,
-      };
-    }
-    return {
-      ok: true,
-      env: {
-        GH_TOKEN: envToken,
-        GITHUB_TOKEN: undefined,
-        [REVIEWER_GH_TOKEN_ENV]: undefined,
-      },
-      source: `env:${REVIEWER_GH_TOKEN_ENV}`,
-    };
-  }
-
-  const tokenFile = options.reviewerGhTokenFile;
-  if (tokenFile === undefined) {
-    return {
-      ok: false,
-      error: `reviewer GitHub token missing: set ${REVIEWER_GH_TOKEN_ENV} or reviewer.gh_token_file before spawning reviewer attempts`,
-    };
-  }
-
-  let token: string;
-  try {
-    token = readFileSync(tokenFile, "utf8").trim();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      error: `reviewer gh_token_file (${tokenFile}) missing or unreadable: ${message}`,
-    };
-  }
-
-  if (token.length === 0) {
-    return {
-      ok: false,
-      error: `reviewer gh_token_file (${tokenFile}) is empty`,
-    };
-  }
-
-  try {
-    deps.github.probeTokenAccess(task.repo_id, token);
-  } catch (err) {
-    const message = redactSecret(
-      err instanceof Error ? err.message : String(err),
-      token,
-    );
-    return {
-      ok: false,
-      error: `reviewer gh_token_file (${tokenFile}) token is invalid, expired, or cannot access the repository: ${message}`,
-    };
-  }
-
-  return {
-    ok: true,
-    env: {
-      GITHUB_TOKEN: undefined,
-      [REVIEWER_GH_TOKEN_ENV]: undefined,
-    },
-    envFiles: [{ name: "GH_TOKEN", path: tokenFile }],
-    source: "file:reviewer.gh_token_file",
-  };
-}
-
 function redactSecret(message: string, secret: string): string {
   if (secret.length === 0) return message;
   return message.split(secret).join("[redacted]");
@@ -5869,7 +5910,12 @@ function promoteAndSpawnReviewer(
     );
   }
 
-  const tokenPreflight = preflightReviewerGhToken(deps, task, options);
+  const tokenPreflight = resolveGithubActorToken(
+    "reviewer",
+    deps,
+    task.repo_id,
+    options,
+  );
   if (!tokenPreflight.ok) {
     return {
       task_id: task.task_id,

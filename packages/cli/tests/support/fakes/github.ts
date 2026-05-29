@@ -10,6 +10,7 @@ import type {
 } from "../../../src/ports/github.ts";
 
 export class FakeGitHub implements GitHubPort {
+  readonly defaultWorkerToken = "ghs_fake_worker_test_token";
   readonly calls: { repoId: string; branch: string }[] = [];
   readonly snapshotCalls: { repoId: string; branch: string }[] = [];
   readonly snapshotByNumberCalls: { repoId: string; prNumber: number }[] = [];
@@ -44,7 +45,16 @@ export class FakeGitHub implements GitHubPort {
   readonly prViews = new Map<string, PullRequestView | null>();
   readonly postedReviews = new Map<string, PostedReview | null>();
   readonly postedReviewAuthorsAtHead = new Map<string, PostedReviewAuthor[]>();
-  readonly tokenAccessCalls: { repoId: string; token: string }[] = [];
+  readonly tokenAccessCalls: {
+    repoId: string;
+    token: string;
+    actor: "worker" | "reviewer";
+  }[] = [];
+  readonly prExistsWithTokenCalls: {
+    repoId: string;
+    branch: string;
+    token: string;
+  }[] = [];
   readonly mergePullRequestCalls: {
     repoId: string;
     prNumber: number;
@@ -54,13 +64,26 @@ export class FakeGitHub implements GitHubPort {
   private prSnapshotHandler:
     | ((repoId: string, branch: string) => PrSnapshot | null)
     | null = null;
-  private tokenAccessHandler: (repoId: string, token: string) => void = () => {};
+  private tokenAccessHandler: (
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ) => void = () => {};
   private mergePullRequestHandler:
     | ((repoId: string, prNumber: number, expectedHeadSha: string) => void)
     | null = null;
 
   prExistsForBranch(repoId: string, branch: string): boolean {
     this.calls.push({ repoId, branch });
+    return this.prExisting.get(`${repoId}\0${branch}`) ?? false;
+  }
+
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean {
+    this.prExistsWithTokenCalls.push({ repoId, branch, token });
     return this.prExisting.get(`${repoId}\0${branch}`) ?? false;
   }
 
@@ -302,12 +325,22 @@ export class FakeGitHub implements GitHubPort {
     ]);
   }
 
-  probeTokenAccess(repoId: string, token: string): void {
-    this.tokenAccessCalls.push({ repoId, token });
-    this.tokenAccessHandler(repoId, token);
+  probeTokenAccess(
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ): void {
+    this.tokenAccessCalls.push({ repoId, token, actor });
+    this.tokenAccessHandler(repoId, token, actor);
   }
 
-  setTokenAccessHandler(handler: (repoId: string, token: string) => void): void {
+  setTokenAccessHandler(
+    handler: (
+      repoId: string,
+      token: string,
+      actor: "worker" | "reviewer",
+    ) => void,
+  ): void {
     this.tokenAccessHandler = handler;
   }
 }

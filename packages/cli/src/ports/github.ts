@@ -12,6 +12,14 @@
 // plain-text `gh pr checks ...` output.
 export interface GitHubPort {
   prExistsForBranch(repoId: string, branch: string): boolean;
+  // Same spawn-time read as `prExistsForBranch`, but forced through an explicit
+  // actor token so worker/reviewer launch paths never depend on ambient gh auth
+  // after resolving role-specific credentials.
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean;
   // Exact reconciliation read for a dead worker that reports an already-open
   // PR before Quay has attached PR metadata to the task row. The adapter must
   // filter by both head branch and base branch, and return only currently open
@@ -88,11 +96,15 @@ export interface GitHubPort {
     prNumber: number,
     headSha: string,
   ): PostedReviewAuthor[];
-  // Validate an explicit reviewer GH_TOKEN before handing it to a reviewer
-  // pane. Throws when the token is invalid, expired, or cannot access the
+  // Validate an explicit actor GH_TOKEN before handing it to a worker or
+  // reviewer pane. Throws when the token is invalid, expired, or cannot access the
   // target repository. Kept repo-scoped so GitHub App installation tokens are
   // supported; installation tokens cannot use the authenticated-user endpoint.
-  probeTokenAccess(repoId: string, token: string): void;
+  probeTokenAccess(
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ): void;
 }
 
 export interface GitHubGraphqlRateLimit {

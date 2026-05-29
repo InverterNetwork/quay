@@ -45,8 +45,8 @@ gh auth status
 Headless setup:
 
 ```bash
-export GH_TOKEN=...
-gh auth status
+export QUAY_WORKER_GH_TOKEN=...
+GH_TOKEN="$QUAY_WORKER_GH_TOKEN" gh auth status
 ```
 
 GitHub CLI also recognizes `GITHUB_TOKEN`; for GitHub Enterprise use
@@ -54,9 +54,11 @@ GitHub CLI also recognizes `GITHUB_TOKEN`; for GitHub Enterprise use
 
 If you authenticate with `gh auth login --with-token` using a classic personal
 access token, GitHub CLI documents minimum scopes of `repo`, `read:org`, and
-`gist`. If you use a fine-grained token through `GH_TOKEN`, grant access to the
-target repository and make sure the token can read pull requests/checks and
-write branches/pull requests.
+`gist`. If you use a fine-grained token through a role-specific Quay token
+source, grant access to the target repository and make sure the token can read
+pull requests/checks and write branches/pull requests. Quay worker panes use
+`QUAY_WORKER_GH_TOKEN` or `worker.gh_token_file`; reviewer panes use
+`QUAY_REVIEWER_GH_TOKEN` or `reviewer.gh_token_file`.
 
 ### Verify Repo Access
 
@@ -215,7 +217,7 @@ max_thread_messages = 200
 Confirm the same environment is visible to Quay:
 
 ```bash
-for v in LINEAR_API_KEY SLACK_TOKEN GH_TOKEN GITHUB_TOKEN QUAY_REVIEWER_GH_TOKEN; do
+for v in LINEAR_API_KEY SLACK_TOKEN QUAY_WORKER_GH_TOKEN QUAY_REVIEWER_GH_TOKEN; do
   if [ -n "${!v:-}" ]; then echo "$v is set"; fi
 done
 quay task list
@@ -230,9 +232,9 @@ interactive shell. Make sure the scheduled `quay tick` process has:
 - `QUAY_DATA_DIR`, `QUAY_CONFIG_FILE`, or `QUAY_CONFIG_DIR` if you rely on them.
 - `LINEAR_API_KEY` or your configured Linear token env var.
 - `SLACK_TOKEN` or your configured Slack token env var.
-- `GH_TOKEN`, `GITHUB_TOKEN`, or stored `gh` credentials.
-- `QUAY_REVIEWER_GH_TOKEN` when reviewer workers run under a separate GitHub
-  App identity; `reviewer.gh_token_file` remains a migration fallback.
+- `QUAY_WORKER_GH_TOKEN` or `worker.gh_token_file`.
+- `QUAY_REVIEWER_GH_TOKEN` or `reviewer.gh_token_file` when reviewer workers
+  run under a separate GitHub App identity.
 - SSH agent/socket or HTTPS credentials for git push.
 
 Prefer an explicit wrapper script for scheduled ticks:
@@ -245,7 +247,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 export QUAY_DATA_DIR="/var/lib/quay"
 export LINEAR_API_KEY="..."
 export SLACK_TOKEN="..."
-export GH_TOKEN="<worker-runtime-app-token>"
+export QUAY_WORKER_GH_TOKEN="<worker-app-token>"
 export QUAY_REVIEWER_GH_TOKEN="<reviewer-app-token>"
 
 exec /usr/local/bin/quay tick
