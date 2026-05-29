@@ -257,6 +257,9 @@ test("tick materializes missing worktree when recovering existing final umbrella
       },
     ],
   );
+  built.github.setPrCheckStatus(repoId, "quay/umbrella/BRIX-1511", {
+    state: "pending",
+  });
 
   const results = await tick_once(built.deps);
 
@@ -264,6 +267,10 @@ test("tick materializes missing worktree when recovering existing final umbrella
     {
       task_id: taskId,
       action: "umbrella_final_pr_reconciled",
+    },
+    {
+      task_id: taskId,
+      action: "ci_pending",
     },
   ]);
   expect(built.git.calls).toContainEqual({
@@ -284,4 +291,88 @@ test("tick materializes missing worktree when recovering existing final umbrella
     pr_number: 88,
     pr_url: "https://github.example/repo/pull/88",
   });
+});
+
+test("tick materializes existing umbrella external-ref task before recording it as final PR task", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T13:30:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-final-unrelated-task");
+  const unrelatedTaskId = insertTask(h.db, {
+    taskId: "existing-umbrella-ticket-task",
+    repoId,
+    state: "queued",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1511',
+              branch_name = 'quay/existing-umbrella-ticket-task',
+              worktree_path = ?
+        WHERE task_id = ?`,
+    )
+    .run(`${h.dataDir}/worktrees/${unrelatedTaskId}`, unrelatedTaskId);
+  const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
+  const built = buildTickDeps(h);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    {
+      task_id: unrelatedTaskId,
+      action: "umbrella_final_pr_reconciled",
+    },
+    {
+      task_id: unrelatedTaskId,
+      action: "skipped_no_pending_attempt",
+    },
+  ]);
+  const workflow = h.db
+    .query<{ final_pr_task_id: string | null }, []>(
+      `SELECT final_pr_task_id FROM umbrella_workflows`,
+    )
+    .get();
+  expect(workflow).toEqual({ final_pr_task_id: unrelatedTaskId });
+  const task = h.db
+    .query<
+      {
+        state: string;
+        authoring_mode: string;
+        branch_name: string;
+        base_branch: string | null;
+        pr_number: number | null;
+        pr_url: string | null;
+      },
+      [string]
+    >(
+      `SELECT state, authoring_mode, branch_name, base_branch, pr_number, pr_url
+         FROM tasks
+        WHERE task_id = ?`,
+    )
+    .get(unrelatedTaskId);
+  expect(task).toEqual({
+    state: "pr-open",
+    authoring_mode: "quay_owned",
+    branch_name: "quay/umbrella/BRIX-1511",
+    base_branch: "dev",
+    pr_number: 1001,
+    pr_url: "https://github.example/repo-umbrella-final-unrelated-task/pull/1001",
+  });
+  const attempt = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n
+         FROM attempts
+        WHERE task_id = ?
+          AND reason = 'umbrella_final_pr'`,
+    )
+    .get(unrelatedTaskId);
+  expect(attempt?.n).toBe(1);
+  const artifacts = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n
+         FROM artifacts
+        WHERE task_id = ?
+          AND kind IN ('task_objective', 'brief', 'final_prompt')`,
+    )
+    .get(unrelatedTaskId);
+  expect(artifacts?.n).toBe(3);
 });
