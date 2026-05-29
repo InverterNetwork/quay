@@ -3007,6 +3007,20 @@ function finalizePostedReview(
     verdict === "changes_requested" &&
     task.authoring_mode !== "synthetic_review";
 
+  if (handOffToRespawn) {
+    const snapshot = refreshPrMetadataBeforeReviewRespawn(deps, task);
+    if (snapshot === null) {
+      return recordTickError(
+        deps,
+        task.task_id,
+        new Error(
+          `PR snapshot unavailable for branch ${task.branch_name}; cannot schedule review respawn with the current PR base`,
+        ),
+      );
+    }
+    persistPrMetadata(deps, task.task_id, snapshot);
+  }
+
   deps.db.exec("BEGIN IMMEDIATE");
   try {
     deps.db
@@ -3115,6 +3129,20 @@ function finalizePostedReview(
     action:
       verdict === "approved" ? "review_approved" : "review_changes_requested",
   };
+}
+
+function refreshPrMetadataBeforeReviewRespawn(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+): PrSnapshot | null {
+  if (task.pr_number !== null) {
+    const byNumber = deps.github.prLightweightSnapshotByNumber(
+      task.repo_id,
+      task.pr_number,
+    );
+    if (byNumber !== null) return byNumber;
+  }
+  return deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
 }
 
 function markReviewInfraFailure(
