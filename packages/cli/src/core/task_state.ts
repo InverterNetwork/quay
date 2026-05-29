@@ -374,6 +374,7 @@ export interface TaskTransitionUpdates {
   incrementAttemptsConsumedBy?: number;
   resetSpawnFailures?: boolean;
   budgetExhausted?: 0 | 1;
+  baseBranch?: string | null;
   pr?: TaskTransitionPrMetadata;
 }
 
@@ -514,6 +515,10 @@ function buildTaskUpdate(input: TransitionTaskStateInput): {
   if (updates.budgetExhausted !== undefined) {
     setSql.push("budget_exhausted = ?");
     params.push(updates.budgetExhausted);
+  }
+  if (updates.baseBranch !== undefined) {
+    setSql.push("base_branch = ?");
+    params.push(updates.baseBranch);
   }
   if (updates.pr) {
     appendPrMetadataUpdate(setSql, params, updates.pr);

@@ -26,6 +26,7 @@ import {
   type AgentRole,
   type ResolvedAgent,
 } from "./agents.ts";
+import { baseBranchNameSchema } from "./base_branch.ts";
 import { QUAY_BRANCH_PREFIX } from "./branch_slug.ts";
 import { runCancelFinalizer } from "./cancel.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
@@ -3190,6 +3191,20 @@ function finalizePostedReview(
     verdict === "changes_requested" &&
     task.authoring_mode !== "synthetic_review";
 
+  if (handOffToRespawn) {
+    const snapshot = refreshPrMetadataBeforeReviewRespawn(deps, task);
+    if (snapshot === null) {
+      return recordTickError(
+        deps,
+        task.task_id,
+        new Error(
+          `PR snapshot unavailable for branch ${task.branch_name}; cannot schedule review respawn with the current PR base`,
+        ),
+      );
+    }
+    persistPrMetadata(deps, task.task_id, snapshot);
+  }
+
   deps.db.exec("BEGIN IMMEDIATE");
   try {
     deps.db
@@ -3298,6 +3313,20 @@ function finalizePostedReview(
     action:
       verdict === "approved" ? "review_approved" : "review_changes_requested",
   };
+}
+
+function refreshPrMetadataBeforeReviewRespawn(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+): PrSnapshot | null {
+  if (task.pr_number !== null) {
+    const byNumber = deps.github.prLightweightSnapshotByNumber(
+      task.repo_id,
+      task.pr_number,
+    );
+    if (byNumber !== null) return byNumber;
+  }
+  return deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
 }
 
 function markReviewInfraFailure(
@@ -3500,11 +3529,13 @@ function persistPrMetadata(
   const prUrl = snapshot.prUrl ?? null;
   const headSha = snapshot.headSha === "" ? null : snapshot.headSha;
   const baseSha = snapshot.baseSha;
+  const baseRef = normalizePrBaseRef(snapshot.baseRef);
   if (
     prNumber === null &&
     prUrl === null &&
     headSha === null &&
-    baseSha === null
+    baseSha === null &&
+    baseRef === null
   ) {
     return;
   }
@@ -3515,14 +3546,21 @@ function persistPrMetadata(
             SET pr_number = COALESCE(?, pr_number),
                 pr_url    = COALESCE(?, pr_url),
                 head_sha  = COALESCE(?, head_sha),
-                base_sha  = COALESCE(?, base_sha)
+                base_sha  = COALESCE(?, base_sha),
+                base_branch = COALESCE(?, base_branch)
           WHERE task_id = ?`,
       )
-      .run(prNumber, prUrl, headSha, baseSha, taskId);
+      .run(prNumber, prUrl, headSha, baseSha, baseRef, taskId);
   } catch {
     // Best-effort: PR-metadata observability never blocks the state
     // machine. A SQL failure here will be retried on the next tick.
   }
+}
+
+function normalizePrBaseRef(baseRef: string | null | undefined): string | null {
+  const trimmed = baseRef?.trim();
+  if (trimmed === undefined || trimmed.length === 0) return null;
+  return baseBranchNameSchema.safeParse(trimmed).success ? trimmed : null;
 }
 
 function loadRepoForTask(

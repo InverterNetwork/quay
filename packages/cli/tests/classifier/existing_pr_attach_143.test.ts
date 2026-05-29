@@ -120,3 +120,77 @@ test("AST-143 attaches an existing open PR instead of retrying as no_progress", 
     pr_existed_at_spawn: true,
   });
 });
+
+test("existing open PR attach preserves human-updated GitHub base branch", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T12:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-existing-pr-retargeted");
+  const worktreesRoot = join(h.dataDir, "worktrees");
+
+  const t = insertRunningTask(h.db, {
+    taskId: "task-existing-pr-retargeted",
+    repoId,
+    branchName: "quay/BRIX-1501",
+    worktreesRoot,
+    attemptNumber: 2,
+    reason: "crash",
+    consumedBudget: 1,
+    remoteShaAtSpawn: "head-1501",
+    prExistedAtSpawn: 1,
+    attemptsConsumed: 2,
+  });
+  h.db.query(`UPDATE tasks SET base_branch = 'main' WHERE task_id = ?`).run(t.taskId);
+
+  const built = buildTickDeps(h);
+  built.tmux.markDead(t.sessionName!);
+  built.git.setRemoteHeadSha(repoId, t.branchName, "head-1501");
+  built.github.setPrExists(repoId, t.branchName, true);
+  built.github.setPrSnapshot(repoId, t.branchName, {
+    prNumber: 1501,
+    prUrl: "https://github.example/repo/pull/1501",
+    state: "open",
+    headSha: "head-1501",
+    baseSha: "base-dev",
+    baseRef: "dev",
+    mergeable: "mergeable",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: { checkSha: "head-1501", items: [] },
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([{ task_id: t.taskId, action: "existing_pr_attached" }]);
+
+  const task = h.db
+    .query<
+      {
+        state: string;
+        pr_number: number | null;
+        base_branch: string | null;
+        base_sha: string | null;
+      },
+      [string]
+    >(
+      `SELECT state, pr_number, base_branch, base_sha
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(t.taskId);
+  expect(task).toEqual({
+    state: "pr-open",
+    pr_number: 1501,
+    base_branch: "dev",
+    base_sha: "base-dev",
+  });
+
+  const ev = h.db
+    .query<{ event_data: string | null }, [string]>(
+      `SELECT event_data FROM events
+        WHERE task_id = ? AND event_type = 'existing_pr_attached'
+        ORDER BY event_id DESC LIMIT 1`,
+    )
+    .get(t.taskId);
+  expect(JSON.parse(ev!.event_data!)).toMatchObject({
+    base_branch: "dev",
+    pr_base_ref: "dev",
+  });
+});
