@@ -64,7 +64,7 @@ export const TASK_TRANSITIONS = [
   transition(
     "waiting_dependencies",
     "queued",
-    ["dependency_satisfied"],
+    ["dependencies_satisfied", "dependency_satisfied"],
     "dependencies are satisfied and task can spawn",
   ),
   transition(

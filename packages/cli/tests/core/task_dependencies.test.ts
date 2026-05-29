@@ -94,7 +94,7 @@ test("task dependencies persist status and release waiting task when satisfied",
         to_state: "waiting_dependencies",
       },
       {
-        event_type: "dependency_satisfied",
+        event_type: "dependencies_satisfied",
         from_state: "waiting_dependencies",
         to_state: "queued",
       },

@@ -32,6 +32,7 @@ import { runCancelFinalizer } from "./cancel.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
 import {
   LINEAR_STATE_IN_PROGRESS,
+  LINEAR_STATE_WAITING,
   LinearSyncQueue,
 } from "./linear_state_sync.ts";
 import {
@@ -69,7 +70,9 @@ import {
 } from "./goal_audit.ts";
 import { transitionTaskState } from "./task_state.ts";
 import {
+  listWaitingDependencyTasks,
   releaseTaskIfDependenciesSatisfied,
+  reconcileWaitingDependencyTask,
   satisfyDependenciesForMergedTask,
 } from "./task_dependencies.ts";
 import {
@@ -898,6 +901,17 @@ export async function tick_once(
     const pendingReviewSnapshot = readPendingReviewAttempts(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
+
+    for (const task of listWaitingDependencyTasks(deps.db)) {
+      if (cancelledIds.has(task.task_id)) continue;
+      linearSyncs.enqueue(task.external_ref, LINEAR_STATE_WAITING);
+      try {
+        reconcileWaitingDependencyTask(deps, task.task_id, nowISO);
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
     const queuedSnapshot = readQueued(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id) && !closedUnmergedIds.has(t.task_id),
     );

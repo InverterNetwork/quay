@@ -345,6 +345,23 @@ test("incomplete tracked Linear blocker creates dependency and waits", async () 
     dependency_repo_id: REPO_ID,
     satisfied_at: null,
   });
+  const outbox = h.db
+    .query<
+      { kind: string; handler_class: string; payload_json: string | null; route_hint_json: string | null },
+      [string]
+    >(
+      `SELECT kind, handler_class, payload_json, route_hint_json
+         FROM outbox_items
+        WHERE task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(outbox?.kind).toBe("delivery.dependency_waiting");
+  expect(outbox?.handler_class).toBe("delivery");
+  expect(JSON.parse(outbox!.payload_json!)).toMatchObject({
+    dependency_count: 1,
+    dependencies: [{ dependency_task_id: blockerTaskId }],
+  });
+  expect(JSON.parse(outbox!.route_hint_json!)).toEqual({ attention: "normal" });
 });
 
 test("incomplete untracked Linear blocker fails before substrate side effects", async () => {
