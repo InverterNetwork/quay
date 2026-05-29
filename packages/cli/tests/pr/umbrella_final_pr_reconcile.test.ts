@@ -99,6 +99,19 @@ test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
   expect(built.github.createPullRequestCalls[0]!.body).toContain(
     "- BRIX-1512 - Subtask title (task task-integrated-subtask; subtask PR: https://github.example/repo/pull/12)",
   );
+  expect(built.git.calls).toContainEqual({
+    op: "fetch",
+    args: { repoId, ref: "quay/umbrella/BRIX-1511" },
+  });
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeAddExistingBranch",
+    args: {
+      repoId,
+      worktreePath: `${h.dataDir}/worktrees/umbrella-final-pr-${workflowId}`,
+      branch: "quay/umbrella/BRIX-1511",
+      baseRef: "origin/quay/umbrella/BRIX-1511",
+    },
+  });
 
   const workflow = h.db
     .query<
@@ -190,4 +203,85 @@ test("tick reuses existing final umbrella PR and replaces managed body section",
   expect(body).toContain("Umbrella external ref: BRIX-1511");
   expect(body).toContain("Human footer.");
   expect(body).not.toContain("stale managed text");
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeAddExistingBranch",
+    args: {
+      repoId,
+      worktreePath: `${h.dataDir}/worktrees/umbrella-final-pr-${workflowId}`,
+      branch: "quay/umbrella/BRIX-1511",
+      baseRef: "origin/quay/umbrella/BRIX-1511",
+    },
+  });
+});
+
+test("tick materializes missing worktree when recovering existing final umbrella task", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T13:00:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-final-partial");
+  const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
+  const taskId = `umbrella-final-pr-${workflowId}`;
+  insertTask(h.db, {
+    taskId,
+    repoId,
+    state: "pr-open",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1511',
+              branch_name = 'quay/umbrella/BRIX-1511',
+              base_branch = 'dev',
+              worktree_path = ?
+        WHERE task_id = ?`,
+    )
+    .run(`${h.dataDir}/worktrees/${taskId}`, taskId);
+  h.db
+    .query(
+      `UPDATE umbrella_workflows
+          SET final_pr_task_id = ?
+        WHERE umbrella_workflow_id = ?`,
+    )
+    .run(taskId, workflowId);
+  const built = buildTickDeps(h);
+  built.github.setOpenPrsForBranchBase(
+    repoId,
+    "quay/umbrella/BRIX-1511",
+    "dev",
+    [
+      {
+        number: 88,
+        url: "https://github.example/repo/pull/88",
+        headSha: "head-88",
+        baseSha: "base-88",
+        baseRef: "dev",
+      },
+    ],
+  );
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    {
+      task_id: taskId,
+      action: "umbrella_final_pr_reconciled",
+    },
+  ]);
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeAddExistingBranch",
+    args: {
+      repoId,
+      worktreePath: `${h.dataDir}/worktrees/${taskId}`,
+      branch: "quay/umbrella/BRIX-1511",
+      baseRef: "origin/quay/umbrella/BRIX-1511",
+    },
+  });
+  const task = h.db
+    .query<{ pr_number: number | null; pr_url: string | null }, [string]>(
+      `SELECT pr_number, pr_url FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    pr_number: 88,
+    pr_url: "https://github.example/repo/pull/88",
+  });
 });

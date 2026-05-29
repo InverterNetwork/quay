@@ -3063,11 +3063,17 @@ function ensureUmbrellaFinalPrTask(
       workflow.umbrella_workflow_id,
     );
     const worktreePath = join(worktreesRoot, taskId);
+    let worktreeCreated = false;
     const preambleId = ensurePreambleIdForAttemptReason(
       deps.db,
       deps.clock,
       "initial",
       { repoId: workflow.repo_id },
+    );
+    worktreeCreated = ensureUmbrellaFinalPrWorktree(
+      deps,
+      workflow,
+      worktreePath,
     );
     deps.db.exec("BEGIN");
     try {
@@ -3149,34 +3155,98 @@ function ensureUmbrellaFinalPrTask(
       try {
         deps.db.exec("ROLLBACK");
       } catch {}
+      if (worktreeCreated) {
+        removeUmbrellaFinalPrWorktreeBestEffort(deps, worktreePath);
+      }
       throw err;
     }
     return taskId;
   }
 
-  deps.db
-    .query(
-      `UPDATE tasks
-          SET branch_name = ?,
-              base_branch = ?,
-              pr_number = ?,
-              pr_url = COALESCE(?, pr_url),
-              head_sha = COALESCE(?, head_sha),
-              base_sha = COALESCE(?, base_sha),
-              updated_at = ?
-        WHERE task_id = ?`,
-    )
-    .run(
-      workflow.feature_branch,
-      workflow.base_branch,
-      pr.number,
-      pr.url,
-      pr.headSha,
-      pr.baseSha,
-      now,
-      existingTaskId,
+  const existingWorktreePath = loadTaskWorktreePath(deps.db, existingTaskId);
+  let recoveredWorktree = false;
+  if (existingWorktreePath !== null) {
+    recoveredWorktree = ensureUmbrellaFinalPrWorktree(
+      deps,
+      workflow,
+      existingWorktreePath,
     );
+  }
+  try {
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET branch_name = ?,
+                base_branch = ?,
+                pr_number = ?,
+                pr_url = COALESCE(?, pr_url),
+                head_sha = COALESCE(?, head_sha),
+                base_sha = COALESCE(?, base_sha),
+                updated_at = ?
+          WHERE task_id = ?`,
+      )
+      .run(
+        workflow.feature_branch,
+        workflow.base_branch,
+        pr.number,
+        pr.url,
+        pr.headSha,
+        pr.baseSha,
+        now,
+        existingTaskId,
+      );
+  } catch (err) {
+    if (recoveredWorktree && existingWorktreePath !== null) {
+      removeUmbrellaFinalPrWorktreeBestEffort(deps, existingWorktreePath);
+    }
+    throw err;
+  }
   return existingTaskId;
+}
+
+function ensureUmbrellaFinalPrWorktree(
+  deps: TickDeps,
+  workflow: ReadyUmbrellaFinalPrWorkflowRow,
+  worktreePath: string,
+): boolean {
+  if (existsSync(worktreePath)) return false;
+  try {
+    deps.git.fetch(workflow.repo_id, workflow.feature_branch);
+    deps.git.worktreeAddExistingBranch(
+      workflow.repo_id,
+      worktreePath,
+      workflow.feature_branch,
+      `origin/${workflow.feature_branch}`,
+    );
+    return true;
+  } catch (err) {
+    if (existsSync(worktreePath)) {
+      removeUmbrellaFinalPrWorktreeBestEffort(deps, worktreePath);
+    }
+    throw err;
+  }
+}
+
+function removeUmbrellaFinalPrWorktreeBestEffort(
+  deps: Pick<TickDeps, "git">,
+  worktreePath: string,
+): void {
+  try {
+    deps.git.worktreeRemove(worktreePath);
+  } catch {
+    try {
+      rmSync(worktreePath, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+function loadTaskWorktreePath(db: DB, taskId: string): string | null {
+  const row = db
+    .query<{ worktree_path: string }, [string]>(
+      `SELECT worktree_path FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  return row?.worktree_path ?? null;
 }
 
 function lookupUmbrellaFinalTaskId(
