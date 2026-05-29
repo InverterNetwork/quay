@@ -25,8 +25,23 @@ export interface TaskListRow {
   reviewer_agent: string | null;
   reviewer_model: string | null;
   dependency_status: TaskDependencyStatus;
+  umbrella_status: TaskUmbrellaStatus | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface TaskUmbrellaStatus {
+  role: "subtask" | "final_pr";
+  umbrella_workflow_id: number;
+  external_ref: string;
+  repo_id: string;
+  base_branch: string;
+  feature_branch: string;
+  state: string;
+  task_external_ref: string | null;
+  final_pr_task_id: string | null;
+  final_pr_number: number | null;
+  final_pr_url: string | null;
 }
 
 export interface TaskGetCurrentAttempt {
@@ -115,9 +130,55 @@ function rowToList(db: DB, r: TaskListRawRow): TaskListRow {
     reviewer_agent: r.reviewer_agent,
     reviewer_model: r.reviewer_model,
     dependency_status: taskDependencyStatus(db, r.task_id),
+    umbrella_status: taskUmbrellaStatus(db, r.task_id),
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
+}
+
+function taskUmbrellaStatus(db: DB, taskId: string): TaskUmbrellaStatus | null {
+  const subtask = db
+    .query<TaskUmbrellaStatus, [string]>(
+      `SELECT 'subtask' AS role,
+              uw.umbrella_workflow_id,
+              uw.external_ref,
+              uw.repo_id,
+              uw.base_branch,
+              uw.feature_branch,
+              uw.state,
+              ut.external_ref AS task_external_ref,
+              uw.final_pr_task_id,
+              uw.final_pr_number,
+              uw.final_pr_url
+         FROM umbrella_tasks ut
+         JOIN umbrella_workflows uw
+           ON uw.umbrella_workflow_id = ut.umbrella_workflow_id
+        WHERE ut.task_id = ?
+        LIMIT 1`,
+    )
+    .get(taskId);
+  if (subtask !== null && subtask !== undefined) return subtask;
+
+  return (
+    db
+      .query<TaskUmbrellaStatus, [string]>(
+        `SELECT 'final_pr' AS role,
+                uw.umbrella_workflow_id,
+                uw.external_ref,
+                uw.repo_id,
+                uw.base_branch,
+                uw.feature_branch,
+                uw.state,
+                NULL AS task_external_ref,
+                uw.final_pr_task_id,
+                uw.final_pr_number,
+                uw.final_pr_url
+           FROM umbrella_workflows uw
+          WHERE uw.final_pr_task_id = ?
+          LIMIT 1`,
+      )
+      .get(taskId) ?? null
+  );
 }
 
 export function listTasks(db: DB): TaskListRow[] {

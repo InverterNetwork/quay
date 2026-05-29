@@ -63,8 +63,9 @@ quay enqueue \
 
 This path requires `[adapters.linear].enabled = true` and a configured Linear
 token. It fetches the Linear ticket, parses the `quay-config` block, optionally
-fetches Slack thread context, validates the assembled ticket payload, and then
-enters the same enqueue path as manual briefs.
+fetches Slack thread context, validates the assembled ticket payload, reads
+Linear blocked-by relations, and then enters the same enqueue path as manual
+briefs.
 
 `--linear-issue` is mutually exclusive with:
 
@@ -80,6 +81,17 @@ briefs.
 
 Calling the same Linear issue twice for the same repo returns the existing task
 instead of creating a duplicate.
+
+Linear blocked-by relations are resolved only at enqueue time. Complete Linear
+blockers do not block enqueue. Incomplete tracked blockers create dependency
+rows and place the dependent task in `waiting_dependencies` until the blocker
+reaches `merged`. Incomplete untracked blockers fail enqueue with
+`dependency_not_tracked` before any task, worktree, or artifact is created.
+
+Umbrella subtasks are also configured in `quay-config`. A subtask targets the
+umbrella feature branch as its effective base, and `umbrella.depends_on`
+creates dependency rows that wait for blockers to reach
+`merged_to_feature_branch`.
 
 ## Goal Worker Mode
 
@@ -174,6 +186,10 @@ remain lifetime accounting and are not reset.
 6. Runs the repo `install_cmd` in the worktree.
 7. Inserts the task and attempt rows.
 8. Writes artifacts.
+
+When dependencies are present and unsatisfied, the inserted task starts in
+`waiting_dependencies`; it is prepared and queryable, but tick will not spawn a
+worker until all dependency rows are satisfied.
 
 If any step fails, Quay rolls back worktree, branch, SQL, and artifact side
 effects as far as possible.

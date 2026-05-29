@@ -88,6 +88,8 @@ Artifacts are stored under the data directory and indexed in SQLite.
 Common active states:
 
 - `queued`: ready for a future tick to spawn.
+- `waiting_dependencies`: prepared and known to Quay, but not spawnable until
+  its persisted dependency rows are satisfied.
 - `running`: worker session is active or recently active.
 - `pr-open`: worker opened or updated a PR; Quay is polling PR/CI.
 - `done`: CI passed, but the PR is still open. This is not terminal.
@@ -103,6 +105,39 @@ Parked states:
 
 Terminal states:
 
+- `merged_to_feature_branch`
 - `merged`
 - `closed_unmerged`
 - `cancelled`
+
+## Dependencies
+
+Linear-backed enqueue reads native Linear blocked-by relations at enqueue time.
+Quay then persists source-agnostic dependency rows and uses only its own SQLite
+rows during later ticks. It does not keep re-reading Linear to decide whether a
+waiting task can run.
+
+Complete Linear blockers do not block enqueue. Incomplete blockers must already
+be tracked by Quay. If the blocker task is tracked, the dependent task is
+created in `waiting_dependencies` and is released to `queued` only after the
+blocker reaches `merged`. If the incomplete blocker is not tracked, enqueue
+fails with `dependency_not_tracked` before creating the dependent task.
+
+Failed blockers do not auto-unblock or auto-cancel dependents. Operators must
+inspect the blocker and decide whether to retry, cancel, retarget, or otherwise
+recover the blocked workflow.
+
+## Umbrella Workflows
+
+One-repo umbrella workflows use a shared feature branch. Each umbrella subtask
+targets that feature branch as its effective PR base, and dependency rows with
+`scope: "umbrella"` wait for blockers to reach `merged_to_feature_branch`.
+
+Quay may auto-merge only approved and green umbrella subtask PRs into the
+umbrella feature branch. It must never auto-merge normal task PRs or the final
+umbrella PR into the repository base branch.
+
+When all subtasks are integrated, tick creates or reuses the final umbrella PR
+and a final Quay-owned task already in `pr-open`. That final task follows the
+normal Quay-owned PR lifecycle: CI polling, review, review feedback, worker
+fixes, and merge observation.
