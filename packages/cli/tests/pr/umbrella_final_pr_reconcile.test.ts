@@ -313,6 +313,11 @@ test("tick materializes existing umbrella external-ref task before recording it 
     .run(`${h.dataDir}/worktrees/${unrelatedTaskId}`, unrelatedTaskId);
   const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
   const built = buildTickDeps(h);
+  built.git.setWorktreeBranch(
+    repoId,
+    `${h.dataDir}/worktrees/${unrelatedTaskId}`,
+    "quay/existing-umbrella-ticket-task",
+  );
 
   const results = await tick_once(built.deps);
 
@@ -356,6 +361,27 @@ test("tick materializes existing umbrella external-ref task before recording it 
     base_branch: "dev",
     pr_number: 1001,
     pr_url: "https://github.example/repo-umbrella-final-unrelated-task/pull/1001",
+  });
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeCurrentBranch",
+    args: { worktreePath: `${h.dataDir}/worktrees/${unrelatedTaskId}` },
+  });
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeRemove",
+    args: { worktreePath: `${h.dataDir}/worktrees/${unrelatedTaskId}` },
+  });
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeAddExistingBranch",
+    args: {
+      repoId,
+      worktreePath: `${h.dataDir}/worktrees/${unrelatedTaskId}`,
+      branch: "quay/umbrella/BRIX-1511",
+      baseRef: "origin/quay/umbrella/BRIX-1511",
+    },
+  });
+  expect(built.git.worktreeBranches.get(`${h.dataDir}/worktrees/${unrelatedTaskId}`)).toEqual({
+    repoId,
+    branch: "quay/umbrella/BRIX-1511",
   });
   const attempt = h.db
     .query<{ n: number }, [string]>(

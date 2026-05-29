@@ -3242,7 +3242,11 @@ function ensureUmbrellaFinalPrWorktree(
   workflow: ReadyUmbrellaFinalPrWorkflowRow,
   worktreePath: string,
 ): boolean {
-  if (existsSync(worktreePath)) return false;
+  if (existsSync(worktreePath)) {
+    const currentBranch = deps.git.worktreeCurrentBranch(worktreePath);
+    if (currentBranch === workflow.feature_branch) return false;
+    deps.git.worktreeRemove(worktreePath);
+  }
   try {
     deps.git.fetch(workflow.repo_id, workflow.feature_branch);
     deps.git.worktreeAddExistingBranch(
