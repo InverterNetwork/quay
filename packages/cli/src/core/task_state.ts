@@ -101,6 +101,30 @@ export const TASK_TRANSITIONS = [
     "worker produced or attached a PR",
   ),
   transition(
+    "awaiting-next-brief",
+    "pr-open",
+    ["existing_pr_attached"],
+    "stale human handoff reconciled to open PR polling",
+  ),
+  transition(
+    "claimed-by-orchestrator",
+    "pr-open",
+    ["existing_pr_attached"],
+    "stale claimed handoff reconciled to open PR polling",
+  ),
+  transition(
+    "waiting_human",
+    "pr-open",
+    ["existing_pr_attached"],
+    "stale human wait reconciled to open PR polling",
+  ),
+  transition(
+    "orchestrator_loop",
+    "pr-open",
+    ["existing_pr_attached"],
+    "stale orchestrator-loop handoff reconciled to open PR polling",
+  ),
+  transition(
     "running",
     "worktree_error",
     ["worktree_error"],
@@ -111,6 +135,30 @@ export const TASK_TRANSITIONS = [
     "done",
     ["ci_passed"],
     "PR checks passed and task is ready for review",
+  ),
+  transition(
+    "awaiting-next-brief",
+    "done",
+    ["ci_passed"],
+    "stale human handoff reconciled to a ready PR",
+  ),
+  transition(
+    "claimed-by-orchestrator",
+    "done",
+    ["ci_passed"],
+    "stale claimed handoff reconciled to a ready PR",
+  ),
+  transition(
+    "waiting_human",
+    "done",
+    ["ci_passed"],
+    "stale human wait reconciled to a ready PR",
+  ),
+  transition(
+    "orchestrator_loop",
+    "done",
+    ["ci_passed"],
+    "stale orchestrator-loop handoff reconciled to a ready PR",
   ),
   transition(
     "pr-open",
@@ -141,6 +189,36 @@ export const TASK_TRANSITIONS = [
     "queued",
     ["pr_adopted"],
     "external PR adopted for code-worker ownership",
+  ),
+  transition(
+    "waiting_external_changes",
+    "pr-open",
+    ["pr_adopted"],
+    "external PR adopted for PR polling",
+  ),
+  transition(
+    "pr-review",
+    "pr-open",
+    ["pr_adopted"],
+    "external PR adopted for PR polling",
+  ),
+  transition(
+    "done",
+    "pr-open",
+    ["pr_adopted"],
+    "adopted PR returned to open PR polling",
+  ),
+  transition(
+    "waiting_external_changes",
+    "done",
+    ["pr_adopted_ready"],
+    "external PR adopted with green CI and no current requested changes",
+  ),
+  transition(
+    "pr-review",
+    "done",
+    ["pr_adopted_ready"],
+    "external PR adopted with green CI and no current requested changes",
   ),
   transition(
     "pr-review",
@@ -296,6 +374,7 @@ export interface TaskTransitionUpdates {
   incrementAttemptsConsumedBy?: number;
   resetSpawnFailures?: boolean;
   budgetExhausted?: 0 | 1;
+  baseBranch?: string | null;
   pr?: TaskTransitionPrMetadata;
 }
 
@@ -436,6 +515,10 @@ function buildTaskUpdate(input: TransitionTaskStateInput): {
   if (updates.budgetExhausted !== undefined) {
     setSql.push("budget_exhausted = ?");
     params.push(updates.budgetExhausted);
+  }
+  if (updates.baseBranch !== undefined) {
+    setSql.push("base_branch = ?");
+    params.push(updates.baseBranch);
   }
   if (updates.pr) {
     appendPrMetadataUpdate(setSql, params, updates.pr);

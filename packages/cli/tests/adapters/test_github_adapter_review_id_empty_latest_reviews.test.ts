@@ -175,6 +175,54 @@ esac
   expect(snap!.latestReview.latestReviewId).toBe("PRR_second_cr");
 });
 
+test("submitted head SHA falls back to matched reviews row when latestReviews omits commit", () => {
+  installGhStub(`
+case "$*" in
+  *"checks"*"--required"*)
+    echo '[]'
+    exit 0
+    ;;
+  *"checks"*)
+    echo '[]'
+    exit 0
+    ;;
+  *"api"*"graphql"*)
+    cat <<'JSON'
+{"data":{"node":{"comments":{"nodes":[]}}}}
+JSON
+    exit 0
+    ;;
+  *"view"*)
+    cat <<'JSON'
+{
+  "state":"OPEN",
+  "headRefOid":"head-new",
+  "mergeable":"MERGEABLE",
+  "reviewDecision":"CHANGES_REQUESTED",
+  "latestReviews":[
+    {"id":"","state":"CHANGES_REQUESTED","body":"please fix","submittedAt":"2026-05-28T20:00:00Z","commit":{"oid":""}}
+  ],
+  "reviews":[
+    {"id":"PRR_real_id","state":"CHANGES_REQUESTED","body":"please fix","submittedAt":"2026-05-28T20:00:00Z","commit":{"oid":"head-old"}}
+  ]
+}
+JSON
+    exit 0
+    ;;
+  *)
+    echo '[]'
+    exit 0
+    ;;
+esac
+`);
+  const { reposRoot, repoId } = makeBareDir();
+  const adapter = new GitHubCliAdapter(reposRoot);
+  const snap = adapter.prSnapshot(repoId, "quay/branch");
+  expect(snap).not.toBeNull();
+  expect(snap!.latestReview.latestReviewId).toBe("PRR_real_id");
+  expect(snap!.latestReview.submittedHeadSha).toBe("head-old");
+});
+
 test("empty latestReviews[].id with no recoverable reviews row yields null (no graphql call)", () => {
   // Reviews list is empty (or carries no usable id). Without a recoverable
   // node id, the guard must short-circuit the graphql fetch — otherwise

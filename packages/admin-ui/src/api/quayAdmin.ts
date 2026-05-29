@@ -45,12 +45,21 @@ export interface QuayAdminRepo {
 export interface QuayAdminRepoDetail extends QuayAdminRepo {
   revision: string;
   active_task_count: number;
+  ci_policy: QuayAdminRepoCiPolicy;
   effective_preambles: {
     worker: QuayAdminRepoEffectivePreamble;
     reviewer: QuayAdminRepoEffectivePreamble;
   };
   tag_namespaces: QuayAdminTagNamespace[];
   inherited_tag_namespaces: QuayAdminTagNamespace[];
+}
+
+interface QuayAdminRepoCiPolicy {
+  ignore_mode: 'inherit' | 'extend' | 'replace';
+  ignored_check_names: string[];
+  ignored_workflow_names: string[];
+  effective_ignored_check_names: string[];
+  effective_ignored_workflow_names: string[];
 }
 
 interface QuayAdminRepoEffectivePreamble {
@@ -148,6 +157,10 @@ interface QuayAdminGlobal {
     live_worker_thresholds: QuayAdminField[];
     claims: QuayAdminField[];
     paths: QuayAdminField[];
+  };
+  ci_policy: {
+    ignored_check_names: string[];
+    ignored_workflow_names: string[];
   };
   adapters: QuayAdminAdapter[];
   agents: {
@@ -427,6 +440,13 @@ function toRepoSummary(repo: QuayAdminRepoDetail): RepoSummary {
     modelReviewer: repo.model_reviewer,
     preambleWorker: repo.preamble_worker,
     preambleReviewer: repo.preamble_reviewer,
+    ciPolicy: {
+      ignoreMode: repo.ci_policy.ignore_mode,
+      ignoredCheckNames: repo.ci_policy.ignored_check_names,
+      ignoredWorkflowNames: repo.ci_policy.ignored_workflow_names,
+      effectiveIgnoredCheckNames: repo.ci_policy.effective_ignored_check_names,
+      effectiveIgnoredWorkflowNames: repo.ci_policy.effective_ignored_workflow_names,
+    },
     effectivePreambles: {
       worker: toRepoEffectivePreamble(repo.effective_preambles.worker),
       reviewer: toRepoEffectivePreamble(repo.effective_preambles.reviewer),
@@ -467,6 +487,10 @@ function toGlobalSummary(global: QuayAdminGlobal): GlobalConfigSummary {
       liveWorkerThresholds: global.operations.live_worker_thresholds.map(toFieldSummary),
       claims: global.operations.claims.map(toFieldSummary),
       paths: global.operations.paths.map(toFieldSummary),
+    },
+    ciPolicy: {
+      ignoredCheckNames: global.ci_policy.ignored_check_names,
+      ignoredWorkflowNames: global.ci_policy.ignored_workflow_names,
     },
     adapters: global.adapters.map(toAdapterSummary),
     agents: {

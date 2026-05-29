@@ -312,6 +312,17 @@ tag/author shape stays consistent across validation and enqueue.
 | `QUAY_CONFIG_FILE` | Direct path to a config TOML; bypasses dir resolution |
 | `QUAY_INTEGRATION_TESTS=1` | Opt in to network-backed adapter tests |
 
+### Quay review workflow secrets
+
+`.github/workflows/quay-review.yml` calls Hermes `POST /quay/review-pr` after
+successful pull request CI runs so Quay can enroll or refresh synthetic PR
+reviews. Configure these repository secrets in GitHub Actions:
+
+| Secret | Purpose |
+|---|---|
+| `QUAY_REVIEW_URL` | Base Hermes URL, or the full `/quay/review-pr` endpoint |
+| `QUAY_REVIEW_PR_TOKEN` | Bearer token accepted by Hermes for Quay review requests |
+
 ## Layout
 
 ```

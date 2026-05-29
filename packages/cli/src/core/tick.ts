@@ -26,6 +26,7 @@ import {
   type AgentRole,
   type ResolvedAgent,
 } from "./agents.ts";
+import { baseBranchNameSchema } from "./base_branch.ts";
 import { QUAY_BRANCH_PREFIX } from "./branch_slug.ts";
 import { runCancelFinalizer } from "./cancel.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
@@ -47,6 +48,14 @@ import {
   type ClassifyOutcome,
 } from "./classifier.ts";
 import { classifyCi } from "./ci_status.ts";
+import {
+  EMPTY_CI_IGNORE_POLICY,
+  parseCiIgnoreListJson,
+  resolveCiIgnorePolicy,
+  type CiIgnorePolicy,
+  type CiIgnoreMode,
+  type RepoCiIgnorePolicy,
+} from "./ci_policy.ts";
 import { fireFailpoint } from "./failpoints.ts";
 import { scheduleNonBudgetRespawn } from "./non_budget_respawn.ts";
 import {
@@ -152,6 +161,7 @@ export interface TickOptions {
   maxClaimExpirations?: number;
   maxNonBudgetRespawns?: number;
   referenceReposRoot?: string | undefined;
+  ciIgnorePolicy?: CiIgnorePolicy;
 }
 
 export type TickAction =
@@ -179,6 +189,7 @@ export type TickAction =
   | "ci_failed"
   | "ci_pending"
   | "ci_passed"
+  | "adopted_pr_reconciled"
   | "pr_merged"
   | "pr_closed_unmerged"
   | "review_respawn_scheduled"
@@ -277,6 +288,7 @@ interface ParkedPrTerminalTaskRow {
   branch_name: string;
   worktree_path: string;
   pr_number: number | null;
+  head_sha: string | null;
   cancel_requested_at: string | null;
   github_pr_polled_at: string | null;
 }
@@ -753,7 +765,7 @@ export async function tick_once(
           continue;
         }
         try {
-          const result = processPendingReviewRequest(deps, req);
+          const result = processPendingReviewRequest(deps, req, options);
           if (result !== null) results.push(result);
         } catch (err) {
           results.push(
@@ -1220,6 +1232,7 @@ function readPendingReviewRequests(db: DB): PendingReviewRequestRow[] {
 function processPendingReviewRequest(
   deps: TickDeps,
   req: PendingReviewRequestRow,
+  options: TickOptions,
 ): TickTaskResult | null {
   markGithubPrPolled(deps, req.task_id);
   const snapshot = deps.github.prLightweightSnapshotByNumber(
@@ -1256,6 +1269,7 @@ function processPendingReviewRequest(
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
       referenceReposRoot: deps.referenceReposRoot,
+      ciIgnorePolicy: options.ciIgnorePolicy,
     },
   );
   if (result.scheduled) {
@@ -1462,7 +1476,7 @@ function readParkedPrTerminal(db: DB): ParkedPrTerminalTaskRow[] {
                 THEN 'synthetic_review'
                 ELSE authoring_mode
               END AS authoring_mode,
-              pr_number, cancel_requested_at, github_pr_polled_at
+              pr_number, head_sha, cancel_requested_at, github_pr_polled_at
          FROM tasks
         WHERE state IN (
           'awaiting-next-brief',
@@ -1749,7 +1763,7 @@ function processRunningReviewAttempt(
     posted.decision === "APPROVED" &&
     task.authoring_mode !== "synthetic_review"
   ) {
-    const ciGate = guardApprovedReviewCi(deps, task, posted, exitInfo);
+    const ciGate = guardApprovedReviewCi(deps, task, posted, exitInfo, options);
     if (ciGate !== null) return ciGate;
   }
   return finalizePostedReview(deps, task, posted, exitInfo, options);
@@ -1888,7 +1902,11 @@ function processPrOpenTask(
 
   // 3. CI status (any reported failure blocks; empty check set preserves no-CI).
   const repo = loadRepoForTask(deps.db, task.task_id);
-  const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
+  const ci = classifyCi(
+    snapshot,
+    repo?.ci_workflow_name ?? null,
+    resolveCiIgnorePolicy(options.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repo),
+  );
 
   if (ci === "stale") {
     return recordTickError(
@@ -1929,6 +1947,7 @@ function processPrOpenTask(
           reviewerEnabled: true,
           gateQuayOwnedDone: true,
           referenceReposRoot: deps.referenceReposRoot,
+          ciIgnorePolicy: options.ciIgnorePolicy,
         },
       );
       if (
@@ -2076,6 +2095,7 @@ function processSyntheticReviewLifecycle(
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
       referenceReposRoot: deps.referenceReposRoot,
+      ciIgnorePolicy: options.ciIgnorePolicy,
     },
   );
 
@@ -2175,11 +2195,151 @@ function processParkedPrTerminal(
   const snapshot = loadParkedPrSnapshot(deps, task);
   if (snapshot === null) return null;
   if (snapshot.state !== "merged" && snapshot.state !== "closed_unmerged") {
+    const reconciled = reconcileParkedAdoptedOpenPr(deps, task, attempt);
+    if (reconciled !== null) return reconciled;
     return null;
   }
 
   persistPrMetadata(deps, task.task_id, snapshot);
   return finalizePrTerminal(deps, task, attempt, snapshot.state, task.state);
+}
+
+function reconcileParkedAdoptedOpenPr(
+  deps: TickDeps,
+  task: ParkedPrTerminalTaskRow,
+  attempt: CurrentAttemptRow,
+): TickTaskResult | null {
+  if (task.authoring_mode !== "adopted_external_pr") return null;
+  if (
+    task.state !== "awaiting-next-brief" &&
+    task.state !== "claimed-by-orchestrator" &&
+    task.state !== "waiting_human" &&
+    task.state !== "orchestrator_loop"
+  ) {
+    return null;
+  }
+  const snapshot = loadParkedPrFullSnapshot(deps, task);
+  if (snapshot === null) return null;
+  if (snapshot.state !== "open") return null;
+  if (task.head_sha !== null && snapshot.headSha === task.head_sha) return null;
+
+  const repo = loadRepoForTask(deps.db, task.task_id);
+  const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
+  if (ci === "stale") {
+    return recordTickError(
+      deps,
+      task.task_id,
+      new Error(
+        `PR head SHA (${snapshot.headSha}) and check-run SHA (${snapshot.checks.checkSha}) disagree; skipping adopted PR reconciliation this tick`,
+      ),
+    );
+  }
+
+  persistPrMetadata(deps, task.task_id, snapshot);
+
+  if (snapshot.mergeable === "conflicting") {
+    return transitionParkedAdoptedToPrOpen(deps, task, "adopted_pr_reconciled");
+  }
+  if (ci === "pending" || ci === "fail") {
+    return transitionParkedAdoptedToPrOpen(
+      deps,
+      task,
+      ci === "pending" ? "ci_pending" : "ci_failed",
+    );
+  }
+  if (snapshot.latestReview.decision === "CHANGES_REQUESTED") {
+    return transitionParkedAdoptedToPrOpen(
+      deps,
+      task,
+      "adopted_pr_reconciled",
+    );
+  }
+
+  return transitionParkedAdoptedReady(deps, task, attempt, snapshot);
+}
+
+function transitionParkedAdoptedToPrOpen(
+  deps: TickDeps,
+  task: ParkedPrTerminalTaskRow,
+  action: Extract<TickAction, "adopted_pr_reconciled" | "ci_pending" | "ci_failed">,
+): TickTaskResult | null {
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: task.state,
+      to: "pr-open",
+      eventType: "existing_pr_attached",
+      now,
+      updates: {
+        clearClaim: true,
+        resetClaimExpirations: true,
+        clearTickError: true,
+        budgetExhausted: 0,
+      },
+    });
+    if (!transition.applied) {
+      deps.db.exec("ROLLBACK");
+      return null;
+    }
+    cancelOpenOrchestratorHandoffs(deps, task.task_id);
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+  return { task_id: task.task_id, action };
+}
+
+function transitionParkedAdoptedReady(
+  deps: TickDeps,
+  task: ParkedPrTerminalTaskRow,
+  attempt: CurrentAttemptRow,
+  snapshot: PrSnapshot,
+): TickTaskResult | null {
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    const transition = transitionTaskState(deps, {
+      taskId: task.task_id,
+      from: task.state,
+      to: "done",
+      eventType: "ci_passed",
+      attemptId: attempt.attempt_id,
+      now,
+      updates: {
+        clearClaim: true,
+        resetClaimExpirations: true,
+        clearTickError: true,
+        budgetExhausted: 0,
+      },
+    });
+    if (!transition.applied) {
+      deps.db.exec("ROLLBACK");
+      return null;
+    }
+    cancelOpenOrchestratorHandoffs(deps, task.task_id);
+    if (
+      snapshot.latestReview.decision === "APPROVED" &&
+      snapshot.latestReview.latestReviewId !== null
+    ) {
+      enqueuePrReadyApprovedOutboxItem(deps, {
+        taskId: task.task_id,
+        sourceEventId: transition.eventId,
+        externalReview: { reviewId: snapshot.latestReview.latestReviewId },
+      });
+    }
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+  return { task_id: task.task_id, action: "ci_passed" };
 }
 
 function loadParkedPrSnapshot(
@@ -2194,6 +2354,17 @@ function loadParkedPrSnapshot(
     if (byNumber !== null) return byNumber;
   }
   return deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
+}
+
+function loadParkedPrFullSnapshot(
+  deps: TickDeps,
+  task: Pick<ParkedPrTerminalTaskRow, "repo_id" | "branch_name" | "pr_number">,
+): PrSnapshot | null {
+  if (task.pr_number !== null) {
+    const byNumber = deps.github.prSnapshotByNumber(task.repo_id, task.pr_number);
+    if (byNumber !== null) return byNumber;
+  }
+  return deps.github.prSnapshot(task.repo_id, task.branch_name);
 }
 
 function finalizePrTerminal(
@@ -2483,6 +2654,9 @@ function hasActionableReviewFeedback(
   return (
     snapshot.latestReview.decision === "CHANGES_REQUESTED" &&
     snapshot.latestReview.latestReviewId !== null &&
+    (snapshot.latestReview.submittedHeadSha === undefined ||
+      snapshot.latestReview.submittedHeadSha === null ||
+      snapshot.latestReview.submittedHeadSha === snapshot.headSha) &&
     task.last_review_id_acted_on !== snapshot.latestReview.latestReviewId
   );
 }
@@ -2637,6 +2811,7 @@ function guardApprovedReviewCi(
   task: ReviewAttemptTaskRow,
   posted: PostedReview,
   exitInfo: PaneExitInfo,
+  options: TickOptions,
 ): TickTaskResult | null {
   const snapshot = deps.github.prSnapshot(task.repo_id, task.branch_name);
   if (snapshot === null) {
@@ -2657,11 +2832,15 @@ function guardApprovedReviewCi(
   }
   persistPrMetadata(deps, task.task_id, snapshot);
   if (snapshot.headSha !== task.head_sha) {
-    return handleStaleApprovedReview(deps, task, posted, exitInfo, snapshot);
+    return handleStaleApprovedReview(deps, task, posted, exitInfo, snapshot, options);
   }
 
   const repo = loadRepoForTask(deps.db, task.task_id);
-  const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
+  const ci = classifyCi(
+    snapshot,
+    repo?.ci_workflow_name ?? null,
+    resolveCiIgnorePolicy(options.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repo),
+  );
   if (ci === "stale") {
     finalizeApprovedReviewBackToPrOpen(
       deps,
@@ -2706,9 +2885,14 @@ function handleStaleApprovedReview(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
+  options: TickOptions,
 ): TickTaskResult {
   const repo = loadRepoForTask(deps.db, task.task_id);
-  const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
+  const ci = classifyCi(
+    snapshot,
+    repo?.ci_workflow_name ?? null,
+    resolveCiIgnorePolicy(options.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repo),
+  );
   if (ci === "stale") {
     finalizeApprovedReviewBackToPrOpen(
       deps,
@@ -2776,6 +2960,7 @@ function handleStaleApprovedReview(
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
       referenceReposRoot: deps.referenceReposRoot,
+      ciIgnorePolicy: options.ciIgnorePolicy,
     },
   );
   return {
@@ -3006,6 +3191,20 @@ function finalizePostedReview(
     verdict === "changes_requested" &&
     task.authoring_mode !== "synthetic_review";
 
+  if (handOffToRespawn) {
+    const snapshot = refreshPrMetadataBeforeReviewRespawn(deps, task);
+    if (snapshot === null) {
+      return recordTickError(
+        deps,
+        task.task_id,
+        new Error(
+          `PR snapshot unavailable for branch ${task.branch_name}; cannot schedule review respawn with the current PR base`,
+        ),
+      );
+    }
+    persistPrMetadata(deps, task.task_id, snapshot);
+  }
+
   deps.db.exec("BEGIN IMMEDIATE");
   try {
     deps.db
@@ -3114,6 +3313,20 @@ function finalizePostedReview(
     action:
       verdict === "approved" ? "review_approved" : "review_changes_requested",
   };
+}
+
+function refreshPrMetadataBeforeReviewRespawn(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+): PrSnapshot | null {
+  if (task.pr_number !== null) {
+    const byNumber = deps.github.prLightweightSnapshotByNumber(
+      task.repo_id,
+      task.pr_number,
+    );
+    if (byNumber !== null) return byNumber;
+  }
+  return deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
 }
 
 function markReviewInfraFailure(
@@ -3316,11 +3529,13 @@ function persistPrMetadata(
   const prUrl = snapshot.prUrl ?? null;
   const headSha = snapshot.headSha === "" ? null : snapshot.headSha;
   const baseSha = snapshot.baseSha;
+  const baseRef = normalizePrBaseRef(snapshot.baseRef);
   if (
     prNumber === null &&
     prUrl === null &&
     headSha === null &&
-    baseSha === null
+    baseSha === null &&
+    baseRef === null
   ) {
     return;
   }
@@ -3331,29 +3546,49 @@ function persistPrMetadata(
             SET pr_number = COALESCE(?, pr_number),
                 pr_url    = COALESCE(?, pr_url),
                 head_sha  = COALESCE(?, head_sha),
-                base_sha  = COALESCE(?, base_sha)
+                base_sha  = COALESCE(?, base_sha),
+                base_branch = COALESCE(?, base_branch)
           WHERE task_id = ?`,
       )
-      .run(prNumber, prUrl, headSha, baseSha, taskId);
+      .run(prNumber, prUrl, headSha, baseSha, baseRef, taskId);
   } catch {
     // Best-effort: PR-metadata observability never blocks the state
     // machine. A SQL failure here will be retried on the next tick.
   }
 }
 
+function normalizePrBaseRef(baseRef: string | null | undefined): string | null {
+  const trimmed = baseRef?.trim();
+  if (trimmed === undefined || trimmed.length === 0) return null;
+  return baseBranchNameSchema.safeParse(trimmed).success ? trimmed : null;
+}
+
 function loadRepoForTask(
   db: DB,
   taskId: string,
-): { ci_workflow_name: string | null } | null {
-  return (
-    db
-      .query<{ ci_workflow_name: string | null }, [string]>(
-        `SELECT r.ci_workflow_name AS ci_workflow_name
-           FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
-          WHERE t.task_id = ?`,
-      )
-      .get(taskId) ?? null
-  );
+): ({ ci_workflow_name: string | null } & RepoCiIgnorePolicy) | null {
+  const row = db
+    .query<{
+      ci_workflow_name: string | null;
+      ci_ignore_mode: CiIgnoreMode;
+      ci_ignored_check_names: string;
+      ci_ignored_workflow_names: string;
+    }, [string]>(
+      `SELECT r.ci_workflow_name AS ci_workflow_name,
+              r.ci_ignore_mode AS ci_ignore_mode,
+              r.ci_ignored_check_names AS ci_ignored_check_names,
+              r.ci_ignored_workflow_names AS ci_ignored_workflow_names
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        WHERE t.task_id = ?`,
+    )
+    .get(taskId);
+  if (row === undefined || row === null) return null;
+  return {
+    ci_workflow_name: row.ci_workflow_name,
+    ci_ignore_mode: row.ci_ignore_mode,
+    ignored_check_names: parseCiIgnoreListJson(row.ci_ignored_check_names),
+    ignored_workflow_names: parseCiIgnoreListJson(row.ci_ignored_workflow_names),
+  };
 }
 
 function processClaimedTask(

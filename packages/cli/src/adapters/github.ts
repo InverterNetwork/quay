@@ -1414,45 +1414,86 @@ function extractLatestReview(parsed: Record<string, unknown>): PrLatestReview {
       comments = pick.body !== undefined ? String(pick.body) : "";
     }
   }
-  const latestReviewId = resolveReviewNodeId(pick, parsed);
-  return { decision, latestReviewId, comments };
+  const fallbackReview = resolveReviewFallbackRow(pick, parsed);
+  const latestReviewId = resolveReviewNodeId(pick, fallbackReview);
+  return {
+    decision,
+    latestReviewId,
+    submittedHeadSha:
+      extractReviewSubmittedHeadSha(pick) ??
+      extractReviewSubmittedHeadSha(fallbackReview),
+    comments,
+  };
 }
 
-// Recover the review node id for the picked `latestReviews` entry. Some
-// `gh` versions return `latestReviews[].id` as the empty string while the
-// same review surfaces under `--json reviews` with the real GraphQL node
-// id (`PRR_…`). Trust `latestReviews[].id` when populated; otherwise walk
-// `reviews` newest-first and match by state (preferring an exact
-// `submittedAt` match when both sides expose one). Return null when no
-// usable id can be resolved — the enrichment guard skips the graphql
-// fetch on null so tick doesn't loop on empty-id errors.
-function resolveReviewNodeId(
+function extractReviewSubmittedHeadSha(
   picked: Record<string, unknown> | null,
-  parsed: Record<string, unknown>,
 ): string | null {
   if (picked === null) return null;
-  const pickedId = picked.id !== undefined ? String(picked.id) : "";
-  if (pickedId !== "") return pickedId;
+  const commit = picked.commit;
+  if (commit && typeof commit === "object") {
+    const oid = (commit as Record<string, unknown>).oid;
+    if (typeof oid === "string" && oid.trim() !== "") return oid;
+  }
+  const commitOid = picked.commitOid ?? picked.commitOID;
+  if (typeof commitOid === "string" && commitOid.trim() !== "") {
+    return commitOid;
+  }
+  return null;
+}
+
+// Recover the `reviews` row for the picked `latestReviews` entry. Some `gh`
+// versions return lossy `latestReviews` rows (empty id and/or missing
+// commit.oid) while the same review under `--json reviews` carries the
+// authoritative node id and commit OID. Match by id first when present, then
+// by state/submittedAt, then fall back to the newest same-state row.
+function resolveReviewFallbackRow(
+  picked: Record<string, unknown> | null,
+  parsed: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (picked === null) return null;
   const reviews = Array.isArray(parsed.reviews)
     ? (parsed.reviews as Array<Record<string, unknown>>)
     : [];
   if (reviews.length === 0) return null;
+  const pickedId = picked.id !== undefined ? String(picked.id) : "";
+  if (pickedId !== "") {
+    for (let i = reviews.length - 1; i >= 0; i -= 1) {
+      const r = reviews[i] ?? {};
+      if (String(r.id ?? "") === pickedId) return r;
+    }
+  }
   const pickedState = String(picked.state ?? "").toUpperCase();
   const pickedSubmittedAt = String(picked.submittedAt ?? "");
-  let stateMatch: string | null = null;
+  let stateMatch: Record<string, unknown> | null = null;
   for (let i = reviews.length - 1; i >= 0; i -= 1) {
     const r = reviews[i] ?? {};
-    const id = String(r.id ?? "");
-    if (id === "") continue;
     const state = String(r.state ?? "").toUpperCase();
     if (state !== pickedState) continue;
     const submittedAt = String(r.submittedAt ?? "");
     if (pickedSubmittedAt !== "" && submittedAt === pickedSubmittedAt) {
-      return id;
+      return r;
     }
-    if (stateMatch === null) stateMatch = id;
+    if (stateMatch === null) stateMatch = r;
   }
   return stateMatch;
+}
+
+// Trust `latestReviews[].id` when populated; otherwise use the matched
+// `reviews` row. Return null when no usable id can be resolved — the
+// enrichment guard skips the graphql fetch on null so tick doesn't loop on
+// empty-id errors.
+function resolveReviewNodeId(
+  picked: Record<string, unknown> | null,
+  fallbackReview: Record<string, unknown> | null,
+): string | null {
+  if (picked === null) return null;
+  const pickedId = picked.id !== undefined ? String(picked.id) : "";
+  if (pickedId !== "") return pickedId;
+  if (fallbackReview === null) return null;
+  const fallbackId =
+    fallbackReview.id !== undefined ? String(fallbackReview.id) : "";
+  return fallbackId !== "" ? fallbackId : null;
 }
 
 function mapReviewDecision(raw: unknown): PrReviewDecision {
