@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
+import { AgentDrawer } from './agent/AgentDrawer';
+import { AGENT_CTX, hermesAdapter } from './agent/agentData';
 import { PrimarySidebar, type AppRoute } from './app/PrimarySidebar';
 import { useQuayAdminReadModel } from './api/quayAdmin';
 import { MissionControlPage } from './mission-control/MissionControlPage';
@@ -62,6 +64,7 @@ function routePath(basePath: string, route: AppRoute, scope: Scope = 'global'): 
 export function App() {
   const [routeState, setRouteState] = useState<RouteState>(readRouteState);
   const [overlay, setOverlay] = useState<Overlay>(null);
+  const [agentOpen, setAgentOpen] = useState(true);
   const [empty, setEmpty] = useState(false);
   const [mode, setMode] = useState<Mode>(readModeFromStorage);
   const admin = useQuayAdminReadModel();
@@ -122,6 +125,15 @@ export function App() {
   // Cmd/Ctrl + Enter → preview diff (opens the save-preview modal)
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'j') {
+        e.preventDefault();
+        setAgentOpen((open) => !open);
+        return;
+      }
+      if (e.key === 'Escape') {
+        setAgentOpen(false);
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         if (store.changes.length > 0) {
           e.preventDefault();
@@ -188,6 +200,8 @@ export function App() {
         crumbs={crumbs}
         mode={mode}
         backendStatus={status}
+        agentOpen={agentOpen}
+        onAgentToggle={() => setAgentOpen((open) => !open)}
         onModeToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
       />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
@@ -282,6 +296,13 @@ export function App() {
           </>
         )}
       </div>
+
+      <AgentDrawer
+        open={agentOpen}
+        onClose={() => setAgentOpen(false)}
+        adapter={hermesAdapter}
+        ctx={AGENT_CTX}
+      />
 
       {import.meta.env.DEV && route === 'configuration' && <DevToggle empty={empty} onToggle={() => setEmpty((e) => !e)} />}
 
