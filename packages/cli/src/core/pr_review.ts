@@ -10,6 +10,14 @@ import type { TmuxPort } from "../ports/tmux.ts";
 import type { AgentResolver } from "./agents.ts";
 import { baseBranchNameSchema } from "./base_branch.ts";
 import { classifyCi } from "./ci_status.ts";
+import {
+  EMPTY_CI_IGNORE_POLICY,
+  parseCiIgnoreListJson,
+  resolveCiIgnorePolicy,
+  type CiIgnorePolicy,
+  type CiIgnoreMode,
+  type RepoCiIgnorePolicy,
+} from "./ci_policy.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 import { renderReferenceReposPrompt } from "./reference_repos.ts";
 import { assertTaskState, transitionTaskState } from "./task_state.ts";
@@ -68,6 +76,7 @@ export interface EnterReviewInput {
   reviewerAgent?: string;
   reviewerModel?: string;
   referenceReposRoot?: string | undefined;
+  ciIgnorePolicy?: CiIgnorePolicy | undefined;
 }
 
 export interface EnterReviewResult {
@@ -162,12 +171,34 @@ interface RepoRow {
   archived_at: string | null;
 }
 
+interface RepoCiPolicyRow {
+  ci_ignore_mode: CiIgnoreMode;
+  ci_ignored_check_names: string;
+  ci_ignored_workflow_names: string;
+}
+
 interface LatestCodeAttemptRow {
   attempt_id: number;
   reason: string;
   remote_sha_at_spawn: string | null;
   remote_sha_at_exit: string | null;
   diff_summary: string | null;
+}
+
+function loadRepoCiIgnorePolicy(db: DB, repoId: string): RepoCiIgnorePolicy | null {
+  const row = db
+    .query<RepoCiPolicyRow, [string]>(
+      `SELECT ci_ignore_mode, ci_ignored_check_names, ci_ignored_workflow_names
+         FROM repos
+        WHERE repo_id = ?`,
+    )
+    .get(repoId);
+  if (row === undefined || row === null) return null;
+  return {
+    ci_ignore_mode: row.ci_ignore_mode,
+    ignored_check_names: parseCiIgnoreListJson(row.ci_ignored_check_names),
+    ignored_workflow_names: parseCiIgnoreListJson(row.ci_ignored_workflow_names),
+  };
 }
 
 export function enterReview(
@@ -238,14 +269,19 @@ export function enterReview(
       );
 
   const supersededSessions: string[] = [];
-  const ci = classifyCi(deps.github.prSnapshotByNumber(input.repoId, input.prNumber) ?? {
-    state: "open",
-    headSha,
-    baseSha: null,
-    mergeable: "unknown",
-    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
-    checks: { checkSha: null, items: [] },
-  }, null);
+  const repoCiPolicy = loadRepoCiIgnorePolicy(deps.db, input.repoId);
+  const ci = classifyCi(
+    deps.github.prSnapshotByNumber(input.repoId, input.prNumber) ?? {
+      state: "open",
+      headSha,
+      baseSha: null,
+      mergeable: "unknown",
+      latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+      checks: { checkSha: null, items: [] },
+    },
+    null,
+    resolveCiIgnorePolicy(input.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repoCiPolicy),
+  );
   const shouldScheduleNow = ci === "pass";
   deps.db.exec("BEGIN IMMEDIATE");
   try {

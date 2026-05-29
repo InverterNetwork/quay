@@ -47,6 +47,14 @@ import {
   type ClassifyOutcome,
 } from "./classifier.ts";
 import { classifyCi } from "./ci_status.ts";
+import {
+  EMPTY_CI_IGNORE_POLICY,
+  parseCiIgnoreListJson,
+  resolveCiIgnorePolicy,
+  type CiIgnorePolicy,
+  type CiIgnoreMode,
+  type RepoCiIgnorePolicy,
+} from "./ci_policy.ts";
 import { fireFailpoint } from "./failpoints.ts";
 import { scheduleNonBudgetRespawn } from "./non_budget_respawn.ts";
 import {
@@ -152,6 +160,7 @@ export interface TickOptions {
   maxClaimExpirations?: number;
   maxNonBudgetRespawns?: number;
   referenceReposRoot?: string | undefined;
+  ciIgnorePolicy?: CiIgnorePolicy;
 }
 
 export type TickAction =
@@ -753,7 +762,7 @@ export async function tick_once(
           continue;
         }
         try {
-          const result = processPendingReviewRequest(deps, req);
+          const result = processPendingReviewRequest(deps, req, options);
           if (result !== null) results.push(result);
         } catch (err) {
           results.push(
@@ -1220,6 +1229,7 @@ function readPendingReviewRequests(db: DB): PendingReviewRequestRow[] {
 function processPendingReviewRequest(
   deps: TickDeps,
   req: PendingReviewRequestRow,
+  options: TickOptions,
 ): TickTaskResult | null {
   markGithubPrPolled(deps, req.task_id);
   const snapshot = deps.github.prLightweightSnapshotByNumber(
@@ -1256,6 +1266,7 @@ function processPendingReviewRequest(
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
       referenceReposRoot: deps.referenceReposRoot,
+      ciIgnorePolicy: options.ciIgnorePolicy,
     },
   );
   if (result.scheduled) {
@@ -1749,7 +1760,7 @@ function processRunningReviewAttempt(
     posted.decision === "APPROVED" &&
     task.authoring_mode !== "synthetic_review"
   ) {
-    const ciGate = guardApprovedReviewCi(deps, task, posted, exitInfo);
+    const ciGate = guardApprovedReviewCi(deps, task, posted, exitInfo, options);
     if (ciGate !== null) return ciGate;
   }
   return finalizePostedReview(deps, task, posted, exitInfo, options);
@@ -1888,7 +1899,11 @@ function processPrOpenTask(
 
   // 3. CI status (any reported failure blocks; empty check set preserves no-CI).
   const repo = loadRepoForTask(deps.db, task.task_id);
-  const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
+  const ci = classifyCi(
+    snapshot,
+    repo?.ci_workflow_name ?? null,
+    resolveCiIgnorePolicy(options.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repo),
+  );
 
   if (ci === "stale") {
     return recordTickError(
@@ -1929,6 +1944,7 @@ function processPrOpenTask(
           reviewerEnabled: true,
           gateQuayOwnedDone: true,
           referenceReposRoot: deps.referenceReposRoot,
+          ciIgnorePolicy: options.ciIgnorePolicy,
         },
       );
       if (
@@ -2076,6 +2092,7 @@ function processSyntheticReviewLifecycle(
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
       referenceReposRoot: deps.referenceReposRoot,
+      ciIgnorePolicy: options.ciIgnorePolicy,
     },
   );
 
@@ -2637,6 +2654,7 @@ function guardApprovedReviewCi(
   task: ReviewAttemptTaskRow,
   posted: PostedReview,
   exitInfo: PaneExitInfo,
+  options: TickOptions,
 ): TickTaskResult | null {
   const snapshot = deps.github.prSnapshot(task.repo_id, task.branch_name);
   if (snapshot === null) {
@@ -2657,11 +2675,15 @@ function guardApprovedReviewCi(
   }
   persistPrMetadata(deps, task.task_id, snapshot);
   if (snapshot.headSha !== task.head_sha) {
-    return handleStaleApprovedReview(deps, task, posted, exitInfo, snapshot);
+    return handleStaleApprovedReview(deps, task, posted, exitInfo, snapshot, options);
   }
 
   const repo = loadRepoForTask(deps.db, task.task_id);
-  const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
+  const ci = classifyCi(
+    snapshot,
+    repo?.ci_workflow_name ?? null,
+    resolveCiIgnorePolicy(options.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repo),
+  );
   if (ci === "stale") {
     finalizeApprovedReviewBackToPrOpen(
       deps,
@@ -2706,9 +2728,14 @@ function handleStaleApprovedReview(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
+  options: TickOptions,
 ): TickTaskResult {
   const repo = loadRepoForTask(deps.db, task.task_id);
-  const ci = classifyCi(snapshot, repo?.ci_workflow_name ?? null);
+  const ci = classifyCi(
+    snapshot,
+    repo?.ci_workflow_name ?? null,
+    resolveCiIgnorePolicy(options.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repo),
+  );
   if (ci === "stale") {
     finalizeApprovedReviewBackToPrOpen(
       deps,
@@ -2776,6 +2803,7 @@ function handleStaleApprovedReview(
       reviewerEnabled: true,
       gateQuayOwnedDone: true,
       referenceReposRoot: deps.referenceReposRoot,
+      ciIgnorePolicy: options.ciIgnorePolicy,
     },
   );
   return {
@@ -3344,16 +3372,29 @@ function persistPrMetadata(
 function loadRepoForTask(
   db: DB,
   taskId: string,
-): { ci_workflow_name: string | null } | null {
-  return (
-    db
-      .query<{ ci_workflow_name: string | null }, [string]>(
-        `SELECT r.ci_workflow_name AS ci_workflow_name
-           FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
-          WHERE t.task_id = ?`,
-      )
-      .get(taskId) ?? null
-  );
+): ({ ci_workflow_name: string | null } & RepoCiIgnorePolicy) | null {
+  const row = db
+    .query<{
+      ci_workflow_name: string | null;
+      ci_ignore_mode: CiIgnoreMode;
+      ci_ignored_check_names: string;
+      ci_ignored_workflow_names: string;
+    }, [string]>(
+      `SELECT r.ci_workflow_name AS ci_workflow_name,
+              r.ci_ignore_mode AS ci_ignore_mode,
+              r.ci_ignored_check_names AS ci_ignored_check_names,
+              r.ci_ignored_workflow_names AS ci_ignored_workflow_names
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        WHERE t.task_id = ?`,
+    )
+    .get(taskId);
+  if (row === undefined || row === null) return null;
+  return {
+    ci_workflow_name: row.ci_workflow_name,
+    ci_ignore_mode: row.ci_ignore_mode,
+    ignored_check_names: parseCiIgnoreListJson(row.ci_ignored_check_names),
+    ignored_workflow_names: parseCiIgnoreListJson(row.ci_ignored_workflow_names),
+  };
 }
 
 function processClaimedTask(

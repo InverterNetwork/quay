@@ -91,6 +91,20 @@ const ReviewerConfigSchema = z
   })
   .strict();
 
+const CiIgnoredNameSchema = z
+  .string()
+  .refine((value) => value.trim().length > 0, {
+    message: "ignored CI names must be non-empty strings",
+  })
+  .transform((value) => value.trim());
+
+const CiConfigSchema = z
+  .object({
+    ignored_check_names: z.array(CiIgnoredNameSchema).optional().default([]),
+    ignored_workflow_names: z.array(CiIgnoredNameSchema).optional().default([]),
+  })
+  .strict();
+
 // `[agents]` block lets the deployment register a per-agent invocation
 // template once (under `[agents.invocations.<name>].worker` /
 // `.reviewer`) and choose one as the global default for each role via
@@ -151,6 +165,7 @@ export const ConfigSchema = z
     admin: AdminConfigSchema.optional(),
     context: ContextConfigSchema.optional(),
     reviewer: ReviewerConfigSchema.optional(),
+    ci: CiConfigSchema.optional(),
   })
   .strict();
 
@@ -237,6 +252,12 @@ export function tickOptionsFromConfig(config: QuayConfig): TickOptions {
   }
   if (config.context?.reference_repos_root !== undefined) {
     opts.referenceReposRoot = config.context.reference_repos_root;
+  }
+  if (config.ci !== undefined) {
+    opts.ciIgnorePolicy = {
+      ignoredCheckNames: config.ci.ignored_check_names,
+      ignoredWorkflowNames: config.ci.ignored_workflow_names,
+    };
   }
   return opts;
 }
