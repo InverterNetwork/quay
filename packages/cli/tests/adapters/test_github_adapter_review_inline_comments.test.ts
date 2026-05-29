@@ -81,7 +81,7 @@ JSON
   "mergeable":"MERGEABLE",
   "reviewDecision":"CHANGES_REQUESTED",
   "latestReviews":[
-    {"id":"PRR_xyz123","state":"CHANGES_REQUESTED","body":""}
+    {"id":"PRR_xyz123","state":"CHANGES_REQUESTED","body":"","commit":{"oid":"abc"}}
   ]
 }
 JSON
@@ -99,6 +99,7 @@ esac
   expect(snap).not.toBeNull();
   expect(snap!.latestReview.decision).toBe("CHANGES_REQUESTED");
   expect(snap!.latestReview.latestReviewId).toBe("PRR_xyz123");
+  expect(snap!.latestReview.submittedHeadSha).toBe("abc");
   // The composed `comments` field carries the inline comments verbatim,
   // keyed by `path:line` (or just `path` when line is null).
   const comments = snap!.latestReview.comments;
