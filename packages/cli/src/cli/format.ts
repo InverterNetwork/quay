@@ -1,5 +1,9 @@
 // JSON output shapes for read commands. Read-only SQL; no behavior.
 import type { DB } from "../db/connection.ts";
+import {
+  taskDependencyStatus,
+  type TaskDependencyStatus,
+} from "../core/task_dependencies.ts";
 import type { TicketAuthor } from "../ports/ticket_context.ts";
 
 export interface TaskListRow {
@@ -20,6 +24,7 @@ export interface TaskListRow {
   worker_model: string | null;
   reviewer_agent: string | null;
   reviewer_model: string | null;
+  dependency_status: TaskDependencyStatus;
   created_at: string;
   updated_at: string;
 }
@@ -90,7 +95,7 @@ interface TaskListRawRow {
   updated_at: string;
 }
 
-function rowToList(r: TaskListRawRow): TaskListRow {
+function rowToList(db: DB, r: TaskListRawRow): TaskListRow {
   return {
     task_id: r.task_id,
     repo_id: r.repo_id,
@@ -109,6 +114,7 @@ function rowToList(r: TaskListRawRow): TaskListRow {
     worker_model: r.worker_model,
     reviewer_agent: r.reviewer_agent,
     reviewer_model: r.reviewer_model,
+    dependency_status: taskDependencyStatus(db, r.task_id),
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -122,7 +128,7 @@ export function listTasks(db: DB): TaskListRow[] {
         ORDER BY t.created_at, t.task_id`,
     )
     .all();
-  return rows.map(rowToList);
+  return rows.map((row) => rowToList(db, row));
 }
 
 interface TaskGetRawRow extends TaskListRawRow {
@@ -219,7 +225,7 @@ export function getTask(db: DB, taskId: string): TaskGetPayload | null {
       .get(taskId) ?? null;
 
   return {
-    ...rowToList(row),
+    ...rowToList(db, row),
     authors: parseTaskAuthors(row.authors_json),
     slack_thread_ref: row.slack_thread_ref,
     pr_number: row.pr_number,

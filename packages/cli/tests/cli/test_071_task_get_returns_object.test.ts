@@ -3,6 +3,7 @@ import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
+import { createTaskDependency } from "../../src/core/task_dependencies.ts";
 import {
   insertAttempt,
   insertRepo,
@@ -52,6 +53,12 @@ test("test_071_task_get_returns_object", async () => {
   expect(parsed.task_id).toBe(taskId);
   expect(parsed.state).toBe("queued");
   expect(parsed.repo_id).toBe(repoId);
+  expect(parsed.dependency_status).toEqual({
+    total: 0,
+    satisfied: 0,
+    unsatisfied: 0,
+    dependencies: [],
+  });
   expect(parsed.authors).toEqual([]);
   expect(parsed.slack_thread_ref).toBe("GPRIVATE123:999.000000");
   // Current attempt is the most recent attempt row for this task.
@@ -62,6 +69,46 @@ test("test_071_task_get_returns_object", async () => {
   expect(Array.isArray(parsed.recent_events)).toBe(true);
   expect(parsed.recent_events.length).toBeGreaterThan(0);
   expect(parsed.recent_events[0].event_type).toBe("enqueued");
+});
+
+test("task get exposes dependency status for waiting tasks", async () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-get-deps");
+  const taskId = insertTask(h.db, {
+    taskId: "task-get-deps",
+    repoId,
+    state: "waiting_dependencies",
+  });
+  createTaskDependency(h.db, {
+    dependentTaskId: taskId,
+    dependencySource: "linear",
+    dependencyExternalRef: "BRIX-1505",
+    dependencyRepoId: repoId,
+    requiredState: "merged",
+    now: "2026-05-29T10:00:00.000Z",
+  });
+
+  const built = buildCliDeps(h);
+  const io = bufferIO();
+
+  const result = await dispatch(["task", "get", taskId], built.deps, io);
+
+  expect(result.exitCode).toBe(0);
+  const parsed = JSON.parse(io.out());
+  expect(parsed.state).toBe("waiting_dependencies");
+  expect(parsed.dependency_status).toMatchObject({
+    total: 1,
+    satisfied: 0,
+    unsatisfied: 1,
+  });
+  expect(parsed.dependency_status.dependencies[0]).toMatchObject({
+    dependency_source: "linear",
+    dependency_external_ref: "BRIX-1505",
+    kind: "blocked_by",
+    scope: "normal",
+    required_state: "merged",
+    satisfied_at: null,
+  });
 });
 
 test("test_task_get_returns_parsed_authors", async () => {

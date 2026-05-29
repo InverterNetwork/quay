@@ -2,6 +2,7 @@ import type { Tone } from '../styles/tones';
 
 export const TASK_STATES = [
   'queued',
+  'waiting_dependencies',
   'running',
   'goal-completion-pending',
   'pr-open',
@@ -20,7 +21,7 @@ export const TASK_STATES = [
 ] as const;
 
 export type TaskState = (typeof TASK_STATES)[number];
-export type AttnReason = 'changes' | 'ci' | 'slack' | 'brief' | 'budget' | 'loop' | 'worktree';
+export type AttnReason = 'changes' | 'ci' | 'slack' | 'brief' | 'dependency' | 'budget' | 'loop' | 'worktree';
 
 export interface MissionControlTask {
   id: string;
@@ -55,6 +56,7 @@ export const ATTENTION_STATES = [
   'non_budget_loop',
   'worktree_error',
   'orchestrator_loop',
+  'waiting_dependencies',
   'waiting_human',
 ] as const satisfies readonly TaskState[];
 
@@ -72,7 +74,7 @@ export const LANE_DEFINITIONS: readonly LaneDefinition[] = [
     tone: 'warn',
     states: ['pr-open', 'pr-review', 'done', 'waiting_external_changes'],
   },
-  { key: 'waiting', label: 'WAITING', tone: 'neutral', states: ['queued', 'awaiting-next-brief'] },
+  { key: 'waiting', label: 'WAITING', tone: 'neutral', states: ['queued', 'waiting_dependencies', 'awaiting-next-brief'] },
   { key: 'terminal', label: 'TERMINAL', tone: 'good', states: TERMINAL_STATES },
 ];
 
@@ -81,6 +83,7 @@ export const ATTN_LABEL: Record<AttnReason, string> = {
   ci: 'CI failed',
   slack: 'Slack reply',
   brief: 'Next brief',
+  dependency: 'Dependency',
   budget: 'Budget exhausted',
   loop: 'Non-budget loop',
   worktree: 'Worktree error',
