@@ -26,6 +26,7 @@ export interface CreateTaskDependencyInput {
   kind?: TaskDependencyKind;
   scope?: TaskDependencyScope;
   requiredState?: TaskDependencyRequiredState;
+  satisfiedAt?: string | null;
   now: string;
 }
 
@@ -74,6 +75,7 @@ export function createTaskDependency(
         string,
         string,
         string,
+        string | null,
         string,
         string,
       ]
@@ -81,8 +83,8 @@ export function createTaskDependency(
       `INSERT INTO task_dependencies (
          dependent_task_id, dependency_task_id, dependency_source,
          dependency_external_ref, dependency_repo_id, kind, scope,
-         required_state, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         required_state, satisfied_at, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING dependency_id, dependent_task_id, dependency_task_id,
                  dependency_source, dependency_external_ref, dependency_repo_id,
                  kind, scope, required_state, satisfied_at, created_at, updated_at`,
@@ -96,6 +98,7 @@ export function createTaskDependency(
       input.kind ?? "blocked_by",
       input.scope ?? "normal",
       input.requiredState ?? "merged",
+      input.satisfiedAt ?? null,
       input.now,
       input.now,
     );

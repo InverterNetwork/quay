@@ -26,6 +26,15 @@ import {
   parseWorkerExecution,
   type WorkerExecution,
 } from "./goals.ts";
+import {
+  createTaskDependency,
+  TASK_DEPENDENCY_REQUIRED_STATES,
+  TASK_DEPENDENCY_SCOPES,
+  TASK_DEPENDENCY_SOURCES,
+  type TaskDependencyRequiredState,
+  type TaskDependencyScope,
+  type TaskDependencySource,
+} from "./task_dependencies.ts";
 
 export const DEFAULT_RETRY_BUDGET = 5;
 
@@ -75,6 +84,21 @@ export const enqueueInputSchema = z
     base_branch: baseBranchNameSchema.optional(),
     request_pr_screenshots: z.boolean().optional(),
     require_pr_screenshots: z.boolean().optional(),
+    dependencies: z
+      .array(
+        z
+          .object({
+            dependency_task_id: z.string().min(1),
+            dependency_source: z.enum(TASK_DEPENDENCY_SOURCES),
+            dependency_external_ref: z.string().min(1).nullable().optional(),
+            dependency_repo_id: z.string().min(1).nullable().optional(),
+            scope: z.enum(TASK_DEPENDENCY_SCOPES).optional(),
+            required_state: z.enum(TASK_DEPENDENCY_REQUIRED_STATES).optional(),
+            satisfied_at: z.string().min(1).nullable().optional(),
+          })
+          .strict(),
+      )
+      .optional(),
   })
   .strict();
 
@@ -82,11 +106,21 @@ export type EnqueueInput = z.infer<typeof enqueueInputSchema>;
 
 export interface EnqueueResult {
   task_id: string;
-  state: "queued";
+  state: "queued" | "waiting_dependencies";
   branch_name: string;
   tmux_id: string;
   worktree_path: string;
   attempt_id: number;
+}
+
+export interface EnqueueResolvedDependency {
+  dependency_task_id: string;
+  dependency_source: TaskDependencySource;
+  dependency_external_ref?: string | null;
+  dependency_repo_id?: string | null;
+  scope?: TaskDependencyScope;
+  required_state?: TaskDependencyRequiredState;
+  satisfied_at?: string | null;
 }
 
 interface RepoRow {
@@ -160,6 +194,11 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const tmuxId = computeTmuxId(input.external_ref, shortId);
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
   const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
+  const dependencies = input.dependencies ?? [];
+  const initialState =
+    dependencies.some((dep) => dep.satisfied_at === null || dep.satisfied_at === undefined)
+      ? "waiting_dependencies"
+      : "queued";
 
   // Track substrate side effects so rollback knows what to undo.
   let worktreeCreated = false;
@@ -278,12 +317,13 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
              pr_screenshots_requested, pr_screenshots_required,
              worker_agent, worker_model, reviewer_agent, reviewer_model,
              retargeted_from_task_id, created_at, updated_at
-           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
           repo.repo_id,
           input.external_ref ?? null,
+          initialState,
           fullBranchName,
           effectiveBaseBranch,
           tmuxId,
@@ -302,6 +342,23 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           now,
           now,
         );
+
+      for (const dep of dependencies) {
+        const dependencyInput: Parameters<typeof createTaskDependency>[1] = {
+          dependentTaskId: taskId,
+          dependencyTaskId: dep.dependency_task_id,
+          dependencySource: dep.dependency_source,
+          dependencyExternalRef: dep.dependency_external_ref ?? null,
+          dependencyRepoId: dep.dependency_repo_id ?? null,
+          satisfiedAt: dep.satisfied_at ?? null,
+          now,
+        };
+        if (dep.scope !== undefined) dependencyInput.scope = dep.scope;
+        if (dep.required_state !== undefined) {
+          dependencyInput.requiredState = dep.required_state;
+        }
+        createTaskDependency(deps.db, dependencyInput);
+      }
 
       if (deps.retargetIntent !== undefined) {
         deps.db
@@ -449,7 +506,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     // The branch_name column carries the full `quay/<slug>` form.
     return {
       task_id: taskId,
-      state: "queued",
+      state: initialState,
       branch_name: fullBranchName,
       tmux_id: tmuxId,
       worktree_path: worktreePath,

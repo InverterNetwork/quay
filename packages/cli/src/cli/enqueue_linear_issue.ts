@@ -7,11 +7,22 @@
 // earlier point leaves the system in a clean no-op state — there is
 // nothing to roll back because nothing was started.
 
-import { enqueue, type EnqueueDeps, type EnqueueResult } from "../core/enqueue.ts";
+import {
+  enqueue,
+  type EnqueueDeps,
+  type EnqueueResolvedDependency,
+  type EnqueueResult,
+} from "../core/enqueue.ts";
+import { QuayError } from "../core/errors.ts";
+import { parseQuayConfigBlock } from "../core/quay_config_block.ts";
 import { mergeNormalizedTags } from "../core/tag_normalize.ts";
 import { fetchTicketContextWithIssue } from "../core/ticket_context.ts";
 import type { ValidatorRunner } from "../core/validator_runner.ts";
-import type { LinearIssue, LinearPort } from "../ports/linear.ts";
+import type {
+  LinearBlockedByRelation,
+  LinearIssue,
+  LinearPort,
+} from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { TicketAuthor, TicketContext } from "../ports/ticket_context.ts";
 import type { CliIO } from "./io.ts";
@@ -151,6 +162,26 @@ export async function handleEnqueueLinearIssue(
     return { exitCode: 1 };
   }
 
+  let dependencyResolution: LinearDependencyResolution;
+  try {
+    const relations = await deps.linear.getBlockedByRelations(args.identifier);
+    dependencyResolution = resolveLinearDependencies(
+      deps.enqueueDeps.db,
+      relations,
+      resolvedRepoId,
+      deps.enqueueDeps.clock.nowISO(),
+    );
+    ctx = {
+      ...ctx,
+      ticket_snapshot: augmentTicketSnapshotWithDependencies(
+        ctx.ticket_snapshot,
+        dependencyResolution.snapshotRelations,
+      ),
+    };
+  } catch (err) {
+    return emitError(io, err);
+  }
+
   const authorsJson = serializeAuthors(ctx.authors);
 
   let result: EnqueueResult;
@@ -166,6 +197,7 @@ export async function handleEnqueueLinearIssue(
       base_branch: resolvedBaseBranch ?? undefined,
       request_pr_screenshots: args.requestPrScreenshots,
       require_pr_screenshots: args.requirePrScreenshots,
+      dependencies: dependencyResolution.dependencies,
       authors_json: authorsJson,
       worker_agent: args.workerAgent,
       worker_model: args.workerModel,
@@ -196,6 +228,136 @@ export async function handleEnqueueLinearIssue(
 
   io.stdout(`${JSON.stringify(result)}\n`);
   return { exitCode: 0 };
+}
+
+interface DependencyTaskRow {
+  task_id: string;
+  state: string;
+}
+
+interface LinearDependencySnapshot {
+  relation_id: string;
+  blocker_identifier: string;
+  blocker_url: string;
+  blocker_title: string;
+  blocker_state_type: string | null;
+  blocker_repo_id: string | null;
+  complete_in_linear: boolean;
+  tracked_task_id: string | null;
+  tracked_task_state: string | null;
+  persisted: boolean;
+}
+
+interface LinearDependencyResolution {
+  dependencies: EnqueueResolvedDependency[];
+  snapshotRelations: LinearDependencySnapshot[];
+}
+
+function resolveLinearDependencies(
+  db: DB,
+  relations: LinearBlockedByRelation[],
+  fallbackRepoId: string,
+  now: string,
+): LinearDependencyResolution {
+  const dependencies: EnqueueResolvedDependency[] = [];
+  const snapshotRelations: LinearDependencySnapshot[] = [];
+  const missing: Array<{ external_ref: string; repo_id: string }> = [];
+  const seen = new Set<string>();
+
+  for (const relation of relations) {
+    const blockerExternalRef = relation.blocker.identifier.toUpperCase();
+    const blockerRepoId = repoIdFromBlockerBody(relation.blocker.body) ?? fallbackRepoId;
+    const completeInLinear = isCompleteLinearState(relation.blocker.stateType);
+    const key = `${blockerRepoId}\0${blockerExternalRef}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    let tracked: DependencyTaskRow | null = null;
+    if (!completeInLinear) {
+      tracked = lookupDependencyTask(db, blockerRepoId, blockerExternalRef);
+      if (tracked === null) {
+        missing.push({ external_ref: blockerExternalRef, repo_id: blockerRepoId });
+      } else {
+        dependencies.push({
+          dependency_task_id: tracked.task_id,
+          dependency_source: "linear",
+          dependency_external_ref: blockerExternalRef,
+          dependency_repo_id: blockerRepoId,
+          required_state: "merged",
+          satisfied_at: tracked.state === "merged" ? now : null,
+        });
+      }
+    }
+
+    snapshotRelations.push({
+      relation_id: relation.relationId,
+      blocker_identifier: blockerExternalRef,
+      blocker_url: relation.blocker.url,
+      blocker_title: relation.blocker.title,
+      blocker_state_type: relation.blocker.stateType,
+      blocker_repo_id: blockerRepoId,
+      complete_in_linear: completeInLinear,
+      tracked_task_id: tracked?.task_id ?? null,
+      tracked_task_state: tracked?.state ?? null,
+      persisted: !completeInLinear && tracked !== null,
+    });
+  }
+
+  if (missing.length > 0) {
+    throw new QuayError(
+      "dependency_not_tracked",
+      `Linear blocker ${missing[0]!.external_ref} is incomplete but not tracked by Quay`,
+      { dependencies: missing },
+    );
+  }
+
+  return { dependencies, snapshotRelations };
+}
+
+function repoIdFromBlockerBody(body: string): string | null {
+  try {
+    return parseQuayConfigBlock(body)?.repo ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function isCompleteLinearState(stateType: string | null): boolean {
+  return stateType?.toLowerCase() === "completed";
+}
+
+function lookupDependencyTask(
+  db: DB,
+  repoId: string,
+  externalRef: string,
+): DependencyTaskRow | null {
+  return (
+    db
+      .query<DependencyTaskRow, [string, string]>(
+        `SELECT task_id, state FROM tasks WHERE repo_id = ? AND external_ref = ?`,
+      )
+      .get(repoId, externalRef) ?? null
+  );
+}
+
+function augmentTicketSnapshotWithDependencies(
+  snapshot: string,
+  relations: LinearDependencySnapshot[],
+): string {
+  try {
+    const parsed = JSON.parse(snapshot) as Record<string, unknown>;
+    parsed.linear_blocked_by_relations = relations;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return JSON.stringify(
+      {
+        original_snapshot: snapshot,
+        linear_blocked_by_relations: relations,
+      },
+      null,
+      2,
+    );
+  }
 }
 
 // Spec §11 mapping: explicit. `body` is the raw Linear ticket body (block

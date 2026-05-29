@@ -82,6 +82,20 @@ function issuePayload(overrides: {
   return { data: { issue } };
 }
 
+function relationsPayload(nodes: Array<Record<string, unknown>>): Record<string, unknown> {
+  return {
+    data: {
+      issue: {
+        identifier: "ENG-2000",
+        relations: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes,
+        },
+      },
+    },
+  };
+}
+
 let savedApiKey: string | undefined;
 beforeEach(() => {
   savedApiKey = process.env.LINEAR_API_KEY;
@@ -135,6 +149,71 @@ test("test_linear_adapter_get_issue_returns_structured_payload", async () => {
   expect(issue!.comments[0]!.createdAt).toBe("2026-04-25T14:02:00.000Z");
   expect(handle.requests.length).toBe(1);
   expect(handle.requests[0]!.headers.Authorization).toBe("test-token");
+});
+
+test("linear adapter returns native blocked-by relations with blocker metadata", async () => {
+  const handle = recorder(() =>
+    jsonResponse(
+      relationsPayload([
+        {
+          id: "rel-1",
+          type: "blocks",
+          issue: {
+            identifier: "ENG-1999",
+            url: "https://linear.app/inverter/issue/ENG-1999",
+            title: "Ship prerequisite",
+            description: "blocker body",
+            state: { type: "started" },
+          },
+          relatedIssue: {
+            identifier: "ENG-2000",
+            url: "https://linear.app/inverter/issue/ENG-2000",
+            title: "Dependent",
+            description: "dependent body",
+            state: { type: "started" },
+          },
+        },
+        {
+          id: "rel-2",
+          type: "related",
+          issue: {
+            identifier: "ENG-2000",
+            url: "https://linear.app/inverter/issue/ENG-2000",
+            title: "Dependent",
+            description: "dependent body",
+            state: { type: "started" },
+          },
+          relatedIssue: {
+            identifier: "ENG-1000",
+            url: "https://linear.app/inverter/issue/ENG-1000",
+            title: "Related only",
+            description: "related body",
+            state: { type: "completed" },
+          },
+        },
+      ]),
+    ),
+  );
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+
+  const relations = await adapter.getBlockedByRelations("ENG-2000");
+
+  expect(relations).toEqual([
+    {
+      relationId: "rel-1",
+      blocker: {
+        identifier: "ENG-1999",
+        url: "https://linear.app/inverter/issue/ENG-1999",
+        title: "Ship prerequisite",
+        body: "blocker body",
+        stateType: "started",
+      },
+    },
+  ]);
+  expect(handle.requests[0]!.parsedBody.query).toContain("relations");
 });
 
 test("test_linear_adapter_get_issue_returns_null_on_404", async () => {
