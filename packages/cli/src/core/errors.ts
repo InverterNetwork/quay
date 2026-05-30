@@ -9,6 +9,7 @@ export type QuayErrorCode =
   | "bootstrap_failed"
   | "dependency_not_tracked"
   | "umbrella_workflow_conflict"
+  | "umbrella_subtask_not_expected"
   | "missing_agent_capability"
   | "ticket_block_invalid"
   | "ticket_not_actionable"
