@@ -18,6 +18,10 @@ import {
   type AdminRequestAuditContext,
 } from "./auth.ts";
 import {
+  agentGatewayAllowedMethods,
+  createAgentGateway,
+} from "./agent_gateway.ts";
+import {
   assertPreambleKind,
   DEFAULT_PREAMBLE_BODY,
   DEFAULT_REVIEWER_PREAMBLE_BODY,
@@ -310,6 +314,7 @@ const ACTIVE_TASK_STATES = [
 ] as const;
 
 export function createAdminApiHandler(runtime: AdminApiRuntime) {
+  const agentGateway = createAgentGateway();
   return async function handleAdminApi(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const segments = pathSegments(url.pathname);
@@ -357,6 +362,8 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
     }
 
     if (request.method === "POST") {
+      const agentResponse = await agentGateway.handle(request, segments, cors.headers);
+      if (agentResponse !== null) return agentResponse;
       if (isWriteRoute(segments, "preview")) {
         return handleAdminMutation(
           cors.headers,
@@ -525,6 +532,8 @@ function isVersionedRoute(segments: string[]): boolean {
 
 function allowedMethodsForRoute(segments: string[]): string | null {
   if (segments[0] !== "v1") return null;
+  const agentMethods = agentGatewayAllowedMethods(segments);
+  if (agentMethods !== null) return agentMethods;
   if (segments.length === 2) {
     return [
       "global",
