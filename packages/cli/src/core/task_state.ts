@@ -3,6 +3,7 @@ import type { DB } from "../db/connection.ts";
 
 export const TASK_STATES = [
   "queued",
+  "waiting_dependencies",
   "running",
   "goal-completion-pending",
   "pr-open",
@@ -16,6 +17,7 @@ export const TASK_STATES = [
   "worktree_error",
   "orchestrator_loop",
   "cancelled",
+  "merged_to_feature_branch",
   "merged",
   "closed_unmerged",
 ] as const;
@@ -31,6 +33,7 @@ export interface TaskTransition {
 
 const TERMINAL_FROM_STATES = [
   "queued",
+  "waiting_dependencies",
   "running",
   "goal-completion-pending",
   "pr-open",
@@ -53,6 +56,24 @@ const CANCEL_FROM_STATES = [
 
 export const TASK_TRANSITIONS = [
   transition("queued", "running", ["spawned"], "worker attempt spawned"),
+  transition(
+    "queued",
+    "waiting_dependencies",
+    ["dependency_waiting"],
+    "task is prepared but blocked by dependencies",
+  ),
+  transition(
+    "waiting_dependencies",
+    "queued",
+    ["dependencies_satisfied", "dependency_satisfied"],
+    "dependencies are satisfied and task can spawn",
+  ),
+  transition(
+    "waiting_dependencies",
+    "awaiting-next-brief",
+    ["dependency_failed"],
+    "dependency failed and task needs orchestrator input",
+  ),
   transition(
     "queued",
     "queued",
@@ -329,6 +350,12 @@ export const TASK_TRANSITIONS = [
   ),
   ...TERMINAL_FROM_STATES.flatMap((from) => [
     transition(from, "merged", ["merged"], "PR reached merged terminal state"),
+    transition(
+      from,
+      "merged_to_feature_branch",
+      ["merged"],
+      "umbrella task PR reached merged terminal state on the feature branch",
+    ),
     transition(
       from,
       "closed_unmerged",

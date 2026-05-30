@@ -218,6 +218,7 @@ test("transition metadata documents every known task state", () => {
   }
   for (const state of [
     "queued",
+    "waiting_dependencies",
     "running",
     "goal-completion-pending",
     "pr-open",
@@ -231,6 +232,7 @@ test("transition metadata documents every known task state", () => {
     "worktree_error",
     "orchestrator_loop",
     "cancelled",
+    "merged_to_feature_branch",
     "merged",
     "closed_unmerged",
   ]) {

@@ -20,8 +20,11 @@
 //                                                 body included in the message for debuggability)
 import { QuayError } from "../core/errors.ts";
 import type {
+  LinearBlockedByRelation,
   LinearComment,
+  LinearHierarchyIssue,
   LinearIssue,
+  LinearIssueHierarchy,
   LinearPort,
 } from "../ports/linear.ts";
 
@@ -30,6 +33,7 @@ const DEFAULT_LINEAR_TIMEOUT_MS = 30_000;
 // First page of comments fetched alongside the issue, and subsequent pages.
 // Linear's GraphQL caps `first` at 250; 100 keeps us well under.
 const COMMENTS_PAGE_SIZE = 100;
+const CHILDREN_PAGE_SIZE = 100;
 
 export interface LinearTransportRequest {
   url: string;
@@ -71,6 +75,49 @@ interface RawLinearIssue {
   draft?: boolean | null;
   state?: { type?: string | null } | null;
   comments: RawLinearCommentsPage;
+}
+
+interface RawLinearRelationIssue {
+  identifier: string;
+  url: string;
+  title: string;
+  description: string | null;
+  state?: { type?: string | null } | null;
+}
+
+interface RawLinearIssueRelation {
+  id: string;
+  type: string;
+  issue: RawLinearRelationIssue | null;
+  relatedIssue: RawLinearRelationIssue | null;
+}
+
+interface RawLinearRelationsPage {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: RawLinearIssueRelation[];
+}
+
+interface RawLinearIssueRelations {
+  identifier: string;
+  relations: RawLinearRelationsPage;
+}
+
+interface RawLinearHierarchyIssue {
+  identifier: string;
+  url: string;
+  title: string;
+  state?: { type?: string | null } | null;
+}
+
+interface RawLinearChildrenPage {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: RawLinearHierarchyIssue[];
+}
+
+interface RawLinearIssueHierarchy {
+  identifier: string;
+  parent: RawLinearHierarchyIssue | null;
+  children: RawLinearChildrenPage;
 }
 
 interface RawIssueStateRefs {
@@ -182,6 +229,104 @@ export class LinearAdapter implements LinearPort {
       title: first.title,
       body: first.description ?? "",
       comments,
+    };
+  }
+
+  async getBlockedByRelations(
+    identifier: string,
+  ): Promise<LinearBlockedByRelation[]> {
+    const first = await this.queryIssueRelationsPage(identifier, null);
+    if (first === null) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: ticket disappeared before relation fetch`,
+        { adapter: "linear", retryable: true },
+      );
+    }
+    const allRaw: RawLinearIssueRelation[] = [...first.relations.nodes];
+    let cursor = first.relations.pageInfo.endCursor;
+    let hasNext = first.relations.pageInfo.hasNextPage;
+    while (hasNext) {
+      if (cursor === null) {
+        throw new QuayError(
+          "adapter_error",
+          `Linear ${identifier}: relations hasNextPage=true with null endCursor`,
+          { adapter: "linear", retryable: false },
+        );
+      }
+      const next = await this.queryIssueRelationsPage(identifier, cursor);
+      if (next === null) {
+        throw new QuayError(
+          "adapter_error",
+          `Linear ${identifier}: ticket disappeared mid-relation-pagination`,
+          { adapter: "linear", retryable: true },
+        );
+      }
+      allRaw.push(...next.relations.nodes);
+      cursor = next.relations.pageInfo.endCursor;
+      hasNext = next.relations.pageInfo.hasNextPage;
+    }
+
+    const current = first.identifier.toUpperCase();
+    const blockers: LinearBlockedByRelation[] = [];
+    for (const relation of allRaw) {
+      const blocker = extractBlockingIssue(relation, current);
+      if (blocker === null) continue;
+      blockers.push({
+        relationId: relation.id,
+        blocker: {
+          identifier: blocker.identifier,
+          url: blocker.url,
+          title: blocker.title,
+          body: blocker.description ?? "",
+          stateType: blocker.state?.type ?? null,
+        },
+      });
+    }
+    return blockers.sort((a, b) =>
+      a.blocker.identifier.localeCompare(b.blocker.identifier),
+    );
+  }
+
+  async getIssueHierarchy(identifier: string): Promise<LinearIssueHierarchy> {
+    const first = await this.queryIssueHierarchyPage(identifier, null);
+    if (first === null) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: ticket disappeared before hierarchy fetch`,
+        { adapter: "linear", retryable: true },
+      );
+    }
+    const allRaw: RawLinearHierarchyIssue[] = [...first.children.nodes];
+    let cursor = first.children.pageInfo.endCursor;
+    let hasNext = first.children.pageInfo.hasNextPage;
+    while (hasNext) {
+      if (cursor === null) {
+        throw new QuayError(
+          "adapter_error",
+          `Linear ${identifier}: children hasNextPage=true with null endCursor`,
+          { adapter: "linear", retryable: false },
+        );
+      }
+      const next = await this.queryIssueHierarchyPage(identifier, cursor);
+      if (next === null) {
+        throw new QuayError(
+          "adapter_error",
+          `Linear ${identifier}: ticket disappeared mid-children-pagination`,
+          { adapter: "linear", retryable: true },
+        );
+      }
+      allRaw.push(...next.children.nodes);
+      cursor = next.children.pageInfo.endCursor;
+      hasNext = next.children.pageInfo.hasNextPage;
+    }
+
+    return {
+      parent:
+        first.parent === null ? null : parseHierarchyIssue(first.parent),
+      children: allRaw
+        .map(parseHierarchyIssue)
+        .sort((a, b) => a.identifier.localeCompare(b.identifier)),
     };
   }
 
@@ -306,6 +451,56 @@ export class LinearAdapter implements LinearPort {
       );
     }
     return parsed.issue;
+  }
+
+  private async queryIssueRelationsPage(
+    identifier: string,
+    relationsAfter: string | null,
+  ): Promise<RawLinearIssueRelations | null> {
+    const response = await this.postGraphQL(identifier, GET_ISSUE_RELATIONS_QUERY, {
+      id: identifier,
+      relationsFirst: RELATIONS_PAGE_SIZE,
+      relationsAfter,
+    });
+    const data = this.parseGraphQLEnvelope<{
+      issue: RawLinearIssueRelations | null;
+    }>(identifier, response);
+    if (data === null) return null;
+    if (!("issue" in data)) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: response missing issue field`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+    return data.issue;
+  }
+
+  private async queryIssueHierarchyPage(
+    identifier: string,
+    childrenAfter: string | null,
+  ): Promise<RawLinearIssueHierarchy | null> {
+    const response = await this.postGraphQL(
+      identifier,
+      GET_ISSUE_HIERARCHY_QUERY,
+      {
+        id: identifier,
+        childrenFirst: CHILDREN_PAGE_SIZE,
+        childrenAfter,
+      },
+    );
+    const data = this.parseGraphQLEnvelope<{
+      issue: RawLinearIssueHierarchy | null;
+    }>(identifier, response);
+    if (data === null) return null;
+    if (!("issue" in data)) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: response missing issue field`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+    return data.issue;
   }
 
   private async queryTeamStates(
@@ -442,6 +637,7 @@ export class LinearAdapter implements LinearPort {
 // First page of team workflow states. Workflow state counts per team are
 // typically <20 in Linear; 50 is generous headroom without paging.
 const TEAM_STATES_PAGE_SIZE = 50;
+const RELATIONS_PAGE_SIZE = 100;
 
 // `AbortController` bounds each request to `timeoutMs` so a stalled
 // connection cannot wedge the supervisor's bounded budget.
@@ -494,6 +690,54 @@ const GET_ISSUE_QUERY = `query GetIssue($id: String!, $commentsFirst: Int!, $com
         body
         user { name displayName }
         botActor { name }
+      }
+    }
+  }
+}`;
+
+const GET_ISSUE_RELATIONS_QUERY = `query GetIssueRelations($id: String!, $relationsFirst: Int!, $relationsAfter: String) {
+  issue(id: $id) {
+    identifier
+    relations(first: $relationsFirst, after: $relationsAfter) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id
+        type
+        issue {
+          identifier
+          url
+          title
+          description
+          state { type }
+        }
+        relatedIssue {
+          identifier
+          url
+          title
+          description
+          state { type }
+        }
+      }
+    }
+  }
+}`;
+
+const GET_ISSUE_HIERARCHY_QUERY = `query GetIssueHierarchy($id: String!, $childrenFirst: Int!, $childrenAfter: String) {
+  issue(id: $id) {
+    identifier
+    parent {
+      identifier
+      url
+      title
+      state { type }
+    }
+    children(first: $childrenFirst, after: $childrenAfter) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        identifier
+        url
+        title
+        state { type }
       }
     }
   }
@@ -562,6 +806,40 @@ function parseComment(raw: RawLinearComment): LinearComment {
     body: raw.body,
     createdAt: raw.createdAt,
   };
+}
+
+function parseHierarchyIssue(
+  raw: RawLinearHierarchyIssue,
+): LinearHierarchyIssue {
+  return {
+    identifier: raw.identifier,
+    url: raw.url,
+    title: raw.title,
+    stateType: raw.state?.type ?? null,
+  };
+}
+
+function extractBlockingIssue(
+  relation: RawLinearIssueRelation,
+  currentIdentifier: string,
+): RawLinearRelationIssue | null {
+  const type = relation.type.toLowerCase().replace(/[_-]/g, "");
+  const issue = relation.issue;
+  const related = relation.relatedIssue;
+  const issueIdentifier = issue?.identifier.toUpperCase() ?? null;
+  const relatedIdentifier = related?.identifier.toUpperCase() ?? null;
+
+  if (type === "blockedby") {
+    if (issueIdentifier === currentIdentifier && related !== null) return related;
+    if (relatedIdentifier === currentIdentifier && issue !== null) return null;
+  }
+
+  if (type === "blocks") {
+    if (relatedIdentifier === currentIdentifier && issue !== null) return issue;
+    if (issueIdentifier === currentIdentifier && related !== null) return null;
+  }
+
+  return null;
 }
 
 function parseRetryAfter(headers: Record<string, string>): number | null {

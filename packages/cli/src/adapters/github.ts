@@ -34,6 +34,7 @@
 //   - Closing the PR:     `gh pr close <branch>`  (idempotent: tolerates "already closed"
 //                                                  and "no PR" by inspecting stderr)
 import { join, resolve } from "node:path";
+import { GitHubMergeError } from "../ports/github.ts";
 import type {
   GitHubPort,
   GitHubGraphqlRateLimit,
@@ -68,6 +69,21 @@ export class GitHubCliAdapter implements GitHubPort {
     return list.length > 0;
   }
 
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean {
+    const list = this.listPrs(
+      repoId,
+      branch,
+      "all",
+      undefined,
+      githubActorCommandEnv(token),
+    );
+    return list.length > 0;
+  }
+
   openPrsForBranchBase(
     repoId: string,
     branch: string,
@@ -94,6 +110,60 @@ export class GitHubCliAdapter implements GitHubPort {
         baseRef: view.baseRef ?? null,
       };
     });
+  }
+
+  createPullRequest(input: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }): OpenBranchPr {
+    const result = this.run(input.repoId, [
+      "gh",
+      "pr",
+      "create",
+      "--head",
+      input.headBranch,
+      "--base",
+      input.baseBranch,
+      "--title",
+      input.title,
+      "--body",
+      input.body,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh pr create ${input.headBranch} -> ${input.baseBranch} failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    const listed = this.openPrsForBranchBase(
+      input.repoId,
+      input.headBranch,
+      input.baseBranch,
+    );
+    if (listed.length !== 1) {
+      throw new Error(
+        `gh pr create ${input.headBranch} -> ${input.baseBranch} did not reconcile to exactly one open PR (found ${listed.length})`,
+      );
+    }
+    return listed[0]!;
+  }
+
+  updatePullRequestBody(repoId: string, prNumber: number, body: string): void {
+    const result = this.run(repoId, [
+      "gh",
+      "pr",
+      "edit",
+      String(prNumber),
+      "--body",
+      body,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh pr edit ${prNumber} --body failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
   }
 
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {
@@ -157,6 +227,47 @@ export class GitHubCliAdapter implements GitHubPort {
     prNumber: number,
   ): PrSnapshot | null {
     return this.prLightweightSnapshotBySelector(repoId, String(prNumber));
+  }
+
+  freshPrSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null {
+    return this.prSnapshotBySelector(repoId, String(prNumber));
+  }
+
+  freshPrView(repoId: string, prNumber: number): PullRequestView | null {
+    return this.prView(repoId, prNumber);
+  }
+
+  mergePullRequest(
+    repoId: string,
+    prNumber: number,
+    expectedHeadSha: string,
+  ): void {
+    const result = this.run(repoId, [
+      "gh",
+      "pr",
+      "merge",
+      String(prNumber),
+      "--merge",
+      "--match-head-commit",
+      expectedHeadSha,
+    ]);
+    if (result.exitCode === 0) return;
+    const msg = `${result.stdout}\n${result.stderr}`;
+    const lower = msg.toLowerCase();
+    const kind =
+      lower.includes("head branch was modified") ||
+      lower.includes("head sha") ||
+      lower.includes("head commit")
+        ? "head_mismatch"
+        : lower.includes("not mergeable") ||
+            lower.includes("merge conflict") ||
+            lower.includes("cannot be merged")
+          ? "not_mergeable"
+          : "unknown";
+    throw new GitHubMergeError(
+      `gh pr merge ${prNumber} failed: ${msg.trim()}`,
+      kind,
+    );
   }
 
   getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null {
@@ -452,6 +563,7 @@ export class GitHubCliAdapter implements GitHubPort {
     branch: string,
     state: "open" | "closed" | "all",
     baseBranch?: string,
+    env?: Record<string, string | undefined>,
   ): Array<{ number: number }> {
     const args = [
       "gh",
@@ -466,7 +578,7 @@ export class GitHubCliAdapter implements GitHubPort {
       args.push("--base", baseBranch);
     }
     args.push("--json", "number");
-    const result = this.run(repoId, args);
+    const result = this.run(repoId, args, env);
     if (result.exitCode !== 0) {
       throw new Error(
         `gh pr list --head ${branch}${baseBranch !== undefined ? ` --base ${baseBranch}` : ""} --state ${state} failed: ${result.stderr.trim()}`,
@@ -1025,20 +1137,83 @@ export class GitHubCliAdapter implements GitHubPort {
     return login;
   }
 
-  probeTokenAccess(repoId: string, token: string): void {
+  probeTokenAccess(
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ): void {
     const path = "repos/{owner}/{repo}";
     const result = this.run(
       repoId,
       ["gh", "api", path, "--jq", ".full_name"],
-      { ...process.env, GH_TOKEN: token },
+      {
+        ...process.env,
+        GH_TOKEN: token,
+        GITHUB_TOKEN: undefined,
+        QUAY_WORKER_GH_TOKEN: undefined,
+        QUAY_REVIEWER_GH_TOKEN: undefined,
+      },
     );
     if (result.exitCode !== 0) {
       throw new Error(
         `gh api ${path} failed: ${result.stderr.trim() || result.stdout.trim()}`,
       );
     }
-    if (result.stdout.trim() === "") {
+    const fullName = result.stdout.trim();
+    if (fullName === "") {
       throw new Error(`gh api ${path} returned an empty repository name`);
+    }
+    if (actor === "worker") {
+      this.probeWorkerPullRequestWrite(repoId, token, fullName);
+    }
+  }
+
+  private probeWorkerPullRequestWrite(
+    repoId: string,
+    token: string,
+    fullName: string,
+  ): void {
+    const [owner, name, ...extra] = fullName.split("/");
+    if (!owner || !name || extra.length > 0) {
+      throw new Error(
+        `gh api repos/{owner}/{repo} returned invalid repository name ${fullName}`,
+      );
+    }
+    const query =
+      "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { viewerPermission } }";
+    const result = this.run(
+      repoId,
+      [
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        `query=${query}`,
+        "-F",
+        `owner=${owner}`,
+        "-F",
+        `name=${name}`,
+        "--jq",
+        ".data.repository.viewerPermission",
+      ],
+      {
+        ...process.env,
+        GH_TOKEN: token,
+        GITHUB_TOKEN: undefined,
+        QUAY_WORKER_GH_TOKEN: undefined,
+        QUAY_REVIEWER_GH_TOKEN: undefined,
+      },
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh api graphql viewerPermission failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    const permission = result.stdout.trim();
+    if (!["ADMIN", "MAINTAIN", "WRITE"].includes(permission)) {
+      throw new Error(
+        `worker token does not have write access to ${fullName}; grant repository write access before spawning worker attempts`,
+      );
     }
   }
 
@@ -1215,6 +1390,16 @@ export function markRequired(items: PrCheck[], requiredKeys: Set<string>): PrChe
       requiredKeys.has(requiredKeyOf(c)) ||
       requiredKeys.has(requiredNameKeyOf(c.name)),
   }));
+}
+
+function githubActorCommandEnv(token: string): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    GH_TOKEN: token,
+    GITHUB_TOKEN: undefined,
+    QUAY_WORKER_GH_TOKEN: undefined,
+    QUAY_REVIEWER_GH_TOKEN: undefined,
+  };
 }
 
 function mapCheckRow(row: unknown): PrCheck {

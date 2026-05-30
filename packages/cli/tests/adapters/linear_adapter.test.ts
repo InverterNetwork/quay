@@ -82,6 +82,42 @@ function issuePayload(overrides: {
   return { data: { issue } };
 }
 
+function relationsPayload(nodes: Array<Record<string, unknown>>): Record<string, unknown> {
+  return {
+    data: {
+      issue: {
+        identifier: "ENG-2000",
+        relations: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes,
+        },
+      },
+    },
+  };
+}
+
+function hierarchyPayload(overrides: {
+  identifier?: string;
+  parent?: Record<string, unknown> | null;
+  children?: {
+    pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+    nodes: Array<Record<string, unknown>>;
+  };
+}): Record<string, unknown> {
+  return {
+    data: {
+      issue: {
+        identifier: overrides.identifier ?? "ENG-2000",
+        parent: overrides.parent ?? null,
+        children: overrides.children ?? {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [],
+        },
+      },
+    },
+  };
+}
+
 let savedApiKey: string | undefined;
 beforeEach(() => {
   savedApiKey = process.env.LINEAR_API_KEY;
@@ -135,6 +171,223 @@ test("test_linear_adapter_get_issue_returns_structured_payload", async () => {
   expect(issue!.comments[0]!.createdAt).toBe("2026-04-25T14:02:00.000Z");
   expect(handle.requests.length).toBe(1);
   expect(handle.requests[0]!.headers.Authorization).toBe("test-token");
+});
+
+test("linear adapter returns native blocked-by relations with blocker metadata", async () => {
+  const handle = recorder(() =>
+    jsonResponse(
+      relationsPayload([
+        {
+          id: "rel-1",
+          type: "blocks",
+          issue: {
+            identifier: "ENG-1999",
+            url: "https://linear.app/inverter/issue/ENG-1999",
+            title: "Ship prerequisite",
+            description: "blocker body",
+            state: { type: "started" },
+          },
+          relatedIssue: {
+            identifier: "ENG-2000",
+            url: "https://linear.app/inverter/issue/ENG-2000",
+            title: "Dependent",
+            description: "dependent body",
+            state: { type: "started" },
+          },
+        },
+        {
+          id: "rel-2",
+          type: "blockedBy",
+          issue: {
+            identifier: "ENG-2000",
+            url: "https://linear.app/inverter/issue/ENG-2000",
+            title: "Dependent",
+            description: "dependent body",
+            state: { type: "started" },
+          },
+          relatedIssue: {
+            identifier: "ENG-1500",
+            url: "https://linear.app/inverter/issue/ENG-1500",
+            title: "Earlier prerequisite",
+            description: "earlier blocker body",
+            state: { type: "completed" },
+          },
+        },
+        {
+          id: "rel-3",
+          type: "blockedBy",
+          issue: {
+            identifier: "ENG-3000",
+            url: "https://linear.app/inverter/issue/ENG-3000",
+            title: "Downstream dependent",
+            description: "downstream body",
+            state: { type: "started" },
+          },
+          relatedIssue: {
+            identifier: "ENG-2000",
+            url: "https://linear.app/inverter/issue/ENG-2000",
+            title: "Current issue",
+            description: "current body",
+            state: { type: "started" },
+          },
+        },
+        {
+          id: "rel-4",
+          type: "related",
+          issue: {
+            identifier: "ENG-2000",
+            url: "https://linear.app/inverter/issue/ENG-2000",
+            title: "Dependent",
+            description: "dependent body",
+            state: { type: "started" },
+          },
+          relatedIssue: {
+            identifier: "ENG-1000",
+            url: "https://linear.app/inverter/issue/ENG-1000",
+            title: "Related only",
+            description: "related body",
+            state: { type: "completed" },
+          },
+        },
+      ]),
+    ),
+  );
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+
+  const relations = await adapter.getBlockedByRelations("ENG-2000");
+
+  expect(relations).toEqual([
+    {
+      relationId: "rel-2",
+      blocker: {
+        identifier: "ENG-1500",
+        url: "https://linear.app/inverter/issue/ENG-1500",
+        title: "Earlier prerequisite",
+        body: "earlier blocker body",
+        stateType: "completed",
+      },
+    },
+    {
+      relationId: "rel-1",
+      blocker: {
+        identifier: "ENG-1999",
+        url: "https://linear.app/inverter/issue/ENG-1999",
+        title: "Ship prerequisite",
+        body: "blocker body",
+        stateType: "started",
+      },
+    },
+  ]);
+  expect(handle.requests[0]!.parsedBody.query).toContain("relations");
+});
+
+test("linear adapter returns empty native hierarchy for standalone issues", async () => {
+  const handle = recorder(() => jsonResponse(hierarchyPayload({})));
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+
+  const hierarchy = await adapter.getIssueHierarchy("ENG-2000");
+
+  expect(hierarchy).toEqual({ parent: null, children: [] });
+  expect(handle.requests[0]!.parsedBody.query).toContain("parent");
+  expect(handle.requests[0]!.parsedBody.query).toContain("children");
+});
+
+test("linear adapter returns native parent issue metadata", async () => {
+  const handle = recorder(() =>
+    jsonResponse(
+      hierarchyPayload({
+        parent: {
+          identifier: "ENG-1000",
+          url: "https://linear.app/inverter/issue/ENG-1000",
+          title: "Umbrella workflow",
+          state: { type: "started" },
+        },
+      }),
+    ),
+  );
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+
+  const hierarchy = await adapter.getIssueHierarchy("ENG-2000");
+
+  expect(hierarchy).toEqual({
+    parent: {
+      identifier: "ENG-1000",
+      url: "https://linear.app/inverter/issue/ENG-1000",
+      title: "Umbrella workflow",
+      stateType: "started",
+    },
+    children: [],
+  });
+});
+
+test("linear adapter paginates native child issue metadata including completed children", async () => {
+  const handle = recorder((req) => {
+    const after = req.parsedBody.variables.childrenAfter as string | null;
+    if (after === null) {
+      return jsonResponse(
+        hierarchyPayload({
+          children: {
+            pageInfo: { hasNextPage: true, endCursor: "cursor-page-1" },
+            nodes: [
+              {
+                identifier: "ENG-3000",
+                url: "https://linear.app/inverter/issue/ENG-3000",
+                title: "Later child",
+                state: { type: "started" },
+              },
+            ],
+          },
+        }),
+      );
+    }
+    expect(after).toBe("cursor-page-1");
+    return jsonResponse(
+      hierarchyPayload({
+        children: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [
+            {
+              identifier: "ENG-1500",
+              url: "https://linear.app/inverter/issue/ENG-1500",
+              title: "Already finished child",
+              state: { type: "completed" },
+            },
+          ],
+        },
+      }),
+    );
+  });
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+
+  const hierarchy = await adapter.getIssueHierarchy("ENG-2000");
+
+  expect(hierarchy.children).toEqual([
+    {
+      identifier: "ENG-1500",
+      url: "https://linear.app/inverter/issue/ENG-1500",
+      title: "Already finished child",
+      stateType: "completed",
+    },
+    {
+      identifier: "ENG-3000",
+      url: "https://linear.app/inverter/issue/ENG-3000",
+      title: "Later child",
+      stateType: "started",
+    },
+  ]);
+  expect(handle.requests).toHaveLength(2);
 });
 
 test("test_linear_adapter_get_issue_returns_null_on_404", async () => {

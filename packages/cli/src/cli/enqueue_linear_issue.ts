@@ -7,11 +7,37 @@
 // earlier point leaves the system in a clean no-op state — there is
 // nothing to roll back because nothing was started.
 
-import { enqueue, type EnqueueDeps, type EnqueueResult } from "../core/enqueue.ts";
+import { join } from "node:path";
+import {
+  enqueue,
+  type EnqueueDeps,
+  type EnqueueResolvedDependency,
+  type EnqueueResult,
+} from "../core/enqueue.ts";
+import { QuayError } from "../core/errors.ts";
+import { parseQuayConfigBlock } from "../core/quay_config_block.ts";
 import { mergeNormalizedTags } from "../core/tag_normalize.ts";
 import { fetchTicketContextWithIssue } from "../core/ticket_context.ts";
+import {
+  createOrVerifyUmbrellaWorkflow,
+  deriveUmbrellaFeatureBranch,
+  listUmbrellaExpectedTasks,
+  lookupUmbrellaWorkflow,
+  markUmbrellaExpectedTaskCompleteWithoutQuay,
+  requireUmbrellaFeatureBranchExists,
+  requireUmbrellaExpectedTask,
+  upsertUmbrellaExpectedTask,
+  type UmbrellaExpectedTaskRow,
+  type UmbrellaWorkflowRow,
+} from "../core/umbrella_workflows.ts";
 import type { ValidatorRunner } from "../core/validator_runner.ts";
-import type { LinearIssue, LinearPort } from "../ports/linear.ts";
+import type {
+  LinearBlockedByRelation,
+  LinearHierarchyIssue,
+  LinearIssueHierarchy,
+  LinearIssue,
+  LinearPort,
+} from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { TicketAuthor, TicketContext } from "../ports/ticket_context.ts";
 import type { CliIO } from "./io.ts";
@@ -27,6 +53,7 @@ export interface EnqueueLinearIssueArgs {
   baseBranch: string | null;
   requestPrScreenshots: boolean;
   requirePrScreenshots: boolean;
+  asNormalTask: boolean;
   workerAgent: string | null;
   workerModel: string | null;
   reviewerAgent: string | null;
@@ -121,6 +148,17 @@ export async function handleEnqueueLinearIssue(
     }
   }
 
+  if (ctx.umbrella !== null) {
+    return emitError(
+      io,
+      new QuayError(
+        "validation_error",
+        "quay-config umbrella metadata is not supported for Linear-backed enqueue; use native Linear parent/child relations for umbrella membership and native Linear blocked-by relations for ordering",
+        { external_ref: externalRef },
+      ),
+    );
+  }
+
   // Block tags are already normalised inside `fetchTicketContextWithIssue`;
   // merge in the CLI `--tag` values (lower-cased + deduped against the block
   // set, first occurrence wins) and route the merged set through the
@@ -151,6 +189,72 @@ export async function handleEnqueueLinearIssue(
     return { exitCode: 1 };
   }
 
+  let relations: LinearBlockedByRelation[];
+  let hierarchy: LinearIssueHierarchy;
+  try {
+    relations = await deps.linear.getBlockedByRelations(args.identifier);
+    hierarchy = await deps.linear.getIssueHierarchy(args.identifier);
+  } catch (err) {
+    return emitError(io, err);
+  }
+
+  if (hierarchy.children.length > 0) {
+    try {
+      const result = createLinearUmbrellaParentWorkflow(deps.enqueueDeps, {
+        repoId: resolvedRepoId,
+        externalRef,
+        baseBranch: resolvedBaseBranch,
+        title: issue.title,
+        url: issue.url,
+        hierarchy,
+      });
+      io.stdout(`${JSON.stringify(result)}\n`);
+      return { exitCode: 0 };
+    } catch (err) {
+      return emitError(io, err);
+    }
+  }
+
+  let resolvedLinearUmbrella: LinearUmbrellaSubtaskResolution | null = null;
+  if (!args.asNormalTask && hierarchy.parent !== null) {
+    try {
+      resolvedLinearUmbrella = resolveLinearUmbrellaSubtask(
+        deps.enqueueDeps.db,
+        {
+          repoId: resolvedRepoId,
+          childExternalRef: externalRef,
+          parent: hierarchy.parent,
+        },
+      );
+    } catch (err) {
+      return emitError(io, err);
+    }
+  }
+  let dependencyResolution: LinearDependencyResolution;
+  try {
+    const now = deps.enqueueDeps.clock.nowISO();
+    dependencyResolution = resolveLinearDependencies(
+      deps.enqueueDeps.db,
+      relations,
+      resolvedRepoId,
+      now,
+      { umbrellaWorkflow: resolvedLinearUmbrella?.workflow ?? null },
+    );
+    ctx = {
+      ...ctx,
+      ticket_snapshot: augmentTicketSnapshot(
+        ctx.ticket_snapshot,
+        dependencyResolution.snapshotRelations,
+        hierarchy,
+        args.asNormalTask
+          ? { linear_umbrella_membership_override: "as_normal_task" }
+          : {},
+      ),
+    };
+  } catch (err) {
+    return emitError(io, err);
+  }
+
   const authorsJson = serializeAuthors(ctx.authors);
 
   let result: EnqueueResult;
@@ -163,9 +267,26 @@ export async function handleEnqueueLinearIssue(
       slack_thread_ref: ctx.slack_thread_ref,
       tags: mergedTags,
       worker_execution: ctx.worker_execution,
-      base_branch: resolvedBaseBranch ?? undefined,
+      base_branch:
+        resolvedLinearUmbrella?.workflow.feature_branch ??
+        resolvedBaseBranch ??
+        undefined,
+      umbrella:
+        resolvedLinearUmbrella !== null
+          ? {
+              external_ref: resolvedLinearUmbrella.workflow.external_ref,
+              base_branch: resolvedLinearUmbrella.workflow.base_branch,
+              feature_branch: resolvedLinearUmbrella.workflow.feature_branch,
+              expected_external_ref: externalRef,
+              complete_without_quay:
+                dependencyResolution.umbrellaCompletions.length === 0
+                  ? undefined
+                  : dependencyResolution.umbrellaCompletions,
+            }
+          : undefined,
       request_pr_screenshots: args.requestPrScreenshots,
       require_pr_screenshots: args.requirePrScreenshots,
+      dependencies: dependencyResolution.dependencies,
       authors_json: authorsJson,
       worker_agent: args.workerAgent,
       worker_model: args.workerModel,
@@ -196,6 +317,505 @@ export async function handleEnqueueLinearIssue(
 
   io.stdout(`${JSON.stringify(result)}\n`);
   return { exitCode: 0 };
+}
+
+interface DependencyTaskRow {
+  task_id: string;
+  state: string;
+}
+
+interface LinearDependencySnapshot {
+  relation_id: string;
+  blocker_identifier: string;
+  blocker_url: string;
+  blocker_title: string;
+  blocker_state_type: string | null;
+  blocker_repo_id: string | null;
+  complete_in_linear: boolean;
+  tracked_task_id: string | null;
+  tracked_task_state: string | null;
+  persisted: boolean;
+}
+
+interface LinearDependencyResolution {
+  dependencies: EnqueueResolvedDependency[];
+  snapshotRelations: LinearDependencySnapshot[];
+  umbrellaCompletions: LinearUmbrellaCompletionWithoutQuay[];
+}
+
+interface LinearUmbrellaCompletionWithoutQuay {
+  external_ref: string;
+  completion_source: "linear";
+  completion_reason: string;
+  completed_at: string;
+}
+
+interface LinearHierarchySnapshotIssue {
+  identifier: string;
+  url: string;
+  title: string;
+  state_type: string | null;
+  complete_in_linear: boolean;
+}
+
+interface LinearHierarchySnapshot {
+  parent: LinearHierarchySnapshotIssue | null;
+  children: LinearHierarchySnapshotIssue[];
+}
+
+interface UmbrellaParentEnqueueResult {
+  umbrella_workflow_id: number;
+  external_ref: string;
+  repo_id: string;
+  base_branch: string;
+  feature_branch: string;
+  expected_tasks: UmbrellaExpectedTaskRow[];
+  linear_hierarchy: LinearHierarchySnapshot;
+}
+
+interface LinearUmbrellaSubtaskResolution {
+  workflow: UmbrellaWorkflowRow;
+}
+
+interface RepoRow {
+  repo_id: string;
+  base_branch: string;
+  archived_at: string | null;
+}
+
+function createLinearUmbrellaParentWorkflow(
+  deps: EnqueueDeps,
+  input: {
+    repoId: string;
+    externalRef: string;
+    baseBranch: string | null;
+    title: string;
+    url: string;
+    hierarchy: LinearIssueHierarchy;
+  },
+): UmbrellaParentEnqueueResult {
+  const repo = lookupRepo(deps.db, input.repoId);
+  if (repo === null) {
+    throw new QuayError("unknown_repo", `repo "${input.repoId}" not found`, {
+      repo_id: input.repoId,
+    });
+  }
+  if (repo.archived_at !== null) {
+    throw new QuayError(
+      "repo_archived",
+      `repo "${input.repoId}" is archived; new tasks are rejected`,
+      { repo_id: input.repoId },
+    );
+  }
+  if (!deps.git.bareCloneExists(repo.repo_id)) {
+    const expectedPath = join(deps.paths.reposRoot, `${repo.repo_id}.git`);
+    throw new QuayError(
+      "bare_clone_missing",
+      `bare clone for repo "${repo.repo_id}" not found at ${expectedPath}; materialize it before enqueuing (e.g. \`git clone --bare <repo_url> ${expectedPath}\` — look up <repo_url> via \`quay repo get ${repo.repo_id}\`)`,
+      { repo_id: repo.repo_id, expected_path: expectedPath },
+    );
+  }
+
+  const baseBranch = input.baseBranch ?? repo.base_branch;
+  const featureBranch = deriveUmbrellaFeatureBranch(deps.git, input.externalRef);
+  const now = deps.clock.nowISO();
+  const existingWorkflow = lookupUmbrellaWorkflow(
+    deps.db,
+    repo.repo_id,
+    input.externalRef,
+  );
+
+  deps.db.exec("BEGIN");
+  try {
+    const workflow = createOrVerifyUmbrellaWorkflow(
+      { db: deps.db, git: deps.git },
+      {
+        repoId: repo.repo_id,
+        externalRef: input.externalRef,
+        baseBranch,
+        featureBranch,
+        linearIssueTitle: input.title,
+        linearIssueUrl: input.url,
+        now,
+        ensureBranch: false,
+      },
+    );
+
+    const expectedExternalRefs = new Set<string>();
+    for (const child of input.hierarchy.children) {
+      const childExternalRef = child.identifier.toUpperCase();
+      if (expectedExternalRefs.has(childExternalRef)) continue;
+      expectedExternalRefs.add(childExternalRef);
+      const row = upsertUmbrellaExpectedTask(deps.db, {
+        umbrellaWorkflowId: workflow.umbrella_workflow_id,
+        externalRef: childExternalRef,
+        title: child.title,
+        linearIssueUrl: child.url,
+        now,
+      });
+      if (isCompleteLinearState(child.stateType) && row.state !== "linked") {
+        markUmbrellaExpectedTaskCompleteWithoutQuay(deps.db, {
+          umbrellaWorkflowId: workflow.umbrella_workflow_id,
+          externalRef: childExternalRef,
+          completionSource: "linear",
+          completionReason: "Linear issue was complete when umbrella was enqueued",
+          completedAt: now,
+          now,
+        });
+      }
+    }
+
+    const expectedTasks = listUmbrellaExpectedTasks(
+      deps.db,
+      workflow.umbrella_workflow_id,
+    );
+    if (existingWorkflow === null) {
+      deps.git.ensureRemoteBranchFromBase(
+        repo.repo_id,
+        workflow.feature_branch,
+        workflow.base_branch,
+      );
+    } else {
+      requireUmbrellaFeatureBranchExists(deps, workflow);
+    }
+    deps.db.exec("COMMIT");
+    return {
+      umbrella_workflow_id: workflow.umbrella_workflow_id,
+      external_ref: workflow.external_ref,
+      repo_id: workflow.repo_id,
+      base_branch: workflow.base_branch,
+      feature_branch: workflow.feature_branch,
+      expected_tasks: expectedTasks,
+      linear_hierarchy: buildLinearHierarchySnapshot(input.hierarchy),
+    };
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+}
+
+function resolveLinearUmbrellaSubtask(
+  db: DB,
+  input: {
+    repoId: string;
+    childExternalRef: string;
+    parent: LinearHierarchyIssue;
+  },
+): LinearUmbrellaSubtaskResolution {
+  const parentExternalRef = input.parent.identifier.toUpperCase();
+  const childExternalRef = input.childExternalRef.toUpperCase();
+  const workflow = lookupUmbrellaWorkflow(
+    db,
+    input.repoId,
+    parentExternalRef,
+  );
+  if (workflow === null) {
+    throw new QuayError(
+      "umbrella_not_enqueued",
+      `Linear parent ${parentExternalRef} has not been enqueued as an umbrella workflow`,
+      {
+        repo_id: input.repoId,
+        parent_external_ref: parentExternalRef,
+        child_external_ref: childExternalRef,
+      },
+    );
+  }
+  const expectedTask = requireUmbrellaExpectedTask(db, {
+    umbrellaWorkflowId: workflow.umbrella_workflow_id,
+    externalRef: childExternalRef,
+  });
+  if (expectedTask.state === "complete_without_quay") {
+    throw new QuayError(
+      "validation_error",
+      `umbrella subtask ${childExternalRef} is already complete without Quay and cannot be enqueued`,
+      {
+        umbrella_workflow_id: workflow.umbrella_workflow_id,
+        parent_external_ref: parentExternalRef,
+        child_external_ref: childExternalRef,
+        state: expectedTask.state,
+      },
+    );
+  }
+  return { workflow };
+}
+
+function resolveLinearDependencies(
+  db: DB,
+  relations: LinearBlockedByRelation[],
+  fallbackRepoId: string,
+  now: string,
+  options: { umbrellaWorkflow?: UmbrellaWorkflowRow | null } = {},
+): LinearDependencyResolution {
+  const dependencies: EnqueueResolvedDependency[] = [];
+  const snapshotRelations: LinearDependencySnapshot[] = [];
+  const umbrellaCompletions: LinearUmbrellaCompletionWithoutQuay[] = [];
+  const missing: Array<{
+    external_ref: string;
+    repo_id: string;
+    umbrella_external_ref?: string;
+    umbrella_workflow_id?: number;
+  }> = [];
+  const seen = new Set<string>();
+  const umbrellaWorkflow = options.umbrellaWorkflow ?? null;
+
+  for (const relation of relations) {
+    const blockerExternalRef = relation.blocker.identifier.toUpperCase();
+    const blockerRepoId = repoIdFromBlockerBody(relation.blocker.body) ?? fallbackRepoId;
+    const completeInLinear = isCompleteLinearState(relation.blocker.stateType);
+    const sameUmbrellaBlocker =
+      umbrellaWorkflow === null
+        ? null
+        : lookupSameUmbrellaDependency(
+            db,
+            umbrellaWorkflow.umbrella_workflow_id,
+            blockerExternalRef,
+          );
+    const dependencyRepoId =
+      sameUmbrellaBlocker === null ? blockerRepoId : umbrellaWorkflow!.repo_id;
+    const key = `${sameUmbrellaBlocker === null ? "normal" : "umbrella"}\0${dependencyRepoId}\0${blockerExternalRef}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    let tracked: DependencyTaskRow | null = null;
+    let persisted = false;
+    if (sameUmbrellaBlocker !== null) {
+      tracked =
+        sameUmbrellaBlocker.task_id === null
+          ? null
+          : {
+              task_id: sameUmbrellaBlocker.task_id,
+              state: sameUmbrellaBlocker.task_state ?? "",
+            };
+      if (
+        sameUmbrellaBlocker.task_id === null &&
+        completeInLinear &&
+        sameUmbrellaBlocker.expected_state !== "complete_without_quay"
+      ) {
+        umbrellaCompletions.push({
+          external_ref: blockerExternalRef,
+          completion_source: "linear",
+          completion_reason:
+            "Linear issue was complete when used as an umbrella dependency",
+          completed_at: now,
+        });
+      }
+      if (sameUmbrellaBlocker.task_id === null && completeInLinear) {
+        snapshotRelations.push({
+          relation_id: relation.relationId,
+          blocker_identifier: blockerExternalRef,
+          blocker_url: relation.blocker.url,
+          blocker_title: relation.blocker.title,
+          blocker_state_type: relation.blocker.stateType,
+          blocker_repo_id: dependencyRepoId,
+          complete_in_linear: completeInLinear,
+          tracked_task_id: null,
+          tracked_task_state: sameUmbrellaBlocker.task_state ?? null,
+          persisted: false,
+        });
+        continue;
+      }
+      if (sameUmbrellaBlocker.task_id === null) {
+        missing.push({
+          external_ref: blockerExternalRef,
+          repo_id: dependencyRepoId,
+          umbrella_external_ref: umbrellaWorkflow!.external_ref,
+          umbrella_workflow_id: umbrellaWorkflow!.umbrella_workflow_id,
+        });
+        continue;
+      }
+      dependencies.push({
+        dependency_task_id: sameUmbrellaBlocker.task_id,
+        dependency_source: "linear",
+        dependency_external_ref: blockerExternalRef,
+        dependency_repo_id: dependencyRepoId,
+        umbrella_workflow_id: umbrellaWorkflow!.umbrella_workflow_id,
+        scope: "umbrella",
+        required_state: "merged_to_feature_branch",
+        satisfied_at: sameUmbrellaDependencySatisfied(
+          sameUmbrellaBlocker,
+          completeInLinear,
+        )
+          ? now
+          : null,
+      });
+      persisted = true;
+    } else {
+      if (!completeInLinear) {
+        tracked = lookupDependencyTask(db, blockerRepoId, blockerExternalRef);
+        if (tracked === null) {
+          missing.push({ external_ref: blockerExternalRef, repo_id: blockerRepoId });
+        } else {
+          dependencies.push({
+            dependency_task_id: tracked.task_id,
+            dependency_source: "linear",
+            dependency_external_ref: blockerExternalRef,
+            dependency_repo_id: blockerRepoId,
+            required_state: "merged",
+            satisfied_at: tracked.state === "merged" ? now : null,
+          });
+          persisted = true;
+        }
+      }
+    }
+
+    snapshotRelations.push({
+      relation_id: relation.relationId,
+      blocker_identifier: blockerExternalRef,
+      blocker_url: relation.blocker.url,
+      blocker_title: relation.blocker.title,
+      blocker_state_type: relation.blocker.stateType,
+      blocker_repo_id: dependencyRepoId,
+      complete_in_linear: completeInLinear,
+      tracked_task_id: tracked?.task_id ?? null,
+      tracked_task_state:
+        sameUmbrellaBlocker?.task_state ?? tracked?.state ?? null,
+      persisted,
+    });
+  }
+
+  if (missing.length > 0) {
+    throw new QuayError(
+      "dependency_not_tracked",
+      `Linear blocker ${missing[0]!.external_ref} is incomplete but not tracked by Quay`,
+      { dependencies: missing },
+    );
+  }
+
+  return { dependencies, snapshotRelations, umbrellaCompletions };
+}
+
+interface SameUmbrellaDependencyRow {
+  expected_state: string;
+  task_id: string | null;
+  task_state: string | null;
+}
+
+function lookupSameUmbrellaDependency(
+  db: DB,
+  umbrellaWorkflowId: number,
+  externalRef: string,
+): SameUmbrellaDependencyRow | null {
+  return (
+    db
+      .query<SameUmbrellaDependencyRow, [number, string]>(
+        `SELECT uet.state AS expected_state,
+                ut.task_id AS task_id,
+                t.state AS task_state
+           FROM umbrella_expected_tasks uet
+           LEFT JOIN umbrella_tasks ut
+             ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
+            AND ut.external_ref = uet.external_ref
+           LEFT JOIN tasks t
+             ON t.task_id = ut.task_id
+          WHERE uet.umbrella_workflow_id = ?
+            AND uet.external_ref = ?
+          LIMIT 1`,
+      )
+      .get(umbrellaWorkflowId, externalRef) ?? null
+  );
+}
+
+function sameUmbrellaDependencySatisfied(
+  row: SameUmbrellaDependencyRow,
+  completeInLinear: boolean,
+): boolean {
+  return (
+    row.task_state === "merged_to_feature_branch" ||
+    row.expected_state === "complete_without_quay" ||
+    (row.task_id === null && completeInLinear)
+  );
+}
+
+function repoIdFromBlockerBody(body: string): string | null {
+  try {
+    return parseQuayConfigBlock(body)?.repo ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function isCompleteLinearState(stateType: string | null): boolean {
+  return stateType?.toLowerCase() === "completed";
+}
+
+function lookupDependencyTask(
+  db: DB,
+  repoId: string,
+  externalRef: string,
+): DependencyTaskRow | null {
+  return (
+    db
+      .query<DependencyTaskRow, [string, string]>(
+        `SELECT task_id, state FROM tasks WHERE repo_id = ? AND external_ref = ?`,
+      )
+      .get(repoId, externalRef) ?? null
+  );
+}
+
+function lookupRepo(db: DB, repoId: string): RepoRow | null {
+  return (
+    db
+      .query<RepoRow, [string]>(
+        `SELECT repo_id, base_branch, archived_at FROM repos WHERE repo_id = ?`,
+      )
+      .get(repoId) ?? null
+  );
+}
+
+function augmentTicketSnapshot(
+  snapshot: string,
+  relations: LinearDependencySnapshot[],
+  hierarchy: LinearIssueHierarchy,
+  options: { linear_umbrella_membership_override?: string | null } = {},
+): string {
+  const hierarchySnapshot = buildLinearHierarchySnapshot(hierarchy);
+  try {
+    const parsed = JSON.parse(snapshot) as Record<string, unknown>;
+    parsed.linear_blocked_by_relations = relations;
+    parsed.linear_hierarchy = hierarchySnapshot;
+    if (options.linear_umbrella_membership_override !== undefined) {
+      parsed.linear_umbrella_membership_override =
+        options.linear_umbrella_membership_override;
+    }
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    const wrapped: Record<string, unknown> = {
+      original_snapshot: snapshot,
+      linear_blocked_by_relations: relations,
+      linear_hierarchy: hierarchySnapshot,
+    };
+    if (options.linear_umbrella_membership_override !== undefined) {
+      wrapped.linear_umbrella_membership_override =
+        options.linear_umbrella_membership_override;
+    }
+    return JSON.stringify(wrapped, null, 2);
+  }
+}
+
+function buildLinearHierarchySnapshot(
+  hierarchy: LinearIssueHierarchy,
+): LinearHierarchySnapshot {
+  return {
+    parent:
+      hierarchy.parent === null
+        ? null
+        : snapshotHierarchyIssue(hierarchy.parent),
+    children: hierarchy.children.map(snapshotHierarchyIssue),
+  };
+}
+
+function snapshotHierarchyIssue(
+  issue: LinearHierarchyIssue,
+): LinearHierarchySnapshotIssue {
+  return {
+    identifier: issue.identifier.toUpperCase(),
+    url: issue.url,
+    title: issue.title,
+    state_type: issue.stateType,
+    complete_in_linear: isCompleteLinearState(issue.stateType),
+  };
 }
 
 // Spec §11 mapping: explicit. `body` is the raw Linear ticket body (block

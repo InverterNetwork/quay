@@ -187,10 +187,10 @@ const COMMANDS: Record<string, CommandSpec> = {
   enqueue: {
     path: "enqueue",
     synopsis:
-      "quay enqueue --repo <id> --brief-file <path> [--base-branch <b>] [--request-pr-screenshots|--require-pr-screenshots] [--worker-execution oneshot|goal] [--ticket-snapshot-file <p>] [--external-ref <r>] [--slack-thread-ref <r>] [--worker-agent <a>] [--worker-model <m>] [--reviewer-agent <a>] [--reviewer-model <m>] [--tag <name>]...",
+      "quay enqueue --repo <id> --brief-file <path> [--base-branch <b>] [--request-pr-screenshots|--require-pr-screenshots] [--worker-execution oneshot|goal] [--ticket-snapshot-file <p>] [--external-ref <r>] [--slack-thread-ref <r>] [--worker-agent <a>] [--worker-model <m>] [--reviewer-agent <a>] [--reviewer-model <m>] [--as-normal-task] [--tag <name>]...",
     summary: "Enqueue a new task from a brief file (or a Linear issue).",
     details:
-      "Pass --linear-issue <id> instead of --brief-file to derive the task from a Linear ticket via the configured adapter.",
+      "Pass --linear-issue <id> instead of --brief-file to derive the task from a Linear ticket via the configured adapter. Linear parent/child hierarchy drives umbrella membership. On child issues, --as-normal-task ignores parent membership for one enqueue while still processing blocked-by relations as normal dependencies.",
     flags: [
       { flag: "--repo <id>", desc: "Target repo_id (required, unless --linear-issue carries one)." },
       { flag: "--brief-file <path>", desc: "Path to the brief markdown file (required)." },
@@ -206,6 +206,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--reviewer-agent <a>", desc: "Override the reviewer agent for this task." },
       { flag: "--reviewer-model <m>", desc: "Override the reviewer model for this task." },
       { flag: "--linear-issue <id>", desc: "Adapter-driven flow; mutually exclusive with --brief-file/--external-ref/--slack-thread-ref." },
+      { flag: "--as-normal-task", desc: "Linear child issue override: ignore parent membership only; blocked-by relations still apply as normal dependencies." },
       { flag: "--tag <name>", desc: "Repeatable. Attach a task tag." },
     ],
   },

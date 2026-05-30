@@ -5,6 +5,7 @@ import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
+import { GitHubMergeError } from "../ports/github.ts";
 import type {
   GitHubGraphqlRateLimit,
   GitHubPort,
@@ -32,6 +33,7 @@ import { runCancelFinalizer } from "./cancel.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
 import {
   LINEAR_STATE_IN_PROGRESS,
+  LINEAR_STATE_WAITING,
   LinearSyncQueue,
 } from "./linear_state_sync.ts";
 import {
@@ -39,6 +41,7 @@ import {
   enqueueOrchestratorHandoff,
   reopenClaimedOrchestratorHandoffs,
 } from "./orchestrator_handoffs.ts";
+import { ensurePreambleIdForAttemptReason } from "./preamble.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact, persistResolvedAttemptModel } from "./usage.ts";
 import {
@@ -69,12 +72,20 @@ import {
 } from "./goal_audit.ts";
 import { transitionTaskState } from "./task_state.ts";
 import {
+  listWaitingDependencyTasks,
+  releaseTaskIfDependenciesSatisfied,
+  reconcileWaitingDependencyTask,
+  satisfyDependenciesForMergedTask,
+  satisfyDependenciesForMergedToFeatureBranchTask,
+} from "./task_dependencies.ts";
+import {
   scheduleCleanSpawnRetry,
   scheduleDeterministicRetry,
   type BudgetRetryReason,
   type RetryAttemptRef,
 } from "./retries.ts";
 import { accountGoalFailureAndMaybeLimit } from "./goals.ts";
+import { requireUmbrellaFeatureBranchExists } from "./umbrella_workflows.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
 
 export const DEFAULT_MAX_CONCURRENT = 2;
@@ -88,6 +99,9 @@ export const DEFAULT_MAX_NON_BUDGET_RESPAWNS = 20;
 export const DEFAULT_LOW_PRIORITY_PR_POLL_INTERVAL_MINUTES = 5;
 export const DEFAULT_PARKED_PR_POLL_INTERVAL_MINUTES = 15;
 export const DEFAULT_GITHUB_GRAPHQL_BACKOFF_MINUTES = 10;
+export const DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS = 24;
+export const DEFAULT_RETAINED_CANCELLED_WORKTREE_GC_BATCH_SIZE = 10;
+export const WORKER_GH_TOKEN_ENV = "QUAY_WORKER_GH_TOKEN";
 export const REVIEWER_GH_TOKEN_ENV = "QUAY_REVIEWER_GH_TOKEN";
 const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Canonical claude worker template, kept here as a named re-export so
@@ -137,6 +151,10 @@ export interface TickOptions {
   // ingest matches the right author when tick and worker authenticate as
   // different identities. Defaults to whatever `gh api user` reports.
   reviewerLogin?: string;
+  // Absolute path to a fallback file (expected mode 0600) whose contents
+  // are exported as `GH_TOKEN` in the worker tmux pane's environment.
+  // `QUAY_WORKER_GH_TOKEN` in the tick process environment wins when present.
+  workerGhTokenFile?: string;
   // Absolute path to a fallback file (expected mode 0600) whose contents
   // are exported as `GH_TOKEN` in the reviewer tmux pane's environment.
   // `QUAY_REVIEWER_GH_TOKEN` in the tick process environment wins when
@@ -190,6 +208,7 @@ export type TickAction =
   | "ci_pending"
   | "ci_passed"
   | "adopted_pr_reconciled"
+  | "umbrella_final_pr_reconciled"
   | "pr_merged"
   | "pr_closed_unmerged"
   | "review_respawn_scheduled"
@@ -203,6 +222,7 @@ export type TickAction =
   | "claim_expired"
   | "orchestrator_loop_parked"
   | "cancel_finalized"
+  | "retained_worktree_cleaned"
   | "slack_fence_captured"
   | "slack_post_recovered"
   | "slack_posted"
@@ -348,6 +368,37 @@ interface DoneTaskRow {
   github_pr_polled_at: string | null;
 }
 
+interface UmbrellaSubtaskIntegrationRow {
+  umbrella_workflow_id: number;
+  feature_branch: string;
+  final_pr_task_id: string | null;
+}
+
+interface ReadyUmbrellaFinalPrWorkflowRow {
+  umbrella_workflow_id: number;
+  external_ref: string;
+  repo_id: string;
+  base_branch: string;
+  feature_branch: string;
+  linear_issue_title: string | null;
+  linear_issue_url: string | null;
+  final_pr_task_id: string | null;
+  final_pr_number: number | null;
+  final_pr_url: string | null;
+}
+
+interface UmbrellaFinalPrExpectedSubtaskRow {
+  external_ref: string;
+  title: string | null;
+  state: string;
+  completion_source: string | null;
+  completion_reason: string | null;
+  task_id: string | null;
+  task_state: string | null;
+  pr_url: string | null;
+  objective_path: string | null;
+}
+
 type SyntheticReviewLifecycleState =
   | "pr-review"
   | "done"
@@ -414,8 +465,20 @@ class TickGithubCache implements GitHubPort {
 
   constructor(private readonly inner: GitHubPort) {}
 
+  get defaultWorkerToken(): string | undefined {
+    return (this.inner as { defaultWorkerToken?: string }).defaultWorkerToken;
+  }
+
   prExistsForBranch(repoId: string, branch: string): boolean {
     return this.inner.prExistsForBranch(repoId, branch);
+  }
+
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean {
+    return this.inner.prExistsForBranchWithToken(repoId, branch, token);
   }
 
   openPrsForBranchBase(
@@ -424,6 +487,24 @@ class TickGithubCache implements GitHubPort {
     baseBranch: string,
   ): OpenBranchPr[] {
     return this.inner.openPrsForBranchBase(repoId, branch, baseBranch);
+  }
+
+  createPullRequest(input: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }): OpenBranchPr {
+    const pr = this.inner.createPullRequest(input);
+    this.prSnapshotByBranch.delete(`${input.repoId}\0${input.headBranch}`);
+    this.lightweightByBranch.delete(`${input.repoId}\0${input.headBranch}`);
+    return pr;
+  }
+
+  updatePullRequestBody(repoId: string, prNumber: number, body: string): void {
+    this.inner.updatePullRequestBody(repoId, prNumber, body);
+    this.prViews.delete(`${repoId}\0${prNumber}`);
   }
 
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {
@@ -481,6 +562,29 @@ class TickGithubCache implements GitHubPort {
     return this.lightweightByNumber.get(key) ?? null;
   }
 
+  freshPrSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null {
+    const snapshot = this.inner.freshPrSnapshotByNumber(repoId, prNumber);
+    this.prSnapshotByNumberCache.set(`${repoId}\0${prNumber}`, snapshot);
+    this.rememberSnapshotAliases(repoId, String(prNumber), snapshot, false);
+    return snapshot;
+  }
+
+  freshPrView(repoId: string, prNumber: number): PullRequestView | null {
+    const view = this.inner.freshPrView(repoId, prNumber);
+    this.prViews.set(`${repoId}\0${prNumber}`, view);
+    return view;
+  }
+
+  mergePullRequest(
+    repoId: string,
+    prNumber: number,
+    expectedHeadSha: string,
+  ): void {
+    this.inner.mergePullRequest(repoId, prNumber, expectedHeadSha);
+    this.prSnapshotByNumberCache.delete(`${repoId}\0${prNumber}`);
+    this.lightweightByNumber.delete(`${repoId}\0${prNumber}`);
+  }
+
   getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null {
     if (!this.graphqlRateLimits.has(repoId)) {
       this.graphqlRateLimits.set(repoId, this.inner.getGraphqlRateLimit(repoId));
@@ -521,8 +625,12 @@ class TickGithubCache implements GitHubPort {
     return this.inner.fetchPostedReviewAuthorsAtHead(repoId, prNumber, headSha);
   }
 
-  probeTokenAccess(repoId: string, token: string): void {
-    this.inner.probeTokenAccess(repoId, token);
+  probeTokenAccess(
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ): void {
+    this.inner.probeTokenAccess(repoId, token, actor);
   }
 
   private rememberSnapshotAliases(
@@ -757,6 +865,22 @@ export async function tick_once(
       active: readActiveGithubGraphqlBackoff(deps.db, nowISO),
     };
 
+    for (const task of readRetainedCancelledWorktreeGcCandidates(
+      deps.db,
+      retainedCancelledWorktreeGcCutoff(nowISO),
+      DEFAULT_RETAINED_CANCELLED_WORKTREE_GC_BATCH_SIZE,
+    )) {
+      try {
+        cleanupRetainedCancelledWorktree(deps, task);
+        results.push({
+          task_id: task.task_id,
+          action: "retained_worktree_cleaned",
+        });
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
     if (options.reviewerEnabled === true) {
       for (const req of readPendingReviewRequests(deps.db)) {
         const skipped = githubBackoffSkipResult(githubBackoff, req.task_id);
@@ -894,6 +1018,17 @@ export async function tick_once(
     const pendingReviewSnapshot = readPendingReviewAttempts(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
+
+    for (const task of listWaitingDependencyTasks(deps.db)) {
+      if (cancelledIds.has(task.task_id)) continue;
+      linearSyncs.enqueue(task.external_ref, LINEAR_STATE_WAITING);
+      try {
+        reconcileWaitingDependencyTask(deps, task.task_id, nowISO);
+      } catch (err) {
+        results.push(recordTickError(deps, task.task_id, err));
+      }
+    }
+
     const queuedSnapshot = readQueued(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id) && !closedUnmergedIds.has(t.task_id),
     );
@@ -933,6 +1068,25 @@ export async function tick_once(
             task.task_id,
             err,
             task.repo_id,
+          ),
+        );
+      }
+    }
+
+    for (const workflow of readReadyUmbrellaFinalPrWorkflows(deps.db)) {
+      try {
+        results.push(reconcileUmbrellaFinalPr(deps, workflow));
+      } catch (err) {
+        const taskId =
+          workflow.final_pr_task_id ??
+          `umbrella-final-pr-${workflow.umbrella_workflow_id}`;
+        results.push(
+          recordTickErrorWithGithubBackoff(
+            deps,
+            githubBackoff,
+            taskId,
+            err,
+            workflow.repo_id,
           ),
         );
       }
@@ -1223,7 +1377,12 @@ function readPendingReviewRequests(db: DB): PendingReviewRequestRow[] {
          JOIN tasks t ON t.task_id = rr.task_id
         WHERE rr.status = 'pending_ci'
           AND t.cancel_requested_at IS NULL
-          AND t.state NOT IN ('merged', 'closed_unmerged', 'cancelled')
+          AND t.state NOT IN (
+            'merged_to_feature_branch',
+            'merged',
+            'closed_unmerged',
+            'cancelled'
+          )
         ORDER BY rr.created_at ASC, rr.request_id ASC`,
     )
     .all();
@@ -1282,12 +1441,92 @@ interface CancelTargetRow {
   task_id: string;
 }
 
+interface RetainedCancelledWorktreeGcRow {
+  task_id: string;
+  worktree_path: string;
+}
+
+function retainedCancelledWorktreeGcCutoff(nowISO: string): string {
+  const now = new Date(nowISO).getTime();
+  return new Date(
+    now -
+      DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS * 60 * 60 * 1000,
+  ).toISOString();
+}
+
+function readRetainedCancelledWorktreeGcCandidates(
+  db: DB,
+  cutoffISO: string,
+  limit: number,
+): RetainedCancelledWorktreeGcRow[] {
+  return db
+    .query<RetainedCancelledWorktreeGcRow, [string, number]>(
+      `SELECT task_id, worktree_path
+         FROM tasks
+        WHERE state = 'cancelled'
+          AND cancel_keep_worktree = 1
+          AND worktree_cleaned_at IS NULL
+          AND COALESCE(cancel_requested_at, updated_at) <= ?
+        ORDER BY COALESCE(cancel_requested_at, updated_at), task_id
+        LIMIT ?`,
+    )
+    .all(cutoffISO, limit);
+}
+
+function cleanupRetainedCancelledWorktree(
+  deps: TickDeps,
+  task: RetainedCancelledWorktreeGcRow,
+): void {
+  if (existsSync(task.worktree_path)) {
+    deps.git.worktreeRemove(task.worktree_path);
+    if (existsSync(task.worktree_path)) {
+      throw new Error(
+        `retained cancelled worktree cleanup did not remove ${task.worktree_path}`,
+      );
+    }
+  }
+
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN");
+  try {
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET worktree_cleaned_at = ?,
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ?
+            AND state = 'cancelled'
+            AND cancel_keep_worktree = 1
+            AND worktree_cleaned_at IS NULL`,
+      )
+      .run(now, now, task.task_id);
+    deps.db
+      .query(
+        `INSERT INTO events (task_id, event_type, occurred_at)
+         VALUES (?, 'retained_worktree_cleaned', ?)`,
+      )
+      .run(task.task_id, now);
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+}
+
 function readCancelTargets(db: DB): CancelTargetRow[] {
   return db
     .query<CancelTargetRow, []>(
       `SELECT task_id FROM tasks
         WHERE cancel_requested_at IS NOT NULL
-          AND state NOT IN ('cancelled', 'merged', 'closed_unmerged')
+          AND state NOT IN (
+            'cancelled',
+            'merged_to_feature_branch',
+            'merged',
+            'closed_unmerged'
+          )
         ORDER BY task_id`,
     )
     .all();
@@ -1398,6 +1637,48 @@ function readDone(db: DB): DoneTaskRow[] {
          FROM tasks
         WHERE state = 'done'
         ORDER BY created_at, task_id`,
+    )
+    .all();
+}
+
+function readReadyUmbrellaFinalPrWorkflows(
+  db: DB,
+): ReadyUmbrellaFinalPrWorkflowRow[] {
+  return db
+    .query<ReadyUmbrellaFinalPrWorkflowRow, []>(
+      `SELECT uw.umbrella_workflow_id, uw.external_ref, uw.repo_id,
+              uw.base_branch, uw.feature_branch, uw.linear_issue_title,
+              uw.linear_issue_url, uw.final_pr_task_id, uw.final_pr_number,
+              uw.final_pr_url
+         FROM umbrella_workflows uw
+        WHERE uw.state = 'active'
+          AND (
+               uw.final_pr_task_id IS NULL
+            OR uw.final_pr_number IS NULL
+          )
+          AND EXISTS (
+            SELECT 1
+              FROM umbrella_expected_tasks uet
+             WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM umbrella_expected_tasks uet
+              LEFT JOIN umbrella_tasks ut
+                ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
+               AND ut.external_ref = uet.external_ref
+              LEFT JOIN tasks t
+                ON t.task_id = ut.task_id
+             WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+               AND NOT (
+                    uet.state = 'complete_without_quay'
+                 OR (
+                      ut.task_id IS NOT NULL
+                  AND t.state = 'merged_to_feature_branch'
+                 )
+               )
+          )
+        ORDER BY uw.created_at, uw.umbrella_workflow_id`,
     )
     .all();
 }
@@ -2042,8 +2323,290 @@ function processDoneTask(
     );
   }
 
+  const umbrellaIntegration = loadUmbrellaSubtaskIntegration(deps.db, task.task_id);
+  if (umbrellaIntegration !== null) {
+    return processUmbrellaSubtaskAutoMerge(
+      deps,
+      task,
+      attempt,
+      snapshot,
+      umbrellaIntegration,
+      options,
+    );
+  }
+
   clearTickError(deps, task.task_id);
   return null;
+}
+
+function reconcileUmbrellaFinalPr(
+  deps: TickDeps,
+  workflow: ReadyUmbrellaFinalPrWorkflowRow,
+): TickTaskResult {
+  requireUmbrellaFeatureBranchExists(deps, {
+    repo_id: workflow.repo_id,
+    external_ref: workflow.external_ref,
+    base_branch: workflow.base_branch,
+    feature_branch: workflow.feature_branch,
+  });
+  const subtasks = loadUmbrellaFinalPrExpectedSubtasks(
+    deps.db,
+    workflow.umbrella_workflow_id,
+  );
+  const title = renderUmbrellaFinalPrTitle(workflow);
+  const managedSection = renderUmbrellaFinalPrManagedSection(workflow, subtasks);
+  const existingPrs = deps.github.openPrsForBranchBase(
+    workflow.repo_id,
+    workflow.feature_branch,
+    workflow.base_branch,
+  );
+  if (existingPrs.length > 1) {
+    throw new Error(
+      `umbrella final PR reconciliation found ${existingPrs.length} open PRs for ${workflow.feature_branch} -> ${workflow.base_branch}`,
+    );
+  }
+
+  const pr =
+    existingPrs[0] ??
+    deps.github.createPullRequest({
+      repoId: workflow.repo_id,
+      headBranch: workflow.feature_branch,
+      baseBranch: workflow.base_branch,
+      title,
+      body: managedSection,
+    });
+
+  if (existingPrs.length === 1) {
+    const view = deps.github.prView(workflow.repo_id, pr.number);
+    const nextBody = replaceUmbrellaFinalPrManagedSection(
+      view?.body ?? "",
+      managedSection,
+    );
+    if (view === null || view.body !== nextBody) {
+      deps.github.updatePullRequestBody(workflow.repo_id, pr.number, nextBody);
+    }
+  }
+
+  const taskId = ensureUmbrellaFinalPrTask(deps, workflow, pr, managedSection);
+  deps.db
+    .query(
+      `UPDATE umbrella_workflows
+          SET final_pr_task_id = ?,
+              final_pr_number = ?,
+              final_pr_url = COALESCE(?, final_pr_url),
+              updated_at = ?
+        WHERE umbrella_workflow_id = ?`,
+    )
+    .run(
+      taskId,
+      pr.number,
+      pr.url,
+      deps.clock.nowISO(),
+      workflow.umbrella_workflow_id,
+    );
+  clearTickError(deps, taskId);
+  return { task_id: taskId, action: "umbrella_final_pr_reconciled" };
+}
+
+function processUmbrellaSubtaskAutoMerge(
+  deps: TickDeps,
+  task: DoneTaskRow,
+  attempt: CurrentAttemptRow,
+  observedSnapshot: PrSnapshot,
+  umbrella: UmbrellaSubtaskIntegrationRow,
+  options: TickOptions,
+): TickTaskResult | null {
+  if (umbrella.final_pr_task_id === task.task_id) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      "task is the umbrella final PR task; Quay may only auto-merge subtasks into the feature branch",
+    );
+  }
+
+  const prNumber = task.pr_number ?? observedSnapshot.prNumber ?? null;
+  if (prNumber === null) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR number is unavailable for branch ${task.branch_name}`,
+    );
+  }
+
+  const liveView = deps.github.freshPrView(task.repo_id, prNumber);
+  const liveSnapshot = deps.github.freshPrSnapshotByNumber(task.repo_id, prNumber);
+  if (liveView === null || liveSnapshot === null) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `live PR #${prNumber} could not be read before guarded umbrella auto-merge`,
+    );
+  }
+  persistPrMetadata(deps, task.task_id, liveSnapshot);
+
+  if (liveSnapshot.state === "merged" || liveSnapshot.state === "closed_unmerged") {
+    return finalizePrTerminal(deps, task, attempt, liveSnapshot.state, "done");
+  }
+  if (liveView.headRefName !== task.branch_name) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} head branch ${liveView.headRefName || "<unknown>"} does not match subtask branch ${task.branch_name}`,
+    );
+  }
+  if (liveView.isCrossRepository === true) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} head branch is from a fork`,
+    );
+  }
+  if (liveView.headSha !== "" && liveView.headSha !== liveSnapshot.headSha) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} head SHA changed during guarded read (${liveView.headSha} -> ${liveSnapshot.headSha})`,
+    );
+  }
+  if (
+    liveView.baseRef !== umbrella.feature_branch ||
+    liveSnapshot.baseRef !== umbrella.feature_branch
+  ) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} base branch ${liveView.baseRef ?? liveSnapshot.baseRef ?? "<unknown>"} does not exactly match umbrella feature branch ${umbrella.feature_branch}`,
+    );
+  }
+  if (liveSnapshot.isDraft === true) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} is still a draft`,
+    );
+  }
+  if (liveSnapshot.mergeable === "conflicting") {
+    ensureUmbrellaSubtaskBaseBranch(deps, task.task_id, umbrella.feature_branch);
+    const observation = formatConflictObservation(liveSnapshot);
+    if (task.last_conflict_observation !== observation) {
+      return scheduleConflictNonBudget(
+        deps,
+        task.task_id,
+        attempt,
+        liveSnapshot,
+        observation,
+        "done",
+        options,
+      );
+    }
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} is not mergeable and the conflict observation has already been acted on`,
+    );
+  }
+  if (liveSnapshot.mergeable !== "mergeable") {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} mergeable state is ${liveSnapshot.mergeable}`,
+    );
+  }
+
+  const repo = loadRepoForTask(deps.db, task.task_id);
+  const ci = classifyCi(
+    liveSnapshot,
+    repo?.ci_workflow_name ?? null,
+    resolveCiIgnorePolicy(options.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repo),
+  );
+  if (ci === "stale") {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} head SHA (${liveSnapshot.headSha}) and check-run SHA (${liveSnapshot.checks.checkSha}) disagree`,
+    );
+  }
+  if (ci !== "pass") {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} required CI is ${ci}`,
+    );
+  }
+  if (
+    liveSnapshot.latestReview.decision !== "APPROVED" ||
+    liveSnapshot.latestReview.latestReviewId === null ||
+    !reviewAppliesToHead(liveSnapshot)
+  ) {
+    return recordUmbrellaMergeGuardFailure(
+      deps,
+      task.task_id,
+      `PR #${prNumber} latest applicable review is not approved`,
+    );
+  }
+
+  try {
+    deps.github.mergePullRequest(task.repo_id, prNumber, liveSnapshot.headSha);
+  } catch (err) {
+    if (err instanceof GitHubMergeError && err.kind === "not_mergeable") {
+      ensureUmbrellaSubtaskBaseBranch(deps, task.task_id, umbrella.feature_branch);
+      const conflictSnapshot: PrSnapshot = {
+        ...liveSnapshot,
+        mergeable: "conflicting",
+      };
+      const observation = formatConflictObservation(conflictSnapshot);
+      if (task.last_conflict_observation !== observation) {
+        return scheduleConflictNonBudget(
+          deps,
+          task.task_id,
+          attempt,
+          conflictSnapshot,
+          observation,
+          "done",
+          options,
+        );
+      }
+    }
+    throw err;
+  }
+
+  return finalizePrTerminal(deps, task, attempt, "merged", "done");
+}
+
+function reviewAppliesToHead(snapshot: PrSnapshot): boolean {
+  return (
+    snapshot.latestReview.submittedHeadSha === undefined ||
+    snapshot.latestReview.submittedHeadSha === null ||
+    snapshot.latestReview.submittedHeadSha === snapshot.headSha
+  );
+}
+
+function recordUmbrellaMergeGuardFailure(
+  deps: TickDeps,
+  taskId: string,
+  reason: string,
+): TickTaskResult {
+  return recordTickError(
+    deps,
+    taskId,
+    new Error(`umbrella auto-merge guard failed: ${reason}`),
+  );
+}
+
+function ensureUmbrellaSubtaskBaseBranch(
+  deps: TickDeps,
+  taskId: string,
+  featureBranch: string,
+): void {
+  deps.db
+    .query(
+      `UPDATE tasks
+          SET base_branch = ?,
+              updated_at = ?
+        WHERE task_id = ?
+          AND (base_branch IS NULL OR base_branch <> ?)`,
+    )
+    .run(featureBranch, deps.clock.nowISO(), taskId, featureBranch);
 }
 
 function processSyntheticReviewLifecycle(
@@ -2375,6 +2938,10 @@ function finalizePrTerminal(
   fromState: PrTerminalFromState,
 ): TickTaskResult {
   const now = deps.clock.nowISO();
+  const taskTerminalState =
+    terminal === "merged" && isUmbrellaTask(deps.db, task.task_id)
+      ? "merged_to_feature_branch"
+      : terminal;
   const activeReviewers =
     fromState === "pr-review"
       ? loadActiveReviewersForTask(deps.db, task.task_id)
@@ -2394,7 +2961,7 @@ function finalizePrTerminal(
     const transition = transitionTaskState(deps, {
       taskId: task.task_id,
       from: fromState,
-      to: terminal,
+      to: taskTerminalState,
       eventType: terminal === "merged" ? "merged" : "closed",
       attemptId: attempt.attempt_id,
       now,
@@ -2444,6 +3011,14 @@ function finalizePrTerminal(
         .run(now, attempt.attempt_id);
     }
     cancelOpenOrchestratorHandoffs(deps, task.task_id);
+    if (terminal === "merged") {
+      if (taskTerminalState === "merged_to_feature_branch") {
+        releaseDependentsForMergedToFeatureBranchTask(deps, task.task_id, now);
+      } else {
+        markFinalUmbrellaWorkflowCompleted(deps.db, task.task_id, now);
+        releaseDependentsForMergedTask(deps, task.task_id, now);
+      }
+    }
     deps.db.exec("COMMIT");
   } catch (err) {
     try {
@@ -2462,6 +3037,634 @@ function finalizePrTerminal(
     task_id: task.task_id,
     action: terminal === "merged" ? "pr_merged" : "pr_closed_unmerged",
   };
+}
+
+function markFinalUmbrellaWorkflowCompleted(
+  db: DB,
+  taskId: string,
+  now: string,
+): void {
+  db.query(
+    `UPDATE umbrella_workflows
+        SET state = 'completed',
+            updated_at = ?
+      WHERE final_pr_task_id = ?
+        AND state = 'active'`,
+  ).run(now, taskId);
+}
+
+function isUmbrellaTask(db: DB, taskId: string): boolean {
+  const row = db
+    .query<{ n: number }, [string]>(
+      `SELECT 1 AS n FROM umbrella_tasks WHERE task_id = ? LIMIT 1`,
+    )
+    .get(taskId);
+  return row !== null && row !== undefined;
+}
+
+function loadUmbrellaSubtaskIntegration(
+  db: DB,
+  taskId: string,
+): UmbrellaSubtaskIntegrationRow | null {
+  const row = db
+    .query<UmbrellaSubtaskIntegrationRow, [string]>(
+      `SELECT uw.umbrella_workflow_id,
+              uw.feature_branch,
+              uw.final_pr_task_id
+         FROM umbrella_tasks ut
+         JOIN umbrella_workflows uw
+           ON uw.umbrella_workflow_id = ut.umbrella_workflow_id
+        WHERE ut.task_id = ?
+          AND uw.state = 'active'
+        LIMIT 1`,
+    )
+    .get(taskId);
+  return row ?? null;
+}
+
+function loadUmbrellaFinalPrExpectedSubtasks(
+  db: DB,
+  umbrellaWorkflowId: number,
+): UmbrellaFinalPrExpectedSubtaskRow[] {
+  return db
+    .query<UmbrellaFinalPrExpectedSubtaskRow, [number]>(
+      `SELECT uet.external_ref,
+              uet.title,
+              uet.state,
+              uet.completion_source,
+              uet.completion_reason,
+              ut.task_id,
+              t.state AS task_state,
+              t.pr_url,
+              ao.file_path AS objective_path
+         FROM umbrella_expected_tasks uet
+         LEFT JOIN umbrella_tasks ut
+           ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
+          AND ut.external_ref = uet.external_ref
+         LEFT JOIN tasks t
+           ON t.task_id = ut.task_id
+         LEFT JOIN artifacts ao
+           ON ao.task_id = ut.task_id
+          AND ao.kind = 'task_objective'
+          AND ao.attempt_id IS NULL
+        WHERE uet.umbrella_workflow_id = ?
+        ORDER BY uet.external_ref`,
+    )
+    .all(umbrellaWorkflowId);
+}
+
+const UMBRELLA_FINAL_PR_START = "<!-- quay:umbrella-final-pr:start -->";
+const UMBRELLA_FINAL_PR_END = "<!-- quay:umbrella-final-pr:end -->";
+
+function renderUmbrellaFinalPrTitle(
+  workflow: ReadyUmbrellaFinalPrWorkflowRow,
+): string {
+  const ticket = normalizeTicketRef(workflow.external_ref);
+  const linearTitle = normalizePrTitleText(workflow.linear_issue_title);
+  if (linearTitle !== null) {
+    const titled =
+      hasConventionalCommitPrefix(linearTitle) ? linearTitle : `feat: ${linearTitle}`;
+    return appendTicketRefToTitle(titled, ticket);
+  }
+  return ticket === null
+    ? "feat: reconcile umbrella workflow"
+    : `feat: reconcile umbrella workflow (${ticket})`;
+}
+
+function renderUmbrellaFinalPrManagedSection(
+  workflow: ReadyUmbrellaFinalPrWorkflowRow,
+  subtasks: UmbrellaFinalPrExpectedSubtaskRow[],
+): string {
+  const displayRef = normalizeTicketRef(workflow.external_ref) ?? workflow.external_ref;
+  const linearTicket = renderLinearTicketLink(displayRef, workflow.linear_issue_url);
+  const linearTitle = normalizePrTitleText(workflow.linear_issue_title);
+  const lines = [
+    UMBRELLA_FINAL_PR_START,
+    "## Quay Umbrella Final PR",
+    "",
+    `Umbrella external ref: ${displayRef}`,
+    ...(linearTitle === null ? [] : [`Umbrella title: ${linearTitle}`]),
+    `Linear ticket: ${linearTicket}`,
+    `Source branch: ${workflow.feature_branch}`,
+    `Target branch: ${workflow.base_branch}`,
+    "",
+    "Quay opened this PR after all expected umbrella subtasks were accounted for.",
+    "",
+    "### Expected Subtasks",
+  ];
+  for (const subtask of subtasks) {
+    const subtaskRef = normalizeTicketRef(subtask.external_ref) ?? subtask.external_ref;
+    const title = subtask.title ?? extractObjectiveTitle(subtask.objective_path);
+    const titlePart = title === null ? "" : ` - ${title}`;
+    if (subtask.state === "complete_without_quay") {
+      const source =
+        subtask.completion_source === null
+          ? "unknown"
+          : subtask.completion_source;
+      const reason =
+        subtask.completion_reason === null || subtask.completion_reason === ""
+          ? "no reason recorded"
+          : subtask.completion_reason;
+      lines.push(
+        `- ${subtaskRef}${titlePart} (complete without Quay; source: ${source}; reason: ${reason})`,
+      );
+      continue;
+    }
+    const taskPart =
+      subtask.task_id === null ? "task unavailable" : `task ${subtask.task_id}`;
+    const prPart =
+      subtask.pr_url === null || subtask.pr_url === ""
+        ? "subtask PR: unavailable"
+        : `subtask PR: ${subtask.pr_url}`;
+    lines.push(`- ${subtaskRef}${titlePart} (${taskPart}; ${prPart})`);
+  }
+  if (subtasks.length === 0) {
+    lines.push("- No expected subtasks recorded.");
+  }
+  lines.push("", UMBRELLA_FINAL_PR_END);
+  return lines.join("\n");
+}
+
+function normalizePrTitleText(title: string | null): string | null {
+  if (title === null) return null;
+  const normalized = title.replace(/\s+/g, " ").trim();
+  return normalized === "" ? null : normalized;
+}
+
+function hasConventionalCommitPrefix(title: string): boolean {
+  return /^[a-z]+(?:\([^)]+\))?!?:\s/i.test(title);
+}
+
+function appendTicketRefToTitle(title: string, ticket: string | null): string {
+  if (ticket === null) return title;
+  if (title.toUpperCase().includes(ticket.toUpperCase())) return title;
+  return `${title} (${ticket})`;
+}
+
+function renderLinearTicketLink(displayRef: string, url: string | null): string {
+  const trimmed = url?.trim();
+  if (trimmed === undefined || trimmed === "") return displayRef;
+  return `[${displayRef}](${trimmed})`;
+}
+
+function replaceUmbrellaFinalPrManagedSection(
+  existingBody: string,
+  managedSection: string,
+): string {
+  const start = existingBody.indexOf(UMBRELLA_FINAL_PR_START);
+  const end = existingBody.indexOf(UMBRELLA_FINAL_PR_END);
+  if (start !== -1 && end !== -1 && end >= start) {
+    const afterEnd = end + UMBRELLA_FINAL_PR_END.length;
+    return `${existingBody.slice(0, start).trimEnd()}\n\n${managedSection}\n\n${existingBody.slice(afterEnd).trimStart()}`.trim();
+  }
+  if (existingBody.trim() === "") return managedSection;
+  return `${existingBody.trimEnd()}\n\n${managedSection}`;
+}
+
+function normalizeTicketRef(externalRef: string): string | null {
+  const trimmed = externalRef.trim();
+  if (trimmed === "") return null;
+  const match = trimmed.match(/^([A-Za-z]+)-(\d+)$/);
+  if (match === null) return trimmed;
+  const prefix = match[1]!.toUpperCase() === "ITRY" ? "BRIX" : match[1]!.toUpperCase();
+  return `${prefix}-${match[2]}`;
+}
+
+function extractObjectiveTitle(path: string | null): string | null {
+  if (path === null || path === "") return null;
+  let body: string;
+  try {
+    body = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  for (const line of body.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#")) {
+      const title = trimmed.replace(/^#+\s*/, "").trim();
+      return title === "" ? null : title;
+    }
+  }
+  const first = body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (first === undefined) return null;
+  return first.length > 80 ? `${first.slice(0, 77)}...` : first;
+}
+
+function ensureUmbrellaFinalPrTask(
+  deps: TickDeps,
+  workflow: ReadyUmbrellaFinalPrWorkflowRow,
+  pr: OpenBranchPr,
+  managedSection: string,
+): string {
+  const canonicalTaskId = umbrellaFinalPrTaskId(workflow.umbrella_workflow_id);
+  const existingTaskId =
+    workflow.final_pr_task_id ??
+    lookupUmbrellaFinalTaskId(
+      deps.db,
+      workflow.repo_id,
+      canonicalTaskId,
+      workflow.external_ref,
+    );
+  const now = deps.clock.nowISO();
+  const taskId = existingTaskId ?? canonicalTaskId;
+  if (existingTaskId === null) {
+    const worktreesRoot = inferUmbrellaWorktreesRoot(
+      deps.db,
+      workflow.umbrella_workflow_id,
+    );
+    const worktreePath = join(worktreesRoot, taskId);
+    let worktreeCreated = false;
+    const preambleId = ensurePreambleIdForAttemptReason(
+      deps.db,
+      deps.clock,
+      "initial",
+      { repoId: workflow.repo_id },
+    );
+    worktreeCreated = ensureUmbrellaFinalPrWorktree(
+      deps,
+      workflow,
+      worktreePath,
+    );
+    deps.db.exec("BEGIN");
+    try {
+      deps.db
+        .query(
+          `INSERT INTO tasks (
+             task_id, repo_id, external_ref, state, authoring_mode,
+             branch_name, base_branch, tmux_id, worktree_path,
+             pr_number, pr_url, head_sha, base_sha, retry_budget,
+             created_at, updated_at
+           ) VALUES (?, ?, ?, 'pr-open', 'quay_owned', ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, ?)`,
+        )
+        .run(
+          taskId,
+          workflow.repo_id,
+          workflow.external_ref,
+          workflow.feature_branch,
+          workflow.base_branch,
+          `quay-umbrella-final-${workflow.umbrella_workflow_id}`,
+          worktreePath,
+          pr.number,
+          pr.url,
+          pr.headSha,
+          pr.baseSha,
+          now,
+          now,
+        );
+      const attempt = deps.db
+        .query<{ attempt_id: number }, [string, number, string, string, string | null]>(
+          `INSERT INTO attempts (
+             task_id, attempt_number, preamble_id, reason, consumed_budget,
+             spawned_at, ended_at, exit_kind, remote_sha_at_exit,
+             pr_existed_at_spawn
+           ) VALUES (?, 1, ?, 'umbrella_final_pr', 0, ?, ?, 'pr_opened', ?, 1)
+           RETURNING attempt_id`,
+        )
+        .get(taskId, preambleId, now, now, pr.headSha);
+      if (!attempt) throw new Error("umbrella final PR attempt insert returned no row");
+      deps.artifactStore.writeArtifact({
+        taskId,
+        attemptId: null,
+        kind: "task_objective",
+        content: managedSection,
+        extension: "md",
+      });
+      deps.artifactStore.writeArtifact({
+        taskId,
+        attemptId: attempt.attempt_id,
+        kind: "brief",
+        content: managedSection,
+        extension: "md",
+      });
+      deps.artifactStore.writeArtifact({
+        taskId,
+        attemptId: attempt.attempt_id,
+        kind: "final_prompt",
+        content: managedSection,
+        extension: "md",
+      });
+      deps.db
+        .query(
+          `INSERT INTO events (
+             task_id, attempt_id, event_type, to_state, occurred_at, event_data
+           ) VALUES (?, ?, 'umbrella_final_pr_reconciled', 'pr-open', ?, ?)`,
+        )
+        .run(
+          taskId,
+          attempt.attempt_id,
+          now,
+          JSON.stringify({
+            umbrella_workflow_id: workflow.umbrella_workflow_id,
+            pr_number: pr.number,
+            source_branch: workflow.feature_branch,
+            target_branch: workflow.base_branch,
+          }),
+        );
+      deps.db.exec("COMMIT");
+    } catch (err) {
+      try {
+        deps.db.exec("ROLLBACK");
+      } catch {}
+      if (worktreeCreated) {
+        removeUmbrellaFinalPrWorktreeBestEffort(deps, worktreePath);
+      }
+      throw err;
+    }
+    return taskId;
+  }
+
+  const existingWorktreePath = loadTaskWorktreePath(deps.db, existingTaskId);
+  let recoveredWorktree = false;
+  if (existingWorktreePath !== null) {
+    recoveredWorktree = ensureUmbrellaFinalPrWorktree(
+      deps,
+      workflow,
+      existingWorktreePath,
+    );
+  }
+  try {
+    const preambleId = ensurePreambleIdForAttemptReason(
+      deps.db,
+      deps.clock,
+      "initial",
+      { repoId: workflow.repo_id },
+    );
+    const attemptId = ensureUmbrellaFinalPrReconcileAttempt(
+      deps,
+      existingTaskId,
+      preambleId,
+      pr.headSha,
+      now,
+    );
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET external_ref = ?,
+                state = 'pr-open',
+                authoring_mode = 'quay_owned',
+                branch_name = ?,
+                base_branch = ?,
+                tmux_id = ?,
+                pr_number = ?,
+                pr_url = COALESCE(?, pr_url),
+                head_sha = COALESCE(?, head_sha),
+                base_sha = COALESCE(?, base_sha),
+                tick_error = NULL,
+                updated_at = ?
+          WHERE task_id = ?`,
+      )
+      .run(
+        workflow.external_ref,
+        workflow.feature_branch,
+        workflow.base_branch,
+        `quay-umbrella-final-${workflow.umbrella_workflow_id}`,
+        pr.number,
+        pr.url,
+        pr.headSha,
+        pr.baseSha,
+        now,
+        existingTaskId,
+      );
+    ensureUmbrellaFinalPrArtifacts(
+      deps,
+      existingTaskId,
+      attemptId,
+      managedSection,
+    );
+  } catch (err) {
+    if (recoveredWorktree && existingWorktreePath !== null) {
+      removeUmbrellaFinalPrWorktreeBestEffort(deps, existingWorktreePath);
+    }
+    throw err;
+  }
+  return existingTaskId;
+}
+
+function umbrellaFinalPrTaskId(umbrellaWorkflowId: number): string {
+  return `umbrella-final-pr-${umbrellaWorkflowId}`;
+}
+
+function ensureUmbrellaFinalPrWorktree(
+  deps: TickDeps,
+  workflow: ReadyUmbrellaFinalPrWorkflowRow,
+  worktreePath: string,
+): boolean {
+  if (existsSync(worktreePath)) {
+    const currentBranch = deps.git.worktreeCurrentBranch(worktreePath);
+    if (currentBranch === workflow.feature_branch) return false;
+    deps.git.worktreeRemove(worktreePath);
+  }
+  try {
+    deps.git.fetch(workflow.repo_id, workflow.feature_branch);
+    deps.git.worktreeAddExistingBranch(
+      workflow.repo_id,
+      worktreePath,
+      workflow.feature_branch,
+      `origin/${workflow.feature_branch}`,
+    );
+    return true;
+  } catch (err) {
+    if (existsSync(worktreePath)) {
+      removeUmbrellaFinalPrWorktreeBestEffort(deps, worktreePath);
+    }
+    throw err;
+  }
+}
+
+function removeUmbrellaFinalPrWorktreeBestEffort(
+  deps: Pick<TickDeps, "git">,
+  worktreePath: string,
+): void {
+  try {
+    deps.git.worktreeRemove(worktreePath);
+  } catch {
+    try {
+      rmSync(worktreePath, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+function loadTaskWorktreePath(db: DB, taskId: string): string | null {
+  const row = db
+    .query<{ worktree_path: string }, [string]>(
+      `SELECT worktree_path FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  return row?.worktree_path ?? null;
+}
+
+function lookupUmbrellaFinalTaskId(
+  db: DB,
+  repoId: string,
+  canonicalTaskId: string,
+  externalRef: string,
+): string | null {
+  const row = db
+    .query<{ task_id: string }, [string, string]>(
+      `SELECT task_id
+         FROM tasks
+        WHERE repo_id = ?
+          AND task_id = ?
+        LIMIT 1`,
+    )
+    .get(repoId, canonicalTaskId);
+  if (row !== null && row !== undefined) return row.task_id;
+  const externalRefRow = db
+    .query<{ task_id: string }, [string, string]>(
+      `SELECT task_id
+         FROM tasks
+        WHERE repo_id = ?
+          AND external_ref = ?
+        ORDER BY created_at, task_id
+        LIMIT 1`,
+    )
+    .get(repoId, externalRef);
+  return externalRefRow?.task_id ?? null;
+}
+
+function ensureUmbrellaFinalPrReconcileAttempt(
+  deps: Pick<TickDeps, "db">,
+  taskId: string,
+  preambleId: number,
+  headSha: string | null,
+  now: string,
+): number {
+  const existing = deps.db
+    .query<{ attempt_id: number }, [string]>(
+      `SELECT attempt_id
+         FROM attempts
+        WHERE task_id = ?
+          AND reason = 'umbrella_final_pr'
+        ORDER BY attempt_id
+        LIMIT 1`,
+    )
+    .get(taskId);
+  if (existing !== null && existing !== undefined) return existing.attempt_id;
+
+  const next = deps.db
+    .query<{ attempt_number: number }, [string]>(
+      `SELECT COALESCE(MAX(attempt_number), 0) + 1 AS attempt_number
+         FROM attempts
+        WHERE task_id = ?`,
+    )
+    .get(taskId);
+  const attemptNumber = next?.attempt_number ?? 1;
+  const inserted = deps.db
+    .query<{ attempt_id: number }, [string, number, number, string, string, string | null]>(
+      `INSERT INTO attempts (
+         task_id, attempt_number, preamble_id, reason, consumed_budget,
+         spawned_at, ended_at, exit_kind, remote_sha_at_exit,
+         pr_existed_at_spawn
+       ) VALUES (?, ?, ?, 'umbrella_final_pr', 0, ?, ?, 'pr_opened', ?, 1)
+       RETURNING attempt_id`,
+    )
+    .get(taskId, attemptNumber, preambleId, now, now, headSha);
+  if (!inserted) throw new Error("umbrella final PR attempt insert returned no row");
+  return inserted.attempt_id;
+}
+
+function ensureUmbrellaFinalPrArtifacts(
+  deps: Pick<TickDeps, "db" | "artifactStore">,
+  taskId: string,
+  attemptId: number,
+  managedSection: string,
+): void {
+  ensureUmbrellaFinalPrArtifact(deps, taskId, null, "task_objective", managedSection);
+  ensureUmbrellaFinalPrArtifact(deps, taskId, attemptId, "brief", managedSection);
+  ensureUmbrellaFinalPrArtifact(deps, taskId, attemptId, "final_prompt", managedSection);
+}
+
+function ensureUmbrellaFinalPrArtifact(
+  deps: Pick<TickDeps, "db" | "artifactStore">,
+  taskId: string,
+  attemptId: number | null,
+  kind: string,
+  content: string,
+): void {
+  const existing =
+    attemptId === null
+      ? deps.db
+          .query<{ artifact_id: number }, [string, string]>(
+            `SELECT artifact_id
+               FROM artifacts
+              WHERE task_id = ?
+                AND kind = ?
+                AND attempt_id IS NULL
+              LIMIT 1`,
+          )
+          .get(taskId, kind)
+      : deps.db
+          .query<{ artifact_id: number }, [string, number, string]>(
+            `SELECT artifact_id
+               FROM artifacts
+              WHERE task_id = ?
+                AND attempt_id = ?
+                AND kind = ?
+              LIMIT 1`,
+          )
+          .get(taskId, attemptId, kind);
+  if (existing !== null && existing !== undefined) return;
+  deps.artifactStore.writeArtifact({
+    taskId,
+    attemptId,
+    kind,
+    content,
+    extension: "md",
+  });
+}
+
+function inferUmbrellaWorktreesRoot(db: DB, umbrellaWorkflowId: number): string {
+  const row = db
+    .query<{ worktree_path: string }, [number]>(
+      `SELECT t.worktree_path
+         FROM umbrella_tasks ut
+         JOIN tasks t ON t.task_id = ut.task_id
+        WHERE ut.umbrella_workflow_id = ?
+        ORDER BY ut.umbrella_task_id
+        LIMIT 1`,
+    )
+    .get(umbrellaWorkflowId);
+  if (row === undefined || row === null) return "/tmp";
+  return dirname(row.worktree_path);
+}
+
+function releaseDependentsForMergedTask(
+  deps: Pick<TickDeps, "db">,
+  taskId: string,
+  now: string,
+): void {
+  const satisfiedDependencies = satisfyDependenciesForMergedTask(
+    deps.db,
+    taskId,
+    now,
+  );
+  const dependentTaskIds = new Set(
+    satisfiedDependencies.map((dep) => dep.dependent_task_id),
+  );
+  for (const dependentTaskId of dependentTaskIds) {
+    releaseTaskIfDependenciesSatisfied(deps.db, dependentTaskId, now);
+  }
+}
+
+function releaseDependentsForMergedToFeatureBranchTask(
+  deps: Pick<TickDeps, "db">,
+  taskId: string,
+  now: string,
+): void {
+  const satisfiedDependencies = satisfyDependenciesForMergedToFeatureBranchTask(
+    deps.db,
+    taskId,
+    now,
+  );
+  const dependentTaskIds = new Set(
+    satisfiedDependencies.map((dep) => dep.dependent_task_id),
+  );
+  for (const dependentTaskId of dependentTaskIds) {
+    releaseTaskIfDependenciesSatisfied(deps.db, dependentTaskId, now);
+  }
 }
 
 interface ActiveReviewerAttemptRow {
@@ -4486,13 +5689,6 @@ function promoteAndSpawn(
   // that case and lets `remoteHeadSha` return null — the spec records
   // `remote_sha_at_spawn = null` for the first attempt, so a missing remote
   // is the *expected* state, not a tick error.
-  deps.git.fetchBranchIfExists(task.repo_id, task.branch_name);
-  const remoteSha = deps.git.remoteHeadSha(task.repo_id, task.branch_name);
-  const prExisted = deps.github.prExistsForBranch(task.repo_id, task.branch_name)
-    ? 1
-    : 0;
-  const now = deps.clock.nowISO();
-
   // Probe agent identity and compute the canonical session name BEFORE the
   // promotion transaction so the `spawned` event can carry both in
   // `event_data`. The probe is documented as in-process and never throws;
@@ -4501,7 +5697,24 @@ function promoteAndSpawn(
   // (paired with `tmux_session`) — this earlier probe is event-only.
   const sessionName = `quay-task-${task.tmux_id}-${pending.attempt_number}`;
   const agentIdentity = probeAgentIdentity(agentInvocation);
-  const githubToken = resolveWorkerGithubToken(options);
+  const githubToken = resolveGithubActorToken("worker", deps, task.repo_id, options);
+  if (!githubToken.ok) {
+    return {
+      task_id: task.task_id,
+      action: "spawn_substrate_failed",
+      error: githubToken.error,
+    };
+  }
+  deps.git.fetchBranchIfExists(task.repo_id, task.branch_name);
+  const remoteSha = deps.git.remoteHeadSha(task.repo_id, task.branch_name);
+  const prExisted = deps.github.prExistsForBranchWithToken(
+    task.repo_id,
+    task.branch_name,
+    githubToken.token,
+  )
+    ? 1
+    : 0;
+  const now = deps.clock.nowISO();
   const spawnEnv = addCodexLaunchIsolation(
     githubToken.env,
     task.worktree_path,
@@ -4541,6 +5754,9 @@ function promoteAndSpawn(
       promptContent,
       agentInvocation,
       env: spawnEnv,
+      ...(githubToken.envFiles !== undefined
+        ? { envFiles: githubToken.envFiles }
+        : {}),
     });
   } catch (err) {
     return {
@@ -4581,45 +5797,139 @@ function promoteAndSpawn(
   return { task_id: task.task_id, action: "spawned" };
 }
 
-type ReviewerGhTokenPreflightResult =
+type GithubActor = "worker" | "reviewer";
+
+type GithubActorTokenResult =
   | {
       ok: true;
       env?: TmuxSpawnInput["env"];
       envFiles?: TmuxSpawnInput["envFiles"];
+      token: string;
       source: string;
     }
   | { ok: false; error: string };
 
-function resolveWorkerGithubToken(options: TickOptions): {
-  env: NonNullable<TmuxSpawnInput["env"]>;
-  source: string;
-} {
+type GithubActorTokenProbeResult = { ok: true } | { ok: false; error: string };
+
+function resolveGithubActorToken(
+  actor: GithubActor,
+  deps: TickDeps,
+  repoId: string,
+  options: TickOptions,
+): GithubActorTokenResult {
   const env = options.env ?? process.env;
-  const overrides: NonNullable<TmuxSpawnInput["env"]> = {
-    GH_TOKEN: undefined,
+  const envName =
+    actor === "worker" ? WORKER_GH_TOKEN_ENV : REVIEWER_GH_TOKEN_ENV;
+  const fileOption =
+    actor === "worker" ? options.workerGhTokenFile : options.reviewerGhTokenFile;
+  const fileConfigName = `${actor}.gh_token_file`;
+
+  const envToken = env[envName];
+  if (envToken !== undefined) {
+    if (envToken.trim().length === 0) {
+      return {
+        ok: false,
+        error: `${actor} GitHub token env ${envName} is empty`,
+      };
+    }
+    const probed = probeGithubActorToken(deps, repoId, actor, envName, envToken);
+    if (!probed.ok) return probed;
+    return {
+      ok: true,
+      env: githubActorPaneEnv(envToken),
+      token: envToken,
+      source: `env:${envName}`,
+    };
+  }
+
+  if (fileOption === undefined) {
+    // Unit tests use FakeGitHub without constructing operator auth config in
+    // every spawn fixture. Production adapters do not expose this property.
+    const testDefaultWorkerToken =
+      actor === "worker" && options.env === undefined
+        ? (deps.github as { defaultWorkerToken?: string }).defaultWorkerToken
+        : undefined;
+    if (testDefaultWorkerToken !== undefined) {
+      const probed = probeGithubActorToken(
+        deps,
+        repoId,
+        actor,
+        "test:defaultWorkerToken",
+        testDefaultWorkerToken,
+      );
+      if (!probed.ok) return probed;
+      return {
+        ok: true,
+        env: githubActorPaneEnv(testDefaultWorkerToken),
+        token: testDefaultWorkerToken,
+        source: "test:defaultWorkerToken",
+      };
+    }
+    return {
+      ok: false,
+      error: `${actor} GitHub token missing: set ${envName} or ${fileConfigName} before spawning ${actor} attempts`,
+    };
+  }
+
+  let token: string;
+  try {
+    token = readFileSync(fileOption, "utf8").trim();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `${actor} gh_token_file (${fileOption}) missing or unreadable: ${message}`,
+    };
+  }
+
+  if (token.length === 0) {
+    return {
+      ok: false,
+      error: `${actor} gh_token_file (${fileOption}) is empty`,
+    };
+  }
+
+  const probed = probeGithubActorToken(deps, repoId, actor, fileConfigName, token);
+  if (!probed.ok) return probed;
+
+  return {
+    ok: true,
+    env: githubActorPaneEnv(),
+    envFiles: [{ name: "GH_TOKEN", path: fileOption }],
+    token,
+    source: `file:${fileConfigName}`,
+  };
+}
+
+function githubActorPaneEnv(token?: string): NonNullable<TmuxSpawnInput["env"]> {
+  return {
+    GH_TOKEN: token,
     GITHUB_TOKEN: undefined,
+    [WORKER_GH_TOKEN_ENV]: undefined,
     [REVIEWER_GH_TOKEN_ENV]: undefined,
   };
-  const token = env.GH_TOKEN?.trim();
-  if (token !== undefined && token.length > 0) {
-    overrides.GH_TOKEN = token;
+}
+
+function probeGithubActorToken(
+  deps: TickDeps,
+  repoId: string,
+  actor: GithubActor,
+  source: string,
+  token: string,
+): GithubActorTokenProbeResult {
+  try {
+    deps.github.probeTokenAccess(repoId, token, actor);
+  } catch (err) {
+    const message = redactSecret(
+      err instanceof Error ? err.message : String(err),
+      token,
+    );
     return {
-      env: overrides,
-      source: "env:GH_TOKEN",
+      ok: false,
+      error: `${actor} GitHub token ${source} is invalid, expired, or cannot access the repository: ${message}`,
     };
   }
-  const githubToken = env.GITHUB_TOKEN?.trim();
-  if (githubToken !== undefined && githubToken.length > 0) {
-    overrides.GH_TOKEN = githubToken;
-    return {
-      env: overrides,
-      source: "env:GITHUB_TOKEN",
-    };
-  }
-  return {
-    env: overrides,
-    source: "ambient_gh_auth",
-  };
+  return { ok: true };
 }
 
 function addCodexLaunchIsolation(
@@ -4663,93 +5973,6 @@ function usesCodexRuntime(agentName: string, agentInvocation: string): boolean {
   return basename.toLowerCase() === "codex";
 }
 
-function preflightReviewerGhToken(
-  deps: TickDeps,
-  task: ReviewAttemptTaskRow,
-  options: TickOptions,
-): ReviewerGhTokenPreflightResult {
-  const env = options.env ?? process.env;
-  const envToken = env[REVIEWER_GH_TOKEN_ENV];
-  if (envToken !== undefined) {
-    if (envToken.trim().length === 0) {
-      return {
-        ok: false,
-        error: `reviewer GitHub token env ${REVIEWER_GH_TOKEN_ENV} is empty`,
-      };
-    }
-    try {
-      deps.github.probeTokenAccess(task.repo_id, envToken);
-    } catch (err) {
-      const message = redactSecret(
-        err instanceof Error ? err.message : String(err),
-        envToken,
-      );
-      return {
-        ok: false,
-        error: `reviewer GitHub token env ${REVIEWER_GH_TOKEN_ENV} is invalid, expired, or cannot access the repository: ${message}`,
-      };
-    }
-    return {
-      ok: true,
-      env: {
-        GH_TOKEN: envToken,
-        GITHUB_TOKEN: undefined,
-        [REVIEWER_GH_TOKEN_ENV]: undefined,
-      },
-      source: `env:${REVIEWER_GH_TOKEN_ENV}`,
-    };
-  }
-
-  const tokenFile = options.reviewerGhTokenFile;
-  if (tokenFile === undefined) {
-    return {
-      ok: false,
-      error: `reviewer GitHub token missing: set ${REVIEWER_GH_TOKEN_ENV} or reviewer.gh_token_file before spawning reviewer attempts`,
-    };
-  }
-
-  let token: string;
-  try {
-    token = readFileSync(tokenFile, "utf8").trim();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      error: `reviewer gh_token_file (${tokenFile}) missing or unreadable: ${message}`,
-    };
-  }
-
-  if (token.length === 0) {
-    return {
-      ok: false,
-      error: `reviewer gh_token_file (${tokenFile}) is empty`,
-    };
-  }
-
-  try {
-    deps.github.probeTokenAccess(task.repo_id, token);
-  } catch (err) {
-    const message = redactSecret(
-      err instanceof Error ? err.message : String(err),
-      token,
-    );
-    return {
-      ok: false,
-      error: `reviewer gh_token_file (${tokenFile}) token is invalid, expired, or cannot access the repository: ${message}`,
-    };
-  }
-
-  return {
-    ok: true,
-    env: {
-      GITHUB_TOKEN: undefined,
-      [REVIEWER_GH_TOKEN_ENV]: undefined,
-    },
-    envFiles: [{ name: "GH_TOKEN", path: tokenFile }],
-    source: "file:reviewer.gh_token_file",
-  };
-}
-
 function redactSecret(message: string, secret: string): string {
   if (secret.length === 0) return message;
   return message.split(secret).join("[redacted]");
@@ -4782,7 +6005,12 @@ function promoteAndSpawnReviewer(
     );
   }
 
-  const tokenPreflight = preflightReviewerGhToken(deps, task, options);
+  const tokenPreflight = resolveGithubActorToken(
+    "reviewer",
+    deps,
+    task.repo_id,
+    options,
+  );
   if (!tokenPreflight.ok) {
     return {
       task_id: task.task_id,

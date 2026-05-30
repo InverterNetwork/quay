@@ -91,6 +91,14 @@ const ReviewerConfigSchema = z
   })
   .strict();
 
+const WorkerConfigSchema = z
+  .object({
+    // Fallback path whose contents are exported as `GH_TOKEN` in the worker
+    // tmux pane when QUAY_WORKER_GH_TOKEN is unset.
+    gh_token_file: z.string().min(1).optional(),
+  })
+  .strict();
+
 const CiIgnoredNameSchema = z
   .string()
   .refine((value) => value.trim().length > 0, {
@@ -165,6 +173,7 @@ export const ConfigSchema = z
     admin: AdminConfigSchema.optional(),
     context: ContextConfigSchema.optional(),
     reviewer: ReviewerConfigSchema.optional(),
+    worker: WorkerConfigSchema.optional(),
     ci: CiConfigSchema.optional(),
   })
   .strict();
@@ -225,6 +234,9 @@ export function tickOptionsFromConfig(config: QuayConfig): TickOptions {
   }
   if (config.reviewer?.login !== undefined) {
     opts.reviewerLogin = config.reviewer.login;
+  }
+  if (config.worker?.gh_token_file !== undefined) {
+    opts.workerGhTokenFile = config.worker.gh_token_file;
   }
   if (config.reviewer?.gh_token_file !== undefined) {
     opts.reviewerGhTokenFile = config.reviewer.gh_token_file;

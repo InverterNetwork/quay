@@ -12,6 +12,11 @@ export interface GitPort {
   hasLocalBranch(repoId: string, branch: string): boolean;
   hasRemoteBranch(repoId: string, branch: string): boolean;
   hasOpenPullRequestForBranch(repoId: string, branch: string): boolean;
+  ensureRemoteBranchFromBase(
+    repoId: string,
+    branch: string,
+    baseBranch: string,
+  ): void;
   worktreeAdd(
     repoId: string,
     worktreePath: string,
@@ -30,6 +35,7 @@ export interface GitPort {
     prNumber: number,
     headSha: string,
   ): void;
+  worktreeCurrentBranch(worktreePath: string): string | null;
   worktreeDetach(worktreePath: string): void;
   worktreeRemove(worktreePath: string): void;
   branchDelete(repoId: string, branch: string): void;

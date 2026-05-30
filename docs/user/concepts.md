@@ -88,6 +88,8 @@ Artifacts are stored under the data directory and indexed in SQLite.
 Common active states:
 
 - `queued`: ready for a future tick to spawn.
+- `waiting_dependencies`: prepared and known to Quay, but not spawnable until
+  its persisted dependency rows are satisfied.
 - `running`: worker session is active or recently active.
 - `pr-open`: worker opened or updated a PR; Quay is polling PR/CI.
 - `done`: CI passed, but the PR is still open. This is not terminal.
@@ -103,6 +105,59 @@ Parked states:
 
 Terminal states:
 
+- `merged_to_feature_branch`
 - `merged`
 - `closed_unmerged`
 - `cancelled`
+
+## Dependencies
+
+Linear-backed enqueue reads native Linear blocked-by relations at enqueue time.
+Quay then persists source-agnostic dependency rows and uses only its own SQLite
+rows during later ticks. It does not keep re-reading Linear to decide whether a
+waiting task can run.
+
+Complete Linear blockers do not block enqueue. Incomplete blockers must already
+be tracked by Quay. If the blocker task is tracked, the dependent task is
+created in `waiting_dependencies` and is released to `queued` only after the
+blocker reaches `merged`. If the incomplete blocker is not tracked, enqueue
+fails with `dependency_not_tracked` before creating the dependent task.
+
+Failed blockers do not auto-unblock or auto-cancel dependents. Operators must
+inspect the blocker and decide whether to retry, cancel, retarget, or otherwise
+recover the blocked workflow.
+
+## Umbrella Workflows
+
+One-repo umbrella workflows use a shared feature branch. For Linear-backed
+umbrellas, Linear's native parent/child hierarchy is the membership source of
+truth. Enqueueing the parent issue creates the umbrella workflow, derives the
+feature branch, and snapshots the expected Linear child set. Tick never polls
+Linear to discover changed membership later.
+
+Each umbrella child target uses the shared feature branch as its effective PR
+base. Child enqueue links the concrete Quay task to an expected child row. If a
+child was already complete in Linear when discovered, Quay can mark that
+expected row `complete_without_quay`; it then counts toward final readiness
+without requiring a Quay task.
+
+Linear blocked-by relations define ordering. Same-umbrella dependency rows use
+`scope: "umbrella"` and wait for blockers to reach
+`merged_to_feature_branch`; blockers outside the umbrella keep normal
+`merged` semantics.
+
+Quay may auto-merge only approved and green umbrella subtask PRs into the
+umbrella feature branch. It must never auto-merge normal task PRs or the final
+umbrella PR into the repository base branch.
+
+When every expected child is either linked to a task in
+`merged_to_feature_branch` or marked `complete_without_quay`, tick creates or
+reuses the final umbrella PR and a final Quay-owned task already in `pr-open`.
+For Linear-backed umbrellas, Quay uses the parent Linear issue title and URL
+captured at umbrella enqueue time when rendering that final PR; older workflows
+without captured metadata fall back to generic deterministic wording.
+That final task follows the normal Quay-owned PR lifecycle: CI polling,
+review, review feedback, worker fixes, and merge observation. Quay observes
+that final PR merge, but never performs it. After the final PR merges, Quay
+marks the umbrella workflow `completed`; closing the final PR without merging
+leaves the workflow active for operator repair.

@@ -42,10 +42,87 @@ The flow is:
    enabled.
 5. Compose a canonical brief and ticket snapshot.
 6. Run `quay validate-ticket`.
-7. Enqueue through the normal substrate path.
+7. Read native Linear blocked-by relations.
+8. Read native Linear parent/child hierarchy metadata.
+9. Enqueue through the normal substrate path, or create umbrella coordination
+   state when the issue is an umbrella parent.
 
 If Linear is disabled, the command fails with `adapter_not_enabled`. If the
 token env var is missing, it fails with `adapter_not_configured`.
+
+## Linear Blocked-By Dependencies
+
+At enqueue time, Quay reads Linear's native blocked-by relations for the issue.
+After enqueue, Quay schedules from its own `task_dependencies` rows only; it
+does not use future Linear state changes as the scheduler source of truth.
+
+Complete Linear blockers are recorded in the ticket snapshot but do not block
+enqueue. Incomplete blockers must already be tracked by Quay. If an incomplete
+blocker has a Quay task, the new task is created in `waiting_dependencies` and
+waits until that blocker reaches `merged`. If an incomplete blocker is not
+tracked, enqueue fails with `dependency_not_tracked` and does not create the
+dependent task.
+
+The ticket snapshot artifact includes `linear_blocked_by_relations`, including
+whether each relation was complete in Linear, whether Quay persisted a
+dependency row, and the tracked blocker task id when available.
+
+## Umbrella Tickets
+
+Linear-backed umbrella workflows use Linear's native hierarchy, not
+`quay-config` umbrella metadata.
+
+The parent Linear issue is the umbrella. Enqueue it first:
+
+```bash
+quay enqueue --repo myrepo --linear-issue ENG-200
+```
+
+If the issue has native Linear child issues, Quay creates or verifies a shared
+feature branch derived from the parent external ref, persists an umbrella
+workflow row, and records every child in `umbrella_expected_tasks`. Children
+that are already complete in Linear are recorded as `complete_without_quay`.
+No worker is spawned for the umbrella parent in the current flow.
+
+Child tickets use ordinary `quay-config` execution metadata:
+
+```yaml
+repo: myrepo
+tags:
+  - backend
+authors:
+  - name: Ada Lovelace
+    slack_id: U06TDC56VJB
+```
+
+When a child is enqueued, Quay resolves its native Linear parent to the
+persisted umbrella workflow and verifies the child is in the expected set. A
+child-before-parent enqueue fails with `umbrella_not_enqueued`; a child missing
+from the persisted expected set fails with `umbrella_subtask_not_expected`.
+
+Pass `--as-normal-task` only on a child issue when you intentionally want to
+ignore its native Linear parent membership for this enqueue. The flag does not
+turn an umbrella parent with children into a normal task. It also does not
+disable Linear blocked-by handling: Quay still reads native blocked-by
+relations and persists them as normal dependency rows.
+
+Linear blocked-by relations define ordering inside the umbrella. Same-umbrella
+blockers wait for `merged_to_feature_branch`; non-umbrella blockers keep normal
+`merged` semantics.
+
+Quay may auto-merge only approved and green umbrella subtask PRs into the
+shared feature branch. It never auto-merges normal task PRs or the final
+umbrella PR into the repository base branch.
+
+When every expected child is either linked to a task in
+`merged_to_feature_branch` or marked `complete_without_quay`, tick creates or
+reuses the final umbrella PR and records a final Quay-owned task at `pr-open`.
+The final PR title and managed body use the parent Linear issue title and URL
+captured when the umbrella parent was enqueued, with generic fallback wording
+for historical workflows that do not have those fields.
+The final task then follows the ordinary Quay PR lifecycle. When that final PR
+merges, Quay marks the umbrella workflow `completed`; closing it without merge
+does not mark the workflow delivered.
 
 ## Slack Context At Enqueue
 

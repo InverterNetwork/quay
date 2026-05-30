@@ -37,6 +37,7 @@ import {
   DEFAULT_MAX_SPAWN_FAILURES,
   DEFAULT_STALENESS_THRESHOLD_SECONDS,
   REVIEWER_GH_TOKEN_ENV,
+  WORKER_GH_TOKEN_ENV,
 } from "../core/tick.ts";
 import type { DB } from "../db/connection.ts";
 
@@ -143,6 +144,7 @@ type AdminMissionControlAttnReason =
   | "ci"
   | "slack"
   | "brief"
+  | "dependency"
   | "budget"
   | "loop"
   | "worktree";
@@ -298,6 +300,7 @@ const changeRequestSchema = z
 
 const ACTIVE_TASK_STATES = [
   "queued",
+  "waiting_dependencies",
   "running",
   "goal-completion-pending",
   "pr-open",
@@ -581,6 +584,7 @@ interface MissionControlEventRow {
 
 const TASK_STATE_SET = new Set<string>(TASK_STATES);
 const MISSION_CONTROL_TERMINAL_STATE_LIST = [
+  "merged_to_feature_branch",
   "merged",
   "cancelled",
   "closed_unmerged",
@@ -771,6 +775,7 @@ function deriveMissionControlAttention(
   const latest = recentEvents[0]?.event_type;
   if (latest === "ci_failed") return { reason: "ci", tone: "danger" };
   if (latest === "budget_exhausted") return { reason: "budget", tone: "danger" };
+  if (state === "waiting_dependencies") return { reason: "dependency", tone: "warn" };
   if (state === "waiting_human") return { reason: "slack", tone: "warn" };
   if (state === "awaiting-next-brief") return { reason: "brief", tone: "warn" };
   if (latest === "changes_requested") return { reason: "changes", tone: "warn" };
@@ -1759,6 +1764,9 @@ function buildAdapterSummaries(runtime: AdminApiRuntime): AdminAdapterSummary[] 
   const slackEnabled = runtime.config.adapters?.slack?.enabled === true;
   const slackEnv = runtime.config.adapters?.slack?.bot_token_env ?? "SLACK_TOKEN";
   const reviewerEnabled = runtime.config.reviewer?.enabled === true;
+  const workerReady =
+    hasEnv(env, WORKER_GH_TOKEN_ENV) ||
+    runtime.config.worker?.gh_token_file !== undefined;
   const reviewerReady =
     hasEnv(env, REVIEWER_GH_TOKEN_ENV) ||
     runtime.config.reviewer?.gh_token_file !== undefined;
@@ -1783,6 +1791,24 @@ function buildAdapterSummaries(runtime: AdminApiRuntime): AdminAdapterSummary[] 
         {
           label: "MAX_THREAD_MESSAGES",
           value: String(runtime.config.adapters?.slack?.max_thread_messages ?? 200),
+        },
+      ],
+    },
+    {
+      name: "github_worker",
+      title: "GitHub worker",
+      enabled: true,
+      ...adapterStatus(
+        true,
+        workerReady,
+        "worker token source configured",
+        `${WORKER_GH_TOKEN_ENV} or worker.gh_token_file not set`,
+      ),
+      fields: [
+        {
+          label: "WORKER_TOKEN_ENV",
+          value: WORKER_GH_TOKEN_ENV,
+          dot_tone: hasEnv(env, WORKER_GH_TOKEN_ENV) ? "good" : "warn",
         },
       ],
     },

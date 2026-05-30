@@ -188,6 +188,7 @@ export async function fetchTicketContextWithIssue(
     external_ref: externalRef,
     repo: block.repo,
     base_branch: block.base_branch,
+    umbrella: block.umbrella,
     brief,
     ticket_snapshot,
     slack_thread_ref: slackThreadRef,

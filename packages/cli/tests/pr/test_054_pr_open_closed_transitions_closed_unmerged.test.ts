@@ -85,3 +85,78 @@ test("test_054_pr_open_closed_transitions_closed_unmerged", async () => {
     to_state: "closed_unmerged",
   });
 });
+
+test("closed-unmerged final umbrella PR leaves workflow active", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-29T13:30:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-final-umbrella-pr-closed");
+  const taskId = insertTask(h.db, {
+    taskId: "umbrella-final-pr-closed",
+    repoId,
+    state: "pr-open",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1538',
+              branch_name = 'quay/umbrella/BRIX-1538',
+              base_branch = 'dev',
+              pr_number = 1539,
+              pr_url = 'https://github.example/repo/pull/1539'
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-04-29T13:00:00.000Z",
+  });
+  const workflow = h.db
+    .query<{ umbrella_workflow_id: number }, [string, string, string, string, string, number, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, final_pr_task_id,
+         final_pr_number, final_pr_url, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id`,
+    )
+    .get(
+      "BRIX-1538",
+      repoId,
+      "dev",
+      "quay/umbrella/BRIX-1538",
+      taskId,
+      1539,
+      "https://github.example/repo/pull/1539",
+      "2026-04-29T13:00:00.000Z",
+      "2026-04-29T13:00:00.000Z",
+    );
+  expect(workflow).not.toBeNull();
+
+  const built = buildTickDeps(h);
+  built.git.setLocalBranches(repoId, ["quay/umbrella/BRIX-1538"]);
+  built.git.setRemoteBranches(repoId, ["quay/umbrella/BRIX-1538"]);
+  built.github.setPrSnapshot(repoId, "quay/umbrella/BRIX-1538", {
+    state: "closed_unmerged",
+    headSha: "head-final-closed",
+    baseSha: "base-final-closed",
+    mergeable: "unknown",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: { checkSha: "head-final-closed", items: [] },
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([{ task_id: taskId, action: "pr_closed_unmerged" }]);
+  expect(built.github.mergePullRequestCalls).toEqual([]);
+  const workflowState = h.db
+    .query<{ state: string; updated_at: string }, [number]>(
+      `SELECT state, updated_at
+         FROM umbrella_workflows
+        WHERE umbrella_workflow_id = ?`,
+    )
+    .get(workflow!.umbrella_workflow_id);
+  expect(workflowState).toEqual({
+    state: "active",
+    updated_at: "2026-04-29T13:00:00.000Z",
+  });
+});

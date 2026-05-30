@@ -80,6 +80,7 @@ type RepoDbRow = Omit<RepoRow, "ignored_check_names" | "ignored_workflow_names">
 // Parked and terminal tasks keep their FK for forensics after archival.
 const ACTIVE_TASK_STATES = [
   "queued",
+  "waiting_dependencies",
   "running",
   "goal-completion-pending",
   "pr-open",

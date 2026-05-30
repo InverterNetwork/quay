@@ -18,6 +18,14 @@ export interface QuayConfigBlock {
   worker_execution: "oneshot" | "goal";
   slack_thread_ref: string | null;
   authors: QuayConfigAuthor[];
+  umbrella: QuayConfigUmbrella | null;
+}
+
+export interface QuayConfigUmbrella {
+  external_ref: string;
+  base_branch: string | null;
+  feature_branch: string | null;
+  depends_on: string[];
 }
 
 const FENCE_OPEN = /^[ \t]*```quay-config[ \t]*$/;
@@ -157,19 +165,17 @@ function parseYaml(text: string): { [key: string]: YamlValue } {
       out[key] = parseInlineValue(inline);
       continue;
     }
-    // No inline value; look for a list continuation.
-    if (
-      pos < tokens.length &&
-      tokens[pos]!.indent > 0 &&
-      tokens[pos]!.body.startsWith("-")
-    ) {
-      const result = parseList(tokens, pos);
-      out[key] = result.value;
-      pos = result.nextPos;
-    } else if (pos < tokens.length && tokens[pos]!.indent > 0) {
-      throw yamlError(
-        `expected list item at line ${tokens[pos]!.lineNo}`,
-      );
+    // No inline value; look for a list or object continuation.
+    if (pos < tokens.length && tokens[pos]!.indent > 0) {
+      if (tokens[pos]!.body.startsWith("-")) {
+        const result = parseList(tokens, pos);
+        out[key] = result.value;
+        pos = result.nextPos;
+      } else {
+        const result = parseObject(tokens, pos);
+        out[key] = result.value;
+        pos = result.nextPos;
+      }
     } else {
       out[key] = null;
     }
@@ -198,6 +204,49 @@ function unquoteScalar(s: string): string {
 interface ListResult {
   value: YamlValue[];
   nextPos: number;
+}
+
+interface ObjectResult {
+  value: { [key: string]: YamlValue };
+  nextPos: number;
+}
+
+function parseObject(tokens: Token[], start: number): ObjectResult {
+  const objectIndent = tokens[start]!.indent;
+  const obj: { [key: string]: YamlValue } = {};
+  let pos = start;
+  while (
+    pos < tokens.length &&
+    tokens[pos]!.indent === objectIndent &&
+    !tokens[pos]!.body.startsWith("-")
+  ) {
+    const t = tokens[pos]!;
+    const m = KEY_VALUE.exec(t.body);
+    if (!m) {
+      throw yamlError(`expected "key: value" at line ${t.lineNo}`);
+    }
+    const key = m[1]!;
+    const inline = m[2]!.trim();
+    pos++;
+    if (inline.length > 0) {
+      obj[key] = parseInlineValue(inline);
+      continue;
+    }
+    if (pos < tokens.length && tokens[pos]!.indent > objectIndent) {
+      if (tokens[pos]!.body.startsWith("-")) {
+        const result = parseList(tokens, pos);
+        obj[key] = result.value;
+        pos = result.nextPos;
+      } else {
+        const result = parseObject(tokens, pos);
+        obj[key] = result.value;
+        pos = result.nextPos;
+      }
+    } else {
+      obj[key] = null;
+    }
+  }
+  return { value: obj, nextPos: pos };
 }
 
 function parseList(tokens: Token[], start: number): ListResult {
@@ -396,5 +445,79 @@ function validateBlock(yaml: { [key: string]: YamlValue }): QuayConfigBlock {
     authors.push({ name, slack_id });
   }
 
-  return { repo, base_branch, tags, worker_execution, slack_thread_ref, authors };
+  const umbrella = parseUmbrella(yaml);
+
+  return {
+    repo,
+    base_branch,
+    tags,
+    worker_execution,
+    slack_thread_ref,
+    authors,
+    umbrella,
+  };
+}
+
+function parseUmbrella(yaml: { [key: string]: YamlValue }): QuayConfigUmbrella | null {
+  if (!("umbrella" in yaml) || yaml.umbrella === null || yaml.umbrella === undefined) {
+    return null;
+  }
+  const rawUmbrella = yaml.umbrella;
+  if (!isPlainObject(rawUmbrella)) {
+    throw blockError("umbrella must be an object");
+  }
+  const rawExternalRef = rawUmbrella.external_ref;
+  if (typeof rawExternalRef !== "string" || rawExternalRef.length === 0) {
+    throw blockError("umbrella.external_ref must be a non-empty string");
+  }
+
+  let base_branch: string | null = null;
+  if (
+    rawUmbrella.base_branch !== null &&
+    rawUmbrella.base_branch !== undefined
+  ) {
+    const raw = rawUmbrella.base_branch;
+    if (typeof raw !== "string" || raw.length === 0) {
+      throw blockError("umbrella.base_branch must be a non-empty string");
+    }
+    if (!isValidBaseBranchName(raw)) {
+      throw blockError(`umbrella.${BASE_BRANCH_ERROR}`);
+    }
+    base_branch = raw;
+  }
+
+  let feature_branch: string | null = null;
+  if (
+    rawUmbrella.feature_branch !== null &&
+    rawUmbrella.feature_branch !== undefined
+  ) {
+    const raw = rawUmbrella.feature_branch;
+    if (typeof raw !== "string" || raw.length === 0) {
+      throw blockError("umbrella.feature_branch must be a non-empty string");
+    }
+    if (!isValidBaseBranchName(raw)) {
+      throw blockError(`umbrella.feature_branch ${BASE_BRANCH_ERROR}`);
+    }
+    feature_branch = raw;
+  }
+
+  const rawDependsOn = rawUmbrella.depends_on ?? [];
+  if (!Array.isArray(rawDependsOn)) {
+    throw blockError("umbrella.depends_on must be a list of strings");
+  }
+  const depends_on: string[] = [];
+  for (let i = 0; i < rawDependsOn.length; i++) {
+    const v = rawDependsOn[i];
+    if (typeof v !== "string" || v.length === 0) {
+      throw blockError(`umbrella.depends_on[${i}] must be a non-empty string`);
+    }
+    depends_on.push(v.toUpperCase());
+  }
+
+  return {
+    external_ref: rawExternalRef.toUpperCase(),
+    base_branch,
+    feature_branch,
+    depends_on,
+  };
 }

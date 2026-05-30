@@ -84,6 +84,21 @@ export class FakeGit implements GitPort {
     return this.openPrBranches.get(repoId)?.has(branch) ?? false;
   }
 
+  ensureRemoteBranchFromBase(
+    repoId: string,
+    branch: string,
+    baseBranch: string,
+  ): void {
+    this.record("ensureRemoteBranchFromBase", { repoId, branch, baseBranch });
+    this.fetch(repoId, baseBranch);
+    let set = this.remoteBranches.get(repoId);
+    if (!set) {
+      set = new Set<string>();
+      this.remoteBranches.set(repoId, set);
+    }
+    set.add(branch);
+  }
+
   worktreeAdd(
     repoId: string,
     worktreePath: string,
@@ -144,6 +159,11 @@ export class FakeGit implements GitPort {
       repoId,
       branch: `pr/${prNumber}@${headSha}`,
     });
+  }
+
+  worktreeCurrentBranch(worktreePath: string): string | null {
+    this.record("worktreeCurrentBranch", { worktreePath });
+    return this.worktreeBranches.get(worktreePath)?.branch ?? null;
   }
 
   worktreeDetach(worktreePath: string): void {

@@ -83,6 +83,12 @@ test("test_linear_sync_queue_does_not_block_on_enqueue", async () => {
     async getIssue() {
       throw new Error("not used");
     },
+    async getBlockedByRelations() {
+      throw new Error("not used");
+    },
+    async getIssueHierarchy() {
+      throw new Error("not used");
+    },
     setIssueState: () => new Promise<void>((r) => (resolveSetState = r)),
   };
   const queue = new LinearSyncQueue(slowLinear);

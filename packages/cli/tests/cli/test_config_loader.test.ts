@@ -456,6 +456,9 @@ test("tickOptionsFromConfig maps every supported key", () => {
       gate_quay_owned_done: true,
       gh_token_file: "/run/hermes/reviewer-gh-token",
     },
+    worker: {
+      gh_token_file: "/run/hermes/worker-gh-token",
+    },
     context: {
       reference_repos_root: "/home/hermes/.hermes/code",
     },
@@ -472,9 +475,34 @@ test("tickOptionsFromConfig maps every supported key", () => {
     maxNonBudgetRespawns: 7,
     reviewerEnabled: true,
     gateQuayOwnedDone: true,
+    workerGhTokenFile: "/run/hermes/worker-gh-token",
     reviewerGhTokenFile: "/run/hermes/reviewer-gh-token",
     referenceReposRoot: "/home/hermes/.hermes/code",
   });
+});
+
+test("[worker].gh_token_file round-trips through loadConfig", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[worker]
+gh_token_file = "/run/hermes/worker-gh-token"
+`,
+  );
+  const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
+  expect(result.config.worker?.gh_token_file).toBe(
+    "/run/hermes/worker-gh-token",
+  );
+});
+
+test("[worker].gh_token_file rejects an empty string", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(path, `[worker]\ngh_token_file = ""\n`);
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /gh_token_file/,
+  );
 });
 
 test("[reviewer].gh_token_file round-trips through loadConfig", () => {
