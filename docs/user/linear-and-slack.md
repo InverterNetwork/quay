@@ -80,9 +80,11 @@ quay enqueue --repo myrepo --linear-issue ENG-200
 
 If the issue has native Linear child issues, Quay creates or verifies a shared
 feature branch derived from the parent external ref, persists an umbrella
-workflow row, and records every child in `umbrella_expected_tasks`. Children
-that are already complete in Linear are recorded as `complete_without_quay`.
-No worker is spawned for the umbrella parent in the current flow.
+workflow row, records every child in `umbrella_expected_tasks`, and
+materializes every incomplete child as a Quay task targeting the umbrella
+feature branch. Children that are already complete in Linear are recorded as
+`complete_without_quay` and do not get Quay tasks. No worker is spawned for the
+umbrella parent in the current flow.
 
 Child tickets use ordinary `quay-config` execution metadata:
 
@@ -95,10 +97,9 @@ authors:
     slack_id: U06TDC56VJB
 ```
 
-When a child is enqueued, Quay resolves its native Linear parent to the
-persisted umbrella workflow and verifies the child is in the expected set. A
-child-before-parent enqueue fails with `umbrella_not_enqueued`; a child missing
-from the persisted expected set fails with `umbrella_subtask_not_expected`.
+Do not enqueue child tickets individually for the umbrella flow. Direct enqueue
+of a Linear child issue fails with `umbrella_child_direct_enqueue`, even if the
+parent umbrella was already enqueued and the child task already exists.
 
 Pass `--as-normal-task` only on a child issue when you intentionally want to
 ignore its native Linear parent membership for this enqueue. The flag does not
