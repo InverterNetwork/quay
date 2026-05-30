@@ -52,6 +52,7 @@ export interface EnqueueLinearIssueArgs {
   baseBranch: string | null;
   requestPrScreenshots: boolean;
   requirePrScreenshots: boolean;
+  asNormalTask: boolean;
   workerAgent: string | null;
   workerModel: string | null;
   reviewerAgent: string | null;
@@ -201,7 +202,7 @@ export async function handleEnqueueLinearIssue(
   }
 
   let resolvedLinearUmbrella: LinearUmbrellaSubtaskResolution | null = null;
-  if (hierarchy.parent !== null) {
+  if (!args.asNormalTask && hierarchy.parent !== null) {
     try {
       resolvedLinearUmbrella = resolveLinearUmbrellaSubtask(
         deps.enqueueDeps.db,
@@ -241,6 +242,9 @@ export async function handleEnqueueLinearIssue(
         ctx.ticket_snapshot,
         dependencyResolution.snapshotRelations,
         hierarchy,
+        args.asNormalTask
+          ? { linear_umbrella_membership_override: "as_normal_task" }
+          : {},
       ),
     };
   } catch (err) {
@@ -642,23 +646,29 @@ function augmentTicketSnapshot(
   snapshot: string,
   relations: LinearDependencySnapshot[],
   hierarchy: LinearIssueHierarchy,
+  options: { linear_umbrella_membership_override?: string | null } = {},
 ): string {
   const hierarchySnapshot = buildLinearHierarchySnapshot(hierarchy);
   try {
     const parsed = JSON.parse(snapshot) as Record<string, unknown>;
     parsed.linear_blocked_by_relations = relations;
     parsed.linear_hierarchy = hierarchySnapshot;
+    if (options.linear_umbrella_membership_override !== undefined) {
+      parsed.linear_umbrella_membership_override =
+        options.linear_umbrella_membership_override;
+    }
     return JSON.stringify(parsed, null, 2);
   } catch {
-    return JSON.stringify(
-      {
-        original_snapshot: snapshot,
-        linear_blocked_by_relations: relations,
-        linear_hierarchy: hierarchySnapshot,
-      },
-      null,
-      2,
-    );
+    const wrapped: Record<string, unknown> = {
+      original_snapshot: snapshot,
+      linear_blocked_by_relations: relations,
+      linear_hierarchy: hierarchySnapshot,
+    };
+    if (options.linear_umbrella_membership_override !== undefined) {
+      wrapped.linear_umbrella_membership_override =
+        options.linear_umbrella_membership_override;
+    }
+    return JSON.stringify(wrapped, null, 2);
   }
 }
 

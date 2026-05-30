@@ -804,6 +804,86 @@ test("Linear child enqueue fails before substrate when parent umbrella is missin
   expect(counts).toEqual({ tasks: 0, artifacts: 0 });
 });
 
+test("Linear child as-normal override ignores umbrella membership but keeps dependencies", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+  const blockerTaskId = insertTrackedTask("pr-open", "ENG-2430");
+
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2431" }));
+  built.linear.setIssueHierarchy("ENG-2431", {
+    parent: {
+      identifier: "ENG-2429",
+      url: "https://linear.app/inverter/issue/ENG-2429",
+      title: "Planning-only parent",
+      stateType: "started",
+    },
+    children: [],
+  });
+  built.linear.setBlockedByRelations("ENG-2431", [
+    blockedByRelation("ENG-2430", "started"),
+  ]);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      REPO_ID,
+      "--linear-issue",
+      "ENG-2431",
+      "--as-normal-task",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const enqResult = JSON.parse(io.out().trim());
+  expect(enqResult.state).toBe("waiting_dependencies");
+
+  const task = h.db
+    .query<{ base_branch: string; external_ref: string | null }, [string]>(
+      `SELECT base_branch, external_ref FROM tasks WHERE task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(task).toEqual({ base_branch: "main", external_ref: "ENG-2431" });
+
+  const umbrellaLinks = h.db
+    .query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM umbrella_tasks`)
+    .get();
+  expect(umbrellaLinks?.count).toBe(0);
+
+  const dep = h.db
+    .query<
+      { dependency_task_id: string; required_state: string; satisfied_at: string | null },
+      [string]
+    >(
+      `SELECT dependency_task_id, required_state, satisfied_at
+         FROM task_dependencies WHERE dependent_task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(dep).toEqual({
+    dependency_task_id: blockerTaskId,
+    required_state: "merged",
+    satisfied_at: null,
+  });
+
+  const snapshot = h.db
+    .query<{ file_path: string }, [string]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND kind = 'ticket_snapshot'
+        ORDER BY artifact_id DESC LIMIT 1`,
+    )
+    .get(enqResult.task_id);
+  const parsed = JSON.parse(readFileSync(snapshot!.file_path, "utf8"));
+  expect(parsed.linear_hierarchy.parent).toMatchObject({
+    identifier: "ENG-2429",
+  });
+  expect(parsed.linear_umbrella_membership_override).toBe("as_normal_task");
+});
+
 test("Linear child enqueue fails before substrate when child is not expected", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
@@ -946,6 +1026,34 @@ test("enqueue linear issue rejects value-bearing PR screenshot boolean flag befo
   expect(parsed.error).toBe("usage_error");
   expect(parsed.message).toContain(
     "--request-pr-screenshots is a boolean flag and does not take a value",
+  );
+  expect(built.linear.getIssueCalls).toHaveLength(0);
+});
+
+test("enqueue linear issue rejects value-bearing as-normal-task boolean flag before adapter calls", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      REPO_ID,
+      "--linear-issue",
+      "ENG-145",
+      "--as-normal-task=true",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  const parsed = JSON.parse(io.err());
+  expect(parsed.error).toBe("usage_error");
+  expect(parsed.message).toContain(
+    "--as-normal-task is a boolean flag and does not take a value",
   );
   expect(built.linear.getIssueCalls).toHaveLength(0);
 });

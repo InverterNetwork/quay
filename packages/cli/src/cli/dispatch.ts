@@ -880,7 +880,11 @@ async function handleEnqueue(
 ): Promise<DispatchResult> {
   if (wantsHelp(argv)) return printHelp(io, ["enqueue"]);
   const validation = validateFlags(argv, {
-    boolean: ["--request-pr-screenshots", "--require-pr-screenshots"],
+    boolean: [
+      "--request-pr-screenshots",
+      "--require-pr-screenshots",
+      "--as-normal-task",
+    ],
     valued: [
       "--input",
       "--repo",
@@ -1254,6 +1258,7 @@ async function handleEnqueueLinearIssueFlow(
       baseBranch,
       requestPrScreenshots: argv.includes("--request-pr-screenshots"),
       requirePrScreenshots: argv.includes("--require-pr-screenshots"),
+      asNormalTask: argv.includes("--as-normal-task"),
       workerAgent: readFlag(argv, "--worker-agent"),
       workerModel: readFlag(argv, "--worker-model"),
       reviewerAgent: readFlag(argv, "--reviewer-agent"),
