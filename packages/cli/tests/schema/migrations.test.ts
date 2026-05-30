@@ -166,6 +166,7 @@ test("task_dependencies table has generic dependency fields", () => {
     "satisfied_at",
     "created_at",
     "updated_at",
+    "umbrella_workflow_id",
   ]);
 });
 

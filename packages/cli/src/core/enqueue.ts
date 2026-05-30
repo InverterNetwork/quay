@@ -41,7 +41,9 @@ import {
   createOrVerifyUmbrellaWorkflow,
   deriveUmbrellaFeatureBranch,
   linkUmbrellaTask,
+  markUmbrellaExpectedTaskCompleteWithoutQuay,
   markUmbrellaExpectedTaskLinked,
+  UMBRELLA_EXPECTED_TASK_COMPLETION_SOURCES,
 } from "./umbrella_workflows.ts";
 
 export const DEFAULT_RETRY_BUDGET = 5;
@@ -100,6 +102,7 @@ export const enqueueInputSchema = z
             dependency_source: z.enum(TASK_DEPENDENCY_SOURCES),
             dependency_external_ref: z.string().min(1).nullable().optional(),
             dependency_repo_id: z.string().min(1).nullable().optional(),
+            umbrella_workflow_id: z.number().int().positive().nullable().optional(),
             scope: z.enum(TASK_DEPENDENCY_SCOPES).optional(),
             required_state: z.enum(TASK_DEPENDENCY_REQUIRED_STATES).optional(),
             satisfied_at: z.string().min(1).nullable().optional(),
@@ -124,6 +127,18 @@ export const enqueueInputSchema = z
         base_branch: baseBranchNameSchema.nullable().optional(),
         feature_branch: baseBranchNameSchema.nullable().optional(),
         expected_external_ref: z.string().min(1).nullable().optional(),
+        complete_without_quay: z
+          .array(
+            z
+              .object({
+                external_ref: z.string().min(1),
+                completion_source: z.enum(UMBRELLA_EXPECTED_TASK_COMPLETION_SOURCES),
+                completion_reason: z.string().nullable().optional(),
+                completed_at: z.string().min(1),
+              })
+              .strict(),
+          )
+          .optional(),
       })
       .strict()
       .optional(),
@@ -146,6 +161,7 @@ export interface EnqueueResolvedDependency {
   dependency_source: TaskDependencySource;
   dependency_external_ref?: string | null;
   dependency_repo_id?: string | null;
+  umbrella_workflow_id?: number | null;
   scope?: TaskDependencyScope;
   required_state?: TaskDependencyRequiredState;
   satisfied_at?: string | null;
@@ -289,6 +305,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           expectedExternalRef: string | null;
         }
       | null = null;
+    let resolvedUmbrellaWorkflowId: number | null = null;
     if (input.umbrella !== undefined) {
       const umbrellaBaseBranch =
         input.umbrella.base_branch ?? effectiveBaseBranch;
@@ -411,6 +428,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
             ensureBranch: false,
           },
         );
+        resolvedUmbrellaWorkflowId = umbrellaWorkflow.umbrella_workflow_id;
         linkUmbrellaTask(deps.db, {
           umbrellaWorkflowId: umbrellaWorkflow.umbrella_workflow_id,
           taskId,
@@ -424,6 +442,16 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
             now,
           });
         }
+        for (const completed of input.umbrella?.complete_without_quay ?? []) {
+          markUmbrellaExpectedTaskCompleteWithoutQuay(deps.db, {
+            umbrellaWorkflowId: umbrellaWorkflow.umbrella_workflow_id,
+            externalRef: completed.external_ref,
+            completionSource: completed.completion_source,
+            completionReason: completed.completion_reason ?? null,
+            completedAt: completed.completed_at,
+            now,
+          });
+        }
       }
 
       const createdDependencies: TaskDependencyRow[] = [];
@@ -433,6 +461,9 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           dependencySource: dep.dependency_source,
           dependencyExternalRef: dep.dependency_external_ref ?? null,
           dependencyRepoId: dep.dependency_repo_id ?? null,
+          umbrellaWorkflowId:
+            dep.umbrella_workflow_id ??
+            (dep.scope === "umbrella" ? resolvedUmbrellaWorkflowId : null),
           satisfiedAt: dep.satisfied_at ?? null,
           now,
         };

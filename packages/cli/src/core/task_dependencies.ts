@@ -1,5 +1,6 @@
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
+import { QuayError } from "./errors.ts";
 import { enqueueOutboxItem } from "./outbox.ts";
 import { transitionTaskState } from "./task_state.ts";
 
@@ -25,6 +26,7 @@ export interface CreateTaskDependencyInput {
   dependencySource: TaskDependencySource;
   dependencyExternalRef?: string | null;
   dependencyRepoId?: string | null;
+  umbrellaWorkflowId?: number | null;
   kind?: TaskDependencyKind;
   scope?: TaskDependencyScope;
   requiredState?: TaskDependencyRequiredState;
@@ -39,6 +41,7 @@ export interface TaskDependencyRow {
   dependency_source: TaskDependencySource;
   dependency_external_ref: string | null;
   dependency_repo_id: string | null;
+  umbrella_workflow_id: number | null;
   kind: TaskDependencyKind;
   scope: TaskDependencyScope;
   required_state: TaskDependencyRequiredState;
@@ -68,12 +71,14 @@ export function createTaskDependency(
   db: DB,
   input: CreateTaskDependencyInput,
 ): TaskDependencyRow {
+  const scope = input.scope ?? "normal";
   if (
     (input.dependencyTaskId === undefined || input.dependencyTaskId === null) &&
     (input.dependencyExternalRef === undefined || input.dependencyExternalRef === null)
   ) {
     throw new Error("task dependency requires dependencyTaskId or dependencyExternalRef");
   }
+  validateTaskDependencyInput(db, input, scope);
 
   const row = db
     .query<
@@ -84,6 +89,7 @@ export function createTaskDependency(
         string,
         string | null,
         string | null,
+        number | null,
         string,
         string,
         string,
@@ -94,12 +100,13 @@ export function createTaskDependency(
     >(
       `INSERT INTO task_dependencies (
          dependent_task_id, dependency_task_id, dependency_source,
-         dependency_external_ref, dependency_repo_id, kind, scope,
-         required_state, satisfied_at, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         dependency_external_ref, dependency_repo_id, umbrella_workflow_id,
+         kind, scope, required_state, satisfied_at, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING dependency_id, dependent_task_id, dependency_task_id,
                  dependency_source, dependency_external_ref, dependency_repo_id,
-                 kind, scope, required_state, satisfied_at, created_at, updated_at`,
+                 umbrella_workflow_id, kind, scope, required_state,
+                 satisfied_at, created_at, updated_at`,
     )
     .get(
       input.dependentTaskId,
@@ -107,8 +114,9 @@ export function createTaskDependency(
       input.dependencySource,
       input.dependencyExternalRef ?? null,
       input.dependencyRepoId ?? null,
+      input.umbrellaWorkflowId ?? null,
       input.kind ?? "blocked_by",
-      input.scope ?? "normal",
+      scope,
       input.requiredState ?? "merged",
       input.satisfiedAt ?? null,
       input.now,
@@ -118,12 +126,192 @@ export function createTaskDependency(
   return row;
 }
 
+function validateTaskDependencyInput(
+  db: DB,
+  input: CreateTaskDependencyInput,
+  scope: TaskDependencyScope,
+): void {
+  if (scope === "normal") {
+    if (input.umbrellaWorkflowId !== undefined && input.umbrellaWorkflowId !== null) {
+      throw new QuayError(
+        "validation_error",
+        "normal task dependencies must not reference an umbrella workflow",
+        { umbrella_workflow_id: input.umbrellaWorkflowId },
+      );
+    }
+    validateNoDependencyCycle(db, input);
+    return;
+  }
+
+  if (input.umbrellaWorkflowId === undefined || input.umbrellaWorkflowId === null) {
+    throw new QuayError(
+      "validation_error",
+      "umbrella task dependencies require umbrella_workflow_id",
+      { dependent_task_id: input.dependentTaskId },
+    );
+  }
+
+  const dependentLinked = db
+    .query<{ n: number }, [number, string]>(
+      `SELECT 1 AS n
+         FROM umbrella_tasks
+        WHERE umbrella_workflow_id = ?
+          AND task_id = ?
+        LIMIT 1`,
+    )
+    .get(input.umbrellaWorkflowId, input.dependentTaskId);
+  if (dependentLinked === null || dependentLinked === undefined) {
+    throw new QuayError(
+      "validation_error",
+      "umbrella dependency dependent task is not linked to the umbrella workflow",
+      {
+        umbrella_workflow_id: input.umbrellaWorkflowId,
+        dependent_task_id: input.dependentTaskId,
+      },
+    );
+  }
+
+  const resolvedDependencyTaskId =
+    input.dependencyTaskId ??
+    resolveDependencyTaskIdByExternalRef(
+      db,
+      input.dependencyExternalRef ?? null,
+      input.dependencyRepoId ?? null,
+    );
+  if (resolvedDependencyTaskId !== null) {
+    const dependencyLinked = db
+      .query<{ n: number }, [number, string]>(
+        `SELECT 1 AS n
+           FROM umbrella_tasks
+          WHERE umbrella_workflow_id = ?
+            AND task_id = ?
+          LIMIT 1`,
+      )
+      .get(input.umbrellaWorkflowId, resolvedDependencyTaskId);
+    if (dependencyLinked === null || dependencyLinked === undefined) {
+      throw new QuayError(
+        "validation_error",
+        "umbrella dependency blocker task is not linked to the same umbrella workflow",
+        {
+          umbrella_workflow_id: input.umbrellaWorkflowId,
+          dependent_task_id: input.dependentTaskId,
+          dependency_task_id: resolvedDependencyTaskId,
+        },
+      );
+    }
+  }
+
+  if (input.dependencyExternalRef !== undefined && input.dependencyExternalRef !== null) {
+    const expected = db
+      .query<{ n: number }, [number, string]>(
+        `SELECT 1 AS n
+           FROM umbrella_expected_tasks
+          WHERE umbrella_workflow_id = ?
+            AND external_ref = ?
+          LIMIT 1`,
+      )
+      .get(input.umbrellaWorkflowId, input.dependencyExternalRef);
+    if (expected === null || expected === undefined) {
+      throw new QuayError(
+        "validation_error",
+        "umbrella dependency external ref is not expected in the umbrella workflow",
+        {
+          umbrella_workflow_id: input.umbrellaWorkflowId,
+          dependent_task_id: input.dependentTaskId,
+          dependency_external_ref: input.dependencyExternalRef,
+        },
+      );
+    }
+  }
+
+  validateNoDependencyCycle(db, input);
+}
+
+function validateNoDependencyCycle(
+  db: DB,
+  input: CreateTaskDependencyInput,
+): void {
+  const dependencyTaskId =
+    input.dependencyTaskId ??
+    resolveDependencyTaskIdByExternalRef(
+      db,
+      input.dependencyExternalRef ?? null,
+      input.dependencyRepoId ?? null,
+    );
+  if (dependencyTaskId === null) return;
+  if (dependencyTaskId === input.dependentTaskId) {
+    throwDependencyCycle(input.dependentTaskId, dependencyTaskId);
+  }
+  const closesCycle = db
+    .query<{ n: number }, [string, string]>(
+      `WITH RECURSIVE dependency_graph(task_id) AS (
+         SELECT ? AS task_id
+         UNION
+         SELECT COALESCE(td.dependency_task_id, external_task.task_id)
+           FROM task_dependencies td
+           JOIN dependency_graph dg
+             ON td.dependent_task_id = dg.task_id
+           LEFT JOIN tasks external_task
+             ON td.dependency_task_id IS NULL
+            AND td.dependency_external_ref IS NOT NULL
+            AND external_task.external_ref = td.dependency_external_ref
+            AND (
+                  td.dependency_repo_id IS NULL
+               OR external_task.repo_id = td.dependency_repo_id
+            )
+          WHERE COALESCE(td.dependency_task_id, external_task.task_id) IS NOT NULL
+       )
+       SELECT 1 AS n
+         FROM dependency_graph
+        WHERE task_id = ?
+        LIMIT 1`,
+    )
+    .get(dependencyTaskId, input.dependentTaskId);
+  if (closesCycle !== null && closesCycle !== undefined) {
+    throwDependencyCycle(input.dependentTaskId, dependencyTaskId);
+  }
+}
+
+function resolveDependencyTaskIdByExternalRef(
+  db: DB,
+  externalRef: string | null,
+  repoId: string | null,
+): string | null {
+  if (externalRef === null) return null;
+  return (
+    db
+      .query<{ task_id: string }, [string, string | null, string | null]>(
+        `SELECT task_id
+           FROM tasks
+          WHERE external_ref = ?
+            AND (? IS NULL OR repo_id = ?)
+          LIMIT 1`,
+      )
+      .get(externalRef, repoId, repoId)?.task_id ?? null
+  );
+}
+
+function throwDependencyCycle(
+  dependentTaskId: string,
+  dependencyTaskId: string,
+): never {
+  throw new QuayError(
+    "dependency_cycle",
+    "task dependency would create a cycle",
+    {
+      dependent_task_id: dependentTaskId,
+      dependency_task_id: dependencyTaskId,
+    },
+  );
+}
+
 export function listTaskDependencies(db: DB, taskId: string): TaskDependencyRow[] {
   return db
     .query<TaskDependencyRow, [string]>(
       `SELECT dependency_id, dependent_task_id, dependency_task_id,
               dependency_source, dependency_external_ref, dependency_repo_id,
-              kind, scope, required_state, satisfied_at, created_at, updated_at
+              umbrella_workflow_id, kind, scope, required_state, satisfied_at,
+              created_at, updated_at
          FROM task_dependencies
         WHERE dependent_task_id = ?
         ORDER BY satisfied_at IS NOT NULL, dependency_id`,
@@ -156,7 +344,8 @@ export function markTaskDependencySatisfied(
           WHERE dependency_id = ?
           RETURNING dependency_id, dependent_task_id, dependency_task_id,
                     dependency_source, dependency_external_ref, dependency_repo_id,
-                    kind, scope, required_state, satisfied_at, created_at, updated_at`,
+                    umbrella_workflow_id, kind, scope, required_state,
+                    satisfied_at, created_at, updated_at`,
       )
       .get(now, now, dependencyId) ?? null
   );
@@ -177,7 +366,8 @@ export function satisfyDependenciesForMergedTask(
           AND satisfied_at IS NULL
         RETURNING dependency_id, dependent_task_id, dependency_task_id,
                   dependency_source, dependency_external_ref, dependency_repo_id,
-                  kind, scope, required_state, satisfied_at, created_at, updated_at`,
+                  umbrella_workflow_id, kind, scope, required_state,
+                  satisfied_at, created_at, updated_at`,
     )
     .all(now, now, dependencyTaskId);
 }
@@ -197,7 +387,8 @@ export function satisfyDependenciesForMergedToFeatureBranchTask(
           AND satisfied_at IS NULL
         RETURNING dependency_id, dependent_task_id, dependency_task_id,
                   dependency_source, dependency_external_ref, dependency_repo_id,
-                  kind, scope, required_state, satisfied_at, created_at, updated_at`,
+                  umbrella_workflow_id, kind, scope, required_state,
+                  satisfied_at, created_at, updated_at`,
     )
     .all(now, now, dependencyTaskId);
 }
@@ -257,6 +448,7 @@ export function enqueueDependencyWaitingOutboxItem(
         dependency_task_id: dep.dependency_task_id,
         dependency_external_ref: dep.dependency_external_ref,
         dependency_repo_id: dep.dependency_repo_id,
+        umbrella_workflow_id: dep.umbrella_workflow_id,
         dependency_source: dep.dependency_source,
         required_state: dep.required_state,
         scope: dep.scope,
@@ -292,7 +484,7 @@ function loadWaitingDependencyEvaluations(
     .query<WaitingDependencyEvaluationRow, [string]>(
       `SELECT d.dependency_id, d.dependent_task_id, d.dependency_task_id,
               d.dependency_source, d.dependency_external_ref, d.dependency_repo_id,
-              d.kind, d.scope, d.required_state, d.satisfied_at,
+              d.umbrella_workflow_id, d.kind, d.scope, d.required_state, d.satisfied_at,
               d.created_at, d.updated_at,
               COALESCE(blocker.task_id, external_blocker.task_id) AS blocker_task_id,
               COALESCE(blocker.state, external_blocker.state) AS blocker_state
@@ -350,6 +542,7 @@ function enqueueDependencyFailedOutboxItem(
       dependency_task_id: dep.blocker_task_id ?? dep.dependency_task_id,
       dependency_external_ref: dep.dependency_external_ref,
       dependency_repo_id: dep.dependency_repo_id,
+      umbrella_workflow_id: dep.umbrella_workflow_id,
       dependency_source: dep.dependency_source,
       blocker_state: dep.blocker_state,
     },
