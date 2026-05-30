@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { AdminApiRuntime } from "./api.ts";
 import { createEchoAgentAdapter } from "./agent_echo_adapter.ts";
-import type { AgentAdapter, AgentSession, AgentUiContext } from "./agent_types.ts";
+import type { AdminRequestAuditContext } from "./auth.ts";
+import type { AgentAdapter, AgentApproval, AgentEvent, AgentSession, AgentUiContext } from "./agent_types.ts";
 import { createUnavailableAgentAdapter } from "./agent_unavailable_adapter.ts";
 import {
   HermesAgentAdapter,
@@ -17,7 +18,21 @@ interface AgentGateway {
     request: Request,
     segments: string[],
     corsHeaders: JsonHeaders,
+    audit: AdminRequestAuditContext,
   ) => Promise<Response | null>;
+}
+
+interface AgentGatewaySessionState {
+  session: AgentSession;
+  approvals: Map<string, AgentApprovalState>;
+}
+
+interface AgentApprovalState extends AgentApproval {
+  status: "proposed" | "running" | "rejected" | "succeeded" | "failed";
+  createdAt: string;
+  updatedAt: string;
+  decision?: "approved" | "rejected";
+  exitCode?: number;
 }
 
 class AgentGatewayHttpError extends Error {
@@ -71,11 +86,11 @@ const approvalDecisionSchema = z
   .strict();
 
 export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
-  const sessions = new Map<string, AgentSession>();
+  const sessions = new Map<string, AgentGatewaySessionState>();
   const adapter = agentAdapterForRuntime(runtime);
 
   return {
-    async handle(request, segments, corsHeaders) {
+    async handle(request, segments, corsHeaders, audit) {
       try {
         if (isCreateSessionRoute(segments)) {
           const parsed = parseWithSchema(
@@ -93,7 +108,7 @@ export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
             unavailable: false,
           };
           await adapter.createSession({ session });
-          sessions.set(session.sessionId, session);
+          sessions.set(session.sessionId, { session, approvals: new Map() });
           return jsonResponse(
             {
               session_id: session.sessionId,
@@ -107,23 +122,27 @@ export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
         }
 
         if (isSendMessageRoute(segments)) {
-          const session = requireSession(sessions, segments[3]);
+          const state = requireSession(sessions, segments[3]);
           const parsed = parseWithSchema(
             sendMessageSchema,
             await readJsonBody(request),
             "agent message request invalid",
           );
-          session.lastContext = parsed.context;
+          state.session.lastContext = parsed.context;
           const events = adapter.sendMessage({
-            session,
+            session: state.session,
             message: parsed.message,
             context: parsed.context,
           });
-          return eventStreamResponse(events, requestedStreamFormat(request), corsHeaders);
+          return eventStreamResponse(
+            trackAgentEvents(state, events),
+            requestedStreamFormat(request),
+            corsHeaders,
+          );
         }
 
         if (isApprovalRoute(segments)) {
-          const session = requireSession(sessions, segments[3]);
+          const state = requireSession(sessions, segments[3]);
           const approvalId = segments[5];
           if (approvalId === undefined) {
             throw new AgentGatewayHttpError(404, "agent_approval_not_found", "agent approval not found");
@@ -133,20 +152,56 @@ export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
             await readJsonBody(request),
             "agent approval request invalid",
           );
+          const approval = state.approvals.get(approvalId);
+          if (approval === undefined) {
+            throw new AgentGatewayHttpError(
+              404,
+              "agent_approval_not_found",
+              `agent approval "${approvalId}" not found`,
+            );
+          }
+          if (approval.status !== "proposed") {
+            throw new AgentGatewayHttpError(
+              409,
+              "agent_approval_already_decided",
+              `agent approval "${approvalId}" has already been decided`,
+              {
+                approval_id: approval.approvalId,
+                status: approval.status,
+                decision: approval.decision,
+              },
+            );
+          }
+          approval.decision = parsed.decision;
+          approval.status = parsed.decision === "approved" ? "running" : "rejected";
+          approval.updatedAt = new Date().toISOString();
           const events = adapter.decideApproval({
-            session,
+            session: state.session,
             approvalId,
             decision: parsed.decision,
+            approval,
           });
-          return eventStreamResponse(events, requestedStreamFormat(request), corsHeaders);
+          return eventStreamResponse(
+            trackApprovalDecisionEvents({
+              runtime,
+              request,
+              audit,
+              state,
+              approval,
+              decision: parsed.decision,
+              events,
+            }),
+            requestedStreamFormat(request),
+            corsHeaders,
+          );
         }
 
         if (isStopRoute(segments)) {
-          const session = requireSession(sessions, segments[3]);
-          await adapter.stop({ session });
-          session.activeMessageId = null;
+          const state = requireSession(sessions, segments[3]);
+          await adapter.stop({ session: state.session });
+          state.session.activeMessageId = null;
           return jsonResponse(
-            { session_id: session.sessionId, stopped: true },
+            { session_id: state.session.sessionId, stopped: true },
             200,
             corsHeaders,
           );
@@ -202,9 +257,9 @@ function isStopRoute(segments: string[]): boolean {
 }
 
 function requireSession(
-  sessions: Map<string, AgentSession>,
+  sessions: Map<string, AgentGatewaySessionState>,
   sessionId: string | undefined,
-): AgentSession {
+): AgentGatewaySessionState {
   if (sessionId === undefined) {
     throw new AgentGatewayHttpError(404, "agent_session_not_found", "agent session not found");
   }
@@ -217,6 +272,127 @@ function requireSession(
     );
   }
   return session;
+}
+
+async function* trackAgentEvents(
+  state: AgentGatewaySessionState,
+  events: AsyncIterable<AgentEvent>,
+): AsyncIterable<AgentEvent> {
+  for await (const event of events) {
+    if (!rememberAgentEvent(state, event)) continue;
+    yield event;
+  }
+}
+
+async function* trackApprovalDecisionEvents(input: {
+  runtime: AdminApiRuntime;
+  request: Request;
+  audit: AdminRequestAuditContext;
+  state: AgentGatewaySessionState;
+  approval: AgentApprovalState;
+  decision: "approved" | "rejected";
+  events: AsyncIterable<AgentEvent>;
+}): AsyncIterable<AgentEvent> {
+  let success = true;
+  try {
+    for await (const event of input.events) {
+      if (!rememberAgentEvent(input.state, event)) continue;
+      yield event;
+    }
+  } catch (err) {
+    success = false;
+    input.approval.status = "failed";
+    input.approval.updatedAt = new Date().toISOString();
+    throw err;
+  } finally {
+    recordAgentApprovalAudit(input.runtime, input.request, input.audit, {
+      session: input.state.session,
+      approval: input.approval,
+      decision: input.decision,
+      success,
+      status: success ? 200 : 500,
+    });
+  }
+}
+
+function rememberAgentEvent(state: AgentGatewaySessionState, event: AgentEvent): boolean {
+  if (event.type === "approval_required") {
+    const existing = state.approvals.get(event.approvalId);
+    if (existing !== undefined && existing.status !== "proposed") {
+      existing.updatedAt = new Date().toISOString();
+      return false;
+    }
+    state.approvals.set(event.approvalId, {
+      messageId: event.messageId,
+      approvalId: event.approvalId,
+      command: event.command,
+      description: event.description,
+      affects: event.affects,
+      ...(event.note === undefined ? {} : { note: event.note }),
+      status: "proposed",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    return true;
+  }
+
+  if (event.type === "approval_result") {
+    const approval = state.approvals.get(event.approvalId);
+    if (approval === undefined) return true;
+    approval.status = event.status;
+    approval.updatedAt = new Date().toISOString();
+    if (event.exitCode !== undefined) approval.exitCode = event.exitCode;
+  }
+  return true;
+}
+
+function recordAgentApprovalAudit(
+  runtime: AdminApiRuntime,
+  request: Request,
+  audit: AdminRequestAuditContext,
+  input: {
+    session: AgentSession;
+    approval: AgentApprovalState;
+    decision: "approved" | "rejected";
+    success: boolean;
+    status: number;
+  },
+): void {
+  runtime.adminAudit?.({
+    action: "agent.approval.decide",
+    method: request.method,
+    path: new URL(request.url).pathname,
+    timestamp: new Date().toISOString(),
+    ...audit,
+    success: input.success,
+    status: input.status,
+    operation_summary: [
+      `agent approval ${input.decision}: ${truncateAuditText(input.approval.command, 160)}`,
+    ],
+    target_resources: [
+      `agent-session:${input.session.sessionId}`,
+      `agent-approval:${input.approval.approvalId}`,
+      ...input.approval.affects.map((item) =>
+        `${normalizeAuditResourcePart(item.label)}:${truncateAuditText(item.value, 80)}`
+      ),
+    ],
+    session_id: input.session.sessionId,
+    approval_id: input.approval.approvalId,
+    decision: input.decision,
+    result_status: input.approval.status,
+    command: truncateAuditText(input.approval.command, 300),
+    affects: input.approval.affects,
+    ...(input.approval.exitCode === undefined ? {} : { exit_code: input.approval.exitCode }),
+  });
+}
+
+function normalizeAuditResourcePart(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return normalized === "" ? "resource" : normalized;
+}
+
+function truncateAuditText(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;
 }
 
 function requestedStreamFormat(request: Request): "ndjson" | "sse" {

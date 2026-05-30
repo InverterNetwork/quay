@@ -51,6 +51,15 @@ export interface AgentUiContext {
 
 export type AgentFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
+export interface AgentApproval {
+  messageId: string;
+  approvalId: string;
+  command: string;
+  description: string;
+  affects: Array<{ label: string; value: string }>;
+  note?: string;
+}
+
 export interface AgentSession {
   sessionId: string;
   agent: string;
@@ -74,6 +83,7 @@ export interface AgentAdapter {
     session: AgentSession;
     approvalId: string;
     decision: "approved" | "rejected";
+    approval?: AgentApproval;
   }): AsyncIterable<AgentEvent>;
   stop(input: { session: AgentSession }): Promise<void>;
 }

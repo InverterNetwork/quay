@@ -73,6 +73,42 @@ function postJson(path: string, body: unknown): Request {
   });
 }
 
+function authPostJson(path: string, body: unknown): Request {
+  return new Request(`http://quay.local${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer secret-token",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      ...init.headers,
+    },
+  });
+}
+
+function sseResponse(events: Array<Record<string, unknown>>): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const event of events) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        }
+        controller.close();
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
 async function currentRevision(
   handler: ReturnType<typeof createAdminApiHandler>,
 ): Promise<string> {
@@ -392,20 +428,80 @@ test("POST /v1/agent/sessions/:id/messages can stream Server-Sent Events", async
   expect(text).toContain("\"type\":\"message_start\"");
 });
 
-test("POST /v1/agent/sessions/:id/approvals/:approvalId records no-op approval decisions", async () => {
+test("POST /v1/agent/sessions/:id/approvals/:approvalId approves trusted Hermes actions and audits decision", async () => {
   h = createHarness();
-  const handler = createHandler();
-  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+  const auditEvents: AdminAuditEvent[] = [];
+  const runBodies: Array<Record<string, unknown>> = [];
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: {
+      QUAY_ADMIN_TOKEN: "secret-token",
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "hermes-secret",
+    },
+    adminAudit: (event) => auditEvents.push(event),
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") {
+        runBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return jsonResponse({ run_id: `run-${runBodies.length}` });
+      }
+      if (path === "/v1/runs/run-1/events") {
+        return sseResponse([
+          {
+            type: "approval.required",
+            approval_id: "approval-1",
+            command: "quay cancel bcd890 --keep-worktree",
+            description: "Cancel the task but preserve its worktree.",
+            affects: [{ label: "task", value: "bcd890" }],
+            note: "Operator consent requested",
+          },
+          { type: "run.completed" },
+        ]);
+      }
+      return sseResponse([
+        { type: "assistant.delta", delta: "Approval recorded; continuing trusted Hermes workflow." },
+        { type: "run.completed" },
+      ]);
+    },
+  });
+  const session = await responseJson(await handler(authPostJson("/v1/agent/sessions", {
     context: agentContextFixture,
   })));
   const sessionId = session.session_id as string;
+
+  const messageResponse = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "Prepare cancellation",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  const messageEvents = await responseNdjson(messageResponse);
+  const approval = messageEvents.find((event) => event.type === "approval_required");
+  expect(approval).toMatchObject({
+    approvalId: "approval-1",
+    command: "quay cancel bcd890 --keep-worktree",
+  });
 
   const response = await handler(
     new Request(`http://quay.local/v1/agent/sessions/${sessionId}/approvals/approval-1`, {
       method: "POST",
       headers: {
+        Authorization: "Bearer secret-token",
         Accept: "application/x-ndjson",
         "Content-Type": "application/json",
+        "X-Hermes-User-Id": "operator-123",
       },
       body: JSON.stringify({ decision: "approved" }),
     }),
@@ -418,11 +514,279 @@ test("POST /v1/agent/sessions/:id/approvals/:approvalId records no-op approval d
     "approval_result",
     "text_delta",
     "message_done",
+    "approval_result",
   ]);
   expect(events[1]).toMatchObject({
     approvalId: "approval-1",
+    status: "running",
+  });
+  expect(events[4]).toMatchObject({
+    approvalId: "approval-1",
     status: "succeeded",
-    exitCode: 0,
+  });
+  expect(String(runBodies[1]?.input)).toContain("operator approved proposed Quay action approval-1");
+  expect(String(runBodies[1]?.input)).toContain("trusted-Hermes v1");
+  expect(auditEvents).toHaveLength(1);
+  expect(auditEvents[0]).toMatchObject({
+    action: "agent.approval.decide",
+    path: `/v1/agent/sessions/${sessionId}/approvals/approval-1`,
+    success: true,
+    status: 200,
+    slack_user_id: "operator-123",
+    identity_status: "forwarded",
+    session_id: sessionId,
+    approval_id: "approval-1",
+    decision: "approved",
+    result_status: "succeeded",
+    command: "quay cancel bcd890 --keep-worktree",
+    operation_summary: ["agent approval approved: quay cancel bcd890 --keep-worktree"],
+    target_resources: [
+      `agent-session:${sessionId}`,
+      "agent-approval:approval-1",
+      "task:bcd890",
+    ],
+  });
+  expect(Date.parse(auditEvents[0]!.timestamp)).not.toBeNaN();
+});
+
+test("POST /v1/agent/sessions/:id/approvals/:approvalId rejects trusted Hermes actions inline", async () => {
+  h = createHarness();
+  const runBodies: Array<Record<string, unknown>> = [];
+  const handler = createHandler({
+    env: {
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "hermes-secret",
+    },
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") {
+        runBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return jsonResponse({ run_id: `reject-run-${runBodies.length}` });
+      }
+      if (path === "/v1/runs/reject-run-1/events") {
+        return sseResponse([
+          {
+            type: "approval.required",
+            approval_id: "approval-reject",
+            command: "quay retry abc123",
+            description: "Retry failed task.",
+            affects: [{ label: "task", value: "abc123" }],
+          },
+          { type: "run.completed" },
+        ]);
+      }
+      return sseResponse([
+        { type: "assistant.delta", delta: "Rejected action acknowledged." },
+        { type: "run.completed" },
+      ]);
+    },
+  });
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+  await responseNdjson(await handler(new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+    method: "POST",
+    headers: {
+      Accept: "application/x-ndjson",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message: "Prepare retry",
+      context: agentContextFixture,
+    }),
+  })));
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/approvals/approval-reject`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ decision: "rejected" }),
+    }),
+  );
+  const events = await responseNdjson(response);
+
+  expect(response.status).toBe(200);
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "approval_result",
+    "text_delta",
+    "message_done",
+  ]);
+  expect(events[1]).toMatchObject({
+    approvalId: "approval-reject",
+    status: "rejected",
+  });
+  expect(events[2]?.text).toContain("Rejected action acknowledged.");
+  expect(String(runBodies[1]?.input)).toContain("operator rejected proposed Quay action approval-reject");
+  expect(String(runBodies[1]?.input)).toContain("Do not run the rejected action");
+});
+
+test("POST /v1/agent/sessions/:id/approvals/:approvalId rejects repeated approval decisions", async () => {
+  h = createHarness();
+  const runBodies: Array<Record<string, unknown>> = [];
+  const handler = createHandler({
+    env: {
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "hermes-secret",
+    },
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") {
+        runBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return jsonResponse({ run_id: `repeat-run-${runBodies.length}` });
+      }
+      if (path === "/v1/runs/repeat-run-1/events") {
+        return sseResponse([
+          {
+            type: "approval.required",
+            approval_id: "approval-repeat",
+            command: "quay retry repeated",
+            description: "Retry once.",
+            affects: [{ label: "task", value: "repeated" }],
+          },
+          { type: "run.completed" },
+        ]);
+      }
+      return sseResponse([
+        {
+          type: "approval.required",
+          approval_id: "approval-repeat",
+          command: "quay retry repeated",
+          description: "Retry once.",
+          affects: [{ label: "task", value: "repeated" }],
+        },
+        { type: "assistant.delta", delta: "Continued once." },
+        { type: "run.completed" },
+      ]);
+    },
+  });
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+  await responseNdjson(await handler(new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+    method: "POST",
+    headers: {
+      Accept: "application/x-ndjson",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message: "Prepare repeat",
+      context: agentContextFixture,
+    }),
+  })));
+
+  const first = await handler(postJson(`/v1/agent/sessions/${sessionId}/approvals/approval-repeat`, {
+    decision: "approved",
+  }));
+  expect(first.status).toBe(200);
+  const firstEvents = await responseNdjson(first);
+
+  const repeated = await handler(postJson(`/v1/agent/sessions/${sessionId}/approvals/approval-repeat`, {
+    decision: "approved",
+  }));
+  const body = await responseJson(repeated);
+
+  expect(repeated.status).toBe(409);
+  expect(body).toMatchObject({
+    error: "agent_approval_already_decided",
+    details: {
+      approval_id: "approval-repeat",
+      status: "succeeded",
+      decision: "approved",
+    },
+  });
+  expect(firstEvents.map((event) => event.type)).toEqual([
+    "message_start",
+    "approval_result",
+    "text_delta",
+    "message_done",
+    "approval_result",
+  ]);
+  expect(runBodies).toHaveLength(2);
+});
+
+test("POST /v1/agent/sessions/:id/approvals/:approvalId marks failed Hermes continuations as failed", async () => {
+  h = createHarness();
+  const auditEvents: AdminAuditEvent[] = [];
+  const handler = createHandler({
+    env: {
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "hermes-secret",
+    },
+    adminAudit: (event) => auditEvents.push(event),
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const runId = String(body.input).includes("operator approved") ? "approval-failed-run" : "proposal-run";
+        return jsonResponse({ run_id: runId });
+      }
+      if (path === "/v1/runs/proposal-run/events") {
+        return sseResponse([
+          {
+            type: "approval.required",
+            approval_id: "approval-fails",
+            command: "quay cancel failed-task",
+            description: "Cancel task.",
+            affects: [{ label: "task", value: "failed-task" }],
+          },
+          { type: "run.completed" },
+        ]);
+      }
+      return sseResponse([
+        { type: "run.failed", code: "tool_failed" },
+      ]);
+    },
+  });
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+  await responseNdjson(await handler(new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+    method: "POST",
+    headers: {
+      Accept: "application/x-ndjson",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message: "Prepare failing approval",
+      context: agentContextFixture,
+    }),
+  })));
+
+  const response = await handler(postJson(`/v1/agent/sessions/${sessionId}/approvals/approval-fails`, {
+    decision: "approved",
+  }));
+  const events = await responseNdjson(response);
+
+  expect(response.status).toBe(200);
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "approval_result",
+    "error",
+    "message_done",
+    "approval_result",
+  ]);
+  expect(events[1]).toMatchObject({ approvalId: "approval-fails", status: "running" });
+  expect(events[4]).toMatchObject({ approvalId: "approval-fails", status: "failed" });
+  expect(auditEvents[0]).toMatchObject({
+    action: "agent.approval.decide",
+    result_status: "failed",
+    approval_id: "approval-fails",
   });
 });
 

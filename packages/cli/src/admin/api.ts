@@ -77,7 +77,7 @@ export interface AdminApiRuntime {
 }
 
 export interface AdminAuditEvent extends AdminRequestAuditContext {
-  action: "changes.preview" | "changes.apply";
+  action: "changes.preview" | "changes.apply" | "agent.approval.decide";
   method: string;
   path: string;
   timestamp: string;
@@ -87,6 +87,13 @@ export interface AdminAuditEvent extends AdminRequestAuditContext {
   target_resources: string[];
   error_code?: string;
   error_message?: string;
+  session_id?: string;
+  approval_id?: string;
+  decision?: "approved" | "rejected";
+  result_status?: "proposed" | "running" | "rejected" | "succeeded" | "failed";
+  command?: string;
+  affects?: Array<{ label: string; value: string }>;
+  exit_code?: number;
 }
 
 type AdminAuditOutcome = Omit<
@@ -364,7 +371,7 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
     }
 
     if (request.method === "POST") {
-      const agentResponse = await agentGateway.handle(request, segments, cors.headers);
+      const agentResponse = await agentGateway.handle(request, segments, cors.headers, auth.audit);
       if (agentResponse !== null) return agentResponse;
       if (isWriteRoute(segments, "preview")) {
         return handleAdminMutation(
