@@ -3012,6 +3012,7 @@ function finalizePrTerminal(
       if (taskTerminalState === "merged_to_feature_branch") {
         releaseDependentsForMergedToFeatureBranchTask(deps, task.task_id, now);
       } else {
+        markFinalUmbrellaWorkflowCompleted(deps.db, task.task_id, now);
         releaseDependentsForMergedTask(deps, task.task_id, now);
       }
     }
@@ -3033,6 +3034,20 @@ function finalizePrTerminal(
     task_id: task.task_id,
     action: terminal === "merged" ? "pr_merged" : "pr_closed_unmerged",
   };
+}
+
+function markFinalUmbrellaWorkflowCompleted(
+  db: DB,
+  taskId: string,
+  now: string,
+): void {
+  db.query(
+    `UPDATE umbrella_workflows
+        SET state = 'completed',
+            updated_at = ?
+      WHERE final_pr_task_id = ?
+        AND state = 'active'`,
+  ).run(now, taskId);
 }
 
 function isUmbrellaTask(db: DB, taskId: string): boolean {

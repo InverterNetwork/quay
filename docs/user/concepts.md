@@ -155,4 +155,6 @@ When every expected child is either linked to a task in
 reuses the final umbrella PR and a final Quay-owned task already in `pr-open`.
 That final task follows the normal Quay-owned PR lifecycle: CI polling,
 review, review feedback, worker fixes, and merge observation. Quay observes
-that final PR merge, but never performs it.
+that final PR merge, but never performs it. After the final PR merges, Quay
+marks the umbrella workflow `completed`; closing the final PR without merging
+leaves the workflow active for operator repair.
