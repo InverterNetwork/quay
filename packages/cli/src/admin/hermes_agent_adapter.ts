@@ -9,6 +9,8 @@ const CONTEXT_MAX_ARRAY_ITEMS = 50;
 const CONTEXT_MAX_OBJECT_KEYS = 100;
 const CONTEXT_MAX_DEPTH = 8;
 const CONTEXT_OMITTED_VALUE = "[omitted: fetch by stable ID when needed]";
+const PROPOSED_ACTION_BUFFER_LIMIT = 8000;
+const EVENT_DETAIL_MAX_LENGTH = 500;
 const QUAY_AGENT_INSTRUCTIONS =
   [
     "You are assisting inside Quay Admin UI.",
@@ -32,6 +34,20 @@ export interface HermesSessionBinding {
   hermesSessionKey: string;
   activeRunId: string | null;
   lastRunId: string | null;
+}
+
+interface ProposedAction {
+  approvalId: string;
+  command: string;
+  description: string;
+  affects: Array<{ label: string; value: string }>;
+  note?: string;
+}
+
+interface ProposedActionMatch {
+  start: number;
+  end: number;
+  actions: ProposedAction[];
 }
 
 interface HermesAgentAdapterOptions {
@@ -119,6 +135,7 @@ export class HermesAgentAdapter implements AgentAdapter {
     context: AgentUiContext;
   }): AsyncIterable<AgentEvent> {
     const messageId = `agent_${randomUUID()}`;
+    const mapper = new HermesEventMapper(messageId, this.config.model);
     let started = false;
     let done = false;
     try {
@@ -132,8 +149,9 @@ export class HermesAgentAdapter implements AgentAdapter {
       started = true;
 
       for await (const rawEvent of this.runEvents(run.runId, binding)) {
-        const mapped = mapHermesEvent(rawEvent, messageId);
+        const mapped = mapper.map(rawEvent, { allowMessageStart: !started });
         for (const event of mapped.events) {
+          if (event.type === "message_start") started = true;
           yield event;
         }
         if (mapped.done) {
@@ -147,6 +165,11 @@ export class HermesAgentAdapter implements AgentAdapter {
     } finally {
       const binding = maybeHermesBinding(input.session);
       if (binding !== null) binding.activeRunId = null;
+      if (started && !done) {
+        for (const event of mapper.flush()) {
+          yield event;
+        }
+      }
       if (started && !done) {
         yield { type: "message_done", messageId };
       }
@@ -367,74 +390,529 @@ function parseSseBlock(block: string): unknown | null {
   }
 }
 
-function mapHermesEvent(raw: unknown, messageId: string): {
-  events: AgentEvent[];
-  done: boolean;
-} {
-  const record = raw !== null && typeof raw === "object" && !Array.isArray(raw)
-    ? raw as Record<string, unknown>
-    : {};
-  const type = readString(record, "type") ?? readString(record, "event") ?? "";
-  const text = textDeltaFromHermesEvent(record, type);
-  if (text !== null) {
-    return { events: [{ type: "text_delta", messageId, text }], done: false };
+class HermesEventMapper {
+  private readonly messageId: string;
+  private readonly model: string;
+  private pendingText = "";
+
+  constructor(messageId: string, model: string) {
+    this.messageId = messageId;
+    this.model = model;
   }
-  if (type.includes("completed") || type === "run.done") {
-    return { events: [{ type: "message_done", messageId }], done: true };
-  }
-  if (type.includes("cancelled") || type.includes("canceled")) {
+
+  map(raw: unknown, options: { allowMessageStart: boolean }): {
+    events: AgentEvent[];
+    done: boolean;
+  } {
+    const record = raw !== null && typeof raw === "object" && !Array.isArray(raw)
+      ? raw as Record<string, unknown>
+      : {};
+    const rawType = readString(record, "type") ?? readString(record, "event") ?? "";
+    const type = normalizeHermesEventType(rawType);
+
+    if (isRunStartEvent(type)) {
+      return {
+        events: options.allowMessageStart
+          ? [{ type: "message_start", messageId: this.messageId, role: "agent", model: this.model }]
+          : [],
+        done: false,
+      };
+    }
+
+    const toolCall = toolCallFromHermesEvent(record, type, this.messageId);
+    if (toolCall !== null) {
+      return {
+        events: [toolCall, ...approvalEventsFromHermesEvent(record, type, this.messageId)],
+        done: false,
+      };
+    }
+
+    const text = textDeltaFromHermesEvent(record, type);
+    if (text !== null) {
+      return { events: this.mapText(text), done: false };
+    }
+
+    const approvals = approvalEventsFromHermesEvent(record, type, this.messageId);
+    if (approvals.length > 0) {
+      return { events: approvals, done: false };
+    }
+
+    if (isRunCompletedEvent(type)) {
+      return { events: [...this.flush(), { type: "message_done", messageId: this.messageId }], done: true };
+    }
+    if (isRunCancelledEvent(type)) {
+      return {
+        events: [
+          ...this.flush(),
+          {
+            type: "error",
+            messageId: this.messageId,
+            code: "hermes_run_cancelled",
+            message: "Hermes run was cancelled",
+            recoverable: true,
+          },
+          { type: "message_done", messageId: this.messageId },
+        ],
+        done: true,
+      };
+    }
+    if (isRunFailedEvent(type)) {
+      return {
+        events: [
+          ...this.flush(),
+          {
+            type: "error",
+            messageId: this.messageId,
+            code: "hermes_run_failed",
+            message: safeHermesEventMessage(record),
+            recoverable: true,
+            details: { event_type: rawType === "" ? "unknown" : rawType },
+          },
+          { type: "message_done", messageId: this.messageId },
+        ],
+        done: true,
+      };
+    }
+
+    if (isIgnorableHermesEvent(record, type)) return { events: [], done: false };
     return {
       events: [
         {
           type: "error",
-          messageId,
-          code: "hermes_run_cancelled",
-          message: "Hermes run was cancelled",
+          messageId: this.messageId,
+          code: "hermes_event_unsupported",
+          message: "Hermes emitted an unsupported event shape",
           recoverable: true,
+          details: { event_type: rawType === "" ? "unknown" : rawType },
         },
-        { type: "message_done", messageId },
       ],
-      done: true,
+      done: false,
     };
   }
-  if (type.includes("failed") || type.includes("error")) {
-    return {
-      events: [
-        {
-          type: "error",
-          messageId,
-          code: "hermes_run_failed",
-          message: safeHermesEventMessage(record),
-          recoverable: true,
-          details: { event_type: type === "" ? "unknown" : type },
-        },
-        { type: "message_done", messageId },
-      ],
-      done: true,
-    };
+
+  flush(): AgentEvent[] {
+    return this.drainPendingText(true);
   }
-  return { events: [], done: false };
+
+  private mapText(text: string): AgentEvent[] {
+    if (this.pendingText === "") {
+      const objectStart = text.indexOf("{");
+      if (objectStart === -1) {
+        return [{ type: "text_delta", messageId: this.messageId, text }];
+      }
+      const events = textDeltaEvent(this.messageId, text.slice(0, objectStart));
+      this.pendingText = text.slice(objectStart);
+      return [...events, ...this.drainPendingText(false)];
+    }
+    this.pendingText = `${this.pendingText}${text}`;
+    return this.drainPendingText(false);
+  }
+
+  private drainPendingText(final: boolean): AgentEvent[] {
+    const events: AgentEvent[] = [];
+    while (this.pendingText !== "") {
+      const objectStart = this.pendingText.indexOf("{");
+      if (objectStart === -1) {
+        if (final || events.length > 0 || this.pendingText.length > PROPOSED_ACTION_BUFFER_LIMIT) {
+          events.push(...textDeltaEvent(this.messageId, this.pendingText));
+          this.pendingText = "";
+        }
+        break;
+      }
+      if (objectStart > 0) {
+        events.push(...textDeltaEvent(this.messageId, this.pendingText.slice(0, objectStart)));
+        this.pendingText = this.pendingText.slice(objectStart);
+        continue;
+      }
+
+      const objectEnd = findJsonObjectEnd(this.pendingText, 0);
+      if (objectEnd === null) {
+        if (final || this.pendingText.length > PROPOSED_ACTION_BUFFER_LIMIT) {
+          events.push(...textDeltaEvent(this.messageId, this.pendingText));
+          this.pendingText = "";
+        }
+        break;
+      }
+
+      const block = this.pendingText.slice(0, objectEnd);
+      const actions = proposedActionsFromJsonText(block);
+      if (actions.length > 0) {
+        events.push(...actions.map((action) => approvalEventFromProposedAction(action, this.messageId)));
+      } else {
+        events.push(...textDeltaEvent(this.messageId, block));
+      }
+      this.pendingText = this.pendingText.slice(objectEnd);
+    }
+    return events;
+  }
+}
+
+function textDeltaEvent(messageId: string, text: string): AgentEvent[] {
+  return text === "" ? [] : [{ type: "text_delta", messageId, text }];
 }
 
 function textDeltaFromHermesEvent(
   record: Record<string, unknown>,
   type: string,
 ): string | null {
+  const isTextSignal = type.includes("delta") || type.includes("text") || type.includes("assistant");
   const direct = readString(record, "text") ??
     readString(record, "delta") ??
     readString(record, "content");
-  if (
-    direct !== null &&
-    (type.includes("delta") || type.includes("text") || type.includes("assistant"))
-  ) {
+  if (direct !== null && isTextSignal) {
     return direct;
   }
   const data = record.data;
-  if (data !== null && typeof data === "object" && !Array.isArray(data)) {
+  if (isTextSignal && data !== null && typeof data === "object" && !Array.isArray(data)) {
     const nested = data as Record<string, unknown>;
     return readString(nested, "text") ?? readString(nested, "delta") ?? readString(nested, "content");
   }
   return null;
+}
+
+function normalizeHermesEventType(type: string): string {
+  return type.toLowerCase().replace(/_/g, ".").replace(/:/g, ".");
+}
+
+function isRunStartEvent(type: string): boolean {
+  return type.includes("run") && (type.includes("created") || type.includes("started") || type.endsWith(".start"));
+}
+
+function isRunCompletedEvent(type: string): boolean {
+  return (type.includes("run") || type.includes("response")) &&
+    (type.includes("completed") || type.endsWith(".done") || type.endsWith(".succeeded"));
+}
+
+function isRunCancelledEvent(type: string): boolean {
+  return type.includes("run") && (type.includes("cancelled") || type.includes("canceled"));
+}
+
+function isRunFailedEvent(type: string): boolean {
+  return (type.includes("run") || type.includes("response")) &&
+    (type.includes("failed") || type.endsWith(".error"));
+}
+
+function toolCallFromHermesEvent(
+  record: Record<string, unknown>,
+  type: string,
+  messageId: string,
+): AgentEvent | null {
+  if (!isToolEvent(record, type)) return null;
+  const status = toolStatusFromHermesEvent(record, type);
+  if (status === null) return null;
+  const label = toolLabelFromHermesEvent(record);
+  const detail = toolDetailFromHermesEvent(record);
+  return {
+    type: "tool_call",
+    messageId,
+    toolCallId: toolCallIdFromHermesEvent(record, label),
+    label,
+    ...(detail === undefined ? {} : { detail }),
+    status,
+  };
+}
+
+function isToolEvent(record: Record<string, unknown>, type: string): boolean {
+  return type.includes("tool") ||
+    type.includes("function.call") ||
+    type.includes("function.call.output") ||
+    readString(record, "tool_call_id") !== null ||
+    readString(record, "toolCallId") !== null ||
+    readString(record, "tool_id") !== null ||
+    readString(record, "toolId") !== null ||
+    readString(record, "tool_name") !== null ||
+    readString(record, "toolName") !== null;
+}
+
+function toolStatusFromHermesEvent(
+  record: Record<string, unknown>,
+  type: string,
+): "running" | "done" | "failed" | null {
+  const status = normalizeHermesEventType(readString(record, "status") ?? "");
+  const combined = `${type}.${status}`;
+  if (combined.includes("failed") || combined.includes("error")) return "failed";
+  if (
+    combined.includes("completed") ||
+    combined.includes("succeeded") ||
+    combined.endsWith(".done") ||
+    combined.includes("function.call.output")
+  ) {
+    return "done";
+  }
+  if (
+    combined.includes("started") ||
+    combined.endsWith(".start") ||
+    combined.includes("progress") ||
+    combined.includes("delta") ||
+    combined.includes("running") ||
+    combined.includes("function.call")
+  ) {
+    return "running";
+  }
+  return null;
+}
+
+function toolLabelFromHermesEvent(record: Record<string, unknown>): string {
+  const direct = readString(record, "label") ??
+    readString(record, "tool_name") ??
+    readString(record, "toolName") ??
+    readString(record, "name") ??
+    readString(record, "function_name") ??
+    readString(record, "functionName");
+  if (direct !== null && direct.trim() !== "") return truncateEventDetail(direct.trim());
+  const tool = readRecord(record, "tool") ?? readRecord(record, "function");
+  const nested = tool === null ? null : readString(tool, "name") ?? readString(tool, "label");
+  return nested === null || nested.trim() === "" ? "Tool call" : truncateEventDetail(nested.trim());
+}
+
+function toolCallIdFromHermesEvent(record: Record<string, unknown>, label: string): string {
+  const direct = readString(record, "tool_call_id") ??
+    readString(record, "toolCallId") ??
+    readString(record, "tool_id") ??
+    readString(record, "toolId") ??
+    readString(record, "call_id") ??
+    readString(record, "callId") ??
+    readString(record, "id");
+  if (direct !== null && direct.trim() !== "") return truncateEventDetail(direct.trim());
+  return `tool_${hashString(label)}`;
+}
+
+function toolDetailFromHermesEvent(record: Record<string, unknown>): string | undefined {
+  const direct = readString(record, "detail") ?? readString(record, "summary");
+  if (direct !== null && direct.trim() !== "") return sanitizeEventTextDetail(direct);
+  const status = normalizeHermesEventType(readString(record, "status") ?? "");
+  if (status.includes("failed") || status.includes("error")) return "Tool call failed";
+  for (const key of ["input", "arguments", "output", "result"]) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (containsProposedAction(value, 0)) return "Proposed Quay action";
+    return key === "input" || key === "arguments" ? "Tool input available" : "Tool output available";
+  }
+  return undefined;
+}
+
+function isIgnorableHermesEvent(record: Record<string, unknown>, type: string): boolean {
+  if (type === "" && Object.keys(record).length === 0) return true;
+  return type.includes("debug") ||
+    type.includes("heartbeat") ||
+    type.includes("ping") ||
+    type.includes("metrics") ||
+    type.includes("trace");
+}
+
+function approvalEventsFromHermesEvent(
+  record: Record<string, unknown>,
+  type: string,
+  messageId: string,
+): AgentEvent[] {
+  const actions: ProposedAction[] = [];
+  collectProposedActions(record, actions, 0);
+  if (isNativeApprovalEvent(type)) {
+    actions.push(...proposedActionsFromValue(record));
+    for (const key of ["data", "action", "approval", "proposed_action", "proposedAction"]) {
+      const child = record[key];
+      if (child !== undefined) actions.push(...proposedActionsFromValue(child));
+    }
+  }
+
+  const deduped = new Map<string, ProposedAction>();
+  for (const action of actions) {
+    deduped.set(`${action.approvalId}:${action.command}`, action);
+  }
+  return [...deduped.values()].map((action) => approvalEventFromProposedAction(action, messageId));
+}
+
+function isNativeApprovalEvent(type: string): boolean {
+  return type.includes("approval") ||
+    type.includes("requires.action") ||
+    (type.includes("action") && type.includes("proposed"));
+}
+
+function approvalEventFromProposedAction(action: ProposedAction, messageId: string): AgentEvent {
+  return {
+    type: "approval_required",
+    messageId,
+    approvalId: action.approvalId,
+    command: action.command,
+    description: action.description,
+    affects: action.affects,
+    ...(action.note === undefined ? {} : { note: action.note }),
+  };
+}
+
+function collectProposedActions(value: unknown, out: ProposedAction[], depth: number): void {
+  if (depth > 6) return;
+  if (typeof value === "string") {
+    if (value.includes("quay_proposed_action")) out.push(...proposedActionsFromJsonText(value));
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectProposedActions(item, out, depth + 1);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  if (record.quay_proposed_action !== undefined) {
+    out.push(...proposedActionsFromValue(record.quay_proposed_action));
+  }
+  for (const child of Object.values(record)) collectProposedActions(child, out, depth + 1);
+}
+
+function proposedActionsFromJsonText(text: string): ProposedAction[] {
+  const actions: ProposedAction[] = [];
+  for (const match of proposedActionMatchesFromText(text)) {
+    actions.push(...match.actions);
+  }
+  return actions;
+}
+
+function proposedActionMatchesFromText(text: string): ProposedActionMatch[] {
+  const matches: ProposedActionMatch[] = [];
+  let index = 0;
+  while (index < text.length) {
+    const start = text.indexOf("{", index);
+    if (start === -1) break;
+    const end = findJsonObjectEnd(text, start);
+    if (end === null) break;
+    const block = text.slice(start, end);
+    const actions = proposedActionsFromJsonBlock(block);
+    if (actions.length > 0) matches.push({ start, end, actions });
+    index = end;
+  }
+  return matches;
+}
+
+function proposedActionsFromJsonBlock(block: string): ProposedAction[] {
+  try {
+    return proposedActionsFromValue(JSON.parse(block) as unknown);
+  } catch {
+    return [];
+  }
+}
+
+function proposedActionsFromValue(value: unknown): ProposedAction[] {
+  const actions: ProposedAction[] = [];
+  collectProposedActionCandidates(value, actions, 0);
+  return actions;
+}
+
+function collectProposedActionCandidates(value: unknown, out: ProposedAction[], depth: number): void {
+  if (depth > 6 || value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectProposedActionCandidates(item, out, depth + 1);
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.quay_proposed_action !== undefined) {
+    collectProposedActionCandidates(record.quay_proposed_action, out, depth + 1);
+    return;
+  }
+
+  const action = proposedActionFromRecord(record);
+  if (action !== null) out.push(action);
+  for (const child of Object.values(record)) collectProposedActionCandidates(child, out, depth + 1);
+}
+
+function proposedActionFromRecord(record: Record<string, unknown>): ProposedAction | null {
+  const command = readString(record, "command");
+  if (command === null || command.trim() === "") return null;
+  const description = readString(record, "description") ?? readString(record, "title");
+  if (description === null || description.trim() === "") return null;
+  const approvalId = readString(record, "approval_id") ??
+    readString(record, "approvalId") ??
+    `approval_${hashString(`${command}\n${description}`)}`;
+  const note = readString(record, "note");
+  return {
+    approvalId: truncateEventDetail(approvalId.trim()),
+    command: truncateEventDetail(command.trim()),
+    description: truncateEventDetail(description.trim()),
+    affects: affectsFromProposedAction(record.affects),
+    ...(note === null || note.trim() === "" ? {} : { note: truncateEventDetail(note.trim()) }),
+  };
+}
+
+function affectsFromProposedAction(value: unknown): Array<{ label: string; value: string }> {
+  if (!Array.isArray(value)) return [];
+  const affects: Array<{ label: string; value: string }> = [];
+  for (const item of value.slice(0, 20)) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const label = readString(record, "label");
+    const itemValue = readString(record, "value");
+    if (label === null || itemValue === null) continue;
+    affects.push({
+      label: truncateEventDetail(label.trim()),
+      value: truncateEventDetail(itemValue.trim()),
+    });
+  }
+  return affects;
+}
+
+function findJsonObjectEnd(text: string, start: number): number | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return null;
+}
+
+function readRecord(value: unknown, key: string): Record<string, unknown> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = (value as Record<string, unknown>)[key];
+  return candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : null;
+}
+
+function containsProposedAction(value: unknown, depth: number): boolean {
+  if (depth > 6) return false;
+  if (typeof value === "string") return value.includes("quay_proposed_action");
+  if (Array.isArray(value)) return value.some((item) => containsProposedAction(item, depth + 1));
+  if (value === null || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return record.quay_proposed_action !== undefined ||
+    Object.values(record).some((child) => containsProposedAction(child, depth + 1));
+}
+
+function sanitizeEventTextDetail(value: string): string {
+  return truncateEventDetail(value.trim().replace(secretLikeTextPattern(), "[redacted]"));
+}
+
+function secretLikeTextPattern(): RegExp {
+  return /(bearer\s+[a-z0-9._~+/-]+|api[_ -]?key\s*[:=]\s*[^\s,;]+|token\s*[:=]\s*[^\s,;]+|secret\s*[:=]\s*[^\s,;]+)/gi;
+}
+
+function truncateEventDetail(value: string): string {
+  return value.length <= EVENT_DETAIL_MAX_LENGTH ? value : `${value.slice(0, EVENT_DETAIL_MAX_LENGTH)}...[truncated]`;
+}
+
+function hashString(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function safeHermesEventMessage(record: Record<string, unknown>): string {
