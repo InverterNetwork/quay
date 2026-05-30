@@ -96,6 +96,28 @@ function relationsPayload(nodes: Array<Record<string, unknown>>): Record<string,
   };
 }
 
+function hierarchyPayload(overrides: {
+  identifier?: string;
+  parent?: Record<string, unknown> | null;
+  children?: {
+    pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+    nodes: Array<Record<string, unknown>>;
+  };
+}): Record<string, unknown> {
+  return {
+    data: {
+      issue: {
+        identifier: overrides.identifier ?? "ENG-2000",
+        parent: overrides.parent ?? null,
+        children: overrides.children ?? {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [],
+        },
+      },
+    },
+  };
+}
+
 let savedApiKey: string | undefined;
 beforeEach(() => {
   savedApiKey = process.env.LINEAR_API_KEY;
@@ -260,6 +282,112 @@ test("linear adapter returns native blocked-by relations with blocker metadata",
     },
   ]);
   expect(handle.requests[0]!.parsedBody.query).toContain("relations");
+});
+
+test("linear adapter returns empty native hierarchy for standalone issues", async () => {
+  const handle = recorder(() => jsonResponse(hierarchyPayload({})));
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+
+  const hierarchy = await adapter.getIssueHierarchy("ENG-2000");
+
+  expect(hierarchy).toEqual({ parent: null, children: [] });
+  expect(handle.requests[0]!.parsedBody.query).toContain("parent");
+  expect(handle.requests[0]!.parsedBody.query).toContain("children");
+});
+
+test("linear adapter returns native parent issue metadata", async () => {
+  const handle = recorder(() =>
+    jsonResponse(
+      hierarchyPayload({
+        parent: {
+          identifier: "ENG-1000",
+          url: "https://linear.app/inverter/issue/ENG-1000",
+          title: "Umbrella workflow",
+          state: { type: "started" },
+        },
+      }),
+    ),
+  );
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+
+  const hierarchy = await adapter.getIssueHierarchy("ENG-2000");
+
+  expect(hierarchy).toEqual({
+    parent: {
+      identifier: "ENG-1000",
+      url: "https://linear.app/inverter/issue/ENG-1000",
+      title: "Umbrella workflow",
+      stateType: "started",
+    },
+    children: [],
+  });
+});
+
+test("linear adapter paginates native child issue metadata including completed children", async () => {
+  const handle = recorder((req) => {
+    const after = req.parsedBody.variables.childrenAfter as string | null;
+    if (after === null) {
+      return jsonResponse(
+        hierarchyPayload({
+          children: {
+            pageInfo: { hasNextPage: true, endCursor: "cursor-page-1" },
+            nodes: [
+              {
+                identifier: "ENG-3000",
+                url: "https://linear.app/inverter/issue/ENG-3000",
+                title: "Later child",
+                state: { type: "started" },
+              },
+            ],
+          },
+        }),
+      );
+    }
+    expect(after).toBe("cursor-page-1");
+    return jsonResponse(
+      hierarchyPayload({
+        children: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [
+            {
+              identifier: "ENG-1500",
+              url: "https://linear.app/inverter/issue/ENG-1500",
+              title: "Already finished child",
+              state: { type: "completed" },
+            },
+          ],
+        },
+      }),
+    );
+  });
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+
+  const hierarchy = await adapter.getIssueHierarchy("ENG-2000");
+
+  expect(hierarchy.children).toEqual([
+    {
+      identifier: "ENG-1500",
+      url: "https://linear.app/inverter/issue/ENG-1500",
+      title: "Already finished child",
+      stateType: "completed",
+    },
+    {
+      identifier: "ENG-3000",
+      url: "https://linear.app/inverter/issue/ENG-3000",
+      title: "Later child",
+      stateType: "started",
+    },
+  ]);
+  expect(handle.requests).toHaveLength(2);
 });
 
 test("test_linear_adapter_get_issue_returns_null_on_404", async () => {
