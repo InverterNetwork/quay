@@ -177,6 +177,7 @@ export interface TickOptions {
   claimTimeoutSeconds?: number;
   maxClaimExpirations?: number;
   maxNonBudgetRespawns?: number;
+  retainedCancelledWorktreeRetentionHours?: number;
   referenceReposRoot?: string | undefined;
   ciIgnorePolicy?: CiIgnorePolicy;
 }
@@ -856,10 +857,16 @@ export async function tick_once(
     const githubBackoff: GithubBackoffState = {
       active: readActiveGithubGraphqlBackoff(deps.db, nowISO),
     };
+    const retainedCancelledWorktreeRetentionHours =
+      options.retainedCancelledWorktreeRetentionHours ??
+      DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS;
 
     for (const task of readRetainedCancelledWorktreeGcCandidates(
       deps.db,
-      retainedCancelledWorktreeGcCutoff(nowISO),
+      retainedCancelledWorktreeGcCutoff(
+        nowISO,
+        retainedCancelledWorktreeRetentionHours,
+      ),
       DEFAULT_RETAINED_CANCELLED_WORKTREE_GC_BATCH_SIZE,
     )) {
       try {
@@ -1438,11 +1445,13 @@ interface RetainedCancelledWorktreeGcRow {
   worktree_path: string;
 }
 
-function retainedCancelledWorktreeGcCutoff(nowISO: string): string {
+function retainedCancelledWorktreeGcCutoff(
+  nowISO: string,
+  retentionHours: number,
+): string {
   const now = new Date(nowISO).getTime();
   return new Date(
-    now -
-      DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS * 60 * 60 * 1000,
+    now - retentionHours * 60 * 60 * 1000,
   ).toISOString();
 }
 

@@ -77,6 +77,25 @@ test("retained cancelled worktree older than 24 hours is deleted and marked clea
   expect(cleanupStamp(task.taskId)).toBe("2026-05-29T12:00:00.000Z");
 });
 
+test("retained cancelled worktree retention can be configured", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T12:00:00.000Z");
+  const task = retainedCancelledTask(
+    "task-configured-retention",
+    "2026-05-28T06:00:00.000Z",
+  );
+
+  const built = buildTickDeps(h);
+  const results = await tick_once(built.deps, {
+    retainedCancelledWorktreeRetentionHours: 48,
+  });
+
+  expect(results).toEqual([]);
+  expect(existsSync(task.worktreePath)).toBe(true);
+  expect(cleanupStamp(task.taskId)).toBeNull();
+  expect(built.git.countCalls("worktreeRemove")).toBe(0);
+});
+
 test("missing retained cancelled worktree older than 24 hours is marked cleaned", async () => {
   h = createHarness();
   h.clock.set("2026-05-29T12:00:00.000Z");

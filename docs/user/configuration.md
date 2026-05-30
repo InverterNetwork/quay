@@ -29,6 +29,7 @@ max_spawn_failures = 3
 claim_timeout_seconds = 1800
 max_claim_expirations = 3
 max_non_budget_respawns = 20
+retained_cancelled_worktree_retention_hours = 24
 tick_lock_path = "/var/lib/quay/tick.lock"
 supervisor_lock_stale_seconds = 30
 
@@ -96,6 +97,7 @@ capabilities = ["browser", "screenshots"]
 | `claim_timeout_seconds` | `1800` | Time before a stale orchestrator claim expires. |
 | `max_claim_expirations` | `3` | Claim expirations before `orchestrator_loop`. |
 | `max_non_budget_respawns` | `20` | Review/conflict respawns before `non_budget_loop`. |
+| `retained_cancelled_worktree_retention_hours` | `24` | Retained worktrees for cancelled tasks are deleted by `quay tick` after this many hours. |
 | `tick_lock_path` | `${data_dir}/tick.lock` | Supervisor lock path. |
 | `supervisor_lock_stale_seconds` | `30` | Stale lock grace window. |
 | `[admin].require_auth` | `false` unless the token env is set | Requires `Authorization: Bearer <token>` for the Admin API and served UI data requests. |

@@ -64,6 +64,7 @@ max_spawn_failures = 5
 claim_timeout_seconds = 600
 max_claim_expirations = 2
 max_non_budget_respawns = 30
+retained_cancelled_worktree_retention_hours = 48
 
 [context]
 reference_repos_root = "/home/hermes/.hermes/code"
@@ -89,6 +90,7 @@ ignored_workflow_names = ["Quay review"]
   expect(result.config.retry_budget).toBe(8);
   expect(result.config.staleness_threshold_seconds).toBe(900);
   expect(result.config.supervisor_lock_stale_seconds).toBe(60);
+  expect(result.config.retained_cancelled_worktree_retention_hours).toBe(48);
   expect(result.config.tick_lock_path).toBe("/tmp/custom-tick.lock");
   expect(result.config.worktree_root).toBe("/var/lib/quay/worktrees");
   expect(result.config.context?.reference_repos_root).toBe(
@@ -106,6 +108,15 @@ test("rejects a non-positive integer for retry_budget", () => {
   writeFileSync(path, `retry_budget = 0\n`);
   expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
     /retry_budget/,
+  );
+});
+
+test("rejects a non-positive retained cancelled worktree retention", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(path, `retained_cancelled_worktree_retention_hours = 0\n`);
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /retained_cancelled_worktree_retention_hours/,
   );
 });
 
@@ -291,6 +302,7 @@ test("tickOptionsFromConfig only forwards keys that are present", () => {
     tickOptionsFromConfig({
       max_concurrent: 6,
       max_concurrent_reviewers: 2,
+      retained_cancelled_worktree_retention_hours: 48,
       agent_invocation: "claude < {prompt_file}",
       reviewer: { enabled: true },
       context: { reference_repos_root: "/home/hermes/.hermes/code" },
@@ -298,6 +310,7 @@ test("tickOptionsFromConfig only forwards keys that are present", () => {
   ).toEqual({
     maxConcurrent: 6,
     maxConcurrentReviewers: 2,
+    retainedCancelledWorktreeRetentionHours: 48,
     agentInvocation: "claude < {prompt_file}",
     reviewerEnabled: true,
     referenceReposRoot: "/home/hermes/.hermes/code",
@@ -451,6 +464,7 @@ test("tickOptionsFromConfig maps every supported key", () => {
     claim_timeout_seconds: 5,
     max_claim_expirations: 6,
     max_non_budget_respawns: 7,
+    retained_cancelled_worktree_retention_hours: 8,
     reviewer: {
       enabled: true,
       gate_quay_owned_done: true,
@@ -473,6 +487,7 @@ test("tickOptionsFromConfig maps every supported key", () => {
     claimTimeoutSeconds: 5,
     maxClaimExpirations: 6,
     maxNonBudgetRespawns: 7,
+    retainedCancelledWorktreeRetentionHours: 8,
     reviewerEnabled: true,
     gateQuayOwnedDone: true,
     workerGhTokenFile: "/run/hermes/worker-gh-token",

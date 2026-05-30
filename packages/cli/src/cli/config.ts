@@ -167,6 +167,7 @@ export const ConfigSchema = z
     claim_timeout_seconds: positiveInt.optional(),
     max_claim_expirations: positiveInt.optional(),
     max_non_budget_respawns: positiveInt.optional(),
+    retained_cancelled_worktree_retention_hours: positiveInt.optional(),
     tick_lock_path: z.string().min(1).optional(),
     supervisor_lock_stale_seconds: positiveInt.optional(),
     adapters: AdaptersConfigSchema.optional(),
@@ -261,6 +262,10 @@ export function tickOptionsFromConfig(config: QuayConfig): TickOptions {
   }
   if (config.max_non_budget_respawns !== undefined) {
     opts.maxNonBudgetRespawns = config.max_non_budget_respawns;
+  }
+  if (config.retained_cancelled_worktree_retention_hours !== undefined) {
+    opts.retainedCancelledWorktreeRetentionHours =
+      config.retained_cancelled_worktree_retention_hours;
   }
   if (config.context?.reference_repos_root !== undefined) {
     opts.referenceReposRoot = config.context.reference_repos_root;
