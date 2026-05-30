@@ -204,6 +204,8 @@ export async function handleEnqueueLinearIssue(
         repoId: resolvedRepoId,
         externalRef,
         baseBranch: resolvedBaseBranch,
+        title: issue.title,
+        url: issue.url,
         hierarchy,
       });
       io.stdout(`${JSON.stringify(result)}\n`);
@@ -387,6 +389,8 @@ function createLinearUmbrellaParentWorkflow(
     repoId: string;
     externalRef: string;
     baseBranch: string | null;
+    title: string;
+    url: string;
     hierarchy: LinearIssueHierarchy;
   },
 ): UmbrellaParentEnqueueResult {
@@ -430,6 +434,8 @@ function createLinearUmbrellaParentWorkflow(
         externalRef: input.externalRef,
         baseBranch,
         featureBranch,
+        linearIssueTitle: input.title,
+        linearIssueUrl: input.url,
         now,
         ensureBranch: false,
       },

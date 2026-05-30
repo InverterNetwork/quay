@@ -64,6 +64,8 @@ test("umbrella workflow tables capture workflow and task links", () => {
     "final_pr_url",
     "created_at",
     "updated_at",
+    "linear_issue_title",
+    "linear_issue_url",
   ]);
 
   const taskCols = h.db

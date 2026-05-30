@@ -640,10 +640,13 @@ test("Linear parent enqueue creates idempotent umbrella workflow and expected ch
         external_ref: string;
         base_branch: string;
         feature_branch: string;
+        linear_issue_title: string | null;
+        linear_issue_url: string | null;
       },
       []
     >(
-      `SELECT umbrella_workflow_id, external_ref, base_branch, feature_branch
+      `SELECT umbrella_workflow_id, external_ref, base_branch, feature_branch,
+              linear_issue_title, linear_issue_url
          FROM umbrella_workflows`,
     )
     .get();
@@ -651,6 +654,8 @@ test("Linear parent enqueue creates idempotent umbrella workflow and expected ch
     external_ref: "ENG-2300",
     base_branch: "dev",
     feature_branch: "quay/umbrella/ENG-2300",
+    linear_issue_title: "Cache invalidation under concurrent updates",
+    linear_issue_url: "https://linear.app/inverter/issue/ENG-2300",
   });
 
   const expected = h.db

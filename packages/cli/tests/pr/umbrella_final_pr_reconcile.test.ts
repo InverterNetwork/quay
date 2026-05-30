@@ -230,6 +230,46 @@ test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
   expect(built.github.mergePullRequestCalls).toEqual([]);
 });
 
+test("tick renders stored Linear umbrella metadata in final PR title and body", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T12:03:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-final-linear-metadata");
+  const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
+  h.db
+    .query(
+      `UPDATE umbrella_workflows
+          SET linear_issue_title = ?,
+              linear_issue_url = ?
+        WHERE umbrella_workflow_id = ?`,
+    )
+    .run(
+      "Ship the onboarding dashboard",
+      "https://linear.app/inverter/issue/BRIX-1511/ship-the-onboarding-dashboard",
+      workflowId,
+    );
+  const built = buildTickDeps(h);
+  seedUmbrellaFeatureBranch(built, repoId);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    {
+      task_id: `umbrella-final-pr-${workflowId}`,
+      action: "umbrella_final_pr_reconciled",
+    },
+  ]);
+  expect(built.github.createPullRequestCalls[0]).toMatchObject({
+    title: "feat: Ship the onboarding dashboard (BRIX-1511)",
+  });
+  const body = built.github.createPullRequestCalls[0]!.body;
+  expect(body).toContain("Umbrella title: Ship the onboarding dashboard");
+  expect(body).toContain(
+    "Linear ticket: [BRIX-1511](https://linear.app/inverter/issue/BRIX-1511/ship-the-onboarding-dashboard)",
+  );
+  expect(body).toContain("Source branch: quay/umbrella/BRIX-1511");
+  expect(body).toContain("Target branch: dev");
+});
+
 test("tick fails final umbrella PR reconciliation when feature branch is missing", async () => {
   h = createHarness();
   h.clock.set("2026-05-29T12:05:00.000Z");
@@ -332,6 +372,18 @@ test("tick reuses existing final umbrella PR and replaces managed body section",
   h.clock.set("2026-05-29T12:30:00.000Z");
   const repoId = insertRepo(h.db, "repo-umbrella-final-reuse");
   const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
+  h.db
+    .query(
+      `UPDATE umbrella_workflows
+          SET linear_issue_title = ?,
+              linear_issue_url = ?
+        WHERE umbrella_workflow_id = ?`,
+    )
+    .run(
+      "Ship the onboarding dashboard",
+      "https://linear.app/inverter/issue/BRIX-1511/ship-the-onboarding-dashboard",
+      workflowId,
+    );
   const built = buildTickDeps(h);
   seedUmbrellaFeatureBranch(built, repoId);
   built.github.setOpenPrsForBranchBase(
@@ -380,6 +432,10 @@ test("tick reuses existing final umbrella PR and replaces managed body section",
   const body = built.github.updatePullRequestBodyCalls[0]!.body;
   expect(body.startsWith("Human intro.")).toBe(true);
   expect(body).toContain("Umbrella external ref: BRIX-1511");
+  expect(body).toContain("Umbrella title: Ship the onboarding dashboard");
+  expect(body).toContain(
+    "Linear ticket: [BRIX-1511](https://linear.app/inverter/issue/BRIX-1511/ship-the-onboarding-dashboard)",
+  );
   expect(body).toContain("Human footer.");
   expect(body).not.toContain("stale managed text");
   expect(built.git.calls).toContainEqual({
