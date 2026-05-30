@@ -22,7 +22,9 @@ import { QuayError } from "../core/errors.ts";
 import type {
   LinearBlockedByRelation,
   LinearComment,
+  LinearHierarchyIssue,
   LinearIssue,
+  LinearIssueHierarchy,
   LinearPort,
 } from "../ports/linear.ts";
 
@@ -31,6 +33,7 @@ const DEFAULT_LINEAR_TIMEOUT_MS = 30_000;
 // First page of comments fetched alongside the issue, and subsequent pages.
 // Linear's GraphQL caps `first` at 250; 100 keeps us well under.
 const COMMENTS_PAGE_SIZE = 100;
+const CHILDREN_PAGE_SIZE = 100;
 
 export interface LinearTransportRequest {
   url: string;
@@ -97,6 +100,24 @@ interface RawLinearRelationsPage {
 interface RawLinearIssueRelations {
   identifier: string;
   relations: RawLinearRelationsPage;
+}
+
+interface RawLinearHierarchyIssue {
+  identifier: string;
+  url: string;
+  title: string;
+  state?: { type?: string | null } | null;
+}
+
+interface RawLinearChildrenPage {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: RawLinearHierarchyIssue[];
+}
+
+interface RawLinearIssueHierarchy {
+  identifier: string;
+  parent: RawLinearHierarchyIssue | null;
+  children: RawLinearChildrenPage;
 }
 
 interface RawIssueStateRefs {
@@ -267,6 +288,48 @@ export class LinearAdapter implements LinearPort {
     );
   }
 
+  async getIssueHierarchy(identifier: string): Promise<LinearIssueHierarchy> {
+    const first = await this.queryIssueHierarchyPage(identifier, null);
+    if (first === null) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: ticket disappeared before hierarchy fetch`,
+        { adapter: "linear", retryable: true },
+      );
+    }
+    const allRaw: RawLinearHierarchyIssue[] = [...first.children.nodes];
+    let cursor = first.children.pageInfo.endCursor;
+    let hasNext = first.children.pageInfo.hasNextPage;
+    while (hasNext) {
+      if (cursor === null) {
+        throw new QuayError(
+          "adapter_error",
+          `Linear ${identifier}: children hasNextPage=true with null endCursor`,
+          { adapter: "linear", retryable: false },
+        );
+      }
+      const next = await this.queryIssueHierarchyPage(identifier, cursor);
+      if (next === null) {
+        throw new QuayError(
+          "adapter_error",
+          `Linear ${identifier}: ticket disappeared mid-children-pagination`,
+          { adapter: "linear", retryable: true },
+        );
+      }
+      allRaw.push(...next.children.nodes);
+      cursor = next.children.pageInfo.endCursor;
+      hasNext = next.children.pageInfo.hasNextPage;
+    }
+
+    return {
+      parent:
+        first.parent === null ? null : parseHierarchyIssue(first.parent),
+      children: allRaw
+        .map(parseHierarchyIssue)
+        .sort((a, b) => a.identifier.localeCompare(b.identifier)),
+    };
+  }
+
   async setIssueState(identifier: string, stateName: string): Promise<void> {
     // Local fast path: nothing to do when the last writeback for this issue
     // landed on the same target. Skips all three round-trips for steady-
@@ -401,6 +464,33 @@ export class LinearAdapter implements LinearPort {
     });
     const data = this.parseGraphQLEnvelope<{
       issue: RawLinearIssueRelations | null;
+    }>(identifier, response);
+    if (data === null) return null;
+    if (!("issue" in data)) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: response missing issue field`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+    return data.issue;
+  }
+
+  private async queryIssueHierarchyPage(
+    identifier: string,
+    childrenAfter: string | null,
+  ): Promise<RawLinearIssueHierarchy | null> {
+    const response = await this.postGraphQL(
+      identifier,
+      GET_ISSUE_HIERARCHY_QUERY,
+      {
+        id: identifier,
+        childrenFirst: CHILDREN_PAGE_SIZE,
+        childrenAfter,
+      },
+    );
+    const data = this.parseGraphQLEnvelope<{
+      issue: RawLinearIssueHierarchy | null;
     }>(identifier, response);
     if (data === null) return null;
     if (!("issue" in data)) {
@@ -632,6 +722,27 @@ const GET_ISSUE_RELATIONS_QUERY = `query GetIssueRelations($id: String!, $relati
   }
 }`;
 
+const GET_ISSUE_HIERARCHY_QUERY = `query GetIssueHierarchy($id: String!, $childrenFirst: Int!, $childrenAfter: String) {
+  issue(id: $id) {
+    identifier
+    parent {
+      identifier
+      url
+      title
+      state { type }
+    }
+    children(first: $childrenFirst, after: $childrenAfter) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        identifier
+        url
+        title
+        state { type }
+      }
+    }
+  }
+}`;
+
 // Minimal projection for the writeback path: we only need `state.id` (for
 // idempotent-skip) and `team.id` (to resolve the target state). Skipping the
 // comments/description fields keeps the writeback's per-call payload small.
@@ -694,6 +805,17 @@ function parseComment(raw: RawLinearComment): LinearComment {
     authorIsBot: isBot,
     body: raw.body,
     createdAt: raw.createdAt,
+  };
+}
+
+function parseHierarchyIssue(
+  raw: RawLinearHierarchyIssue,
+): LinearHierarchyIssue {
+  return {
+    identifier: raw.identifier,
+    url: raw.url,
+    title: raw.title,
+    stateType: raw.state?.type ?? null,
   };
 }
 

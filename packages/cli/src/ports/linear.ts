@@ -33,6 +33,18 @@ export interface LinearBlockedByRelation {
   };
 }
 
+export interface LinearHierarchyIssue {
+  identifier: string;
+  url: string;
+  title: string;
+  stateType: string | null;
+}
+
+export interface LinearIssueHierarchy {
+  parent: LinearHierarchyIssue | null;
+  children: LinearHierarchyIssue[];
+}
+
 export interface LinearPort {
   // Returns null on 404 (no such issue).
   // Throws `ticket_not_actionable` on draft issues, `adapter_error` with
@@ -43,6 +55,10 @@ export interface LinearPort {
   // Returns Linear-native issues that block this issue. Complete blockers are
   // still returned so enqueue can record the observation in ticket_snapshot.
   getBlockedByRelations(identifier: string): Promise<LinearBlockedByRelation[]>;
+
+  // Returns Linear-native parent/child issue metadata. Complete children are
+  // still returned so future enqueue slices can decide whether they count.
+  getIssueHierarchy(identifier: string): Promise<LinearIssueHierarchy>;
 
   // Best-effort idempotent state writeback. Resolves `stateName` to the
   // issue's team workflow state via Linear's `team.states` query
