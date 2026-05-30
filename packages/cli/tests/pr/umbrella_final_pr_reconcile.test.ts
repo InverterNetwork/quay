@@ -58,6 +58,21 @@ function insertIntegratedUmbrellaWorkflow(repoId: string): {
   if (!row) throw new Error("workflow insert failed");
   h.db
     .query(
+      `INSERT INTO umbrella_expected_tasks (
+         umbrella_workflow_id, external_ref, title, state,
+         linear_issue_url, created_at, updated_at
+       ) VALUES (?, ?, ?, 'linked', ?, ?, ?)`,
+    )
+    .run(
+      row.umbrella_workflow_id,
+      "BRIX-1512",
+      "Subtask title",
+      "https://linear.app/inverter/issue/BRIX-1512",
+      "2026-05-29T10:05:00.000Z",
+      "2026-05-29T10:05:00.000Z",
+    );
+  h.db
+    .query(
       `INSERT INTO umbrella_tasks (
          umbrella_workflow_id, task_id, external_ref, created_at
        ) VALUES (?, ?, ?, ?)`,
@@ -69,6 +84,62 @@ function insertIntegratedUmbrellaWorkflow(repoId: string): {
       "2026-05-29T10:05:00.000Z",
     );
   return { workflowId: row.umbrella_workflow_id, taskId };
+}
+
+function insertUmbrellaWorkflowOnly(repoId: string): number {
+  if (h === null) throw new Error("harness not initialized");
+  const row = h.db
+    .query<{ umbrella_workflow_id: number }, [string, string, string, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id`,
+    )
+    .get(
+      "BRIX-1511",
+      repoId,
+      "dev",
+      "quay/umbrella/BRIX-1511",
+      "2026-05-29T10:00:00.000Z",
+      "2026-05-29T10:00:00.000Z",
+    );
+  if (!row) throw new Error("workflow insert failed");
+  return row.umbrella_workflow_id;
+}
+
+function insertExpectedUmbrellaTask(
+  workflowId: number,
+  input: {
+    externalRef: string;
+    title?: string | null;
+    state?: "expected" | "linked" | "complete_without_quay";
+    completionSource?: "linear" | "manual" | null;
+    completionReason?: string | null;
+    completedAt?: string | null;
+  },
+): void {
+  if (h === null) throw new Error("harness not initialized");
+  const now = h.clock.nowISO();
+  h.db
+    .query(
+      `INSERT INTO umbrella_expected_tasks (
+         umbrella_workflow_id, external_ref, title, linear_issue_url, state,
+         completion_source, completion_reason, completed_at, created_at,
+         updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      workflowId,
+      input.externalRef,
+      input.title ?? null,
+      `https://linear.app/inverter/issue/${input.externalRef}`,
+      input.state ?? "expected",
+      input.completionSource ?? null,
+      input.completionReason ?? null,
+      input.completedAt ?? null,
+      now,
+      now,
+    );
 }
 
 test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
@@ -146,6 +217,76 @@ test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
     )
     .get(`umbrella-final-pr-${workflowId}`);
   expect(finalLinkedAsSubtask?.n).toBe(0);
+  expect(built.github.mergePullRequestCalls).toEqual([]);
+});
+
+test("tick does not create final umbrella PR while an expected subtask is unaccounted for", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T12:10:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-final-not-ready");
+  const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
+  insertExpectedUmbrellaTask(workflowId, {
+    externalRef: "BRIX-1513",
+    title: "Still not enqueued",
+  });
+  const built = buildTickDeps(h);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([]);
+  expect(built.github.createPullRequestCalls).toEqual([]);
+  const workflow = h.db
+    .query<
+      { final_pr_task_id: string | null; final_pr_number: number | null; final_pr_url: string | null },
+      []
+    >(`SELECT final_pr_task_id, final_pr_number, final_pr_url FROM umbrella_workflows`)
+    .get();
+  expect(workflow).toEqual({
+    final_pr_task_id: null,
+    final_pr_number: null,
+    final_pr_url: null,
+  });
+});
+
+test("tick creates final umbrella PR when all expected subtasks completed without Quay", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T12:20:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-final-complete-without-quay");
+  const workflowId = insertUmbrellaWorkflowOnly(repoId);
+  insertExpectedUmbrellaTask(workflowId, {
+    externalRef: "BRIX-1512",
+    title: "Already shipped",
+    state: "complete_without_quay",
+    completionSource: "linear",
+    completionReason: "Linear issue was complete when umbrella was enqueued",
+    completedAt: "2026-05-29T09:00:00.000Z",
+  });
+  insertExpectedUmbrellaTask(workflowId, {
+    externalRef: "BRIX-1513",
+    title: "Manually handled",
+    state: "complete_without_quay",
+    completionSource: "manual",
+    completionReason: "Operator marked the child as already integrated",
+    completedAt: "2026-05-29T09:05:00.000Z",
+  });
+  const built = buildTickDeps(h);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    {
+      task_id: `umbrella-final-pr-${workflowId}`,
+      action: "umbrella_final_pr_reconciled",
+    },
+  ]);
+  expect(built.github.createPullRequestCalls).toHaveLength(1);
+  const body = built.github.createPullRequestCalls[0]!.body;
+  expect(body).toContain(
+    "- BRIX-1512 - Already shipped (complete without Quay; source: linear; reason: Linear issue was complete when umbrella was enqueued)",
+  );
+  expect(body).toContain(
+    "- BRIX-1513 - Manually handled (complete without Quay; source: manual; reason: Operator marked the child as already integrated)",
+  );
   expect(built.github.mergePullRequestCalls).toEqual([]);
 });
 

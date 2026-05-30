@@ -384,9 +384,14 @@ interface ReadyUmbrellaFinalPrWorkflowRow {
   final_pr_url: string | null;
 }
 
-interface UmbrellaIntegratedSubtaskRow {
-  task_id: string;
+interface UmbrellaFinalPrExpectedSubtaskRow {
   external_ref: string;
+  title: string | null;
+  state: string;
+  completion_source: string | null;
+  completion_reason: string | null;
+  task_id: string | null;
+  task_state: string | null;
   pr_url: string | null;
   objective_path: string | null;
 }
@@ -1648,15 +1653,26 @@ function readReadyUmbrellaFinalPrWorkflows(
             OR uw.final_pr_number IS NULL
           )
           AND EXISTS (
-            SELECT 1 FROM umbrella_tasks ut
-             WHERE ut.umbrella_workflow_id = uw.umbrella_workflow_id
+            SELECT 1
+              FROM umbrella_expected_tasks uet
+             WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
           )
           AND NOT EXISTS (
             SELECT 1
-              FROM umbrella_tasks ut
-              JOIN tasks t ON t.task_id = ut.task_id
-             WHERE ut.umbrella_workflow_id = uw.umbrella_workflow_id
-               AND t.state <> 'merged_to_feature_branch'
+              FROM umbrella_expected_tasks uet
+              LEFT JOIN umbrella_tasks ut
+                ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
+               AND ut.external_ref = uet.external_ref
+              LEFT JOIN tasks t
+                ON t.task_id = ut.task_id
+             WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+               AND NOT (
+                    uet.state = 'complete_without_quay'
+                 OR (
+                      ut.task_id IS NOT NULL
+                  AND t.state = 'merged_to_feature_branch'
+                 )
+               )
           )
         ORDER BY uw.created_at, uw.umbrella_workflow_id`,
     )
@@ -2323,7 +2339,7 @@ function reconcileUmbrellaFinalPr(
   deps: TickDeps,
   workflow: ReadyUmbrellaFinalPrWorkflowRow,
 ): TickTaskResult {
-  const subtasks = loadUmbrellaIntegratedSubtasks(
+  const subtasks = loadUmbrellaFinalPrExpectedSubtasks(
     deps.db,
     workflow.umbrella_workflow_id,
   );
@@ -3041,24 +3057,33 @@ function loadUmbrellaSubtaskIntegration(
   return row ?? null;
 }
 
-function loadUmbrellaIntegratedSubtasks(
+function loadUmbrellaFinalPrExpectedSubtasks(
   db: DB,
   umbrellaWorkflowId: number,
-): UmbrellaIntegratedSubtaskRow[] {
+): UmbrellaFinalPrExpectedSubtaskRow[] {
   return db
-    .query<UmbrellaIntegratedSubtaskRow, [number]>(
-      `SELECT ut.task_id,
-              ut.external_ref,
+    .query<UmbrellaFinalPrExpectedSubtaskRow, [number]>(
+      `SELECT uet.external_ref,
+              uet.title,
+              uet.state,
+              uet.completion_source,
+              uet.completion_reason,
+              ut.task_id,
+              t.state AS task_state,
               t.pr_url,
               ao.file_path AS objective_path
-         FROM umbrella_tasks ut
-         JOIN tasks t ON t.task_id = ut.task_id
+         FROM umbrella_expected_tasks uet
+         LEFT JOIN umbrella_tasks ut
+           ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
+          AND ut.external_ref = uet.external_ref
+         LEFT JOIN tasks t
+           ON t.task_id = ut.task_id
          LEFT JOIN artifacts ao
            ON ao.task_id = ut.task_id
           AND ao.kind = 'task_objective'
           AND ao.attempt_id IS NULL
-        WHERE ut.umbrella_workflow_id = ?
-        ORDER BY ut.umbrella_task_id`,
+        WHERE uet.umbrella_workflow_id = ?
+        ORDER BY uet.external_ref`,
     )
     .all(umbrellaWorkflowId);
 }
@@ -3077,7 +3102,7 @@ function renderUmbrellaFinalPrTitle(
 
 function renderUmbrellaFinalPrManagedSection(
   workflow: ReadyUmbrellaFinalPrWorkflowRow,
-  subtasks: UmbrellaIntegratedSubtaskRow[],
+  subtasks: UmbrellaFinalPrExpectedSubtaskRow[],
 ): string {
   const displayRef = normalizeTicketRef(workflow.external_ref) ?? workflow.external_ref;
   const lines = [
@@ -3089,24 +3114,38 @@ function renderUmbrellaFinalPrManagedSection(
     `Source branch: ${workflow.feature_branch}`,
     `Target branch: ${workflow.base_branch}`,
     "",
-    "Quay opened this PR after all umbrella subtasks were integrated into the feature branch.",
+    "Quay opened this PR after all expected umbrella subtasks were accounted for.",
     "",
-    "### Integrated Subtasks",
+    "### Expected Subtasks",
   ];
   for (const subtask of subtasks) {
     const subtaskRef = normalizeTicketRef(subtask.external_ref) ?? subtask.external_ref;
-    const title = extractObjectiveTitle(subtask.objective_path);
+    const title = subtask.title ?? extractObjectiveTitle(subtask.objective_path);
     const titlePart = title === null ? "" : ` - ${title}`;
+    if (subtask.state === "complete_without_quay") {
+      const source =
+        subtask.completion_source === null
+          ? "unknown"
+          : subtask.completion_source;
+      const reason =
+        subtask.completion_reason === null || subtask.completion_reason === ""
+          ? "no reason recorded"
+          : subtask.completion_reason;
+      lines.push(
+        `- ${subtaskRef}${titlePart} (complete without Quay; source: ${source}; reason: ${reason})`,
+      );
+      continue;
+    }
+    const taskPart =
+      subtask.task_id === null ? "task unavailable" : `task ${subtask.task_id}`;
     const prPart =
       subtask.pr_url === null || subtask.pr_url === ""
         ? "subtask PR: unavailable"
         : `subtask PR: ${subtask.pr_url}`;
-    lines.push(
-      `- ${subtaskRef}${titlePart} (task ${subtask.task_id}; ${prPart})`,
-    );
+    lines.push(`- ${subtaskRef}${titlePart} (${taskPart}; ${prPart})`);
   }
   if (subtasks.length === 0) {
-    lines.push("- No integrated subtasks recorded.");
+    lines.push("- No expected subtasks recorded.");
   }
   lines.push("", UMBRELLA_FINAL_PR_END);
   return lines.join("\n");
