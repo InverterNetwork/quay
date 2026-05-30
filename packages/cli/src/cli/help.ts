@@ -206,6 +206,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--reviewer-agent <a>", desc: "Override the reviewer agent for this task." },
       { flag: "--reviewer-model <m>", desc: "Override the reviewer model for this task." },
       { flag: "--linear-issue <id>", desc: "Adapter-driven flow; mutually exclusive with --brief-file/--external-ref/--slack-thread-ref." },
+      { flag: "--as-normal-task", desc: "Linear issue override: ignore native umbrella parent/child membership for this enqueue only." },
       { flag: "--tag <name>", desc: "Repeatable. Attach a task tag." },
     ],
   },
