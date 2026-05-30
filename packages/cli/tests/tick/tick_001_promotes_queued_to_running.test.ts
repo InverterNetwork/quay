@@ -210,6 +210,80 @@ test("tick reconciles waiting dependencies from local merged task state before p
     from_state: "waiting_dependencies",
     to_state: "queued",
   });
+  expect(built.git.countCalls("worktreeRemove")).toBe(0);
+  expect(built.git.countCalls("worktreeAddExistingBranch")).toBe(0);
+});
+
+test("tick refreshes dependency-released first-spawn worktree from latest base", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-26T10:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-tick-deps-refresh");
+  const blockerTaskId = insertTask(h.db, {
+    taskId: "task-blocker-refresh-merged",
+    repoId,
+    state: "merged",
+  });
+  const dependentTaskId = insertTask(h.db, {
+    taskId: "task-dependent-refresh-waiting",
+    repoId,
+    state: "waiting_dependencies",
+  });
+  createTaskDependency(h.db, {
+    dependentTaskId,
+    dependencyTaskId: blockerTaskId,
+    dependencySource: "manual",
+    dependencyExternalRef: "BRIX-1562",
+    dependencyRepoId: repoId,
+    requiredState: "merged",
+    now: "2026-04-26T09:00:00.000Z",
+  });
+  const attemptId = insertAttempt(h.db, {
+    taskId: dependentTaskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+  });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, dependentTaskId, attemptId);
+
+  const built = buildTickDeps(h);
+  built.github.setPrExists(repoId, `quay/${dependentTaskId}`, false);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([{ task_id: dependentTaskId, action: "spawned" }]);
+  expect(built.tmux.spawnCalls).toHaveLength(1);
+  expect(built.git.calls).toContainEqual({
+    op: "fetch",
+    args: { repoId, ref: "main" },
+  });
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeRemove",
+    args: { worktreePath: `/tmp/${dependentTaskId}` },
+  });
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeAddExistingBranch",
+    args: {
+      repoId,
+      worktreePath: `/tmp/${dependentTaskId}`,
+      branch: `quay/${dependentTaskId}`,
+      baseRef: "origin/main",
+    },
+  });
+  const refreshEvent = h.db
+    .query<{ event_type: string; event_data: string | null }, [string]>(
+      `SELECT event_type, event_data
+         FROM events
+        WHERE task_id = ? AND event_type = 'worktree_refreshed'`,
+    )
+    .get(dependentTaskId);
+  expect(refreshEvent?.event_type).toBe("worktree_refreshed");
+  expect(JSON.parse(refreshEvent!.event_data!)).toEqual({
+    reason: "dependencies_satisfied",
+    branch_name: `quay/${dependentTaskId}`,
+    base_ref: "origin/main",
+    worktree_path: `/tmp/${dependentTaskId}`,
+  });
 });
 
 test("tick keeps dependent waiting and surfaces failed blockers through delivery outbox", async () => {

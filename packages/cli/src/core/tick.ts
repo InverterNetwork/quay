@@ -242,6 +242,7 @@ interface QueuedTaskRow {
   task_id: string;
   repo_id: string;
   branch_name: string;
+  base_branch: string;
   tmux_id: string;
   worktree_path: string;
   cancel_requested_at: string | null;
@@ -1535,12 +1536,14 @@ function readCancelTargets(db: DB): CancelTargetRow[] {
 function readQueued(db: DB): QueuedTaskRow[] {
   return db
     .query<QueuedTaskRow, []>(
-      `SELECT task_id, repo_id, branch_name, tmux_id, worktree_path,
-              cancel_requested_at, external_ref, worker_agent, worker_model,
-              worker_execution
-         FROM tasks
-        WHERE state = 'queued'
-        ORDER BY created_at, task_id`,
+      `SELECT t.task_id, t.repo_id, t.branch_name,
+              COALESCE(t.base_branch, r.base_branch) AS base_branch,
+              t.tmux_id, t.worktree_path,
+              t.cancel_requested_at, t.external_ref, t.worker_agent, t.worker_model,
+              t.worker_execution
+         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+        WHERE t.state = 'queued'
+        ORDER BY t.created_at, t.task_id`,
     )
     .all();
 }
@@ -5655,6 +5658,66 @@ function loadFinalPrompt(db: DB, taskId: string, attemptId: number): string {
   }
 }
 
+function wasReleasedFromDependencies(db: DB, taskId: string): boolean {
+  const row = db
+    .query<{ n: number }, [string]>(
+      `SELECT 1 AS n
+         FROM events
+        WHERE task_id = ?
+          AND event_type IN ('dependencies_satisfied', 'dependency_satisfied')
+        LIMIT 1`,
+    )
+    .get(taskId);
+  return row != null;
+}
+
+function refreshDependencyReleasedWorktreeIfNeeded(
+  deps: TickDeps,
+  task: QueuedTaskRow,
+  pending: PendingAttemptRow,
+  remoteSha: string | null,
+  prExisted: 0 | 1,
+  now: string,
+): TickTaskResult | null {
+  if (pending.attempt_number !== 1) return null;
+  if (remoteSha !== null || prExisted !== 0) return null;
+  if (!wasReleasedFromDependencies(deps.db, task.task_id)) return null;
+
+  try {
+    deps.git.fetch(task.repo_id, task.base_branch);
+    deps.git.worktreeRemove(task.worktree_path);
+    deps.git.worktreeAddExistingBranch(
+      task.repo_id,
+      task.worktree_path,
+      task.branch_name,
+      `origin/${task.base_branch}`,
+    );
+  } catch (err) {
+    return {
+      task_id: task.task_id,
+      action: "spawn_substrate_failed",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  deps.db
+    .query(
+      `INSERT INTO events (task_id, event_type, occurred_at, event_data)
+       VALUES (?, 'worktree_refreshed', ?, ?)`,
+    )
+    .run(
+      task.task_id,
+      now,
+      JSON.stringify({
+        reason: "dependencies_satisfied",
+        branch_name: task.branch_name,
+        base_ref: `origin/${task.base_branch}`,
+        worktree_path: task.worktree_path,
+      }),
+    );
+  return null;
+}
+
 function promoteAndSpawn(
   deps: TickDeps,
   task: QueuedTaskRow,
@@ -5715,6 +5778,16 @@ function promoteAndSpawn(
     ? 1
     : 0;
   const now = deps.clock.nowISO();
+  const refreshResult = refreshDependencyReleasedWorktreeIfNeeded(
+    deps,
+    task,
+    pending,
+    remoteSha,
+    prExisted,
+    now,
+  );
+  if (refreshResult !== null) return refreshResult;
+
   const spawnEnv = addCodexLaunchIsolation(
     githubToken.env,
     task.worktree_path,
