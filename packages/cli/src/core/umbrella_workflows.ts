@@ -81,14 +81,6 @@ export function createOrVerifyUmbrellaWorkflow(
   const featureBranch =
     input.featureBranch ?? deriveUmbrellaFeatureBranch(deps.git, input.externalRef);
 
-  if (input.ensureBranch !== false) {
-    deps.git.ensureRemoteBranchFromBase(
-      input.repoId,
-      featureBranch,
-      input.baseBranch,
-    );
-  }
-
   const existing = lookupUmbrellaWorkflow(
     deps.db,
     input.repoId,
@@ -112,7 +104,18 @@ export function createOrVerifyUmbrellaWorkflow(
         },
       );
     }
+    if (input.ensureBranch !== false) {
+      requireUmbrellaFeatureBranchExists(deps, existing);
+    }
     return existing;
+  }
+
+  if (input.ensureBranch !== false) {
+    deps.git.ensureRemoteBranchFromBase(
+      input.repoId,
+      featureBranch,
+      input.baseBranch,
+    );
   }
 
   const row = deps.db
@@ -137,6 +140,57 @@ export function createOrVerifyUmbrellaWorkflow(
     );
   if (!row) throw new Error("umbrella workflow insert returned no row");
   return row;
+}
+
+export function requireUmbrellaFeatureBranchExists(
+  deps: { git: GitPort },
+  workflow: Pick<
+    UmbrellaWorkflowRow,
+    "repo_id" | "external_ref" | "base_branch" | "feature_branch"
+  >,
+): void {
+  if (deps.git.hasRemoteBranch(workflow.repo_id, workflow.feature_branch)) {
+    return;
+  }
+  throw new QuayError(
+    "umbrella_feature_branch_missing",
+    `umbrella workflow ${workflow.external_ref} feature branch ${workflow.feature_branch} is missing in repo ${workflow.repo_id}`,
+    {
+      repo_id: workflow.repo_id,
+      external_ref: workflow.external_ref,
+      base_branch: workflow.base_branch,
+      feature_branch: workflow.feature_branch,
+    },
+  );
+}
+
+export function assertUmbrellaWorkflowBranchMetadata(
+  workflow: UmbrellaWorkflowRow,
+  input: {
+    repoId: string;
+    externalRef: string;
+    baseBranch: string;
+    featureBranch: string;
+  },
+): void {
+  if (
+    workflow.base_branch === input.baseBranch &&
+    workflow.feature_branch === input.featureBranch
+  ) {
+    return;
+  }
+  throw new QuayError(
+    "umbrella_workflow_conflict",
+    `umbrella workflow ${input.externalRef} already exists with different branch metadata`,
+    {
+      repo_id: input.repoId,
+      external_ref: input.externalRef,
+      existing_base_branch: workflow.base_branch,
+      requested_base_branch: input.baseBranch,
+      existing_feature_branch: workflow.feature_branch,
+      requested_feature_branch: input.featureBranch,
+    },
+  );
 }
 
 export function linkUmbrellaTask(

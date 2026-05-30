@@ -24,6 +24,7 @@ import {
   listUmbrellaExpectedTasks,
   lookupUmbrellaWorkflow,
   markUmbrellaExpectedTaskCompleteWithoutQuay,
+  requireUmbrellaFeatureBranchExists,
   requireUmbrellaExpectedTask,
   upsertUmbrellaExpectedTask,
   type UmbrellaExpectedTaskRow,
@@ -414,6 +415,11 @@ function createLinearUmbrellaParentWorkflow(
   const baseBranch = input.baseBranch ?? repo.base_branch;
   const featureBranch = deriveUmbrellaFeatureBranch(deps.git, input.externalRef);
   const now = deps.clock.nowISO();
+  const existingWorkflow = lookupUmbrellaWorkflow(
+    deps.db,
+    repo.repo_id,
+    input.externalRef,
+  );
 
   deps.db.exec("BEGIN");
   try {
@@ -457,11 +463,15 @@ function createLinearUmbrellaParentWorkflow(
       deps.db,
       workflow.umbrella_workflow_id,
     );
-    deps.git.ensureRemoteBranchFromBase(
-      repo.repo_id,
-      workflow.feature_branch,
-      workflow.base_branch,
-    );
+    if (existingWorkflow === null) {
+      deps.git.ensureRemoteBranchFromBase(
+        repo.repo_id,
+        workflow.feature_branch,
+        workflow.base_branch,
+      );
+    } else {
+      requireUmbrellaFeatureBranchExists(deps, workflow);
+    }
     deps.db.exec("COMMIT");
     return {
       umbrella_workflow_id: workflow.umbrella_workflow_id,

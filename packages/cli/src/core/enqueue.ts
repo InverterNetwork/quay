@@ -38,11 +38,14 @@ import {
   type TaskDependencySource,
 } from "./task_dependencies.ts";
 import {
+  assertUmbrellaWorkflowBranchMetadata,
   createOrVerifyUmbrellaWorkflow,
   deriveUmbrellaFeatureBranch,
   linkUmbrellaTask,
+  lookupUmbrellaWorkflow,
   markUmbrellaExpectedTaskCompleteWithoutQuay,
   markUmbrellaExpectedTaskLinked,
+  requireUmbrellaFeatureBranchExists,
   UMBRELLA_EXPECTED_TASK_COMPLETION_SOURCES,
 } from "./umbrella_workflows.ts";
 
@@ -312,11 +315,26 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       const umbrellaFeatureBranch =
         input.umbrella.feature_branch ??
         deriveUmbrellaFeatureBranch(deps.git, input.umbrella.external_ref);
-      deps.git.ensureRemoteBranchFromBase(
+      const existingUmbrella = lookupUmbrellaWorkflow(
+        deps.db,
         repo.repo_id,
-        umbrellaFeatureBranch,
-        umbrellaBaseBranch,
+        input.umbrella.external_ref,
       );
+      if (existingUmbrella === null) {
+        deps.git.ensureRemoteBranchFromBase(
+          repo.repo_id,
+          umbrellaFeatureBranch,
+          umbrellaBaseBranch,
+        );
+      } else {
+        assertUmbrellaWorkflowBranchMetadata(existingUmbrella, {
+          repoId: repo.repo_id,
+          externalRef: input.umbrella.external_ref,
+          baseBranch: umbrellaBaseBranch,
+          featureBranch: umbrellaFeatureBranch,
+        });
+        requireUmbrellaFeatureBranchExists(deps, existingUmbrella);
+      }
       resolvedUmbrella = {
         externalRef: input.umbrella.external_ref,
         baseBranch: umbrellaBaseBranch,
