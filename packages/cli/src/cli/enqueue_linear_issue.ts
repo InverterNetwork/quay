@@ -225,8 +225,9 @@ export async function handleEnqueueLinearIssue(
       relations,
       resolvedRepoId,
       now,
+      { umbrellaWorkflow: resolvedLinearUmbrella?.workflow ?? null },
     );
-    if (ctx.umbrella !== null) {
+    if (ctx.umbrella !== null && resolvedLinearUmbrella === null) {
       dependencyResolution.dependencies.push(
         ...resolveUmbrellaDependencies(
           deps.enqueueDeps.db,
@@ -550,34 +551,70 @@ function resolveLinearDependencies(
   relations: LinearBlockedByRelation[],
   fallbackRepoId: string,
   now: string,
+  options: { umbrellaWorkflow?: UmbrellaWorkflowRow | null } = {},
 ): LinearDependencyResolution {
   const dependencies: EnqueueResolvedDependency[] = [];
   const snapshotRelations: LinearDependencySnapshot[] = [];
   const missing: Array<{ external_ref: string; repo_id: string }> = [];
   const seen = new Set<string>();
+  const umbrellaWorkflow = options.umbrellaWorkflow ?? null;
 
   for (const relation of relations) {
     const blockerExternalRef = relation.blocker.identifier.toUpperCase();
     const blockerRepoId = repoIdFromBlockerBody(relation.blocker.body) ?? fallbackRepoId;
     const completeInLinear = isCompleteLinearState(relation.blocker.stateType);
-    const key = `${blockerRepoId}\0${blockerExternalRef}`;
+    const sameUmbrellaBlocker =
+      umbrellaWorkflow === null
+        ? null
+        : lookupSameUmbrellaDependency(
+            db,
+            umbrellaWorkflow.umbrella_workflow_id,
+            blockerExternalRef,
+          );
+    const dependencyRepoId =
+      sameUmbrellaBlocker === null ? blockerRepoId : umbrellaWorkflow!.repo_id;
+    const key = `${sameUmbrellaBlocker === null ? "normal" : "umbrella"}\0${dependencyRepoId}\0${blockerExternalRef}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
     let tracked: DependencyTaskRow | null = null;
-    if (!completeInLinear) {
-      tracked = lookupDependencyTask(db, blockerRepoId, blockerExternalRef);
-      if (tracked === null) {
-        missing.push({ external_ref: blockerExternalRef, repo_id: blockerRepoId });
-      } else {
-        dependencies.push({
-          dependency_task_id: tracked.task_id,
-          dependency_source: "linear",
-          dependency_external_ref: blockerExternalRef,
-          dependency_repo_id: blockerRepoId,
-          required_state: "merged",
-          satisfied_at: tracked.state === "merged" ? now : null,
-        });
+    let persisted = false;
+    if (sameUmbrellaBlocker !== null) {
+      tracked =
+        sameUmbrellaBlocker.task_id === null
+          ? null
+          : {
+              task_id: sameUmbrellaBlocker.task_id,
+              state: sameUmbrellaBlocker.task_state ?? "",
+            };
+      dependencies.push({
+        dependency_task_id: sameUmbrellaBlocker.task_id,
+        dependency_source: "linear",
+        dependency_external_ref: blockerExternalRef,
+        dependency_repo_id: dependencyRepoId,
+        scope: "umbrella",
+        required_state: "merged_to_feature_branch",
+        satisfied_at: sameUmbrellaDependencySatisfied(sameUmbrellaBlocker)
+          ? now
+          : null,
+      });
+      persisted = true;
+    } else {
+      if (!completeInLinear) {
+        tracked = lookupDependencyTask(db, blockerRepoId, blockerExternalRef);
+        if (tracked === null) {
+          missing.push({ external_ref: blockerExternalRef, repo_id: blockerRepoId });
+        } else {
+          dependencies.push({
+            dependency_task_id: tracked.task_id,
+            dependency_source: "linear",
+            dependency_external_ref: blockerExternalRef,
+            dependency_repo_id: blockerRepoId,
+            required_state: "merged",
+            satisfied_at: tracked.state === "merged" ? now : null,
+          });
+          persisted = true;
+        }
       }
     }
 
@@ -587,11 +624,12 @@ function resolveLinearDependencies(
       blocker_url: relation.blocker.url,
       blocker_title: relation.blocker.title,
       blocker_state_type: relation.blocker.stateType,
-      blocker_repo_id: blockerRepoId,
+      blocker_repo_id: dependencyRepoId,
       complete_in_linear: completeInLinear,
       tracked_task_id: tracked?.task_id ?? null,
-      tracked_task_state: tracked?.state ?? null,
-      persisted: !completeInLinear && tracked !== null,
+      tracked_task_state:
+        sameUmbrellaBlocker?.task_state ?? tracked?.state ?? null,
+      persisted,
     });
   }
 
@@ -604,6 +642,46 @@ function resolveLinearDependencies(
   }
 
   return { dependencies, snapshotRelations };
+}
+
+interface SameUmbrellaDependencyRow {
+  expected_state: string;
+  task_id: string | null;
+  task_state: string | null;
+}
+
+function lookupSameUmbrellaDependency(
+  db: DB,
+  umbrellaWorkflowId: number,
+  externalRef: string,
+): SameUmbrellaDependencyRow | null {
+  return (
+    db
+      .query<SameUmbrellaDependencyRow, [number, string]>(
+        `SELECT uet.state AS expected_state,
+                ut.task_id AS task_id,
+                t.state AS task_state
+           FROM umbrella_expected_tasks uet
+           LEFT JOIN umbrella_tasks ut
+             ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
+            AND ut.external_ref = uet.external_ref
+           LEFT JOIN tasks t
+             ON t.task_id = ut.task_id
+          WHERE uet.umbrella_workflow_id = ?
+            AND uet.external_ref = ?
+          LIMIT 1`,
+      )
+      .get(umbrellaWorkflowId, externalRef) ?? null
+  );
+}
+
+function sameUmbrellaDependencySatisfied(
+  row: SameUmbrellaDependencyRow,
+): boolean {
+  return (
+    row.task_state === "merged_to_feature_branch" ||
+    row.expected_state === "complete_without_quay"
+  );
 }
 
 function repoIdFromBlockerBody(body: string): string | null {
