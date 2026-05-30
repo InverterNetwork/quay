@@ -145,6 +145,15 @@ const agentContextFixture = {
   },
 } as const;
 
+function auditRetentionDays(event: AdminAuditEvent): number {
+  if (event.expires_at === undefined) throw new Error(`audit event ${event.action} missing expires_at`);
+  const timestamp = Date.parse(event.timestamp);
+  const expiresAt = Date.parse(event.expires_at);
+  expect(timestamp).not.toBeNaN();
+  expect(expiresAt).not.toBeNaN();
+  return Math.round((expiresAt - timestamp) / (24 * 60 * 60 * 1000));
+}
+
 interface MissionControlResponse {
   refreshedAt: string;
   activeTaskCount: number;
@@ -428,6 +437,235 @@ test("POST /v1/agent/sessions/:id/messages can stream Server-Sent Events", async
   expect(text).toContain("\"type\":\"message_start\"");
 });
 
+test("Agent Gateway emits bounded audit records with TTL for sessions, messages, tools, approvals, errors, and stops", async () => {
+  h = createHarness();
+  const auditEvents: AdminAuditEvent[] = [];
+  const context = {
+    ...agentContextFixture,
+    payload: {
+      ...agentContextFixture.payload,
+      hidden: { raw: "RAW_CONTEXT_PAYLOAD_SECRET" },
+    },
+  };
+  const longMessage = `Summarize current task health ${"m".repeat(500)} RAW_MESSAGE_TAIL_SECRET`;
+  const longCommand = `quay retry ${"x".repeat(420)} RAW_COMMAND_TAIL_SECRET`;
+  const longAffect = `${"task-".repeat(80)}RAW_AFFECT_TAIL_SECRET`;
+  const longCommandOutput = `quay output ${"o".repeat(600)} RAW_COMMAND_OUTPUT_TAIL_SECRET`;
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: {
+      QUAY_ADMIN_TOKEN: "secret-token",
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "hermes-secret",
+    },
+    adminAudit: (event) => auditEvents.push(event),
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return jsonResponse({ run_id: String(body.input).includes("operator approved") ? "audit-run-2" : "audit-run-1" });
+      }
+      if (path === "/v1/runs/audit-run-1/events") {
+        return sseResponse([
+          {
+            type: "tool.started",
+            tool_call_id: "tool-read",
+            tool_name: "list tasks",
+            input: { raw: "RAW_TOOL_INPUT_SECRET" },
+          },
+          {
+            type: "tool.completed",
+            tool_call_id: "tool-read",
+            tool_name: "list tasks",
+            result: { raw: "RAW_TOOL_OUTPUT_SECRET" },
+          },
+          {
+            type: "approval.required",
+            approval_id: "approval-audit",
+            command: longCommand,
+            description: "Retry the stale task.",
+            affects: [{ label: "task", value: longAffect }],
+          },
+          { type: "run.snapshot", raw: "RAW_UNSUPPORTED_EVENT_SECRET" },
+          { type: "run.completed" },
+        ]);
+      }
+      return sseResponse([
+        { type: "command.output", approval_id: "approval-audit", line: longCommandOutput },
+        { type: "assistant.delta", delta: "Approval recorded." },
+        { type: "run.completed" },
+      ]);
+    },
+  });
+
+  const sessionResponse = await handler(
+    new Request("http://quay.local/v1/agent/sessions", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "operator-audit",
+      },
+      body: JSON.stringify({ context }),
+    }),
+  );
+  const session = await responseJson(sessionResponse);
+  const sessionId = session.session_id as string;
+
+  const messageResponse = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "operator-audit",
+      },
+      body: JSON.stringify({
+        message: longMessage,
+        context,
+      }),
+    }),
+  );
+  await responseNdjson(messageResponse);
+
+  const approvalResponse = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/approvals/approval-audit`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "operator-audit",
+      },
+      body: JSON.stringify({ decision: "approved" }),
+    }),
+  );
+  await responseNdjson(approvalResponse);
+
+  await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/stop`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "operator-audit",
+      },
+      body: JSON.stringify({}),
+    }),
+  );
+
+  const actions = auditEvents.map((event) => event.action);
+  expect(actions).toEqual(expect.arrayContaining([
+    "agent.session.create",
+    "agent.message.send",
+    "agent.tool.call",
+    "agent.approval.required",
+    "agent.error",
+    "agent.approval.decide",
+    "agent.command.output",
+    "agent.approval.result",
+    "agent.session.stop",
+  ]));
+
+  const sessionAudit = auditEvents.find((event) => event.action === "agent.session.create")!;
+  expect(sessionAudit).toMatchObject({
+    retention_bucket: "agent_chat_7d",
+    adapter_id: "hermes",
+    agent_id: "hermes",
+    session_id: sessionId,
+    slack_user_id: "operator-audit",
+    context_view: "mission-control",
+    context_summary: "Mission Control: 1 task visible.",
+  });
+  expect(auditRetentionDays(sessionAudit)).toBe(7);
+
+  const messageAudit = auditEvents.find((event) => event.action === "agent.message.send")!;
+  expect(messageAudit).toMatchObject({
+    retention_bucket: "agent_chat_7d",
+    message_summary: expect.any(String),
+    effect: "unknown",
+  });
+  expect(auditRetentionDays(messageAudit)).toBe(7);
+
+  const toolAudit = auditEvents.find((event) => event.action === "agent.tool.call" && event.result_status === "succeeded")!;
+  expect(toolAudit).toMatchObject({
+    retention_bucket: "agent_tool_7d",
+    tool_call_id: "tool-read",
+    tool_name: "list tasks",
+    arguments_summary: "Tool output available",
+    effect: "read_only",
+  });
+  expect(auditRetentionDays(toolAudit)).toBe(7);
+
+  const requiredAudit = auditEvents.find((event) => event.action === "agent.approval.required")!;
+  expect(requiredAudit).toMatchObject({
+    retention_bucket: "agent_chat_7d",
+    approval_id: "approval-audit",
+    result_status: "proposed",
+    effect: "mutating",
+  });
+  expect(auditRetentionDays(requiredAudit)).toBe(7);
+
+  const decisionAudit = auditEvents.find((event) => event.action === "agent.approval.decide")!;
+  expect(decisionAudit).toMatchObject({
+    retention_bucket: "agent_approved_action_30d",
+    approval_id: "approval-audit",
+    decision: "approved",
+    result_status: "running",
+    effect: "mutating",
+  });
+  expect(auditRetentionDays(decisionAudit)).toBe(30);
+
+  const outputAudit = auditEvents.find((event) => event.action === "agent.command.output")!;
+  expect(outputAudit).toMatchObject({
+    retention_bucket: "agent_approved_action_30d",
+    approval_id: "approval-audit",
+    result_status: "running",
+    arguments_summary: expect.any(String),
+    effect: "mutating",
+  });
+  expect(auditRetentionDays(outputAudit)).toBe(30);
+
+  const resultAudit = auditEvents.find((event) => event.action === "agent.approval.result")!;
+  expect(resultAudit).toMatchObject({
+    retention_bucket: "agent_approved_action_30d",
+    approval_id: "approval-audit",
+    decision: "approved",
+    result_status: "succeeded",
+    effect: "mutating",
+  });
+  expect(auditRetentionDays(resultAudit)).toBe(30);
+
+  const errorAudit = auditEvents.find((event) => event.action === "agent.error")!;
+  expect(errorAudit).toMatchObject({
+    retention_bucket: "agent_chat_7d",
+    error_code: "hermes_event_unsupported",
+    result_status: "failed",
+  });
+  expect(auditRetentionDays(errorAudit)).toBe(7);
+
+  const stopAudit = auditEvents.find((event) => event.action === "agent.session.stop")!;
+  expect(stopAudit).toMatchObject({
+    retention_bucket: "agent_chat_7d",
+    session_id: sessionId,
+  });
+  expect(auditRetentionDays(stopAudit)).toBe(7);
+
+  const serializedAudit = JSON.stringify(auditEvents);
+  expect(serializedAudit).not.toContain("RAW_CONTEXT_PAYLOAD_SECRET");
+  expect(serializedAudit).not.toContain("RAW_TOOL_INPUT_SECRET");
+  expect(serializedAudit).not.toContain("RAW_TOOL_OUTPUT_SECRET");
+  expect(serializedAudit).not.toContain("RAW_UNSUPPORTED_EVENT_SECRET");
+  expect(serializedAudit).not.toContain("RAW_MESSAGE_TAIL_SECRET");
+  expect(serializedAudit).not.toContain("RAW_COMMAND_TAIL_SECRET");
+  expect(serializedAudit).not.toContain("RAW_AFFECT_TAIL_SECRET");
+  expect(serializedAudit).not.toContain("RAW_COMMAND_OUTPUT_TAIL_SECRET");
+});
+
 test("POST /v1/agent/sessions/:id/approvals/:approvalId approves trusted Hermes actions and audits decision", async () => {
   h = createHarness();
   const auditEvents: AdminAuditEvent[] = [];
@@ -526,8 +764,8 @@ test("POST /v1/agent/sessions/:id/approvals/:approvalId approves trusted Hermes 
   });
   expect(String(runBodies[1]?.input)).toContain("operator approved proposed Quay action approval-1");
   expect(String(runBodies[1]?.input)).toContain("trusted-Hermes v1");
-  expect(auditEvents).toHaveLength(1);
-  expect(auditEvents[0]).toMatchObject({
+  const decisionAudit = auditEvents.find((event) => event.action === "agent.approval.decide");
+  expect(decisionAudit).toMatchObject({
     action: "agent.approval.decide",
     path: `/v1/agent/sessions/${sessionId}/approvals/approval-1`,
     success: true,
@@ -537,7 +775,7 @@ test("POST /v1/agent/sessions/:id/approvals/:approvalId approves trusted Hermes 
     session_id: sessionId,
     approval_id: "approval-1",
     decision: "approved",
-    result_status: "succeeded",
+    result_status: "running",
     command: "quay cancel bcd890 --keep-worktree",
     operation_summary: ["agent approval approved: quay cancel bcd890 --keep-worktree"],
     target_resources: [
@@ -546,11 +784,20 @@ test("POST /v1/agent/sessions/:id/approvals/:approvalId approves trusted Hermes 
       "task:bcd890",
     ],
   });
-  expect(Date.parse(auditEvents[0]!.timestamp)).not.toBeNaN();
+  expect(Date.parse(decisionAudit!.timestamp)).not.toBeNaN();
+  const resultAudit = auditEvents.find((event) => event.action === "agent.approval.result");
+  expect(resultAudit).toMatchObject({
+    action: "agent.approval.result",
+    approval_id: "approval-1",
+    decision: "approved",
+    result_status: "succeeded",
+    command: "quay cancel bcd890 --keep-worktree",
+  });
 });
 
 test("POST /v1/agent/sessions/:id/approvals/:approvalId rejects trusted Hermes actions inline", async () => {
   h = createHarness();
+  const auditEvents: AdminAuditEvent[] = [];
   const runBodies: Array<Record<string, unknown>> = [];
   const handler = createHandler({
     env: {
@@ -558,6 +805,7 @@ test("POST /v1/agent/sessions/:id/approvals/:approvalId rejects trusted Hermes a
       QUAY_HERMES_API_BASE_URL: "http://hermes.local",
       QUAY_HERMES_API_KEY: "hermes-secret",
     },
+    adminAudit: (event) => auditEvents.push(event),
     agentFetch: async (input, init = {}) => {
       const path = new URL(String(input)).pathname;
       if (path === "/health") return jsonResponse({ status: "ok" });
@@ -626,6 +874,14 @@ test("POST /v1/agent/sessions/:id/approvals/:approvalId rejects trusted Hermes a
   expect(events[2]?.text).toContain("Rejected action acknowledged.");
   expect(String(runBodies[1]?.input)).toContain("operator rejected proposed Quay action approval-reject");
   expect(String(runBodies[1]?.input)).toContain("Do not run the rejected action");
+  const decisionAudit = auditEvents.find((event) => event.action === "agent.approval.decide");
+  expect(decisionAudit).toMatchObject({
+    retention_bucket: "agent_rejected_approval_7d",
+    approval_id: "approval-reject",
+    decision: "rejected",
+    result_status: "rejected",
+  });
+  expect(auditRetentionDays(decisionAudit!)).toBe(7);
 });
 
 test("POST /v1/agent/sessions/:id/approvals/:approvalId rejects repeated approval decisions", async () => {
@@ -783,10 +1039,18 @@ test("POST /v1/agent/sessions/:id/approvals/:approvalId marks failed Hermes cont
   ]);
   expect(events[1]).toMatchObject({ approvalId: "approval-fails", status: "running" });
   expect(events[4]).toMatchObject({ approvalId: "approval-fails", status: "failed" });
-  expect(auditEvents[0]).toMatchObject({
+  const decisionAudit = auditEvents.find((event) => event.action === "agent.approval.decide");
+  expect(decisionAudit).toMatchObject({
     action: "agent.approval.decide",
+    result_status: "running",
+    approval_id: "approval-fails",
+  });
+  const resultAudit = auditEvents.find((event) => event.action === "agent.approval.result");
+  expect(resultAudit).toMatchObject({
+    action: "agent.approval.result",
     result_status: "failed",
     approval_id: "approval-fails",
+    success: false,
   });
 });
 

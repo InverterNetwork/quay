@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import type { AdminApiRuntime } from "./api.ts";
+import type { AdminApiRuntime, AdminAuditEvent } from "./api.ts";
 import { createEchoAgentAdapter } from "./agent_echo_adapter.ts";
 import type { AdminRequestAuditContext } from "./auth.ts";
 import type { AgentAdapter, AgentApproval, AgentEvent, AgentSession, AgentUiContext } from "./agent_types.ts";
@@ -12,6 +12,17 @@ import {
 } from "./hermes_agent_adapter.ts";
 
 type JsonHeaders = Record<string, string>;
+type AgentAuditAction = Extract<AdminAuditEvent["action"], `agent.${string}`>;
+type AgentAuditRetentionBucket = NonNullable<AdminAuditEvent["retention_bucket"]>;
+type AgentAuditEffect = NonNullable<AdminAuditEvent["effect"]>;
+
+const AGENT_AUDIT_TTL_DAYS: Record<AgentAuditRetentionBucket, number> = {
+  agent_chat_7d: 7,
+  agent_tool_7d: 7,
+  agent_rejected_approval_7d: 7,
+  agent_approved_action_30d: 30,
+};
+const AUDIT_DAY_MS = 24 * 60 * 60 * 1000;
 
 interface AgentGateway {
   handle: (
@@ -109,6 +120,16 @@ export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
           };
           await adapter.createSession({ session });
           sessions.set(session.sessionId, { session, approvals: new Map() });
+          recordAgentAudit(runtime, request, audit, {
+            action: "agent.session.create",
+            success: true,
+            status: 200,
+            retentionBucket: "agent_chat_7d",
+            session,
+            context: parsed.context,
+            operationSummary: [`agent session created for ${session.provider}`],
+            targetResources: [`agent-session:${session.sessionId}`],
+          });
           return jsonResponse(
             {
               session_id: session.sessionId,
@@ -129,13 +150,26 @@ export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
             "agent message request invalid",
           );
           state.session.lastContext = parsed.context;
+          recordAgentAudit(runtime, request, audit, {
+            action: "agent.message.send",
+            success: true,
+            status: 200,
+            retentionBucket: "agent_chat_7d",
+            session: state.session,
+            context: parsed.context,
+            messageSummary: truncateAuditText(parsed.message, 300),
+            argumentsSummary: truncateAuditText(parsed.message, 300),
+            operationSummary: [`agent message sent: ${truncateAuditText(parsed.message, 120)}`],
+            targetResources: [`agent-session:${state.session.sessionId}`],
+            effect: "unknown",
+          });
           const events = adapter.sendMessage({
             session: state.session,
             message: parsed.message,
             context: parsed.context,
           });
           return eventStreamResponse(
-            trackAgentEvents(state, events),
+            trackAgentEvents({ runtime, request, audit, state, events }),
             requestedStreamFormat(request),
             corsHeaders,
           );
@@ -175,6 +209,11 @@ export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
           approval.decision = parsed.decision;
           approval.status = parsed.decision === "approved" ? "running" : "rejected";
           approval.updatedAt = new Date().toISOString();
+          recordAgentApprovalDecisionAudit(runtime, request, audit, {
+            session: state.session,
+            approval,
+            decision: parsed.decision,
+          });
           const events = adapter.decideApproval({
             session: state.session,
             approvalId,
@@ -200,6 +239,15 @@ export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
           const state = requireSession(sessions, segments[3]);
           await adapter.stop({ session: state.session });
           state.session.activeMessageId = null;
+          recordAgentAudit(runtime, request, audit, {
+            action: "agent.session.stop",
+            success: true,
+            status: 200,
+            retentionBucket: "agent_chat_7d",
+            session: state.session,
+            operationSummary: ["agent session stopped"],
+            targetResources: [`agent-session:${state.session.sessionId}`],
+          });
           return jsonResponse(
             { session_id: state.session.sessionId, stopped: true },
             200,
@@ -207,6 +255,7 @@ export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
           );
         }
       } catch (err) {
+        recordAgentGatewayErrorAudit(runtime, request, audit, segments, adapter.provider, err);
         return agentGatewayErrorResponse(err, corsHeaders);
       }
 
@@ -274,12 +323,16 @@ function requireSession(
   return session;
 }
 
-async function* trackAgentEvents(
-  state: AgentGatewaySessionState,
-  events: AsyncIterable<AgentEvent>,
-): AsyncIterable<AgentEvent> {
-  for await (const event of events) {
-    if (!rememberAgentEvent(state, event)) continue;
+async function* trackAgentEvents(input: {
+  runtime: AdminApiRuntime;
+  request: Request;
+  audit: AdminRequestAuditContext;
+  state: AgentGatewaySessionState;
+  events: AsyncIterable<AgentEvent>;
+}): AsyncIterable<AgentEvent> {
+  for await (const event of input.events) {
+    if (!rememberAgentEvent(input.state, event)) continue;
+    recordAgentEventAudit(input.runtime, input.request, input.audit, input.state, event);
     yield event;
   }
 }
@@ -297,6 +350,7 @@ async function* trackApprovalDecisionEvents(input: {
   try {
     for await (const event of input.events) {
       if (!rememberAgentEvent(input.state, event)) continue;
+      recordAgentEventAudit(input.runtime, input.request, input.audit, input.state, event);
       yield event;
     }
   } catch (err) {
@@ -305,13 +359,14 @@ async function* trackApprovalDecisionEvents(input: {
     input.approval.updatedAt = new Date().toISOString();
     throw err;
   } finally {
-    recordAgentApprovalAudit(input.runtime, input.request, input.audit, {
-      session: input.state.session,
-      approval: input.approval,
-      decision: input.decision,
-      success,
-      status: success ? 200 : 500,
-    });
+    if (input.decision === "approved") {
+      recordAgentApprovalResultAudit(input.runtime, input.request, input.audit, {
+        session: input.state.session,
+        approval: input.approval,
+        success,
+        status: success ? 200 : 500,
+      });
+    }
   }
 }
 
@@ -346,7 +401,102 @@ function rememberAgentEvent(state: AgentGatewaySessionState, event: AgentEvent):
   return true;
 }
 
-function recordAgentApprovalAudit(
+function recordAgentEventAudit(
+  runtime: AdminApiRuntime,
+  request: Request,
+  audit: AdminRequestAuditContext,
+  state: AgentGatewaySessionState,
+  event: AgentEvent,
+): void {
+  if (event.type === "tool_call") {
+    const effect = classifyToolCallEffect(event);
+    recordAgentAudit(runtime, request, audit, {
+      action: "agent.tool.call",
+      success: event.status !== "failed",
+      status: 200,
+      retentionBucket: "agent_tool_7d",
+      session: state.session,
+      messageId: event.messageId,
+      toolCallId: event.toolCallId,
+      toolName: truncateAuditText(event.label, 120),
+      argumentsSummary: truncateAuditText(event.detail ?? `tool ${event.status}`, 300),
+      resultStatus: toolResultStatus(event.status),
+      operationSummary: [`agent tool ${event.status}: ${truncateAuditText(event.label, 120)}`],
+      targetResources: [
+        `agent-session:${state.session.sessionId}`,
+        `agent-tool:${normalizeAuditResourcePart(event.toolCallId)}`,
+      ],
+      effect,
+    });
+    return;
+  }
+
+  if (event.type === "approval_required") {
+    recordAgentAudit(runtime, request, audit, {
+      action: "agent.approval.required",
+      success: true,
+      status: 200,
+      retentionBucket: "agent_chat_7d",
+      session: state.session,
+      messageId: event.messageId,
+      approvalId: event.approvalId,
+      toolName: "quay cli",
+      command: truncateAuditText(event.command, 300),
+      affects: auditAffects(event.affects),
+      argumentsSummary: truncateAuditText(event.command, 300),
+      resultStatus: "proposed",
+      operationSummary: [`agent approval required: ${truncateAuditText(event.command, 160)}`],
+      targetResources: approvalTargetResources(state.session.sessionId, event.approvalId, event.affects),
+      effect: "mutating",
+    });
+    return;
+  }
+
+  if (event.type === "error") {
+    recordAgentAudit(runtime, request, audit, {
+      action: "agent.error",
+      success: false,
+      status: 200,
+      retentionBucket: "agent_chat_7d",
+      session: state.session,
+      ...(event.messageId === undefined ? {} : { messageId: event.messageId }),
+      errorCode: event.code,
+      errorMessage: truncateAuditText(event.message, 300),
+      resultStatus: "failed",
+      argumentsSummary: truncateAuditText(event.message, 300),
+      operationSummary: [`agent error: ${truncateAuditText(event.message, 160)}`],
+      targetResources: [`agent-session:${state.session.sessionId}`],
+    });
+    return;
+  }
+
+  if (event.type === "command_output") {
+    const approval = state.approvals.get(event.approvalId);
+    recordAgentAudit(runtime, request, audit, {
+      action: "agent.command.output",
+      success: true,
+      status: 200,
+      retentionBucket: approval?.decision === "approved" ? "agent_approved_action_30d" : "agent_chat_7d",
+      session: state.session,
+      messageId: event.messageId,
+      approvalId: event.approvalId,
+      ...(approval === undefined ? {} : {
+        command: truncateAuditText(approval.command, 300),
+        affects: auditAffects(approval.affects),
+      }),
+      argumentsSummary: truncateAuditText(event.line, 300),
+      toolName: "quay cli",
+      ...(approval === undefined ? {} : { resultStatus: approval.status }),
+      operationSummary: [`agent command output: ${truncateAuditText(event.line, 160)}`],
+      targetResources: approval === undefined
+        ? [`agent-session:${state.session.sessionId}`, `agent-approval:${event.approvalId}`]
+        : approvalTargetResources(state.session.sessionId, event.approvalId, approval.affects),
+      effect: "mutating",
+    });
+  }
+}
+
+function recordAgentApprovalDecisionAudit(
   runtime: AdminApiRuntime,
   request: Request,
   audit: AdminRequestAuditContext,
@@ -354,36 +504,234 @@ function recordAgentApprovalAudit(
     session: AgentSession;
     approval: AgentApprovalState;
     decision: "approved" | "rejected";
+  },
+): void {
+  recordAgentAudit(runtime, request, audit, {
+    action: "agent.approval.decide",
+    success: true,
+    status: 200,
+    retentionBucket: input.decision === "approved"
+      ? "agent_approved_action_30d"
+      : "agent_rejected_approval_7d",
+    session: input.session,
+    approvalId: input.approval.approvalId,
+    decision: input.decision,
+    resultStatus: input.approval.status,
+    command: truncateAuditText(input.approval.command, 300),
+    affects: auditAffects(input.approval.affects),
+    argumentsSummary: truncateAuditText(input.approval.command, 300),
+    toolName: "quay cli",
+    operationSummary: [
+      `agent approval ${input.decision}: ${truncateAuditText(input.approval.command, 160)}`,
+    ],
+    targetResources: approvalTargetResources(
+      input.session.sessionId,
+      input.approval.approvalId,
+      input.approval.affects,
+    ),
+    effect: "mutating",
+    ...(input.approval.exitCode === undefined ? {} : { exitCode: input.approval.exitCode }),
+  });
+}
+
+function recordAgentApprovalResultAudit(
+  runtime: AdminApiRuntime,
+  request: Request,
+  audit: AdminRequestAuditContext,
+  input: {
+    session: AgentSession;
+    approval: AgentApprovalState;
     success: boolean;
     status: number;
   },
 ): void {
+  const success = input.success && input.approval.status !== "failed";
+  recordAgentAudit(runtime, request, audit, {
+    action: "agent.approval.result",
+    success,
+    status: input.status,
+    retentionBucket: "agent_approved_action_30d",
+    session: input.session,
+    approvalId: input.approval.approvalId,
+    decision: "approved",
+    resultStatus: input.approval.status,
+    command: truncateAuditText(input.approval.command, 300),
+    affects: auditAffects(input.approval.affects),
+    argumentsSummary: truncateAuditText(input.approval.command, 300),
+    toolName: "quay cli",
+    operationSummary: [
+      `agent approval result ${input.approval.status}: ${truncateAuditText(input.approval.command, 160)}`,
+    ],
+    targetResources: approvalTargetResources(
+      input.session.sessionId,
+      input.approval.approvalId,
+      input.approval.affects,
+    ),
+    effect: "mutating",
+    ...(input.approval.exitCode === undefined ? {} : { exitCode: input.approval.exitCode }),
+  });
+}
+
+function recordAgentGatewayErrorAudit(
+  runtime: AdminApiRuntime,
+  request: Request,
+  audit: AdminRequestAuditContext,
+  segments: string[],
+  adapterId: string,
+  err: unknown,
+): void {
+  const sessionId = agentSessionIdFromSegments(segments);
+  const status = err instanceof AgentGatewayHttpError ? err.status : 500;
+  const code = err instanceof AgentGatewayHttpError ? err.code : "agent_gateway_failed";
+  const message = err instanceof Error ? err.message : String(err);
+  recordAgentAudit(runtime, request, audit, {
+    action: "agent.error",
+    success: false,
+    status,
+    retentionBucket: "agent_chat_7d",
+    adapterId,
+    ...(sessionId === undefined ? {} : { sessionId }),
+    errorCode: code,
+    errorMessage: truncateAuditText(message, 300),
+    resultStatus: "failed",
+    operationSummary: [`agent gateway error: ${truncateAuditText(message, 160)}`],
+    targetResources: sessionId === undefined ? ["agent-gateway"] : [`agent-session:${sessionId}`],
+  });
+}
+
+function recordAgentAudit(
+  runtime: AdminApiRuntime,
+  request: Request,
+  audit: AdminRequestAuditContext,
+  input: {
+    action: AgentAuditAction;
+    success: boolean;
+    status: number;
+    retentionBucket: AgentAuditRetentionBucket;
+    operationSummary: string[];
+    targetResources: string[];
+    session?: AgentSession;
+    sessionId?: string;
+    adapterId?: string;
+    context?: AgentUiContext;
+    messageId?: string;
+    messageSummary?: string;
+    toolCallId?: string;
+    toolName?: string;
+    argumentsSummary?: string;
+    effect?: AgentAuditEffect;
+    errorCode?: string;
+    errorMessage?: string;
+    approvalId?: string;
+    decision?: "approved" | "rejected";
+    resultStatus?: "proposed" | "running" | "rejected" | "succeeded" | "failed";
+    command?: string;
+    affects?: Array<{ label: string; value: string }>;
+    exitCode?: number;
+  },
+): void {
+  const timestamp = new Date().toISOString();
+  const context = input.context ?? input.session?.lastContext;
+  const adapterId = input.adapterId ?? input.session?.provider;
+  const sessionId = input.sessionId ?? input.session?.sessionId;
   runtime.adminAudit?.({
-    action: "agent.approval.decide",
+    action: input.action,
     method: request.method,
     path: new URL(request.url).pathname,
-    timestamp: new Date().toISOString(),
+    timestamp,
     ...audit,
     success: input.success,
     status: input.status,
-    operation_summary: [
-      `agent approval ${input.decision}: ${truncateAuditText(input.approval.command, 160)}`,
-    ],
-    target_resources: [
-      `agent-session:${input.session.sessionId}`,
-      `agent-approval:${input.approval.approvalId}`,
-      ...input.approval.affects.map((item) =>
-        `${normalizeAuditResourcePart(item.label)}:${truncateAuditText(item.value, 80)}`
-      ),
-    ],
-    session_id: input.session.sessionId,
-    approval_id: input.approval.approvalId,
-    decision: input.decision,
-    result_status: input.approval.status,
-    command: truncateAuditText(input.approval.command, 300),
-    affects: input.approval.affects,
-    ...(input.approval.exitCode === undefined ? {} : { exit_code: input.approval.exitCode }),
+    operation_summary: input.operationSummary,
+    target_resources: input.targetResources,
+    retention_bucket: input.retentionBucket,
+    expires_at: agentAuditExpiresAt(timestamp, input.retentionBucket),
+    ...(adapterId === undefined ? {} : { adapter_id: adapterId }),
+    ...(input.session === undefined ? {} : { agent_id: input.session.agent }),
+    ...(sessionId === undefined ? {} : { session_id: sessionId }),
+    ...(context === undefined ? {} : contextAuditFields(context)),
+    ...(input.messageId === undefined ? {} : { message_id: input.messageId }),
+    ...(input.messageSummary === undefined ? {} : { message_summary: input.messageSummary }),
+    ...(input.toolCallId === undefined ? {} : { tool_call_id: input.toolCallId }),
+    ...(input.toolName === undefined ? {} : { tool_name: input.toolName }),
+    ...(input.argumentsSummary === undefined ? {} : { arguments_summary: input.argumentsSummary }),
+    ...(input.effect === undefined ? {} : { effect: input.effect }),
+    ...(input.errorCode === undefined ? {} : { error_code: input.errorCode }),
+    ...(input.errorMessage === undefined ? {} : { error_message: input.errorMessage }),
+    ...(input.approvalId === undefined ? {} : { approval_id: input.approvalId }),
+    ...(input.decision === undefined ? {} : { decision: input.decision }),
+    ...(input.resultStatus === undefined ? {} : { result_status: input.resultStatus }),
+    ...(input.command === undefined ? {} : { command: input.command }),
+    ...(input.affects === undefined ? {} : { affects: input.affects }),
+    ...(input.exitCode === undefined ? {} : { exit_code: input.exitCode }),
   });
+}
+
+function agentAuditExpiresAt(timestamp: string, bucket: AgentAuditRetentionBucket): string {
+  return new Date(Date.parse(timestamp) + AGENT_AUDIT_TTL_DAYS[bucket] * AUDIT_DAY_MS).toISOString();
+}
+
+function contextAuditFields(context: AgentUiContext): Pick<
+  AdminAuditEvent,
+  "context_view" | "context_scope" | "context_url_path" | "context_summary" | "context_captured_at"
+> {
+  return {
+    context_view: context.view,
+    context_scope: truncateAuditText(context.scope, 120),
+    context_url_path: truncateAuditText(context.urlPath, 200),
+    context_summary: truncateAuditText(context.summary, 300),
+    context_captured_at: context.capturedAt,
+  };
+}
+
+function approvalTargetResources(
+  sessionId: string,
+  approvalId: string,
+  affects: Array<{ label: string; value: string }>,
+): string[] {
+  return [
+    `agent-session:${sessionId}`,
+    `agent-approval:${approvalId}`,
+    ...affects.map((item) =>
+      `${normalizeAuditResourcePart(item.label)}:${truncateAuditText(item.value, 80)}`
+    ),
+  ];
+}
+
+function auditAffects(
+  affects: Array<{ label: string; value: string }>,
+): Array<{ label: string; value: string }> {
+  return affects.map((item) => ({
+    label: truncateAuditText(item.label, 80),
+    value: truncateAuditText(item.value, 160),
+  }));
+}
+
+function toolResultStatus(
+  status: Extract<AgentEvent, { type: "tool_call" }>["status"],
+): NonNullable<AdminAuditEvent["result_status"]> {
+  if (status === "done") return "succeeded";
+  if (status === "failed") return "failed";
+  return "running";
+}
+
+function classifyToolCallEffect(
+  event: Extract<AgentEvent, { type: "tool_call" }>,
+): AgentAuditEffect {
+  const text = `${event.label} ${event.detail ?? ""}`.toLowerCase();
+  if (/\b(create|update|delete|cancel|retry|merge|push|approve|reject|apply|write|execute|run)\b/.test(text)) {
+    return "mutating";
+  }
+  if (/\b(get|list|read|view|show|status|inspect|search|query|fetch|describe|summarize)\b/.test(text)) {
+    return "read_only";
+  }
+  return "unknown";
+}
+
+function agentSessionIdFromSegments(segments: string[]): string | undefined {
+  return segments[0] === "v1" && segments[1] === "agent" && segments[2] === "sessions"
+    ? segments[3]
+    : undefined;
 }
 
 function normalizeAuditResourcePart(value: string): string {

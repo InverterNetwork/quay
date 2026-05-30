@@ -82,9 +82,15 @@ preview a change set before applying it, and must reload when the server returns
 Each `POST /v1/changes/preview` and `POST /v1/changes/apply` emits a structured
 `quay_admin_audit` JSON line on server stderr with the Slack user ID when a
 protected proxy supplied it, timestamp, success or failure status, sanitized
-operation summaries, and target resources. Audit summaries name fields and
-targets but omit raw repository URLs, commands, token values, and other full
-configuration values.
+operation summaries, and target resources. Agent Gateway routes under
+`POST /v1/agent/*` use the same audit stream for session lifecycle, message
+summaries, UI context summaries, visible tool calls, approval prompts,
+approval decisions, approved action results, command output summaries, and
+errors. Agent records include a retention bucket and `expires_at`; chat,
+context, tool, error, and rejected-approval summaries default to 7 days, while
+approved action records default to 30 days. Audit summaries name fields and
+targets but omit raw repository URLs, token values, full UI payloads, raw tool
+payloads, and other full configuration values.
 
 The API returns JSON and uses a stable error envelope:
 

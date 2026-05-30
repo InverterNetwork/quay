@@ -466,6 +466,11 @@ class HermesEventMapper {
       };
     }
 
+    const commandOutput = commandOutputFromHermesEvent(record, type, this.messageId);
+    if (commandOutput !== null) {
+      return { events: [commandOutput], done: false };
+    }
+
     const toolCall = toolCallFromHermesEvent(record, type, this.messageId);
     if (toolCall !== null) {
       return {
@@ -736,6 +741,36 @@ function toolDetailFromHermesEvent(record: Record<string, unknown>): string | un
     return key === "input" || key === "arguments" ? "Tool input available" : "Tool output available";
   }
   return undefined;
+}
+
+function commandOutputFromHermesEvent(
+  record: Record<string, unknown>,
+  type: string,
+  messageId: string,
+): AgentEvent | null {
+  if (!isCommandOutputEvent(type)) return null;
+  const approvalId = readString(record, "approval_id") ??
+    readString(record, "approvalId") ??
+    readString(record, "approval") ??
+    readString(record, "id");
+  const line = readString(record, "line") ??
+    readString(record, "text") ??
+    readString(record, "output") ??
+    readString(record, "content");
+  if (approvalId === null || approvalId.trim() === "" || line === null || line.trim() === "") {
+    return null;
+  }
+  return {
+    type: "command_output",
+    messageId,
+    approvalId: truncateEventDetail(approvalId.trim()),
+    line: sanitizeEventTextDetail(line),
+  };
+}
+
+function isCommandOutputEvent(type: string): boolean {
+  return (type.includes("command") || type.includes("action") || type.includes("approval")) &&
+    (type.includes("output") || type.includes("stdout") || type.includes("stderr"));
 }
 
 function isIgnorableHermesEvent(record: Record<string, unknown>, type: string): boolean {
