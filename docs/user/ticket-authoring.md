@@ -20,28 +20,21 @@ authors:
   - name: Ada Lovelace
     slack_id: U06TDC56VJB
 worker_execution: goal
-umbrella:
-  external_ref: BRIX-1500
-  feature_branch: quay/umbrella/BRIX-1500
-  depends_on:
-    - BRIX-1498
 ```
 ````
 
-`base_branch`, `slack_thread`, `worker_execution`, and `umbrella` are optional.
+`base_branch`, `slack_thread`, and `worker_execution` are optional.
 `base_branch` overrides the repo default for this task only; Quay branches from
 `origin/<base_branch>` and instructs the worker to open the PR into that branch.
 `worker_execution` defaults to `oneshot`; set it to `goal` when the task should
 use durable goal mode and continue across worker attempts. `authors` is
 required and must contain at least one entry.
 
-`umbrella` enrolls the Linear issue as a subtask in a one-repo umbrella
-workflow. `umbrella.external_ref` identifies the overall workflow. If
-`umbrella.feature_branch` is omitted, Quay derives a deterministic
-`quay/umbrella/<slug>` branch and creates it from the umbrella base branch.
-Subtask PRs target the feature branch, not the repository base branch.
-`umbrella.depends_on` lists other umbrella subtask external refs that must be
-merged into the feature branch before this subtask can spawn.
+For Linear-backed umbrella workflows, do not add umbrella membership or
+ordering to `quay-config`. Linear's native parent/child hierarchy defines the
+umbrella and its expected subtasks, and Linear's native blocked-by relations
+define task ordering. The umbrella parent uses the ordinary `repo` and optional
+`base_branch` fields; child tickets use ordinary execution metadata.
 
 ## Block Rules
 
@@ -55,10 +48,10 @@ merged into the feature branch before this subtask can spawn.
 - `slack_thread`, when present, must be a Slack permalink that can be converted
   to `<channel>:<ts>`.
 - `worker_execution`, when present, must be `oneshot` or `goal`.
-- `umbrella.external_ref` must be a non-empty string when `umbrella` is present.
-- `umbrella.base_branch` and `umbrella.feature_branch`, when present, must be
-  branch names, not full refs.
-- `umbrella.depends_on`, when present, must be a list of non-empty strings.
+- Linear-backed tickets should not use an `umbrella:` object. Legacy umbrella
+  config without `depends_on` may still be accepted for compatibility, but it
+  is not the Linear-native happy path. `umbrella.depends_on` is rejected on
+  Linear enqueue; use native Linear blocked-by relations for ordering.
 
 ## Validation
 
