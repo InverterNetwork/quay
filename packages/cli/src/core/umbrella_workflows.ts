@@ -18,6 +18,8 @@ export interface UmbrellaWorkflowRow {
   repo_id: string;
   base_branch: string;
   feature_branch: string;
+  linear_issue_title: string | null;
+  linear_issue_url: string | null;
   state: string;
   final_pr_task_id: string | null;
   final_pr_number: number | null;
@@ -74,6 +76,8 @@ export function createOrVerifyUmbrellaWorkflow(
     externalRef: string;
     baseBranch: string;
     featureBranch?: string | null;
+    linearIssueTitle?: string | null;
+    linearIssueUrl?: string | null;
     now: string;
     ensureBranch?: boolean;
   },
@@ -107,6 +111,30 @@ export function createOrVerifyUmbrellaWorkflow(
     if (input.ensureBranch !== false) {
       requireUmbrellaFeatureBranchExists(deps, existing);
     }
+    if (
+      input.linearIssueTitle !== undefined ||
+      input.linearIssueUrl !== undefined
+    ) {
+      deps.db
+        .query(
+          `UPDATE umbrella_workflows
+              SET linear_issue_title = COALESCE(?, linear_issue_title),
+                  linear_issue_url = COALESCE(?, linear_issue_url),
+                  updated_at = ?
+            WHERE umbrella_workflow_id = ?`,
+        )
+        .run(
+          normalizeStoredLinearMetadata(input.linearIssueTitle),
+          normalizeStoredLinearMetadata(input.linearIssueUrl),
+          input.now,
+          existing.umbrella_workflow_id,
+        );
+      return lookupUmbrellaWorkflow(
+        deps.db,
+        input.repoId,
+        input.externalRef,
+      )!;
+    }
     return existing;
   }
 
@@ -121,25 +149,44 @@ export function createOrVerifyUmbrellaWorkflow(
   const row = deps.db
     .query<
       UmbrellaWorkflowRow,
-      [string, string, string, string, string, string]
+      [
+        string,
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+        string,
+        string,
+      ]
     >(
       `INSERT INTO umbrella_workflows (
-         external_ref, repo_id, base_branch, feature_branch, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?)
+         external_ref, repo_id, base_branch, feature_branch,
+         linear_issue_title, linear_issue_url, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING umbrella_workflow_id, external_ref, repo_id, base_branch,
-                 feature_branch, state, final_pr_task_id, final_pr_number,
-                 final_pr_url, created_at, updated_at`,
+                 feature_branch, linear_issue_title, linear_issue_url, state,
+                 final_pr_task_id, final_pr_number, final_pr_url, created_at,
+                 updated_at`,
     )
     .get(
       input.externalRef,
       input.repoId,
       input.baseBranch,
       featureBranch,
+      normalizeStoredLinearMetadata(input.linearIssueTitle),
+      normalizeStoredLinearMetadata(input.linearIssueUrl),
       input.now,
       input.now,
     );
   if (!row) throw new Error("umbrella workflow insert returned no row");
   return row;
+}
+
+function normalizeStoredLinearMetadata(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 export function requireUmbrellaFeatureBranchExists(
@@ -448,8 +495,9 @@ export function lookupUmbrellaWorkflow(
     db
       .query<UmbrellaWorkflowRow, [string, string]>(
         `SELECT umbrella_workflow_id, external_ref, repo_id, base_branch,
-                feature_branch, state, final_pr_task_id, final_pr_number,
-                final_pr_url, created_at, updated_at
+                feature_branch, linear_issue_title, linear_issue_url, state,
+                final_pr_task_id, final_pr_number, final_pr_url, created_at,
+                updated_at
            FROM umbrella_workflows
           WHERE repo_id = ? AND external_ref = ?`,
       )

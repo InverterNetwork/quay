@@ -380,6 +380,8 @@ interface ReadyUmbrellaFinalPrWorkflowRow {
   repo_id: string;
   base_branch: string;
   feature_branch: string;
+  linear_issue_title: string | null;
+  linear_issue_url: string | null;
   final_pr_task_id: string | null;
   final_pr_number: number | null;
   final_pr_url: string | null;
@@ -1645,8 +1647,9 @@ function readReadyUmbrellaFinalPrWorkflows(
   return db
     .query<ReadyUmbrellaFinalPrWorkflowRow, []>(
       `SELECT uw.umbrella_workflow_id, uw.external_ref, uw.repo_id,
-              uw.base_branch, uw.feature_branch, uw.final_pr_task_id,
-              uw.final_pr_number, uw.final_pr_url
+              uw.base_branch, uw.feature_branch, uw.linear_issue_title,
+              uw.linear_issue_url, uw.final_pr_task_id, uw.final_pr_number,
+              uw.final_pr_url
          FROM umbrella_workflows uw
         WHERE uw.state = 'active'
           AND (
@@ -3117,6 +3120,12 @@ function renderUmbrellaFinalPrTitle(
   workflow: ReadyUmbrellaFinalPrWorkflowRow,
 ): string {
   const ticket = normalizeTicketRef(workflow.external_ref);
+  const linearTitle = normalizePrTitleText(workflow.linear_issue_title);
+  if (linearTitle !== null) {
+    const titled =
+      hasConventionalCommitPrefix(linearTitle) ? linearTitle : `feat: ${linearTitle}`;
+    return appendTicketRefToTitle(titled, ticket);
+  }
   return ticket === null
     ? "feat: reconcile umbrella workflow"
     : `feat: reconcile umbrella workflow (${ticket})`;
@@ -3127,12 +3136,15 @@ function renderUmbrellaFinalPrManagedSection(
   subtasks: UmbrellaFinalPrExpectedSubtaskRow[],
 ): string {
   const displayRef = normalizeTicketRef(workflow.external_ref) ?? workflow.external_ref;
+  const linearTicket = renderLinearTicketLink(displayRef, workflow.linear_issue_url);
+  const linearTitle = normalizePrTitleText(workflow.linear_issue_title);
   const lines = [
     UMBRELLA_FINAL_PR_START,
     "## Quay Umbrella Final PR",
     "",
     `Umbrella external ref: ${displayRef}`,
-    `Linear ticket: ${displayRef}`,
+    ...(linearTitle === null ? [] : [`Umbrella title: ${linearTitle}`]),
+    `Linear ticket: ${linearTicket}`,
     `Source branch: ${workflow.feature_branch}`,
     `Target branch: ${workflow.base_branch}`,
     "",
@@ -3171,6 +3183,28 @@ function renderUmbrellaFinalPrManagedSection(
   }
   lines.push("", UMBRELLA_FINAL_PR_END);
   return lines.join("\n");
+}
+
+function normalizePrTitleText(title: string | null): string | null {
+  if (title === null) return null;
+  const normalized = title.replace(/\s+/g, " ").trim();
+  return normalized === "" ? null : normalized;
+}
+
+function hasConventionalCommitPrefix(title: string): boolean {
+  return /^[a-z]+(?:\([^)]+\))?!?:\s/i.test(title);
+}
+
+function appendTicketRefToTitle(title: string, ticket: string | null): string {
+  if (ticket === null) return title;
+  if (title.toUpperCase().includes(ticket.toUpperCase())) return title;
+  return `${title} (${ticket})`;
+}
+
+function renderLinearTicketLink(displayRef: string, url: string | null): string {
+  const trimmed = url?.trim();
+  if (trimmed === undefined || trimmed === "") return displayRef;
+  return `[${displayRef}](${trimmed})`;
 }
 
 function replaceUmbrellaFinalPrManagedSection(

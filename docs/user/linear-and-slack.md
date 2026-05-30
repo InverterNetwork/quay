@@ -117,6 +117,9 @@ umbrella PR into the repository base branch.
 When every expected child is either linked to a task in
 `merged_to_feature_branch` or marked `complete_without_quay`, tick creates or
 reuses the final umbrella PR and records a final Quay-owned task at `pr-open`.
+The final PR title and managed body use the parent Linear issue title and URL
+captured when the umbrella parent was enqueued, with generic fallback wording
+for historical workflows that do not have those fields.
 The final task then follows the ordinary Quay PR lifecycle. When that final PR
 merges, Quay marks the umbrella workflow `completed`; closing it without merge
 does not mark the workflow delivered.
