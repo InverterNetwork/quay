@@ -22,9 +22,12 @@ import {
   createOrVerifyUmbrellaWorkflow,
   deriveUmbrellaFeatureBranch,
   listUmbrellaExpectedTasks,
+  lookupUmbrellaWorkflow,
   markUmbrellaExpectedTaskCompleteWithoutQuay,
+  requireUmbrellaExpectedTask,
   upsertUmbrellaExpectedTask,
   type UmbrellaExpectedTaskRow,
+  type UmbrellaWorkflowRow,
 } from "../core/umbrella_workflows.ts";
 import type { ValidatorRunner } from "../core/validator_runner.ts";
 import type {
@@ -197,6 +200,22 @@ export async function handleEnqueueLinearIssue(
     }
   }
 
+  let resolvedLinearUmbrella: LinearUmbrellaSubtaskResolution | null = null;
+  if (hierarchy.parent !== null) {
+    try {
+      resolvedLinearUmbrella = resolveLinearUmbrellaSubtask(
+        deps.enqueueDeps.db,
+        {
+          repoId: resolvedRepoId,
+          childExternalRef: externalRef,
+          parent: hierarchy.parent,
+        },
+      );
+    } catch (err) {
+      return emitError(io, err);
+    }
+  }
+
   let dependencyResolution: LinearDependencyResolution;
   try {
     const now = deps.enqueueDeps.clock.nowISO();
@@ -240,9 +259,19 @@ export async function handleEnqueueLinearIssue(
       slack_thread_ref: ctx.slack_thread_ref,
       tags: mergedTags,
       worker_execution: ctx.worker_execution,
-      base_branch: resolvedBaseBranch ?? undefined,
+      base_branch:
+        resolvedLinearUmbrella?.workflow.feature_branch ??
+        resolvedBaseBranch ??
+        undefined,
       umbrella:
-        ctx.umbrella === null
+        resolvedLinearUmbrella !== null
+          ? {
+              external_ref: resolvedLinearUmbrella.workflow.external_ref,
+              base_branch: resolvedLinearUmbrella.workflow.base_branch,
+              feature_branch: resolvedLinearUmbrella.workflow.feature_branch,
+              expected_external_ref: externalRef,
+            }
+          : ctx.umbrella === null
           ? undefined
           : {
               external_ref: ctx.umbrella.external_ref,
@@ -357,6 +386,10 @@ interface UmbrellaParentEnqueueResult {
   linear_hierarchy: LinearHierarchySnapshot;
 }
 
+interface LinearUmbrellaSubtaskResolution {
+  workflow: UmbrellaWorkflowRow;
+}
+
 interface RepoRow {
   repo_id: string;
   base_branch: string;
@@ -461,6 +494,51 @@ function createLinearUmbrellaParentWorkflow(
     } catch {}
     throw err;
   }
+}
+
+function resolveLinearUmbrellaSubtask(
+  db: DB,
+  input: {
+    repoId: string;
+    childExternalRef: string;
+    parent: LinearHierarchyIssue;
+  },
+): LinearUmbrellaSubtaskResolution {
+  const parentExternalRef = input.parent.identifier.toUpperCase();
+  const childExternalRef = input.childExternalRef.toUpperCase();
+  const workflow = lookupUmbrellaWorkflow(
+    db,
+    input.repoId,
+    parentExternalRef,
+  );
+  if (workflow === null) {
+    throw new QuayError(
+      "umbrella_not_enqueued",
+      `Linear parent ${parentExternalRef} has not been enqueued as an umbrella workflow`,
+      {
+        repo_id: input.repoId,
+        parent_external_ref: parentExternalRef,
+        child_external_ref: childExternalRef,
+      },
+    );
+  }
+  const expectedTask = requireUmbrellaExpectedTask(db, {
+    umbrellaWorkflowId: workflow.umbrella_workflow_id,
+    externalRef: childExternalRef,
+  });
+  if (expectedTask.state === "complete_without_quay") {
+    throw new QuayError(
+      "validation_error",
+      `umbrella subtask ${childExternalRef} is already complete without Quay and cannot be enqueued`,
+      {
+        umbrella_workflow_id: workflow.umbrella_workflow_id,
+        parent_external_ref: parentExternalRef,
+        child_external_ref: childExternalRef,
+        state: expectedTask.state,
+      },
+    );
+  }
+  return { workflow };
 }
 
 function resolveLinearDependencies(
