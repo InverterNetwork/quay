@@ -385,7 +385,7 @@ export function requireUmbrellaExpectedTask(
   );
 }
 
-function lookupUmbrellaWorkflow(
+export function lookupUmbrellaWorkflow(
   db: DB,
   repoId: string,
   externalRef: string,

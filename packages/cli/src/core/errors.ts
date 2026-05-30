@@ -8,6 +8,7 @@ export type QuayErrorCode =
   | "bare_clone_missing"
   | "bootstrap_failed"
   | "dependency_not_tracked"
+  | "umbrella_not_enqueued"
   | "umbrella_workflow_conflict"
   | "umbrella_subtask_not_expected"
   | "missing_agent_capability"
