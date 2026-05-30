@@ -136,10 +136,12 @@ feature branch, and snapshots the expected Linear child set. Tick never polls
 Linear to discover changed membership later.
 
 Each umbrella child target uses the shared feature branch as its effective PR
-base. Child enqueue links the concrete Quay task to an expected child row. If a
-child was already complete in Linear when discovered, Quay can mark that
-expected row `complete_without_quay`; it then counts toward final readiness
-without requiring a Quay task.
+base. Parent enqueue materializes each incomplete child as a concrete Quay task
+and links it to an expected child row. If a child was already complete in
+Linear when discovered, Quay marks that expected row `complete_without_quay`;
+it then counts toward final readiness without requiring a Quay task. Direct
+enqueue of a child issue is not part of the umbrella flow and fails unless the
+operator passes `--as-normal-task`.
 
 Linear blocked-by relations define ordering. Same-umbrella dependency rows use
 `scope: "umbrella"` and wait for blockers to reach

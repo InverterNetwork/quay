@@ -90,16 +90,17 @@ reaches `merged`. Incomplete untracked blockers fail enqueue with
 
 Umbrella workflows are driven by native Linear hierarchy. Enqueue the parent
 issue first; Quay records the expected child set and creates the shared feature
-branch. Enqueue child issues afterwards; Quay resolves the parent workflow from
-the child's Linear parent relation and targets the child task at the umbrella
-feature branch.
+branch. Incomplete children are materialized as Quay tasks during the parent
+enqueue and target the umbrella feature branch; children already complete in
+Linear are recorded as `complete_without_quay`.
 
-Child-before-parent enqueue fails with `umbrella_not_enqueued`. A child not in
-the parent's persisted expected set fails with `umbrella_subtask_not_expected`.
-Use `--as-normal-task` on a child issue only to intentionally ignore the
-Linear parent umbrella membership for one enqueue. Parent issues with children
-still create umbrella coordination state. The flag still processes Linear
-blocked-by relations as normal dependencies.
+Do not enqueue child issues afterwards for the umbrella flow. Direct child
+enqueue fails with `umbrella_child_direct_enqueue`, including after the parent
+has already materialized the child task. Use `--as-normal-task` on a child
+issue only to intentionally ignore the Linear parent umbrella membership for
+one enqueue. Parent issues with children still create umbrella coordination
+state. The flag still processes Linear blocked-by relations as normal
+dependencies.
 
 Inside an umbrella, Linear blocked-by relations create umbrella-scoped
 dependency rows. Same-umbrella blockers wait for

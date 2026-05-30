@@ -574,6 +574,22 @@ test("Linear parent enqueue creates idempotent umbrella workflow and expected ch
       },
     }),
   );
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2301",
+      block: {
+        tags: ["child"],
+        slack_thread: null,
+        authors: [{ name: "Fabian Scherer", slack_id: "U06TDC56VJB" }],
+      },
+    }),
+  );
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2302",
+      body: "This child was completed manually before Quay picked up the umbrella.",
+    }),
+  );
   built.linear.setIssueHierarchy("ENG-2300", {
     parent: null,
     children: [
@@ -631,7 +647,7 @@ test("Linear parent enqueue creates idempotent umbrella workflow and expected ch
     branch: "quay/umbrella/ENG-2300",
     baseBranch: "dev",
   });
-  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  expect(built.git.countCalls("worktreeAdd")).toBe(1);
 
   const workflow = h.db
     .query<
@@ -680,7 +696,7 @@ test("Linear parent enqueue creates idempotent umbrella workflow and expected ch
       external_ref: "ENG-2301",
       title: "Build child",
       linear_issue_url: "https://linear.app/inverter/issue/ENG-2301",
-      state: "expected",
+      state: "linked",
       completion_source: null,
     },
     {
@@ -694,7 +710,35 @@ test("Linear parent enqueue creates idempotent umbrella workflow and expected ch
   const taskCount = h.db
     .query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM tasks`)
     .get();
-  expect(taskCount?.count).toBe(0);
+  expect(taskCount?.count).toBe(1);
+  const childTask = h.db
+    .query<{ state: string; base_branch: string }, []>(
+      `SELECT state, base_branch FROM tasks WHERE external_ref = 'ENG-2301'`,
+    )
+    .get();
+  expect(childTask).toEqual({
+    state: "queued",
+    base_branch: "quay/umbrella/ENG-2300",
+  });
+  expect(enqResult.child_tasks).toHaveLength(2);
+  expect(
+    enqResult.child_tasks.find(
+      (t: { external_ref: string }) => t.external_ref === "ENG-2302",
+    ),
+  ).toMatchObject({
+    external_ref: "ENG-2302",
+    complete_in_linear: true,
+    task: null,
+  });
+  expect(
+    enqResult.child_tasks.find(
+      (t: { external_ref: string }) => t.external_ref === "ENG-2301",
+    ),
+  ).toMatchObject({
+    external_ref: "ENG-2301",
+    complete_in_linear: false,
+    reused_existing_task: false,
+  });
 
   const ioAgain = bufferIO();
   const second = await dispatch(
@@ -707,12 +751,298 @@ test("Linear parent enqueue creates idempotent umbrella workflow and expected ch
   expect(secondResult.umbrella_workflow_id).toBe(
     workflow!.umbrella_workflow_id,
   );
+  expect(
+    secondResult.child_tasks.find(
+      (t: { external_ref: string }) => t.external_ref === "ENG-2301",
+    ),
+  ).toMatchObject({
+    external_ref: "ENG-2301",
+    reused_existing_task: true,
+  });
+  expect(built.git.countCalls("worktreeAdd")).toBe(1);
   const expectedCount = h.db
     .query<{ count: number }, []>(
       `SELECT COUNT(*) AS count FROM umbrella_expected_tasks`,
     )
     .get();
   expect(expectedCount?.count).toBe(2);
+});
+
+test("Linear parent enqueue materializes sibling blocked-by ordering", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2310",
+      block: {
+        base_branch: "dev",
+        tags: ["umbrella"],
+      },
+    }),
+  );
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2311" }));
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2312" }));
+  built.linear.setIssueHierarchy("ENG-2310", {
+    parent: null,
+    children: [
+      {
+        identifier: "ENG-2311",
+        url: "https://linear.app/inverter/issue/ENG-2311",
+        title: "Build foundation",
+        stateType: "started",
+      },
+      {
+        identifier: "ENG-2312",
+        url: "https://linear.app/inverter/issue/ENG-2312",
+        title: "Build follow-up",
+        stateType: "started",
+      },
+    ],
+  });
+  built.linear.setBlockedByRelations("ENG-2312", [
+    blockedByRelation("ENG-2311", "started"),
+  ]);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2310"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const tasks = h.db
+    .query<
+      {
+        external_ref: string;
+        task_id: string;
+        state: string;
+        base_branch: string;
+      },
+      []
+    >(
+      `SELECT external_ref, task_id, state, base_branch
+         FROM tasks
+        ORDER BY external_ref`,
+    )
+    .all();
+  expect(
+    tasks.map((t) => ({
+      external_ref: t.external_ref,
+      state: t.state,
+      base_branch: t.base_branch,
+    })),
+  ).toEqual([
+    {
+      external_ref: "ENG-2311",
+      state: "queued",
+      base_branch: "quay/umbrella/ENG-2310",
+    },
+    {
+      external_ref: "ENG-2312",
+      state: "waiting_dependencies",
+      base_branch: "quay/umbrella/ENG-2310",
+    },
+  ]);
+  const dependency = h.db
+    .query<
+      {
+        dependency_task_id: string | null;
+        dependency_external_ref: string | null;
+        scope: string;
+        required_state: string;
+        satisfied_at: string | null;
+      },
+      [string]
+    >(
+      `SELECT dependency_task_id, dependency_external_ref, scope, required_state, satisfied_at
+         FROM task_dependencies
+        WHERE dependent_task_id = ?`,
+    )
+    .get(tasks.find((t) => t.external_ref === "ENG-2312")!.task_id);
+  expect(dependency).toEqual({
+    dependency_task_id: tasks.find((t) => t.external_ref === "ENG-2311")!
+      .task_id,
+    dependency_external_ref: "ENG-2311",
+    scope: "umbrella",
+    required_state: "merged_to_feature_branch",
+    satisfied_at: null,
+  });
+});
+
+test("Linear parent enqueue fails before side effects on same-umbrella cycles", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2320",
+      block: {
+        base_branch: "dev",
+        tags: ["umbrella"],
+      },
+    }),
+  );
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2321" }));
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2322" }));
+  built.linear.setIssueHierarchy("ENG-2320", {
+    parent: null,
+    children: [
+      {
+        identifier: "ENG-2321",
+        url: "https://linear.app/inverter/issue/ENG-2321",
+        title: "Cycle A",
+        stateType: "started",
+      },
+      {
+        identifier: "ENG-2322",
+        url: "https://linear.app/inverter/issue/ENG-2322",
+        title: "Cycle B",
+        stateType: "started",
+      },
+    ],
+  });
+  built.linear.setBlockedByRelations("ENG-2321", [
+    blockedByRelation("ENG-2322", "started"),
+  ]);
+  built.linear.setBlockedByRelations("ENG-2322", [
+    blockedByRelation("ENG-2321", "started"),
+  ]);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2320"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("umbrella_dependency_cycle");
+  expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const counts = h.db
+    .query<{ workflows: number; expected: number; tasks: number; deps: number }, []>(
+      `SELECT
+         (SELECT COUNT(*) FROM umbrella_workflows) AS workflows,
+         (SELECT COUNT(*) FROM umbrella_expected_tasks) AS expected,
+         (SELECT COUNT(*) FROM tasks) AS tasks,
+         (SELECT COUNT(*) FROM task_dependencies) AS deps`,
+    )
+    .get();
+  expect(counts).toEqual({ workflows: 0, expected: 0, tasks: 0, deps: 0 });
+});
+
+test("Linear parent enqueue fails before side effects on untracked external blocker", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2330",
+      block: {
+        base_branch: "dev",
+        tags: ["umbrella"],
+      },
+    }),
+  );
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2331" }));
+  built.linear.setIssueHierarchy("ENG-2330", {
+    parent: null,
+    children: [
+      {
+        identifier: "ENG-2331",
+        url: "https://linear.app/inverter/issue/ENG-2331",
+        title: "Blocked child",
+        stateType: "started",
+      },
+    ],
+  });
+  built.linear.setBlockedByRelations("ENG-2331", [
+    blockedByRelation("ENG-9999", "started"),
+  ]);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2330"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("dependency_not_tracked");
+  expect(err.dependencies).toEqual([
+    {
+      external_ref: "ENG-9999",
+      repo_id: REPO_ID,
+    },
+  ]);
+  expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const taskCount = h.db
+    .query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM tasks`)
+    .get();
+  expect(taskCount?.count).toBe(0);
+});
+
+test("Linear parent enqueue fails before side effects on invalid incomplete child config", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2340",
+      block: {
+        base_branch: "dev",
+        tags: ["umbrella"],
+      },
+    }),
+  );
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2341",
+      body: "Incomplete child has no quay-config block.",
+    }),
+  );
+  built.linear.setIssueHierarchy("ENG-2340", {
+    parent: null,
+    children: [
+      {
+        identifier: "ENG-2341",
+        url: "https://linear.app/inverter/issue/ENG-2341",
+        title: "Invalid child",
+        stateType: "started",
+      },
+    ],
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2340"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("ticket_block_invalid");
+  expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const counts = h.db
+    .query<{ workflows: number; tasks: number; artifacts: number }, []>(
+      `SELECT
+         (SELECT COUNT(*) FROM umbrella_workflows) AS workflows,
+         (SELECT COUNT(*) FROM tasks) AS tasks,
+         (SELECT COUNT(*) FROM artifacts) AS artifacts`,
+    )
+    .get();
+  expect(counts).toEqual({ workflows: 0, tasks: 0, artifacts: 0 });
 });
 
 test("Linear parent re-enqueue fails when existing umbrella feature branch is missing", async () => {
@@ -730,6 +1060,14 @@ test("Linear parent re-enqueue fails when existing umbrella feature branch is mi
       block: {
         base_branch: "dev",
         tags: ["umbrella"],
+      },
+    }),
+  );
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2306",
+      block: {
+        tags: ["child"],
       },
     }),
   );
@@ -772,7 +1110,7 @@ test("Linear parent re-enqueue fails when existing umbrella feature branch is mi
   expect(expectedCount?.count).toBe(0);
 });
 
-test("Linear child enqueue resolves parent umbrella workflow and links expected task", async () => {
+test("Linear child enqueue fails before substrate even when parent umbrella exists", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -810,47 +1148,21 @@ test("Linear child enqueue resolves parent umbrella workflow and links expected 
     io,
   );
 
-  expect(result.exitCode).toBe(0);
-  expect(io.err()).toBe("");
-  const enqResult = JSON.parse(io.out().trim());
-  expect(enqResult.state).toBe("queued");
-
-  const task = h.db
-    .query<{ base_branch: string; external_ref: string | null }, [string]>(
-      `SELECT base_branch, external_ref FROM tasks WHERE task_id = ?`,
-    )
-    .get(enqResult.task_id);
-  expect(task).toEqual({
-    base_branch: "quay/umbrella/ENG-2400",
-    external_ref: "ENG-2401",
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
+  expect(err.message).toContain("enqueue the parent issue");
+  expect(err.message).toContain("--as-normal-task");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    parent_external_ref: "ENG-2400",
+    child_external_ref: "ENG-2401",
   });
-  expect(
-    built.git.calls.find((c) => c.op === "hasRemoteBranch")?.args,
-  ).toEqual({
-    repoId: REPO_ID,
-    branch: "quay/umbrella/ENG-2400",
-  });
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
   expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
-  expect(built.git.calls.find((c) => c.op === "worktreeAdd")?.args).toMatchObject({
-    branch: "quay/ENG-2401",
-    baseRef: "origin/quay/umbrella/ENG-2400",
-  });
+  expect(built.git.countCalls("hasRemoteBranch")).toBe(0);
 
-  const umbrellaTask = h.db
-    .query<
-      { umbrella_workflow_id: number; task_id: string; external_ref: string },
-      [string]
-    >(
-      `SELECT umbrella_workflow_id, task_id, external_ref
-         FROM umbrella_tasks
-        WHERE task_id = ?`,
-    )
-    .get(enqResult.task_id);
-  expect(umbrellaTask).toEqual({
-    umbrella_workflow_id: workflowId,
-    task_id: enqResult.task_id,
-    external_ref: "ENG-2401",
-  });
   const expected = h.db
     .query<{ state: string }, [number, string]>(
       `SELECT state
@@ -858,23 +1170,71 @@ test("Linear child enqueue resolves parent umbrella workflow and links expected 
         WHERE umbrella_workflow_id = ? AND external_ref = ?`,
     )
     .get(workflowId, "ENG-2401");
-  expect(expected?.state).toBe("linked");
-
-  const snapshot = h.db
-    .query<{ file_path: string }, [string]>(
-      `SELECT file_path FROM artifacts
-        WHERE task_id = ? AND kind = 'ticket_snapshot'
-        ORDER BY artifact_id DESC LIMIT 1`,
+  expect(expected?.state).toBe("expected");
+  const counts = h.db
+    .query<{ tasks: number; artifacts: number; links: number; dependencies: number }, []>(
+      `SELECT
+         (SELECT COUNT(*) FROM tasks) AS tasks,
+         (SELECT COUNT(*) FROM artifacts) AS artifacts,
+         (SELECT COUNT(*) FROM umbrella_tasks) AS links,
+         (SELECT COUNT(*) FROM task_dependencies) AS dependencies`,
     )
-    .get(enqResult.task_id);
-  const parsed = JSON.parse(readFileSync(snapshot!.file_path, "utf8"));
-  expect(parsed.linear_hierarchy.parent).toMatchObject({
-    identifier: "ENG-2400",
-    title: "Umbrella parent",
+    .get();
+  expect(counts).toEqual({
+    tasks: 0,
+    artifacts: 0,
+    links: 0,
+    dependencies: 0,
   });
 });
 
-test("Linear child enqueue fails before substrate when umbrella feature branch is missing", async () => {
+test("Linear child enqueue rejects an existing umbrella child task", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+  const workflowId = insertUmbrellaWorkflow("ENG-2402", {
+    baseBranch: "dev",
+    featureBranch: "quay/umbrella/ENG-2402",
+  });
+  insertExpectedUmbrellaTask(workflowId, "ENG-2403", "Build existing subtask");
+  const taskId = insertTrackedTask("queued", "ENG-2403");
+  linkUmbrellaTask(workflowId, "ENG-2403", taskId);
+
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2403" }));
+  built.linear.setIssueHierarchy("ENG-2403", {
+    parent: {
+      identifier: "ENG-2402",
+      url: "https://linear.app/inverter/issue/ENG-2402",
+      title: "Umbrella parent",
+      stateType: "started",
+    },
+    children: [],
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2403"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    parent_external_ref: "ENG-2402",
+    child_external_ref: "ENG-2403",
+  });
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const taskCount = h.db
+    .query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM tasks`)
+    .get();
+  expect(taskCount?.count).toBe(1);
+});
+
+test("Linear child enqueue fails before checking umbrella feature branch", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -904,14 +1264,14 @@ test("Linear child enqueue fails before substrate when umbrella feature branch i
 
   expect(result.exitCode).toBe(1);
   const err = JSON.parse(io.err().trim());
-  expect(err.error).toBe("umbrella_feature_branch_missing");
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
   expect(err).toMatchObject({
     repo_id: REPO_ID,
-    external_ref: "ENG-2405",
-    base_branch: "dev",
-    feature_branch: "quay/umbrella/ENG-2405",
+    parent_external_ref: "ENG-2405",
+    child_external_ref: "ENG-2406",
   });
   expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
+  expect(built.git.countCalls("hasRemoteBranch")).toBe(0);
   expect(built.git.countCalls("worktreeAdd")).toBe(0);
   const counts = h.db
     .query<{ tasks: number; artifacts: number; links: number }, []>(
@@ -924,7 +1284,7 @@ test("Linear child enqueue fails before substrate when umbrella feature branch i
   expect(counts).toEqual({ tasks: 0, artifacts: 0, links: 0 });
 });
 
-test("Linear umbrella subtask blocked by linked same-umbrella task waits for feature-branch merge", async () => {
+test("Linear child direct enqueue fails before same-umbrella dependency resolution", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -966,43 +1326,28 @@ test("Linear umbrella subtask blocked by linked same-umbrella task waits for fea
     io,
   );
 
-  expect(result.exitCode).toBe(0);
-  const enqResult = JSON.parse(io.out().trim());
-  expect(enqResult.state).toBe("waiting_dependencies");
-  const deps = h.db
-    .query<
-      {
-        dependency_task_id: string | null;
-        dependency_external_ref: string | null;
-        dependency_repo_id: string | null;
-        umbrella_workflow_id: number | null;
-        scope: string;
-        required_state: string;
-        satisfied_at: string | null;
-      },
-      [string]
-    >(
-      `SELECT dependency_task_id, dependency_external_ref, dependency_repo_id,
-              umbrella_workflow_id, scope, required_state, satisfied_at
-         FROM task_dependencies
-        WHERE dependent_task_id = ?
-        ORDER BY dependency_external_ref`,
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    parent_external_ref: "ENG-2500",
+    child_external_ref: "ENG-2502",
+  });
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const counts = h.db
+    .query<{ tasks: number; artifacts: number; dependencies: number }, [string]>(
+      `SELECT
+         (SELECT COUNT(*) FROM tasks WHERE task_id != ?) AS tasks,
+         (SELECT COUNT(*) FROM artifacts) AS artifacts,
+         (SELECT COUNT(*) FROM task_dependencies) AS dependencies`,
     )
-    .all(enqResult.task_id);
-  expect(deps).toEqual([
-    {
-      dependency_task_id: blockerTaskId,
-      dependency_external_ref: "ENG-2501",
-      dependency_repo_id: REPO_ID,
-      umbrella_workflow_id: workflowId,
-      scope: "umbrella",
-      required_state: "merged_to_feature_branch",
-      satisfied_at: null,
-    },
-  ]);
+    .get(blockerTaskId);
+  expect(counts).toEqual({ tasks: 0, artifacts: 0, dependencies: 0 });
+  expect(workflowId).toBeGreaterThan(0);
 });
 
-test("Linear umbrella subtask blocker already merged to feature branch does not hold enqueue", async () => {
+test("Linear child direct enqueue fails before satisfied umbrella dependency resolution", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -1040,25 +1385,25 @@ test("Linear umbrella subtask blocker already merged to feature branch does not 
     io,
   );
 
-  expect(result.exitCode).toBe(0);
-  const enqResult = JSON.parse(io.out().trim());
-  expect(enqResult.state).toBe("queued");
-  const dep = h.db
-    .query<
-      { dependency_task_id: string | null; required_state: string; satisfied_at: string | null },
-      [string]
-    >(
-      `SELECT dependency_task_id, required_state, satisfied_at
-         FROM task_dependencies
-        WHERE dependent_task_id = ?`,
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    parent_external_ref: "ENG-2510",
+    child_external_ref: "ENG-2512",
+  });
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const depCount = h.db
+    .query<{ count: number }, []>(
+      `SELECT COUNT(*) AS count FROM task_dependencies`,
     )
-    .get(enqResult.task_id);
-  expect(dep?.dependency_task_id).toBe(blockerTaskId);
-  expect(dep?.required_state).toBe("merged_to_feature_branch");
-  expect(dep?.satisfied_at).not.toBeNull();
+    .get();
+  expect(depCount?.count).toBe(0);
+  expect(blockerTaskId).toBe("task-eng-2511");
 });
 
-test("Linear-complete same-umbrella blocker still waits when linked task is not merged to feature branch", async () => {
+test("Linear child direct enqueue fails before Linear-complete umbrella dependency resolution", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -1093,33 +1438,25 @@ test("Linear-complete same-umbrella blocker still waits when linked task is not 
     io,
   );
 
-  expect(result.exitCode).toBe(0);
-  const enqResult = JSON.parse(io.out().trim());
-  expect(enqResult.state).toBe("waiting_dependencies");
-  const dep = h.db
-    .query<
-      {
-        dependency_task_id: string | null;
-        scope: string;
-        required_state: string;
-        satisfied_at: string | null;
-      },
-      [string]
-    >(
-      `SELECT dependency_task_id, scope, required_state, satisfied_at
-         FROM task_dependencies
-        WHERE dependent_task_id = ?`,
-    )
-    .get(enqResult.task_id);
-  expect(dep).toEqual({
-    dependency_task_id: blockerTaskId,
-    scope: "umbrella",
-    required_state: "merged_to_feature_branch",
-    satisfied_at: null,
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    parent_external_ref: "ENG-2515",
+    child_external_ref: "ENG-2517",
   });
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const depCount = h.db
+    .query<{ count: number }, []>(
+      `SELECT COUNT(*) AS count FROM task_dependencies`,
+    )
+    .get();
+  expect(depCount?.count).toBe(0);
+  expect(blockerTaskId).toBe("task-eng-2516");
 });
 
-test("Linear umbrella subtask blocked by unlinked same-umbrella task fails before substrate", async () => {
+test("Linear child direct enqueue fails before unlinked same-umbrella dependency checks", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -1155,16 +1492,12 @@ test("Linear umbrella subtask blocked by unlinked same-umbrella task fails befor
   expect(result.exitCode).toBe(1);
   expect(io.out()).toBe("");
   const err = JSON.parse(io.err().trim());
-  expect(err.error).toBe("dependency_not_tracked");
-  expect(err.message).toContain("ENG-2521");
-  expect(err.dependencies).toEqual([
-    {
-      external_ref: "ENG-2521",
-      repo_id: REPO_ID,
-      umbrella_external_ref: "ENG-2520",
-      umbrella_workflow_id: workflowId,
-    },
-  ]);
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    parent_external_ref: "ENG-2520",
+    child_external_ref: "ENG-2522",
+  });
   expect(built.git.countCalls("worktreeAdd")).toBe(0);
   const counts = h.db
     .query<{ tasks: number; artifacts: number; links: number; dependencies: number }, []>(
@@ -1181,9 +1514,10 @@ test("Linear umbrella subtask blocked by unlinked same-umbrella task fails befor
     links: 0,
     dependencies: 0,
   });
+  expect(workflowId).toBeGreaterThan(0);
 });
 
-test("Linear-complete expected same-umbrella blocker is marked complete without Quay", async () => {
+test("Linear child direct enqueue fails before complete-without-Quay umbrella updates", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -1216,16 +1550,15 @@ test("Linear-complete expected same-umbrella blocker is marked complete without 
     io,
   );
 
-  expect(result.exitCode).toBe(0);
-  expect(io.err()).toBe("");
-  const enqResult = JSON.parse(io.out().trim());
-  expect(enqResult.state).toBe("queued");
-
-  const deps = h.db
-    .query(`SELECT dependency_id FROM task_dependencies WHERE dependent_task_id = ?`)
-    .all(enqResult.task_id);
-  expect(deps).toHaveLength(0);
-
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    parent_external_ref: "ENG-2525",
+    child_external_ref: "ENG-2527",
+  });
   const expected = h.db
     .query<
       {
@@ -1245,28 +1578,14 @@ test("Linear-complete expected same-umbrella blocker is marked complete without 
     )
     .get(workflowId, workflowId, workflowId);
   expect(expected).toEqual({
-    blocker_state: "complete_without_quay",
-    blocker_source: "linear",
-    followup_state: "linked",
+    blocker_state: "expected",
+    blocker_source: null,
+    followup_state: "expected",
   });
-
-  const snapshot = h.db
-    .query<{ file_path: string }, [string]>(
-      `SELECT file_path FROM artifacts
-        WHERE task_id = ? AND kind = 'ticket_snapshot'
-        ORDER BY artifact_id DESC LIMIT 1`,
-    )
-    .get(enqResult.task_id);
-  const parsed = JSON.parse(readFileSync(snapshot!.file_path, "utf8"));
-  expect(parsed.linear_blocked_by_relations[0]).toMatchObject({
-    blocker_identifier: "ENG-2526",
-    complete_in_linear: true,
-    tracked_task_id: null,
-    persisted: false,
-  });
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
 });
 
-test("Linear umbrella subtask blocked by non-umbrella task keeps normal dependency semantics", async () => {
+test("Linear child direct enqueue fails before non-umbrella dependency resolution", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -1299,28 +1618,25 @@ test("Linear umbrella subtask blocked by non-umbrella task keeps normal dependen
     io,
   );
 
-  expect(result.exitCode).toBe(0);
-  const enqResult = JSON.parse(io.out().trim());
-  expect(enqResult.state).toBe("waiting_dependencies");
-  const dep = h.db
-    .query<
-      { dependency_task_id: string | null; scope: string; required_state: string; satisfied_at: string | null },
-      [string]
-    >(
-      `SELECT dependency_task_id, scope, required_state, satisfied_at
-         FROM task_dependencies
-        WHERE dependent_task_id = ?`,
-    )
-    .get(enqResult.task_id);
-  expect(dep).toEqual({
-    dependency_task_id: blockerTaskId,
-    scope: "normal",
-    required_state: "merged",
-    satisfied_at: null,
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    parent_external_ref: "ENG-2530",
+    child_external_ref: "ENG-2532",
   });
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const depCount = h.db
+    .query<{ count: number }, []>(
+      `SELECT COUNT(*) AS count FROM task_dependencies`,
+    )
+    .get();
+  expect(depCount?.count).toBe(0);
+  expect(blockerTaskId).toBe("task-eng-2531");
 });
 
-test("Linear child enqueue fails before substrate when parent umbrella is missing", async () => {
+test("Linear child enqueue fails before substrate when parent is not enqueued", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -1345,7 +1661,12 @@ test("Linear child enqueue fails before substrate when parent umbrella is missin
 
   expect(result.exitCode).toBe(1);
   const err = JSON.parse(io.err().trim());
-  expect(err.error).toBe("umbrella_not_enqueued");
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    parent_external_ref: "ENG-2410",
+    child_external_ref: "ENG-2411",
+  });
   expect(built.git.countCalls("worktreeAdd")).toBe(0);
   expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
   const counts = h.db
@@ -1540,7 +1861,7 @@ test("Linear child as-normal override still rejects legacy umbrella config", asy
   expect(built.git.countCalls("worktreeAdd")).toBe(0);
 });
 
-test("Linear child enqueue fails before substrate when child is not expected", async () => {
+test("Linear child enqueue fails before expected-child checks", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -1570,7 +1891,12 @@ test("Linear child enqueue fails before substrate when child is not expected", a
 
   expect(result.exitCode).toBe(1);
   const err = JSON.parse(io.err().trim());
-  expect(err.error).toBe("umbrella_subtask_not_expected");
+  expect(err.error).toBe("umbrella_child_direct_enqueue");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    parent_external_ref: "ENG-2420",
+    child_external_ref: "ENG-2421",
+  });
   expect(built.git.countCalls("worktreeAdd")).toBe(0);
   expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
   const taskCount = h.db
@@ -2353,11 +2679,11 @@ test("test_enqueue_linear_issue_explicit_repo_overrides_ticket_repo", async () =
   expect(taskRow?.repo_id).toBe(OVERRIDE_REPO);
 });
 
-test("test_enqueue_linear_issue_idempotent_repoll_no_cli_repo_skips_linear_call", async () => {
-  // Re-poll of an already-enqueued ticket on the no-`--repo` path must NOT
-  // hit the Linear (or Slack) adapter — pre-fetch lookup by external_ref
-  // alone short-circuits to the existing task. This preserves the
-  // load-bearing property that re-polls don't burn API quota.
+test("test_enqueue_linear_issue_idempotent_repoll_no_cli_repo_checks_hierarchy", async () => {
+  // Default Linear re-polls must inspect live hierarchy before returning an
+  // existing task, otherwise a child materialized by parent enqueue can bypass
+  // the direct-child rejection. Once the issue is confirmed as a regular task,
+  // idempotency still returns the existing task without substrate side effects.
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -2383,9 +2709,10 @@ test("test_enqueue_linear_issue_idempotent_repoll_no_cli_repo_skips_linear_call"
   expect(a.exitCode).toBe(0);
   const first = JSON.parse(ioA.out().trim());
 
-  const callsAfterFirst = built.linear.getIssueCalls.length;
+  const issueCallsAfterFirst = built.linear.getIssueCalls.length;
+  const hierarchyCallsAfterFirst = built.linear.getIssueHierarchyCalls.length;
 
-  // Second call — must short-circuit before touching Linear.
+  // Second call — checks Linear hierarchy, then returns the existing task.
   const ioB = bufferIO();
   const b = await dispatch(
     ["enqueue", "--linear-issue", "ENG-1276"],
@@ -2396,7 +2723,11 @@ test("test_enqueue_linear_issue_idempotent_repoll_no_cli_repo_skips_linear_call"
   const second = JSON.parse(ioB.out().trim());
 
   expect(second.task_id).toBe(first.task_id);
-  expect(built.linear.getIssueCalls.length).toBe(callsAfterFirst);
+  expect(built.linear.getIssueCalls.length).toBe(issueCallsAfterFirst + 1);
+  expect(built.linear.getIssueHierarchyCalls.length).toBe(
+    hierarchyCallsAfterFirst + 1,
+  );
+  expect(built.git.countCalls("worktreeAdd")).toBe(1);
 });
 
 test("test_enqueue_linear_issue_ticket_missing_repo_fails_via_validator", async () => {

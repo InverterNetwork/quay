@@ -104,33 +104,31 @@ Fix one of:
   blockers do not block enqueue.
 - Remove the Linear blocked-by relation if it is not a real dependency.
 
-## `umbrella_not_enqueued`
+## `umbrella_child_direct_enqueue`
 
-`quay enqueue --linear-issue` found that the Linear issue is a child of an
-umbrella parent, but Quay has no persisted umbrella workflow for that parent.
-Quay stops before creating the child task because it would not know the shared
-feature branch or expected child set.
+`quay enqueue --linear-issue` found that the Linear issue is a child of a
+Linear umbrella parent. Quay stops before creating or returning a task because
+the parent issue owns the umbrella flow and materializes child tasks itself.
 
 Fix one of:
 
-- Enqueue the Linear parent issue first, then enqueue the child again.
+- Enqueue the Linear parent issue instead.
 - Pass `--as-normal-task` if this child should intentionally run outside the
   umbrella workflow. This ignores the child's Linear parent membership only;
   Linear blocked-by relations are still processed as normal dependencies.
 
-## `umbrella_subtask_not_expected`
+## `umbrella_dependency_cycle`
 
-The Linear child has a parent umbrella workflow, but its external ref is not in
-the expected child set that Quay persisted when the parent was enqueued.
+Parent enqueue found a cycle among incomplete Linear children connected by
+same-umbrella blocked-by relations. Quay stops before creating tasks because no
+valid execution order exists.
 
 Fix one of:
 
-- Confirm the child is attached to the correct Linear parent.
-- Recreate or manually repair the umbrella workflow if the Linear child set was
-  changed after parent enqueue. Automatic resync is not part of the current
-  tick loop.
-- Pass `--as-normal-task` only if this child issue should run outside the
-  umbrella.
+- Remove or correct one of the Linear blocked-by relations in the cycle.
+- Split the umbrella into smaller parent issues if the work is not actually a
+  strict dependency chain.
+- Mark a blocker complete in Linear if it is already done outside Quay.
 
 ## `umbrella_feature_branch_missing`
 
@@ -142,9 +140,7 @@ integrated work.
 Fix one of:
 
 - Restore the missing feature branch to the expected remote ref.
-- Cancel or repair the umbrella workflow before enqueueing more subtasks.
-- If the child should intentionally run outside the umbrella, enqueue it with
-  `--as-normal-task`.
+- Cancel or repair the umbrella workflow before re-enqueueing the parent.
 
 ## `dependency_cycle`
 

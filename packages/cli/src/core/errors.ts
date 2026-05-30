@@ -9,6 +9,8 @@ export type QuayErrorCode =
   | "bootstrap_failed"
   | "dependency_not_tracked"
   | "dependency_cycle"
+  | "umbrella_dependency_cycle"
+  | "umbrella_child_direct_enqueue"
   | "umbrella_not_enqueued"
   | "umbrella_feature_branch_missing"
   | "umbrella_workflow_conflict"

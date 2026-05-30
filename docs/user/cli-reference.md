@@ -255,14 +255,16 @@ incomplete untracked blockers fail with `dependency_not_tracked`.
 
 Linear-backed umbrella workflows use native Linear parent/child hierarchy. If
 the issue has Linear children, enqueue creates the umbrella workflow, derives
-the shared feature branch, and records the expected child set without spawning
-a subtask worker. If the issue has a Linear parent, enqueue requires that the
-parent umbrella has already been enqueued, verifies the child is expected, and
-targets the child task at the umbrella feature branch.
+the shared feature branch, records the expected child set, and materializes
+incomplete children as Quay tasks targeted at that feature branch. Children
+that are already complete in Linear are recorded as `complete_without_quay` and
+do not get Quay tasks. If the issue has a Linear parent, direct enqueue fails
+with `umbrella_child_direct_enqueue` unless `--as-normal-task` is passed.
 
 Umbrella parent enqueue returns coordination JSON instead of the normal task
 enqueue payload. The `expected_tasks` array exposes each persisted child row,
-including state values such as `expected` and `complete_without_quay`.
+including state values such as `linked` and `complete_without_quay`; the
+`child_tasks` array exposes materialized child task enqueue results.
 
 `--as-normal-task` applies to Linear child issues only. It ignores the child's
 native parent umbrella membership for this enqueue, but it does not turn a
