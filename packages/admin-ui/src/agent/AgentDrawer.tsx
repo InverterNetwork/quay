@@ -7,8 +7,9 @@ import { StatusDot } from '../components/StatusDot';
 import { T } from '../components/Typography';
 import { Icon } from '../icons/Icon';
 import { TONES } from '../styles/tones';
+import { createAgentGatewayClient } from './agentClient';
 import type { AgentUiContext } from './agentContext';
-import { type AgentAdapter, type AgentContext, type AgentScriptStep, type DemoCommandResult } from './agentData';
+import { type AgentAdapter, type AgentContext } from './agentData';
 import { EMPTY_AGENT_THREAD, appendUserMessage, applyAgentEvent, stopAgentThread } from './agentState';
 import type { AgentConnectionStatus, AgentContextSummary, AgentEvent, AgentMessage, AgentMessagePart } from './agentTypes';
 
@@ -21,7 +22,7 @@ interface DemoAgentDrawerProps {
 }
 
 export function DemoAgentDrawer({ open, onClose, adapter, ctx, getUiContext }: DemoAgentDrawerProps) {
-  const thread = useAgentThread(adapter, ctx, getUiContext);
+  const thread = useAgentThread(adapter, getUiContext);
   const contextSummary: AgentContextSummary = {
     agentId: adapter.id,
     agentName: adapter.name,
@@ -184,6 +185,7 @@ export function AgentPanel({
                 key={message.id}
                 msg={message}
                 agentName={contextSummary.agentName}
+                busy={busy}
                 onApprove={onApprove}
                 onReject={onReject}
               />
@@ -197,12 +199,15 @@ export function AgentPanel({
   );
 }
 
-function useAgentThread(adapter: AgentAdapter, ctx: AgentContext, getUiContext: () => AgentUiContext) {
+function useAgentThread(adapter: AgentAdapter, getUiContext: () => AgentUiContext) {
   const [state, setState] = useState(EMPTY_AGENT_THREAD);
   const runRef = useRef(0);
   const threadTokenRef = useRef(0);
   const idRef = useRef(0);
-  const approvalResultsRef = useRef(new Map<string, { messageId: string; result: DemoCommandResult }>());
+  const sessionIdRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const clientRef = useRef<ReturnType<typeof createAgentGatewayClient> | null>(null);
+  if (clientRef.current === null) clientRef.current = createAgentGatewayClient({ agent: adapter.id });
   const nid = (prefix: string) => {
     idRef.current += 1;
     return `${prefix}-${idRef.current}`;
@@ -213,33 +218,63 @@ function useAgentThread(adapter: AgentAdapter, ctx: AgentContext, getUiContext: 
     if (!trimmed || state.busy) return;
 
     const myRun = ++runRef.current;
-    const messageId = nid('agent');
     const userId = nid('user');
-    const plan = adapter.plan(trimmed, ctx, messageId, getUiContext());
-    for (const step of plan) {
-      if (step.event.type === 'approval_required' && step.approvalResult) {
-        approvalResultsRef.current.set(step.event.approvalId, { messageId, result: step.approvalResult });
-      }
-    }
+    const context = getUiContext();
+    const controller = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = controller;
 
     setState((current) => ({
       ...appendUserMessage(current, userId, trimmed, new Date().toISOString()),
       busy: true,
     }));
 
-    const alive = () => runRef.current === myRun;
-    runScript(plan, emitAgentEvent, alive, () => setState((current) => stopAgentThread(current)));
+    void (async () => {
+      try {
+        const client = clientRef.current;
+        if (client === null) return;
+        const sessionId = await ensureAgentSession(client, sessionIdRef, context, controller.signal);
+        for await (const event of client.sendMessage({
+          sessionId,
+          message: trimmed,
+          context,
+          signal: controller.signal,
+        })) {
+          if (runRef.current !== myRun) return;
+          emitAgentEvent(event);
+        }
+      } catch (err) {
+        if (isAbortError(err)) return;
+        emitAgentEvent(errorEventFromCaught(err));
+      } finally {
+        if (runRef.current === myRun) {
+          abortRef.current = null;
+          setState((current) => stopAgentThread(current));
+        }
+      }
+    })();
   };
 
   const stop = () => {
     runRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    const sessionId = sessionIdRef.current;
+    const client = clientRef.current;
+    if (sessionId !== null && client !== null) {
+      void client.stopSession({ sessionId }).catch((err) => {
+        if (!isAbortError(err)) emitAgentEvent(errorEventFromCaught(err));
+      });
+    }
     setState((current) => stopAgentThread(current));
   };
 
   const clear = () => {
     runRef.current += 1;
     threadTokenRef.current += 1;
-    approvalResultsRef.current.clear();
+    abortRef.current?.abort();
+    abortRef.current = null;
+    sessionIdRef.current = null;
     setState(EMPTY_AGENT_THREAD);
   };
 
@@ -248,90 +283,79 @@ function useAgentThread(adapter: AgentAdapter, ctx: AgentContext, getUiContext: 
   };
 
   const approve = (approvalId: string) => {
+    if (state.busy) return;
     const target = findApproval(state.messages, approvalId);
-    if (!target) return;
-    const result = approvalResultsRef.current.get(approvalId)?.result;
+    if (!target || target.status !== 'proposed') return;
     const threadToken = threadTokenRef.current;
-    emitAgentEvent({ type: 'approval_result', messageId: target.messageId, approvalId, status: 'running' });
-    if (!result) {
-      emitAgentEvent({ type: 'approval_result', messageId: target.messageId, approvalId, status: 'succeeded', exitCode: 0 });
-      return;
-    }
-
-    const perLine = Math.max(260, Math.round(result.ms / (result.lines.length + 1)));
-    let index = 0;
-    const tick = () => {
-      if (threadTokenRef.current !== threadToken) return;
-      if (index < result.lines.length) {
-        emitAgentEvent({ type: 'command_output', messageId: target.messageId, approvalId, line: result.lines[index]! });
-        index += 1;
-        window.setTimeout(tick, perLine);
-      } else {
-        emitAgentEvent({
-          type: 'approval_result',
-          messageId: target.messageId,
-          approvalId,
-          status: result.exitCode === 0 ? 'succeeded' : 'failed',
-          exitCode: result.exitCode,
-        });
-      }
-    };
-    window.setTimeout(tick, perLine);
+    void decideApproval('approved', approvalId, threadToken);
   };
 
   const reject = (approvalId: string) => {
+    if (state.busy) return;
     const target = findApproval(state.messages, approvalId);
-    if (!target) return;
-    emitAgentEvent({ type: 'approval_result', messageId: target.messageId, approvalId, status: 'rejected' });
+    if (!target || target.status !== 'proposed') return;
+    void decideApproval('rejected', approvalId, threadTokenRef.current);
+  };
+
+  const decideApproval = async (decision: 'approved' | 'rejected', approvalId: string, threadToken: number) => {
+    const controller = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = controller;
+    setState((current) => ({ ...current, busy: true }));
+    try {
+      const client = clientRef.current;
+      if (client === null) return;
+      const sessionId = sessionIdRef.current ?? (await ensureAgentSession(client, sessionIdRef, getUiContext(), controller.signal));
+      for await (const event of client.decideApproval({ sessionId, approvalId, decision, signal: controller.signal })) {
+        if (threadTokenRef.current !== threadToken) return;
+        emitAgentEvent(event);
+      }
+    } catch (err) {
+      if (!isAbortError(err)) {
+        emitAgentEvent(errorEventFromCaught(err));
+      }
+    } finally {
+      if (threadTokenRef.current === threadToken) {
+        abortRef.current = null;
+        setState((current) => stopAgentThread(current));
+      }
+    }
   };
 
   return { messages: state.messages, busy: state.busy, send, stop, clear, approve, reject };
 }
 
-function runScript(plan: AgentScriptStep[], emit: (event: AgentEvent) => void, alive: () => boolean, done: () => void) {
-  let index = 0;
-  const step = () => {
-    if (!alive()) return;
-    if (index >= plan.length) {
-      done();
-      return;
-    }
-
-    const scriptStep = plan[index++]!;
-    const delay = scriptStep.delayMs ?? 0;
-    window.setTimeout(() => {
-      if (!alive()) return;
-      if (scriptStep.streamText && scriptStep.event.type === 'text_delta') {
-        streamText(scriptStep.event, emit, alive, () => window.setTimeout(step, 130));
-        return;
-      }
-      emit(scriptStep.event);
-      window.setTimeout(step, 130);
-    }, delay);
-  };
-  step();
+async function ensureAgentSession(
+  client: ReturnType<typeof createAgentGatewayClient>,
+  sessionIdRef: { current: string | null },
+  context: AgentUiContext,
+  signal?: AbortSignal,
+) {
+  if (sessionIdRef.current !== null) return sessionIdRef.current;
+  const session = await client.createSession({ context, signal });
+  sessionIdRef.current = session.sessionId;
+  return session.sessionId;
 }
 
-function streamText(event: Extract<AgentEvent, { type: 'text_delta' }>, emit: (event: AgentEvent) => void, alive: () => boolean, done: () => void) {
-  let index = 0;
-  const tick = () => {
-    if (!alive()) return;
-    const chunk = event.text.slice(index, index + 3);
-    index += chunk.length;
-    if (chunk) emit({ ...event, text: chunk });
-    if (index < event.text.length) {
-      window.setTimeout(tick, 12);
-      return;
-    }
-    done();
+function isAbortError(err: unknown) {
+  return err instanceof DOMException && err.name === 'AbortError';
+}
+
+function errorEventFromCaught(err: unknown): AgentEvent {
+  const record = err && typeof err === 'object' ? (err as { code?: unknown; message?: unknown }) : {};
+  return {
+    type: 'error',
+    code: typeof record.code === 'string' ? record.code : 'agent_client_error',
+    message: typeof record.message === 'string' ? record.message : String(err),
+    recoverable: true,
   };
-  tick();
 }
 
 function findApproval(messages: AgentMessage[], approvalId: string) {
   for (const message of messages) {
-    if (message.parts.some((part) => part.kind === 'approval' && part.approvalId === approvalId)) {
-      return { messageId: message.id };
+    const part = message.parts.find((item) => item.kind === 'approval' && item.approvalId === approvalId);
+    if (part?.kind === 'approval') {
+      return { messageId: message.id, status: part.status };
     }
   }
   return null;
@@ -340,11 +364,13 @@ function findApproval(messages: AgentMessage[], approvalId: string) {
 function Turn({
   msg,
   agentName,
+  busy,
   onApprove,
   onReject,
 }: {
   msg: AgentMessage;
   agentName: string;
+  busy: boolean;
   onApprove: (approvalId: string) => void;
   onReject: (approvalId: string) => void;
 }) {
@@ -376,6 +402,7 @@ function Turn({
             <Part
               key={group.part.id}
               part={group.part}
+              busy={busy}
               onApprove={onApprove}
               onReject={onReject}
             />
@@ -396,16 +423,18 @@ function Turn({
 
 function Part({
   part,
+  busy,
   onApprove,
   onReject,
 }: {
   part: AgentMessagePart;
+  busy: boolean;
   onApprove: (approvalId: string) => void;
   onReject: (approvalId: string) => void;
 }) {
   if (part.kind === 'text') return <MarkdownLite text={part.text} streaming={!part.done} />;
   if (part.kind === 'reference') return <RefRow part={part} />;
-  if (part.kind === 'approval') return <ApprovalCard part={part} onApprove={() => onApprove(part.approvalId)} onReject={() => onReject(part.approvalId)} />;
+  if (part.kind === 'approval') return <ApprovalCard part={part} busy={busy} onApprove={() => onApprove(part.approvalId)} onReject={() => onReject(part.approvalId)} />;
   if (part.kind === 'error') return <ErrorRow part={part} />;
   return null;
 }
@@ -594,16 +623,21 @@ const REF_ICONS = {
 
 function ApprovalCard({
   part,
+  busy,
   onApprove,
   onReject,
 }: {
   part: Extract<AgentMessagePart, { kind: 'approval' }>;
+  busy: boolean;
   onApprove: () => void;
   onReject: () => void;
 }) {
   const dim = part.status === 'rejected';
   const completed = part.status === 'succeeded' || part.status === 'failed';
   const resultOk = part.status === 'succeeded' && (part.exitCode ?? 0) === 0;
+  const completionLabel = part.status === 'succeeded' && part.exitCode === undefined
+    ? 'Continued'
+    : `${resultOk ? 'Succeeded' : 'Failed'} · exit ${part.exitCode ?? 1}`;
 
   return (
     <div
@@ -641,7 +675,7 @@ function ApprovalCard({
           <>
             {resultOk ? <Icon.Check size={13} style={{ color: 'var(--good)' }} /> : <Icon.X size={13} style={{ color: 'var(--danger)' }} />}
             <T kind="caption" color={resultOk ? 'var(--good-ink)' : 'var(--danger-ink)'}>
-              {resultOk ? 'Succeeded' : 'Failed'} · exit {part.exitCode ?? 1}
+              {completionLabel}
             </T>
             <span style={{ flex: 1 }} />
             <CopyButton text={part.command} />
@@ -700,10 +734,10 @@ function ApprovalCard({
               </div>
             </div>
             <HStack gap={8} justify="flex-end">
-              <Button variant="ghost" size="sm" onClick={onReject}>
+              <Button variant="ghost" size="sm" onClick={onReject} disabled={busy}>
                 Reject
               </Button>
-              <Button variant="accent" size="sm" leading={<Icon.Check size={13} />} onClick={onApprove}>
+              <Button variant="accent" size="sm" leading={<Icon.Check size={13} />} onClick={onApprove} disabled={busy}>
                 Run command
               </Button>
             </HStack>

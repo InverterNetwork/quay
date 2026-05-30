@@ -11,8 +11,8 @@ export function createEchoAgentAdapter(): AgentAdapter {
       yield* noOpMessageEvents(session, message, context);
     },
 
-    async *decideApproval({ session, approvalId, decision }) {
-      yield* noOpApprovalEvents(session, approvalId, decision);
+    async *decideApproval({ session, approvalId, decision, approval }) {
+      yield* noOpApprovalEvents(session, approvalId, decision, approval?.messageId);
     },
 
     async stop() {},
@@ -51,8 +51,8 @@ function noOpApprovalEvents(
   session: AgentSession,
   approvalId: string,
   decision: "approved" | "rejected",
+  messageId = session.activeMessageId ?? `agent_${randomUUID()}`,
 ): AgentEvent[] {
-  const messageId = session.activeMessageId ?? `agent_${randomUUID()}`;
   const status = decision === "approved" ? "succeeded" : "rejected";
   return [
     { type: "message_start", messageId, role: "agent", model: session.agent },

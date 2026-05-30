@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AgentAdapter, AgentEvent, AgentFetch, AgentSession, AgentUiContext } from "./agent_types.ts";
+import type { AgentAdapter, AgentApproval, AgentEvent, AgentFetch, AgentSession, AgentUiContext } from "./agent_types.ts";
 
 const DEFAULT_HERMES_API_BASE_URL = "http://127.0.0.1:8642";
 const DEFAULT_HERMES_MODEL = "hermes-agent";
@@ -180,24 +180,71 @@ export class HermesAgentAdapter implements AgentAdapter {
     session: AgentSession;
     approvalId: string;
     decision: "approved" | "rejected";
+    approval?: AgentApproval;
   }): AsyncIterable<AgentEvent> {
-    const messageId = `agent_${randomUUID()}`;
+    const messageId = input.approval?.messageId ?? `agent_${randomUUID()}`;
+    const mapper = new HermesEventMapper(messageId, this.config.model);
+    let done = false;
+    let continuationFailed = false;
     yield { type: "message_start", messageId, role: "agent", model: this.config.model };
     yield {
       type: "approval_result",
       messageId,
       approvalId: input.approvalId,
-      status: input.decision === "approved" ? "succeeded" : "rejected",
-      ...(input.decision === "approved" ? { exitCode: 0 } : {}),
+      status: input.decision === "approved" ? "running" : "rejected",
     };
-    yield {
-      type: "text_delta",
-      messageId,
-      text: input.decision === "approved"
-        ? "Hermes adapter recorded operator approval. Native Hermes approval continuation is handled in the approval-flow slice."
-        : "Hermes adapter recorded operator rejection. Native Hermes approval continuation is handled in the approval-flow slice.",
-    };
-    yield { type: "message_done", messageId };
+
+    try {
+      await this.assertReady();
+      const binding = hermesBinding(input.session);
+      // Trusted-Hermes v1 records operator consent and continues the Hermes conversation.
+      // Hermes may still have direct Quay CLI access; gateway-enforced mutation control is future hardening.
+      const run = await this.createRun(approvalDecisionFollowUp(input), input.session.lastContext, binding);
+      binding.activeRunId = run.runId;
+      binding.lastRunId = run.runId;
+
+      for await (const rawEvent of this.runEvents(run.runId, binding)) {
+        const mapped = mapper.map(rawEvent, { allowMessageStart: false });
+        if (mapped.events.some((event) => event.type === "error")) {
+          continuationFailed = true;
+        }
+        for (const event of mapped.events) {
+          yield event;
+        }
+        if (mapped.done) {
+          done = true;
+          break;
+        }
+      }
+      if (done && input.decision === "approved") {
+        yield {
+          type: "approval_result",
+          messageId,
+          approvalId: input.approvalId,
+          status: continuationFailed ? "failed" : "succeeded",
+        };
+      }
+    } catch (err) {
+      input.session.unavailable = isAvailabilityError(err);
+      if (input.decision === "approved") {
+        yield {
+          type: "approval_result",
+          messageId,
+          approvalId: input.approvalId,
+          status: "failed",
+        };
+      }
+      yield errorEventFromHermesError(err, messageId);
+    } finally {
+      const binding = maybeHermesBinding(input.session);
+      if (binding !== null) binding.activeRunId = null;
+      if (!done) {
+        for (const event of mapper.flush()) {
+          yield event;
+        }
+        yield { type: "message_done", messageId };
+      }
+    }
   }
 
   async stop({ session }: { session: AgentSession }): Promise<void> {
@@ -1002,6 +1049,33 @@ function isAvailabilityError(err: unknown): boolean {
 
 function hermesInput(message: string, context: AgentUiContext): string {
   return `${message}\n\n<quay-ui-context>${escapedContextJson(sanitizeAgentUiContext(context))}</quay-ui-context>`;
+}
+
+function approvalDecisionFollowUp(input: {
+  approvalId: string;
+  decision: "approved" | "rejected";
+  approval?: AgentApproval;
+}): string {
+  const approval = input.approval;
+  const lines = [
+    input.decision === "approved"
+      ? `The operator approved proposed Quay action ${input.approvalId}.`
+      : `The operator rejected proposed Quay action ${input.approvalId}.`,
+  ];
+  if (approval !== undefined) {
+    lines.push(`Command: ${approval.command}`);
+    lines.push(`Description: ${approval.description}`);
+    if (approval.affects.length > 0) {
+      lines.push(`Affected resources: ${approval.affects.map((item) => `${item.label}=${item.value}`).join(", ")}`);
+    }
+    if (approval.note !== undefined) lines.push(`Operator note: ${approval.note}`);
+  }
+  lines.push(
+    input.decision === "approved"
+      ? "Continue from this approval decision. In trusted-Hermes v1 this is operator consent and visibility, not proof that Quay Gateway enforced or executed the command."
+      : "Do not run the rejected action. Continue by explaining the next safe option if useful.",
+  );
+  return lines.join("\n");
 }
 
 function sanitizeAgentUiContext(context: AgentUiContext): AgentUiContext {
