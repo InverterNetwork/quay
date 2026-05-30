@@ -1179,22 +1179,19 @@ export class GitHubCliAdapter implements GitHubPort {
         `gh api repos/{owner}/{repo} returned invalid repository name ${fullName}`,
       );
     }
-    const query =
-      "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { viewerPermission } }";
+    const probeRef = `refs/heads/quay/token-write-probe-${process.pid}-${Date.now()}`;
     const result = this.run(
       repoId,
       [
-        "gh",
-        "api",
-        "graphql",
-        "-f",
-        `query=${query}`,
-        "-F",
-        `owner=${owner}`,
-        "-F",
-        `name=${name}`,
-        "--jq",
-        ".data.repository.viewerPermission",
+        "git",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "credential.helper=!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f",
+        "push",
+        "--dry-run",
+        `https://github.com/${fullName}.git`,
+        `HEAD:${probeRef}`,
       ],
       {
         ...process.env,
@@ -1202,17 +1199,13 @@ export class GitHubCliAdapter implements GitHubPort {
         GITHUB_TOKEN: undefined,
         QUAY_WORKER_GH_TOKEN: undefined,
         QUAY_REVIEWER_GH_TOKEN: undefined,
+        GIT_ASKPASS: "",
+        GIT_TERMINAL_PROMPT: "0",
       },
     );
     if (result.exitCode !== 0) {
       throw new Error(
-        `gh api graphql viewerPermission failed: ${result.stderr.trim() || result.stdout.trim()}`,
-      );
-    }
-    const permission = result.stdout.trim();
-    if (!["ADMIN", "MAINTAIN", "WRITE"].includes(permission)) {
-      throw new Error(
-        `worker token does not have write access to ${fullName}; grant repository write access before spawning worker attempts`,
+        `worker token does not have write access to ${fullName}; git push --dry-run failed: ${result.stderr.trim() || result.stdout.trim()}`,
       );
     }
   }
