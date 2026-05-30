@@ -27,7 +27,6 @@ import {
   markUmbrellaExpectedTaskCompleteWithoutQuay,
   markUmbrellaExpectedTaskLinked,
   requireUmbrellaFeatureBranchExists,
-  requireUmbrellaExpectedTask,
   upsertUmbrellaExpectedTask,
   type UmbrellaExpectedTaskRow,
   type UmbrellaWorkflowRow,
@@ -75,18 +74,13 @@ export async function handleEnqueueLinearIssue(
   deps: EnqueueLinearIssueDeps,
   io: CliIO,
 ): Promise<DispatchResult> {
-  // Pre-fetch idempotency: when an explicit --repo was given we look up
-  // (repo, external_ref) directly. When --repo is absent we'd normally have to
-  // fetch the ticket first to learn the repo — but Linear identifiers
-  // (ENG-1234, AST-79, …) are globally unique within a workspace, so a unique
-  // row by `external_ref` alone is reliably idempotent. Short-circuiting on
-  // that match preserves the load-bearing property "a re-poll of an already-
-  // enqueued ticket doesn't burn Linear / Slack API quota" on the canonical
-  // hermes-agent path. If the lookup returns 0 rows the ticket fetch is
-  // unavoidable; if it returns 2+ rows (cross-source collision in some future
-  // multi-source world) we defer to the post-fetch (repo, external_ref) check.
+  // Pre-fetch idempotency is only safe on the explicit override path. The
+  // default Linear path treats live parent/child membership as authoritative,
+  // so it must inspect Linear hierarchy before returning any existing task.
+  // With --as-normal-task the caller opts out of umbrella membership semantics,
+  // allowing the old low-quota re-poll shortcut.
   const externalRef = args.identifier.toUpperCase();
-  if (args.repoId !== null) {
+  if (args.asNormalTask && args.repoId !== null) {
     const existing = lookupExistingTask(
       deps.enqueueDeps.db,
       args.repoId,
@@ -96,7 +90,7 @@ export async function handleEnqueueLinearIssue(
       io.stdout(`${JSON.stringify(existing)}\n`);
       return { exitCode: 0 };
     }
-  } else {
+  } else if (args.asNormalTask) {
     const candidates = lookupRepoIdsForExternalRef(
       deps.enqueueDeps.db,
       externalRef,
@@ -136,19 +130,6 @@ export async function handleEnqueueLinearIssue(
   // without editing the ticket.
   const resolvedRepoId = args.repoId ?? ctx.repo;
   const resolvedBaseBranch = args.baseBranch ?? ctx.base_branch;
-
-  // Deferred idempotency check for the ticket-repo path (no --repo given).
-  if (args.repoId === null) {
-    const existing = lookupExistingTask(
-      deps.enqueueDeps.db,
-      resolvedRepoId,
-      externalRef,
-    );
-    if (existing !== null) {
-      io.stdout(`${JSON.stringify(existing)}\n`);
-      return { exitCode: 0 };
-    }
-  }
 
   if (ctx.umbrella !== null) {
     return emitError(
@@ -218,21 +199,32 @@ export async function handleEnqueueLinearIssue(
     }
   }
 
-  let resolvedLinearUmbrella: LinearUmbrellaSubtaskResolution | null = null;
   if (!args.asNormalTask && hierarchy.parent !== null) {
-    try {
-      resolvedLinearUmbrella = resolveLinearUmbrellaSubtask(
-        deps.enqueueDeps.db,
+    const parentExternalRef = hierarchy.parent.identifier.toUpperCase();
+    return emitError(
+      io,
+      new QuayError(
+        "umbrella_child_direct_enqueue",
+        `Linear issue ${externalRef} is a child of umbrella parent ${parentExternalRef}; enqueue the parent issue to start the umbrella workflow, or pass --as-normal-task to process this child as a normal task`,
         {
-          repoId: resolvedRepoId,
-          childExternalRef: externalRef,
-          parent: hierarchy.parent,
+          repo_id: resolvedRepoId,
+          parent_external_ref: parentExternalRef,
+          child_external_ref: externalRef,
         },
-      );
-    } catch (err) {
-      return emitError(io, err);
-    }
+      ),
+    );
   }
+
+  const existing = lookupExistingTask(
+    deps.enqueueDeps.db,
+    resolvedRepoId,
+    externalRef,
+  );
+  if (existing !== null) {
+    io.stdout(`${JSON.stringify(existing)}\n`);
+    return { exitCode: 0 };
+  }
+
   let dependencyResolution: LinearDependencyResolution;
   try {
     const now = deps.enqueueDeps.clock.nowISO();
@@ -241,7 +233,7 @@ export async function handleEnqueueLinearIssue(
       relations,
       resolvedRepoId,
       now,
-      { umbrellaWorkflow: resolvedLinearUmbrella?.workflow ?? null },
+      { umbrellaWorkflow: null },
     );
     ctx = {
       ...ctx,
@@ -270,23 +262,7 @@ export async function handleEnqueueLinearIssue(
       slack_thread_ref: ctx.slack_thread_ref,
       tags: mergedTags,
       worker_execution: ctx.worker_execution,
-      base_branch:
-        resolvedLinearUmbrella?.workflow.feature_branch ??
-        resolvedBaseBranch ??
-        undefined,
-      umbrella:
-        resolvedLinearUmbrella !== null
-          ? {
-              external_ref: resolvedLinearUmbrella.workflow.external_ref,
-              base_branch: resolvedLinearUmbrella.workflow.base_branch,
-              feature_branch: resolvedLinearUmbrella.workflow.feature_branch,
-              expected_external_ref: externalRef,
-              complete_without_quay:
-                dependencyResolution.umbrellaCompletions.length === 0
-                  ? undefined
-                  : dependencyResolution.umbrellaCompletions,
-            }
-          : undefined,
+      base_branch: resolvedBaseBranch ?? undefined,
       request_pr_screenshots: args.requestPrScreenshots,
       require_pr_screenshots: args.requirePrScreenshots,
       dependencies: dependencyResolution.dependencies,
@@ -389,10 +365,6 @@ interface LinearUmbrellaChildMaterialization {
   complete_in_linear: boolean;
   task: EnqueueResult | null;
   reused_existing_task: boolean;
-}
-
-interface LinearUmbrellaSubtaskResolution {
-  workflow: UmbrellaWorkflowRow;
 }
 
 interface RepoRow {
@@ -1105,51 +1077,6 @@ function ensureUmbrellaChildTaskLinked(
     externalRef: input.externalRef,
     now: input.now,
   });
-}
-
-function resolveLinearUmbrellaSubtask(
-  db: DB,
-  input: {
-    repoId: string;
-    childExternalRef: string;
-    parent: LinearHierarchyIssue;
-  },
-): LinearUmbrellaSubtaskResolution {
-  const parentExternalRef = input.parent.identifier.toUpperCase();
-  const childExternalRef = input.childExternalRef.toUpperCase();
-  const workflow = lookupUmbrellaWorkflow(
-    db,
-    input.repoId,
-    parentExternalRef,
-  );
-  if (workflow === null) {
-    throw new QuayError(
-      "umbrella_not_enqueued",
-      `Linear parent ${parentExternalRef} has not been enqueued as an umbrella workflow`,
-      {
-        repo_id: input.repoId,
-        parent_external_ref: parentExternalRef,
-        child_external_ref: childExternalRef,
-      },
-    );
-  }
-  const expectedTask = requireUmbrellaExpectedTask(db, {
-    umbrellaWorkflowId: workflow.umbrella_workflow_id,
-    externalRef: childExternalRef,
-  });
-  if (expectedTask.state === "complete_without_quay") {
-    throw new QuayError(
-      "validation_error",
-      `umbrella subtask ${childExternalRef} is already complete without Quay and cannot be enqueued`,
-      {
-        umbrella_workflow_id: workflow.umbrella_workflow_id,
-        parent_external_ref: parentExternalRef,
-        child_external_ref: childExternalRef,
-        state: expectedTask.state,
-      },
-    );
-  }
-  return { workflow };
 }
 
 function resolveLinearDependencies(

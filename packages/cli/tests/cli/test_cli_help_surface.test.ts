@@ -135,6 +135,7 @@ test("quay enqueue --help and quay cancel --help reach stdout, exit 0", async ()
   expect(ioEnq.out()).toContain("--request-pr-screenshots");
   expect(ioEnq.out()).toContain("--require-pr-screenshots");
   expect(ioEnq.out()).toContain("--as-normal-task");
+  expect(ioEnq.out()).toContain("Direct child enqueue fails");
 
   const ioCancel = bufferIO();
   const cancel = await dispatch(["cancel", "--help"], built.deps, ioCancel);
