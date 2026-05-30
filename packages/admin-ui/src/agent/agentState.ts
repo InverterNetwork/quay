@@ -185,6 +185,18 @@ export function stopAgentThread(state: AgentThreadState): AgentThreadState {
   };
 }
 
+export async function reduceAgentEventStream(
+  initialState: AgentThreadState,
+  events: AsyncIterable<AgentEvent>,
+  capturedAt: () => string = () => new Date().toISOString(),
+): Promise<AgentThreadState> {
+  let state = initialState;
+  for await (const event of events) {
+    state = applyAgentEvent(state, event, capturedAt());
+  }
+  return state;
+}
+
 function mapAgentMessage(
   state: AgentThreadState,
   messageId: string,

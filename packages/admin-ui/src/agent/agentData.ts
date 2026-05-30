@@ -1,5 +1,5 @@
 import type { AgentUiContext } from './agentContext';
-import type { AgentConnectionStatus, AgentEvent, AgentReferenceKind } from './agentTypes';
+import type { AgentConnectionStatus, AgentEvent, AgentReferenceKind, AgentReferenceTone } from './agentTypes';
 
 export interface AgentContext {
   scope: string;
@@ -62,7 +62,7 @@ interface DemoReference {
   kind: AgentReferenceKind;
   id: string;
   label: string;
-  tone?: AgentConnectionStatus;
+  tone?: AgentReferenceTone;
 }
 
 interface DemoApproval {
