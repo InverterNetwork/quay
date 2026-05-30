@@ -54,6 +54,15 @@ async function responseJson(response: Response): Promise<Record<string, unknown>
   return (await response.json()) as Record<string, unknown>;
 }
 
+async function responseNdjson(response: Response): Promise<Record<string, unknown>[]> {
+  const text = await response.text();
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 function postJson(path: string, body: unknown): Request {
   return new Request(`http://quay.local${path}`, {
     method: "POST",
@@ -69,6 +78,34 @@ async function currentRevision(
   const body = await responseJson(response);
   return body.revision as string;
 }
+
+const agentContextFixture = {
+  view: "mission-control",
+  scope: "all repos",
+  urlPath: "/mission-control",
+  capturedAt: "2026-05-30T09:00:00.000Z",
+  summary: "Mission Control: 1 task visible.",
+  payload: {
+    taskCounts: {
+      total: 1,
+      attention: 0,
+      running: 1,
+      prLifecycle: 0,
+      waiting: 0,
+      terminal: 0,
+    },
+    filters: {
+      repo: null,
+      lane: null,
+      sort: "updated",
+    },
+    visibleTasks: [],
+    limits: {
+      maxTasks: 50,
+      truncatedFields: [],
+    },
+  },
+} as const;
 
 interface MissionControlResponse {
   refreshedAt: string;
@@ -261,6 +298,213 @@ test("GET /v1/tasks skips rows with unknown task states", async () => {
   expect(response.status).toBe(200);
   expect(body.activeTaskCount).toBe(1);
   expect(body.tasks.map((task) => task.id)).toEqual(["task-running"]);
+});
+
+test("POST /v1/agent/sessions creates a temporary agent session", async () => {
+  h = createHarness();
+  const handler = createHandler();
+
+  const response = await handler(postJson("/v1/agent/sessions", {
+    agent: "hermes",
+    context: agentContextFixture,
+  }));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("application/json");
+  expect(body).toMatchObject({
+    agent: "hermes",
+    created_at: expect.any(String),
+  });
+  expect(body.session_id).toEqual(expect.stringMatching(/^agent_[0-9a-f-]+$/));
+});
+
+test("POST /v1/agent/sessions/:id/messages streams no-op NDJSON AgentEvents with UI context", async () => {
+  h = createHarness();
+  const handler = createHandler();
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "What needs attention?",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  const events = await responseNdjson(response);
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("application/x-ndjson");
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "text_delta",
+    "reference",
+    "message_done",
+  ]);
+  expect(events[0]).toMatchObject({ role: "agent", model: "hermes" });
+  expect(events[1]?.text).toContain("What needs attention?");
+  expect(events[1]?.text).toContain("Mission Control: 1 task visible.");
+  expect(events[2]).toMatchObject({
+    kind: "config",
+    id: "mission-control",
+    label: "Mission Control: 1 task visible.",
+  });
+});
+
+test("POST /v1/agent/sessions/:id/messages can stream Server-Sent Events", async () => {
+  h = createHarness();
+  const handler = createHandler();
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Accept: "text/event-stream",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "Summarize this page",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  const text = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("text/event-stream");
+  expect(text).toContain("event: agent_event");
+  expect(text).toContain("data: [DONE]");
+  expect(text).toContain("\"type\":\"message_start\"");
+});
+
+test("POST /v1/agent/sessions/:id/approvals/:approvalId records no-op approval decisions", async () => {
+  h = createHarness();
+  const handler = createHandler();
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/approvals/approval-1`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ decision: "approved" }),
+    }),
+  );
+  const events = await responseNdjson(response);
+
+  expect(response.status).toBe(200);
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "approval_result",
+    "text_delta",
+    "message_done",
+  ]);
+  expect(events[1]).toMatchObject({
+    approvalId: "approval-1",
+    status: "succeeded",
+    exitCode: 0,
+  });
+});
+
+test("POST /v1/agent/sessions/:id/stop interrupts the temporary session", async () => {
+  h = createHarness();
+  const handler = createHandler();
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(postJson(`/v1/agent/sessions/${sessionId}/stop`, {}));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(body).toEqual({
+    session_id: sessionId,
+    stopped: true,
+  });
+});
+
+test("Agent Gateway routes use Admin API auth, CORS, validation, and method handling", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: { QUAY_ADMIN_TOKEN: "secret-token" },
+  });
+
+  const missingAuth = await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  }));
+  expect(missingAuth.status).toBe(401);
+
+  const preflight = await handler(
+    new Request("http://quay.local/v1/agent/sessions/session-1/messages", {
+      method: "OPTIONS",
+      headers: { Origin: "http://127.0.0.1:5173" },
+    }),
+  );
+  expect(preflight.status).toBe(204);
+  expect(preflight.headers.get("access-control-allow-methods")).toBe(
+    "POST, OPTIONS",
+  );
+
+  const invalid = await handler(
+    new Request("http://quay.local/v1/agent/sessions", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ context: { view: "unknown" } }),
+    }),
+  );
+  expect(invalid.status).toBe(400);
+  expect(await responseJson(invalid)).toMatchObject({
+    error: "validation_error",
+  });
+
+  const unknownSession = await handler(
+    new Request("http://quay.local/v1/agent/sessions/missing/messages", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "hello",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  expect(unknownSession.status).toBe(404);
+  expect(await responseJson(unknownSession)).toMatchObject({
+    error: "agent_session_not_found",
+  });
+
+  const getSession = await handler(
+    new Request("http://quay.local/v1/agent/sessions", {
+      headers: { Authorization: "Bearer secret-token" },
+    }),
+  );
+  expect(getSession.status).toBe(405);
+  expect(getSession.headers.get("allow")).toBe("POST, OPTIONS");
 });
 
 test("admin bearer auth protects reads and writes when configured", async () => {
