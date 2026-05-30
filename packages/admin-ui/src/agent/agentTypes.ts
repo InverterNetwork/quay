@@ -2,6 +2,7 @@ import type { Tone } from '../styles/tones';
 
 export type AgentConnectionStatus = Tone;
 export type AgentReferenceKind = 'task' | 'pr' | 'log' | 'file' | 'ci' | 'config';
+export type AgentReferenceTone = Exclude<Tone, 'accent'>;
 
 export interface AgentContextSummary {
   agentId: string;
@@ -29,7 +30,7 @@ export type AgentEvent =
       id: string;
       label: string;
       url?: string;
-      tone?: Tone;
+      tone?: AgentReferenceTone;
     }
   | {
       type: 'approval_required';
@@ -70,7 +71,7 @@ export type AgentMessagePart =
       refId: string;
       label: string;
       url?: string;
-      tone?: Tone;
+      tone?: AgentReferenceTone;
     }
   | {
       id: string;
