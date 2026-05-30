@@ -545,7 +545,12 @@ function resolveLinearDependencies(
   const dependencies: EnqueueResolvedDependency[] = [];
   const snapshotRelations: LinearDependencySnapshot[] = [];
   const umbrellaCompletions: LinearUmbrellaCompletionWithoutQuay[] = [];
-  const missing: Array<{ external_ref: string; repo_id: string }> = [];
+  const missing: Array<{
+    external_ref: string;
+    repo_id: string;
+    umbrella_external_ref?: string;
+    umbrella_workflow_id?: number;
+  }> = [];
   const seen = new Set<string>();
   const umbrellaWorkflow = options.umbrellaWorkflow ?? null;
 
@@ -602,6 +607,15 @@ function resolveLinearDependencies(
           tracked_task_id: null,
           tracked_task_state: sameUmbrellaBlocker.task_state ?? null,
           persisted: false,
+        });
+        continue;
+      }
+      if (sameUmbrellaBlocker.task_id === null) {
+        missing.push({
+          external_ref: blockerExternalRef,
+          repo_id: dependencyRepoId,
+          umbrella_external_ref: umbrellaWorkflow!.external_ref,
+          umbrella_workflow_id: umbrellaWorkflow!.umbrella_workflow_id,
         });
         continue;
       }

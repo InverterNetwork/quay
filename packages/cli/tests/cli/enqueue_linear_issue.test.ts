@@ -1114,7 +1114,7 @@ test("Linear-complete same-umbrella blocker still waits when linked task is not 
   });
 });
 
-test("Linear umbrella subtask can wait on expected same-umbrella blocker before blocker is enqueued", async () => {
+test("Linear umbrella subtask blocked by unlinked same-umbrella task fails before substrate", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -1147,35 +1147,34 @@ test("Linear umbrella subtask can wait on expected same-umbrella blocker before 
     io,
   );
 
-  expect(result.exitCode).toBe(0);
-  expect(io.err()).toBe("");
-  const enqResult = JSON.parse(io.out().trim());
-  expect(enqResult.state).toBe("waiting_dependencies");
-  const dep = h.db
-    .query<
-      {
-        dependency_task_id: string | null;
-        dependency_external_ref: string | null;
-        umbrella_workflow_id: number | null;
-        scope: string;
-        required_state: string;
-        satisfied_at: string | null;
-      },
-      [string]
-    >(
-      `SELECT dependency_task_id, dependency_external_ref, umbrella_workflow_id, scope,
-              required_state, satisfied_at
-         FROM task_dependencies
-        WHERE dependent_task_id = ?`,
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("dependency_not_tracked");
+  expect(err.message).toContain("ENG-2521");
+  expect(err.dependencies).toEqual([
+    {
+      external_ref: "ENG-2521",
+      repo_id: REPO_ID,
+      umbrella_external_ref: "ENG-2520",
+      umbrella_workflow_id: workflowId,
+    },
+  ]);
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const counts = h.db
+    .query<{ tasks: number; artifacts: number; links: number; dependencies: number }, []>(
+      `SELECT
+         (SELECT COUNT(*) FROM tasks) AS tasks,
+         (SELECT COUNT(*) FROM artifacts) AS artifacts,
+         (SELECT COUNT(*) FROM umbrella_tasks) AS links,
+         (SELECT COUNT(*) FROM task_dependencies) AS dependencies`,
     )
-    .get(enqResult.task_id);
-  expect(dep).toEqual({
-    dependency_task_id: null,
-    dependency_external_ref: "ENG-2521",
-    umbrella_workflow_id: workflowId,
-    scope: "umbrella",
-    required_state: "merged_to_feature_branch",
-    satisfied_at: null,
+    .get();
+  expect(counts).toEqual({
+    tasks: 0,
+    artifacts: 0,
+    links: 0,
+    dependencies: 0,
   });
 });
 
