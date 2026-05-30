@@ -26,6 +26,7 @@ afterEach(() => {
 function createHandler(opts: {
   config?: Parameters<typeof createAdminApiHandler>[0]["config"];
   env?: NodeJS.ProcessEnv;
+  agentFetch?: Parameters<typeof createAdminApiHandler>[0]["agentFetch"];
   adminAudit?: Parameters<typeof createAdminApiHandler>[0]["adminAudit"];
   repoService?: ReturnType<typeof createRepoService>;
 } = {}) {
@@ -39,6 +40,7 @@ function createHandler(opts: {
     dataDir: h.dataDir,
     db: h.db,
     env: opts.env ?? {},
+    ...(opts.agentFetch !== undefined ? { agentFetch: opts.agentFetch } : {}),
     ...(opts.adminAudit !== undefined ? { adminAudit: opts.adminAudit } : {}),
     paths: {
       reposRoot: `${h.dataDir}/repos`,
@@ -505,6 +507,55 @@ test("Agent Gateway routes use Admin API auth, CORS, validation, and method hand
   );
   expect(getSession.status).toBe(405);
   expect(getSession.headers.get("allow")).toBe("POST, OPTIONS");
+});
+
+test("Hermes provider stays server-side and maps health failures to AgentEvent errors", async () => {
+  h = createHarness();
+  const calls: string[] = [];
+  const handler = createHandler({
+    env: {
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "secret-key",
+    },
+    agentFetch: async (input) => {
+      calls.push(new URL(String(input)).pathname);
+      return new Response(JSON.stringify({ error: "offline" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "hello",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  const events = await responseNdjson(response);
+
+  expect(session.provider).toBe("hermes");
+  expect(response.status).toBe(200);
+  expect(calls).toEqual(["/health"]);
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({
+    type: "error",
+    code: "hermes_health_failed",
+    recoverable: true,
+  });
+  expect(JSON.stringify(events)).not.toContain("secret-key");
 });
 
 test("admin bearer auth protects reads and writes when configured", async () => {
