@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { SQLQueryBindings } from "bun:sqlite";
 import { z } from "zod";
 import type { QuayConfig } from "../cli/config.ts";
+import type { AgentFetch } from "./agent_types.ts";
 import { DEFAULT_RETRY_BUDGET } from "../core/enqueue.ts";
 import {
   buildAgentSelection,
@@ -64,6 +65,7 @@ export interface AdminApiRuntime {
   dataDir: string;
   db: DB;
   env?: NodeJS.ProcessEnv;
+  agentFetch?: AgentFetch;
   adminAudit?: (event: AdminAuditEvent) => void;
   paths: {
     reposRoot: string;
@@ -314,7 +316,7 @@ const ACTIVE_TASK_STATES = [
 ] as const;
 
 export function createAdminApiHandler(runtime: AdminApiRuntime) {
-  const agentGateway = createAgentGateway();
+  const agentGateway = createAgentGateway(runtime);
   return async function handleAdminApi(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const segments = pathSegments(url.pathname);

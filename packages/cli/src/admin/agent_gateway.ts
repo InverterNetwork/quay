@@ -1,65 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import type { AdminApiRuntime } from "./api.ts";
+import { createEchoAgentAdapter } from "./agent_echo_adapter.ts";
+import type { AgentAdapter, AgentSession, AgentUiContext } from "./agent_types.ts";
+import { createUnavailableAgentAdapter } from "./agent_unavailable_adapter.ts";
+import {
+  HermesAgentAdapter,
+  hermesAgentConfigFromEnv,
+  isHermesConfigError,
+} from "./hermes_agent_adapter.ts";
 
 type JsonHeaders = Record<string, string>;
-type AgentReferenceTone = "neutral" | "good" | "warn" | "danger";
-
-type AgentEvent =
-  | { type: "message_start"; messageId: string; role: "agent"; model?: string }
-  | { type: "text_delta"; messageId: string; text: string }
-  | {
-    type: "tool_call";
-    messageId: string;
-    toolCallId: string;
-    label: string;
-    detail?: string;
-    status: "running" | "done" | "failed";
-  }
-  | {
-    type: "reference";
-    messageId: string;
-    kind: "task" | "pr" | "log" | "file" | "ci" | "config";
-    id: string;
-    label: string;
-    url?: string;
-    tone?: AgentReferenceTone;
-  }
-  | {
-    type: "approval_required";
-    messageId: string;
-    approvalId: string;
-    command: string;
-    description: string;
-    affects: Array<{ label: string; value: string }>;
-    note?: string;
-  }
-  | { type: "command_output"; messageId: string; approvalId: string; line: string }
-  | {
-    type: "approval_result";
-    messageId: string;
-    approvalId: string;
-    status: "running" | "rejected" | "succeeded" | "failed";
-    exitCode?: number;
-  }
-  | { type: "error"; messageId?: string; code: string; message: string; recoverable: boolean; details?: unknown }
-  | { type: "message_done"; messageId: string };
-
-interface AgentUiContext {
-  view: "mission-control" | "configuration";
-  scope: string;
-  urlPath: string;
-  capturedAt: string;
-  summary: string;
-  payload: Record<string, unknown>;
-}
-
-interface AgentSession {
-  sessionId: string;
-  agent: string;
-  createdAt: string;
-  lastContext: AgentUiContext;
-  activeMessageId: string | null;
-}
 
 interface AgentGateway {
   handle: (
@@ -119,8 +70,9 @@ const approvalDecisionSchema = z
   })
   .strict();
 
-export function createAgentGateway(): AgentGateway {
+export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
   const sessions = new Map<string, AgentSession>();
+  const adapter = agentAdapterForRuntime(runtime);
 
   return {
     async handle(request, segments, corsHeaders) {
@@ -134,15 +86,19 @@ export function createAgentGateway(): AgentGateway {
           const session: AgentSession = {
             sessionId: `agent_${randomUUID()}`,
             agent: parsed.agent ?? "hermes",
+            provider: adapter.provider,
             createdAt: new Date().toISOString(),
             lastContext: parsed.context,
             activeMessageId: null,
+            unavailable: false,
           };
+          await adapter.createSession({ session });
           sessions.set(session.sessionId, session);
           return jsonResponse(
             {
               session_id: session.sessionId,
               agent: session.agent,
+              provider: session.provider,
               created_at: session.createdAt,
             },
             200,
@@ -158,7 +114,11 @@ export function createAgentGateway(): AgentGateway {
             "agent message request invalid",
           );
           session.lastContext = parsed.context;
-          const events = noOpMessageEvents(session, parsed.message, parsed.context);
+          const events = adapter.sendMessage({
+            session,
+            message: parsed.message,
+            context: parsed.context,
+          });
           return eventStreamResponse(events, requestedStreamFormat(request), corsHeaders);
         }
 
@@ -173,12 +133,17 @@ export function createAgentGateway(): AgentGateway {
             await readJsonBody(request),
             "agent approval request invalid",
           );
-          const events = noOpApprovalEvents(session, approvalId, parsed.decision);
+          const events = adapter.decideApproval({
+            session,
+            approvalId,
+            decision: parsed.decision,
+          });
           return eventStreamResponse(events, requestedStreamFormat(request), corsHeaders);
         }
 
         if (isStopRoute(segments)) {
           const session = requireSession(sessions, segments[3]);
+          await adapter.stop({ session });
           session.activeMessageId = null;
           return jsonResponse(
             { session_id: session.sessionId, stopped: true },
@@ -254,61 +219,6 @@ function requireSession(
   return session;
 }
 
-function noOpMessageEvents(
-  session: AgentSession,
-  message: string,
-  context: AgentUiContext,
-): AgentEvent[] {
-  const messageId = `agent_${randomUUID()}`;
-  session.activeMessageId = messageId;
-  const text = [
-    `Temporary Quay Agent Gateway received your message: "${truncate(message, 160)}".`,
-    `Current UI context is ${context.view} at ${context.urlPath}.`,
-    context.summary,
-  ].join("\n");
-  session.activeMessageId = null;
-  return [
-    { type: "message_start", messageId, role: "agent", model: session.agent },
-    { type: "text_delta", messageId, text },
-    {
-      type: "reference",
-      messageId,
-      kind: "config",
-      id: context.view,
-      label: context.summary,
-      tone: "neutral",
-    },
-    { type: "message_done", messageId },
-  ];
-}
-
-function noOpApprovalEvents(
-  session: AgentSession,
-  approvalId: string,
-  decision: "approved" | "rejected",
-): AgentEvent[] {
-  const messageId = session.activeMessageId ?? `agent_${randomUUID()}`;
-  const status = decision === "approved" ? "succeeded" : "rejected";
-  return [
-    { type: "message_start", messageId, role: "agent", model: session.agent },
-    {
-      type: "approval_result",
-      messageId,
-      approvalId,
-      status,
-      ...(status === "succeeded" ? { exitCode: 0 } : {}),
-    },
-    {
-      type: "text_delta",
-      messageId,
-      text: decision === "approved"
-        ? "Temporary gateway recorded operator approval. No command was executed by the no-op adapter."
-        : "Temporary gateway recorded operator rejection. No command was executed by the no-op adapter.",
-    },
-    { type: "message_done", messageId },
-  ];
-}
-
 function requestedStreamFormat(request: Request): "ndjson" | "sse" {
   const accept = request.headers.get("accept") ?? "";
   if (accept.includes("text/event-stream") && !accept.includes("application/x-ndjson")) {
@@ -318,15 +228,15 @@ function requestedStreamFormat(request: Request): "ndjson" | "sse" {
 }
 
 function eventStreamResponse(
-  events: readonly AgentEvent[],
+  events: AsyncIterable<unknown>,
   format: "ndjson" | "sse",
   extraHeaders: JsonHeaders,
 ): Response {
   const encoder = new TextEncoder();
   return new Response(
     new ReadableStream<Uint8Array>({
-      start(controller) {
-        for (const event of events) {
+      async start(controller) {
+        for await (const event of events) {
           const line = format === "sse"
             ? `event: agent_event\ndata: ${JSON.stringify(event)}\n\n`
             : `${JSON.stringify(event)}\n`;
@@ -347,6 +257,37 @@ function eventStreamResponse(
       },
     },
   );
+}
+
+function agentAdapterForRuntime(runtime: AdminApiRuntime): AgentAdapter {
+  const env = runtime.env ?? process.env;
+  const provider = env.QUAY_AGENT_PROVIDER ?? "echo";
+  if (provider === "echo") return createEchoAgentAdapter();
+  if (provider === "hermes") {
+    try {
+      const options: ConstructorParameters<typeof HermesAgentAdapter>[0] = {
+        config: hermesAgentConfigFromEnv(env),
+      };
+      if (runtime.agentFetch !== undefined) options.fetch = runtime.agentFetch;
+      return new HermesAgentAdapter(options);
+    } catch (err) {
+      if (isHermesConfigError(err)) {
+        return createUnavailableAgentAdapter({
+          provider: "hermes",
+          code: err.code,
+          message: err.message,
+          details: err.details,
+        });
+      }
+      throw err;
+    }
+  }
+  return createUnavailableAgentAdapter({
+    provider,
+    code: "agent_provider_unsupported",
+    message: `Agent provider "${provider}" is not supported`,
+    details: { supported_providers: ["echo", "hermes"] },
+  });
 }
 
 async function readJsonBody(request: Request): Promise<unknown> {
@@ -424,8 +365,4 @@ function agentGatewayErrorResponse(
     500,
     extraHeaders,
   );
-}
-
-function truncate(value: string, maxLength: number): string {
-  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;
 }
