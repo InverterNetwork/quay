@@ -32,6 +32,7 @@ test("test_schema_creates_required_tables", () => {
     "outbox_items",
     "review_requests",
     "umbrella_workflows",
+    "umbrella_expected_tasks",
     "umbrella_tasks",
   ];
   const rows = h.db
@@ -76,6 +77,74 @@ test("umbrella workflow tables capture workflow and task links", () => {
     "external_ref",
     "created_at",
   ]);
+});
+
+test("umbrella expected tasks table captures persisted membership", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(umbrella_expected_tasks)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toEqual([
+    "umbrella_expected_task_id",
+    "umbrella_workflow_id",
+    "external_ref",
+    "title",
+    "linear_issue_id",
+    "linear_issue_url",
+    "state",
+    "completion_source",
+    "completion_reason",
+    "completed_at",
+    "created_at",
+    "updated_at",
+  ]);
+
+  const repoId = insertRepo(h.db, "repo-umbrella-expected");
+  const workflow = h.db
+    .query<{ umbrella_workflow_id: number }, [string, string, string, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id`,
+    )
+    .get("BRIX-2000", repoId, "main", "quay/umbrella-BRIX-2000", "now", "now");
+  expect(workflow).toBeDefined();
+
+  h.db
+    .query(
+      `INSERT INTO umbrella_expected_tasks (
+         umbrella_workflow_id, external_ref, title, linear_issue_url,
+         state, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'expected', ?, ?)`,
+    )
+    .run(
+      workflow!.umbrella_workflow_id,
+      "BRIX-2001",
+      "First child",
+      "https://linear.app/inverter/issue/BRIX-2001",
+      "now",
+      "now",
+    );
+
+  expect(() =>
+    h!.db
+      .query(
+        `INSERT INTO umbrella_expected_tasks (
+           umbrella_workflow_id, external_ref, created_at, updated_at
+         ) VALUES (?, ?, ?, ?)`,
+      )
+      .run(workflow!.umbrella_workflow_id, "BRIX-2001", "now", "now"),
+  ).toThrow();
+  expect(() =>
+    h!.db
+      .query(
+        `INSERT INTO umbrella_expected_tasks (
+           umbrella_workflow_id, external_ref, created_at, updated_at
+         ) VALUES (?, ?, ?, ?)`,
+      )
+      .run(999999, "BRIX-9999", "now", "now"),
+  ).toThrow();
 });
 
 test("task_dependencies table has generic dependency fields", () => {
