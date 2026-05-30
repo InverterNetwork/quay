@@ -132,6 +132,20 @@ Fix one of:
 - Pass `--as-normal-task` only if this child issue should run outside the
   umbrella.
 
+## `umbrella_feature_branch_missing`
+
+Quay found an existing umbrella workflow row, but the persisted feature branch
+no longer exists on the remote repository. Quay refuses to recreate existing
+umbrella branches from the base branch because that could hide deleted
+integrated work.
+
+Fix one of:
+
+- Restore the missing feature branch to the expected remote ref.
+- Cancel or repair the umbrella workflow before enqueueing more subtasks.
+- If the child should intentionally run outside the umbrella, enqueue it with
+  `--as-normal-task`.
+
 ## `dependency_cycle`
 
 The requested dependency edge would make tasks wait on each other. Remove or

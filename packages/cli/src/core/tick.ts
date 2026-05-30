@@ -85,6 +85,7 @@ import {
   type RetryAttemptRef,
 } from "./retries.ts";
 import { accountGoalFailureAndMaybeLimit } from "./goals.ts";
+import { requireUmbrellaFeatureBranchExists } from "./umbrella_workflows.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
 
 export const DEFAULT_MAX_CONCURRENT = 2;
@@ -2339,6 +2340,12 @@ function reconcileUmbrellaFinalPr(
   deps: TickDeps,
   workflow: ReadyUmbrellaFinalPrWorkflowRow,
 ): TickTaskResult {
+  requireUmbrellaFeatureBranchExists(deps, {
+    repo_id: workflow.repo_id,
+    external_ref: workflow.external_ref,
+    base_branch: workflow.base_branch,
+    feature_branch: workflow.feature_branch,
+  });
   const subtasks = loadUmbrellaFinalPrExpectedSubtasks(
     deps.db,
     workflow.umbrella_workflow_id,

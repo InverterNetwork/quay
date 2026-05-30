@@ -213,6 +213,14 @@ function insertUmbrellaWorkflow(
   return row.umbrella_workflow_id;
 }
 
+function seedUmbrellaFeatureBranch(
+  built: ReturnType<typeof buildCliDeps>,
+  branch: string,
+): void {
+  const existing = built.git.remoteBranches.get(REPO_ID) ?? new Set<string>();
+  built.git.setRemoteBranches(REPO_ID, [...existing, branch]);
+}
+
 function insertExpectedUmbrellaTask(
   umbrellaWorkflowId: number,
   externalRef: string,
@@ -702,6 +710,63 @@ test("Linear parent enqueue creates idempotent umbrella workflow and expected ch
   expect(expectedCount?.count).toBe(2);
 });
 
+test("Linear parent re-enqueue fails when existing umbrella feature branch is missing", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+  const workflowId = insertUmbrellaWorkflow("ENG-2305", {
+    baseBranch: "dev",
+    featureBranch: "quay/umbrella/ENG-2305",
+  });
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2305",
+      block: {
+        base_branch: "dev",
+        tags: ["umbrella"],
+      },
+    }),
+  );
+  built.linear.setIssueHierarchy("ENG-2305", {
+    parent: null,
+    children: [
+      {
+        identifier: "ENG-2306",
+        url: "https://linear.app/inverter/issue/ENG-2306",
+        title: "Build child",
+        stateType: "started",
+      },
+    ],
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2305"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("umbrella_feature_branch_missing");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    external_ref: "ENG-2305",
+    base_branch: "dev",
+    feature_branch: "quay/umbrella/ENG-2305",
+  });
+  expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
+  const expectedCount = h.db
+    .query<{ count: number }, [number]>(
+      `SELECT COUNT(*) AS count
+         FROM umbrella_expected_tasks
+        WHERE umbrella_workflow_id = ?`,
+    )
+    .get(workflowId);
+  expect(expectedCount?.count).toBe(0);
+});
+
 test("Linear child enqueue resolves parent umbrella workflow and links expected task", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
@@ -710,6 +775,7 @@ test("Linear child enqueue resolves parent umbrella workflow and links expected 
     baseBranch: "dev",
     featureBranch: "quay/umbrella/ENG-2400",
   });
+  seedUmbrellaFeatureBranch(built, "quay/umbrella/ENG-2400");
   insertExpectedUmbrellaTask(workflowId, "ENG-2401", "Build subtask");
 
   built.linear.setIssue(
@@ -754,12 +820,12 @@ test("Linear child enqueue resolves parent umbrella workflow and links expected 
     external_ref: "ENG-2401",
   });
   expect(
-    built.git.calls.find((c) => c.op === "ensureRemoteBranchFromBase")?.args,
+    built.git.calls.find((c) => c.op === "hasRemoteBranch")?.args,
   ).toEqual({
     repoId: REPO_ID,
     branch: "quay/umbrella/ENG-2400",
-    baseBranch: "dev",
   });
+  expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
   expect(built.git.calls.find((c) => c.op === "worktreeAdd")?.args).toMatchObject({
     branch: "quay/ENG-2401",
     baseRef: "origin/quay/umbrella/ENG-2400",
@@ -803,6 +869,56 @@ test("Linear child enqueue resolves parent umbrella workflow and links expected 
   });
 });
 
+test("Linear child enqueue fails before substrate when umbrella feature branch is missing", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+  const workflowId = insertUmbrellaWorkflow("ENG-2405", {
+    baseBranch: "dev",
+    featureBranch: "quay/umbrella/ENG-2405",
+  });
+  insertExpectedUmbrellaTask(workflowId, "ENG-2406", "Build subtask");
+
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2406" }));
+  built.linear.setIssueHierarchy("ENG-2406", {
+    parent: {
+      identifier: "ENG-2405",
+      url: "https://linear.app/inverter/issue/ENG-2405",
+      title: "Umbrella parent",
+      stateType: "started",
+    },
+    children: [],
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2406"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("umbrella_feature_branch_missing");
+  expect(err).toMatchObject({
+    repo_id: REPO_ID,
+    external_ref: "ENG-2405",
+    base_branch: "dev",
+    feature_branch: "quay/umbrella/ENG-2405",
+  });
+  expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const counts = h.db
+    .query<{ tasks: number; artifacts: number; links: number }, []>(
+      `SELECT
+         (SELECT COUNT(*) FROM tasks) AS tasks,
+         (SELECT COUNT(*) FROM artifacts) AS artifacts,
+         (SELECT COUNT(*) FROM umbrella_tasks) AS links`,
+    )
+    .get();
+  expect(counts).toEqual({ tasks: 0, artifacts: 0, links: 0 });
+});
+
 test("Linear umbrella subtask blocked by linked same-umbrella task waits for feature-branch merge", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
@@ -811,6 +927,7 @@ test("Linear umbrella subtask blocked by linked same-umbrella task waits for fea
     baseBranch: "dev",
     featureBranch: "quay/umbrella/ENG-2500",
   });
+  seedUmbrellaFeatureBranch(built, "quay/umbrella/ENG-2500");
   insertExpectedUmbrellaTask(workflowId, "ENG-2501", "Build foundation");
   insertExpectedUmbrellaTask(workflowId, "ENG-2502", "Build follow-up");
   const blockerTaskId = insertTrackedTask("pr-open", "ENG-2501");
@@ -888,6 +1005,7 @@ test("Linear umbrella subtask blocker already merged to feature branch does not 
     baseBranch: "dev",
     featureBranch: "quay/umbrella/ENG-2510",
   });
+  seedUmbrellaFeatureBranch(built, "quay/umbrella/ENG-2510");
   insertExpectedUmbrellaTask(workflowId, "ENG-2511", "Build foundation");
   insertExpectedUmbrellaTask(workflowId, "ENG-2512", "Build follow-up");
   const blockerTaskId = insertTrackedTask(
@@ -943,6 +1061,7 @@ test("Linear-complete same-umbrella blocker still waits when linked task is not 
     baseBranch: "dev",
     featureBranch: "quay/umbrella/ENG-2515",
   });
+  seedUmbrellaFeatureBranch(built, "quay/umbrella/ENG-2515");
   insertExpectedUmbrellaTask(workflowId, "ENG-2516", "Build foundation");
   insertExpectedUmbrellaTask(workflowId, "ENG-2517", "Build follow-up");
   const blockerTaskId = insertTrackedTask("pr-open", "ENG-2516");
@@ -1003,6 +1122,7 @@ test("Linear umbrella subtask can wait on expected same-umbrella blocker before 
     baseBranch: "dev",
     featureBranch: "quay/umbrella/ENG-2520",
   });
+  seedUmbrellaFeatureBranch(built, "quay/umbrella/ENG-2520");
   insertExpectedUmbrellaTask(workflowId, "ENG-2521", "Build foundation");
   insertExpectedUmbrellaTask(workflowId, "ENG-2522", "Build follow-up");
 
@@ -1067,6 +1187,7 @@ test("Linear-complete expected same-umbrella blocker is marked complete without 
     baseBranch: "dev",
     featureBranch: "quay/umbrella/ENG-2525",
   });
+  seedUmbrellaFeatureBranch(built, "quay/umbrella/ENG-2525");
   insertExpectedUmbrellaTask(workflowId, "ENG-2526", "Build foundation");
   insertExpectedUmbrellaTask(workflowId, "ENG-2527", "Build follow-up");
 
@@ -1156,6 +1277,7 @@ test("Linear umbrella subtask blocked by non-umbrella task keeps normal dependen
     baseBranch: "dev",
     featureBranch: "quay/umbrella/ENG-2530",
   });
+  seedUmbrellaFeatureBranch(built, "quay/umbrella/ENG-2530");
   insertExpectedUmbrellaTask(workflowId, "ENG-2532", "Build follow-up");
   const blockerTaskId = insertTrackedTask("pr-open", "ENG-2531");
 

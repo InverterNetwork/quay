@@ -142,12 +142,22 @@ function insertExpectedUmbrellaTask(
     );
 }
 
+function seedUmbrellaFeatureBranch(
+  built: ReturnType<typeof buildTickDeps>,
+  repoId: string,
+  branch = "quay/umbrella/BRIX-1511",
+): void {
+  const existing = built.git.remoteBranches.get(repoId) ?? new Set<string>();
+  built.git.setRemoteBranches(repoId, [...existing, branch]);
+}
+
 test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
   h = createHarness();
   h.clock.set("2026-05-29T12:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-umbrella-final");
   const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
   const built = buildTickDeps(h);
+  seedUmbrellaFeatureBranch(built, repoId);
 
   const results = await tick_once(built.deps);
 
@@ -220,6 +230,32 @@ test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
   expect(built.github.mergePullRequestCalls).toEqual([]);
 });
 
+test("tick fails final umbrella PR reconciliation when feature branch is missing", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T12:05:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-final-missing-branch");
+  const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
+  const built = buildTickDeps(h);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    {
+      task_id: `umbrella-final-pr-${workflowId}`,
+      action: "tick_error",
+      error: expect.stringContaining("umbrella workflow BRIX-1511 feature branch quay/umbrella/BRIX-1511 is missing"),
+    },
+  ]);
+  expect(built.github.createPullRequestCalls).toEqual([]);
+  expect(built.git.countCalls("worktreeAddExistingBranch")).toBe(0);
+  const finalTask = h.db
+    .query<{ count: number }, [string]>(
+      `SELECT COUNT(*) AS count FROM tasks WHERE task_id = ?`,
+    )
+    .get(`umbrella-final-pr-${workflowId}`);
+  expect(finalTask?.count).toBe(0);
+});
+
 test("tick does not create final umbrella PR while an expected subtask is unaccounted for", async () => {
   h = createHarness();
   h.clock.set("2026-05-29T12:10:00.000Z");
@@ -270,6 +306,7 @@ test("tick creates final umbrella PR when all expected subtasks completed withou
     completedAt: "2026-05-29T09:05:00.000Z",
   });
   const built = buildTickDeps(h);
+  seedUmbrellaFeatureBranch(built, repoId);
 
   const results = await tick_once(built.deps);
 
@@ -296,6 +333,7 @@ test("tick reuses existing final umbrella PR and replaces managed body section",
   const repoId = insertRepo(h.db, "repo-umbrella-final-reuse");
   const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
   const built = buildTickDeps(h);
+  seedUmbrellaFeatureBranch(built, repoId);
   built.github.setOpenPrsForBranchBase(
     repoId,
     "quay/umbrella/BRIX-1511",
@@ -384,6 +422,7 @@ test("tick materializes missing worktree when recovering existing final umbrella
     )
     .run(taskId, workflowId);
   const built = buildTickDeps(h);
+  seedUmbrellaFeatureBranch(built, repoId);
   built.github.setOpenPrsForBranchBase(
     repoId,
     "quay/umbrella/BRIX-1511",
@@ -454,6 +493,7 @@ test("tick materializes existing umbrella external-ref task before recording it 
     .run(`${h.dataDir}/worktrees/${unrelatedTaskId}`, unrelatedTaskId);
   const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
   const built = buildTickDeps(h);
+  seedUmbrellaFeatureBranch(built, repoId);
   built.git.setWorktreeBranch(
     repoId,
     `${h.dataDir}/worktrees/${unrelatedTaskId}`,

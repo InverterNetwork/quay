@@ -10,6 +10,7 @@ export type QuayErrorCode =
   | "dependency_not_tracked"
   | "dependency_cycle"
   | "umbrella_not_enqueued"
+  | "umbrella_feature_branch_missing"
   | "umbrella_workflow_conflict"
   | "umbrella_subtask_not_expected"
   | "missing_agent_capability"
