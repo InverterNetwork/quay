@@ -1217,32 +1217,10 @@ test("Linear-complete expected same-umbrella blocker is marked complete without 
   const enqResult = JSON.parse(io.out().trim());
   expect(enqResult.state).toBe("queued");
 
-  const dep = h.db
-    .query<
-      {
-        dependency_task_id: string | null;
-        dependency_external_ref: string | null;
-        umbrella_workflow_id: number | null;
-        scope: string;
-        required_state: string;
-        satisfied_at: string | null;
-      },
-      [string]
-    >(
-      `SELECT dependency_task_id, dependency_external_ref, umbrella_workflow_id, scope,
-              required_state, satisfied_at
-         FROM task_dependencies
-        WHERE dependent_task_id = ?`,
-    )
-    .get(enqResult.task_id);
-  expect(dep).toMatchObject({
-    dependency_task_id: null,
-    dependency_external_ref: "ENG-2526",
-    umbrella_workflow_id: workflowId,
-    scope: "umbrella",
-    required_state: "merged_to_feature_branch",
-  });
-  expect(dep?.satisfied_at).not.toBeNull();
+  const deps = h.db
+    .query(`SELECT dependency_id FROM task_dependencies WHERE dependent_task_id = ?`)
+    .all(enqResult.task_id);
+  expect(deps).toHaveLength(0);
 
   const expected = h.db
     .query<
@@ -1266,6 +1244,21 @@ test("Linear-complete expected same-umbrella blocker is marked complete without 
     blocker_state: "complete_without_quay",
     blocker_source: "linear",
     followup_state: "linked",
+  });
+
+  const snapshot = h.db
+    .query<{ file_path: string }, [string]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND kind = 'ticket_snapshot'
+        ORDER BY artifact_id DESC LIMIT 1`,
+    )
+    .get(enqResult.task_id);
+  const parsed = JSON.parse(readFileSync(snapshot!.file_path, "utf8"));
+  expect(parsed.linear_blocked_by_relations[0]).toMatchObject({
+    blocker_identifier: "ENG-2526",
+    complete_in_linear: true,
+    tracked_task_id: null,
+    persisted: false,
   });
 });
 

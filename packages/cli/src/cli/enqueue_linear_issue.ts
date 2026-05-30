@@ -590,6 +590,21 @@ function resolveLinearDependencies(
           completed_at: now,
         });
       }
+      if (sameUmbrellaBlocker.task_id === null && completeInLinear) {
+        snapshotRelations.push({
+          relation_id: relation.relationId,
+          blocker_identifier: blockerExternalRef,
+          blocker_url: relation.blocker.url,
+          blocker_title: relation.blocker.title,
+          blocker_state_type: relation.blocker.stateType,
+          blocker_repo_id: dependencyRepoId,
+          complete_in_linear: completeInLinear,
+          tracked_task_id: null,
+          tracked_task_state: sameUmbrellaBlocker.task_state ?? null,
+          persisted: false,
+        });
+        continue;
+      }
       dependencies.push({
         dependency_task_id: sameUmbrellaBlocker.task_id,
         dependency_source: "linear",
