@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AgentDrawer } from './agent/AgentDrawer';
+import { DemoAgentDrawer } from './agent/AgentDrawer';
 import { AGENT_CTX, hermesAdapter } from './agent/agentData';
 import { PrimarySidebar, type AppRoute } from './app/PrimarySidebar';
 import { useQuayAdminReadModel } from './api/quayAdmin';
@@ -314,7 +314,7 @@ export function App() {
         )}
       </div>
 
-      <AgentDrawer
+      <DemoAgentDrawer
         open={agentOpen}
         onClose={closeAgent}
         adapter={hermesAdapter}

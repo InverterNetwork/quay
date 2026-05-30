@@ -1,4 +1,4 @@
-import type { Tone } from '../styles/tones';
+import type { AgentConnectionStatus, AgentEvent, AgentReferenceKind } from './agentTypes';
 
 export interface AgentContext {
   scope: string;
@@ -17,51 +17,25 @@ export interface AgentSuggestion {
   q: string;
 }
 
-interface ToolEvent {
-  t: 'tool';
-  label: string;
-  detail?: string;
-  ms: number;
-}
-
-interface TextEvent {
-  t: 'text';
-  text: string;
-}
-
-export interface RefEvent {
-  t: 'ref';
-  kind: 'ci' | 'log' | 'pr' | 'task' | 'slack' | 'file';
-  id: string;
-  label: string;
-  meta?: string;
-  tone?: Tone;
-}
-
-interface CommandResult {
-  exit: number;
+export interface DemoCommandResult {
+  exitCode: number;
   ms: number;
   lines: string[];
 }
 
-export interface CommandEvent {
-  t: 'cmd';
-  cmd: string;
-  desc: string;
-  affects: Array<{ label: string; val: string }>;
-  note: string;
-  runTone?: Tone;
-  result: CommandResult;
+export interface AgentScriptStep {
+  event: AgentEvent;
+  delayMs?: number;
+  streamText?: boolean;
+  approvalResult?: DemoCommandResult;
 }
-
-export type AgentEvent = ToolEvent | TextEvent | RefEvent | CommandEvent;
 
 export interface AgentAdapter {
   id: string;
   name: string;
   model: string;
-  status: Tone;
-  plan: (userText: string, ctx: AgentContext) => AgentEvent[];
+  status: AgentConnectionStatus;
+  plan: (userText: string, ctx: AgentContext, messageId: string) => AgentScriptStep[];
 }
 
 export const AGENT_CTX: AgentContext = {
@@ -83,32 +57,49 @@ export const AGENT_SUGGESTIONS: AgentSuggestion[] = [
   { icon: 'Inbox', q: 'Summarize the 5 attention items.' },
 ];
 
-const R = {
-  worktree: { t: 'ref', kind: 'task', id: 'hij456', label: 'quay-ui · worktree corrupted', meta: 'WORKTREE', tone: 'danger' },
-  loop: { t: 'ref', kind: 'task', id: 'ghi789', label: 'brix-indexer · non-budget loop, budget 5/5', meta: 'LOOP', tone: 'danger' },
-  ci: { t: 'ref', kind: 'task', id: 'bcd890', label: 'quay · CI red on PR #48', meta: 'CI', tone: 'danger' },
-  review: { t: 'ref', kind: 'task', id: 'abc123', label: 'quay-ui · 5 review comments on PR #42', meta: 'REVIEW', tone: 'warn' },
-  slack: { t: 'ref', kind: 'slack', id: '#quay-ops', label: 'jkl012 - "which redirect after SSO?"', meta: 'awaiting reply', tone: 'warn' },
-  prReady: { t: 'ref', kind: 'pr', id: 'PR #50', label: 'klm234 · iTRY-monorepo - CI green', meta: 'ready', tone: 'good' },
-  prMno: { t: 'ref', kind: 'pr', id: 'PR #53', label: 'mno345 · erpc - CI 4/6 passing', meta: 'in progress', tone: 'neutral' },
-  prEfg: { t: 'ref', kind: 'pr', id: 'PR #45', label: 'efg123 · erpc - reviewer running', meta: 'in review', tone: 'neutral' },
-  prWxc: { t: 'ref', kind: 'pr', id: 'PR #44', label: 'wxc345 · changes requested', meta: 'awaiting author', tone: 'warn' },
-  ciRun: { t: 'ref', kind: 'ci', id: 'ci-run #2291', label: 'PR #48 · e2e:respawn job', meta: 'exit 1', tone: 'danger' },
-} satisfies Record<string, RefEvent>;
+interface DemoReference {
+  kind: AgentReferenceKind;
+  id: string;
+  label: string;
+  tone?: AgentConnectionStatus;
+}
 
-const CMD_RETRY_WT: Omit<CommandEvent, 't'> = {
-  cmd: 'quay task retry hij456 --fresh-worktree',
-  desc: 'Discard the corrupted worktree on `hij456` (quay-ui) and re-run on a clean clone. No PR exists yet, so nothing downstream is affected.',
+interface DemoApproval {
+  key: string;
+  command: string;
+  description: string;
+  affects: Array<{ label: string; value: string }>;
+  note: string;
+  result: DemoCommandResult;
+}
+
+const R = {
+  worktree: { kind: 'task', id: 'hij456', label: 'quay-ui · worktree corrupted', tone: 'danger' },
+  loop: { kind: 'task', id: 'ghi789', label: 'brix-indexer · non-budget loop, budget 5/5', tone: 'danger' },
+  ci: { kind: 'task', id: 'bcd890', label: 'quay · CI red on PR #48', tone: 'danger' },
+  review: { kind: 'task', id: 'abc123', label: 'quay-ui · 5 review comments on PR #42', tone: 'warn' },
+  operatorReply: { kind: 'task', id: 'jkl012', label: 'quay-ops · waiting on operator reply', tone: 'warn' },
+  prReady: { kind: 'pr', id: 'PR #50', label: 'klm234 · iTRY-monorepo - CI green', tone: 'good' },
+  prMno: { kind: 'pr', id: 'PR #53', label: 'mno345 · erpc - CI 4/6 passing', tone: 'neutral' },
+  prEfg: { kind: 'pr', id: 'PR #45', label: 'efg123 · erpc - reviewer running', tone: 'neutral' },
+  prWxc: { kind: 'pr', id: 'PR #44', label: 'wxc345 · changes requested', tone: 'warn' },
+  ciRun: { kind: 'ci', id: 'ci-run #2291', label: 'PR #48 · e2e:respawn job', tone: 'danger' },
+} satisfies Record<string, DemoReference>;
+
+const CMD_RETRY_WT: DemoApproval = {
+  key: 'retry-worktree',
+  command: 'quay task retry hij456 --fresh-worktree',
+  description:
+    'Discard the corrupted worktree on `hij456` (quay-ui) and re-run on a clean clone. No PR exists yet, so nothing downstream is affected.',
   affects: [
-    { label: 'task', val: 'hij456' },
-    { label: 'worktree', val: 'reset -> fresh clone' },
-    { label: 'budget', val: '1/5 -> 2/5' },
-    { label: 'lane', val: 'attention -> running' },
+    { label: 'task', value: 'hij456' },
+    { label: 'worktree', value: 'reset -> fresh clone' },
+    { label: 'budget', value: '1/5 -> 2/5' },
+    { label: 'lane', value: 'attention -> running' },
   ],
   note: 'Safe · no PR, no force-push',
-  runTone: 'accent',
   result: {
-    exit: 0,
+    exitCode: 0,
     ms: 2300,
     lines: [
       '-> acquiring supervisor lock... ok',
@@ -119,19 +110,20 @@ const CMD_RETRY_WT: Omit<CommandEvent, 't'> = {
   },
 };
 
-const CMD_HALT_LOOP: Omit<CommandEvent, 't'> = {
-  cmd: 'quay task halt ghi789 --reason "reindex OOM loop"',
-  desc: 'Stop the non-budget retry loop on `ghi789` (brix-indexer). It has exhausted budget (5/5) and keeps OOM-ing on the historical block range. Halting moves it to PAUSED so you can repartition the range before resuming.',
+const CMD_HALT_LOOP: DemoApproval = {
+  key: 'halt-loop',
+  command: 'quay task halt ghi789 --reason "reindex OOM loop"',
+  description:
+    'Stop the non-budget retry loop on `ghi789` (brix-indexer). It has exhausted budget (5/5) and keeps OOM-ing on the historical block range. Halting moves it to PAUSED so you can repartition the range before resuming.',
   affects: [
-    { label: 'task', val: 'ghi789' },
-    { label: 'loop', val: 'halted' },
-    { label: 'state', val: 'non_budget_loop -> paused' },
-    { label: 'PR #37', val: 'preserved' },
+    { label: 'task', value: 'ghi789' },
+    { label: 'loop', value: 'halted' },
+    { label: 'state', value: 'non_budget_loop -> paused' },
+    { label: 'PR #37', value: 'preserved' },
   ],
   note: 'Reversible · resume with quay task resume',
-  runTone: 'accent',
   result: {
-    exit: 0,
+    exitCode: 0,
     ms: 1800,
     lines: [
       '-> sending halt signal to ghi789... ok',
@@ -141,18 +133,19 @@ const CMD_HALT_LOOP: Omit<CommandEvent, 't'> = {
   },
 };
 
-const CMD_ASSIGN_REVIEWER: Omit<CommandEvent, 't'> = {
-  cmd: 'quay pr assign-reviewer 50 --auto',
-  desc: 'PR #50 (`klm234`, iTRY-monorepo) is CI-green with no requested changes - it just needs a human reviewer. Auto-assign picks an available reviewer from the repo’s CODEOWNERS.',
+const CMD_ASSIGN_REVIEWER: DemoApproval = {
+  key: 'assign-reviewer',
+  command: 'quay pr assign-reviewer 50 --auto',
+  description:
+    'PR #50 (`klm234`, iTRY-monorepo) is CI-green with no requested changes - it just needs a human reviewer. Auto-assign picks an available reviewer from the repo’s CODEOWNERS.',
   affects: [
-    { label: 'PR #50', val: 'klm234' },
-    { label: 'reviewer', val: 'auto from CODEOWNERS' },
-    { label: 'task klm234', val: 'done -> in review' },
+    { label: 'PR #50', value: 'klm234' },
+    { label: 'reviewer', value: 'auto from CODEOWNERS' },
+    { label: 'task klm234', value: 'done -> in review' },
   ],
   note: 'Assigns only · does not merge',
-  runTone: 'accent',
   result: {
-    exit: 0,
+    exitCode: 0,
     ms: 1500,
     lines: [
       '-> resolving CODEOWNERS for iTRY-monorepo... ok',
@@ -162,19 +155,20 @@ const CMD_ASSIGN_REVIEWER: Omit<CommandEvent, 't'> = {
   },
 };
 
-const CMD_RETRY_CI: Omit<CommandEvent, 't'> = {
-  cmd: 'quay task retry bcd890 --fresh-worktree',
-  desc: 'Re-run `bcd890` (quay) on a clean worktree. The e2e:respawn check failed against a corrupt worktree; a fresh clone clears it. Keeps PR #48 and its history.',
+const CMD_RETRY_CI: DemoApproval = {
+  key: 'retry-ci',
+  command: 'quay task retry bcd890 --fresh-worktree',
+  description:
+    'Re-run `bcd890` (quay) on a clean worktree. The e2e:respawn check failed against a corrupt worktree; a fresh clone clears it. Keeps PR #48 and its history.',
   affects: [
-    { label: 'task', val: 'bcd890' },
-    { label: 'worktree', val: 'reset -> fresh clone' },
-    { label: 'PR #48', val: 'preserved' },
-    { label: 'budget', val: '3/5 -> 4/5' },
+    { label: 'task', value: 'bcd890' },
+    { label: 'worktree', value: 'reset -> fresh clone' },
+    { label: 'PR #48', value: 'preserved' },
+    { label: 'budget', value: '3/5 -> 4/5' },
   ],
   note: 'Safe · no force-push',
-  runTone: 'accent',
   result: {
-    exit: 0,
+    exitCode: 0,
     ms: 2400,
     lines: [
       '-> acquiring supervisor lock... ok',
@@ -195,77 +189,163 @@ function matchIntent(text: string) {
   return 'default';
 }
 
-const PLANS: Record<string, () => AgentEvent[]> = {
-  attention: () => [
-    { t: 'tool', label: 'Reading attention queue', detail: '5 items', ms: 700 },
-    { t: 'tool', label: 'Correlating recent events', detail: 'last tick', ms: 900 },
-    { t: 'text', text: 'Five tasks need you. Two are hard-stuck and will not clear themselves; one is waiting on your reply; two are gated on a check or review.' },
-    { t: 'text', text: '**Act now - stuck:**' },
-    R.worktree,
-    R.loop,
-    { t: 'text', text: '**Waiting on you:**' },
-    R.slack,
-    { t: 'text', text: '**Gated:**' },
-    R.ci,
-    R.review,
-    { t: 'text', text: 'Suggested order: clear the two stuck tasks first, answer `jkl012` in Slack, then retry `bcd890` CI. Here are the two stuck ones:' },
-    { t: 'cmd', ...CMD_RETRY_WT },
-    { t: 'cmd', ...CMD_HALT_LOOP },
-  ],
-  stuck: () => [
-    { t: 'tool', label: 'Scanning for stuck tasks', detail: '17 tasks', ms: 800 },
-    { t: 'tool', label: 'Reading worker + worktree state', detail: '', ms: 950 },
-    { t: 'text', text: 'Two tasks are hard-stuck - both are holding a worker slot and neither recovers on its own:' },
-    R.worktree,
-    { t: 'text', text: '`hij456` (quay-ui) hit a **corrupt worktree**. No PR exists yet, so a clean retry is risk-free.' },
-    { t: 'cmd', ...CMD_RETRY_WT },
-    R.loop,
-    { t: 'text', text: '`ghi789` (brix-indexer) is in a **non-budget loop**. Budget is exhausted (5/5), so retrying will not help; halt it first so it stops eating a slot:' },
-    { t: 'cmd', ...CMD_HALT_LOOP },
-  ],
-  ready: () => [
-    { t: 'tool', label: 'Scanning PR lifecycle', detail: '4 open PRs', ms: 750 },
-    { t: 'tool', label: 'Checking merge gates', detail: 'CI + reviews', ms: 800 },
-    { t: 'text', text: 'One PR is merge-ready. The other three are still gated:' },
-    R.prReady,
-    { t: 'text', text: '`PR #50` (`klm234`, iTRY-monorepo) is **CI-green with no requested changes** - it only needs a human reviewer.' },
-    { t: 'cmd', ...CMD_ASSIGN_REVIEWER },
-    { t: 'text', text: 'The rest aren’t ready yet:' },
-    R.prMno,
-    R.prEfg,
-    R.prWxc,
-    { t: 'text', text: '`#53` is mid-CI, `#45` has a reviewer running now, and `#44` is waiting on the author to push the requested changes - nothing for you to do on those.' },
-  ],
-  review: () => [
-    { t: 'tool', label: 'Fetching review threads', detail: 'open PRs', ms: 800 },
-    { t: 'tool', label: 'Summarizing comments', detail: '', ms: 750 },
-    { t: 'text', text: 'The only PR with actionable review feedback is `abc123`:' },
-    R.review,
-    { t: 'text', text: 'On `PR #42` (quay-ui), the reviewer left **5 inline comments** requesting changes, mostly around timezone handling in the activity-log formatter.' },
-    R.prEfg,
-  ],
-  fail: () => [
-    { t: 'tool', label: 'Scanning for failures', detail: '17 tasks', ms: 700 },
-    { t: 'text', text: 'The most urgent failure is `bcd890`. PR #48 opened cleanly, but `e2e:respawn` exited non-zero after a worktree lock timeout.' },
-    R.ciRun,
-    { t: 'text', text: 'Budget is **3 of 5**, so a clean retry is the cheap fix:' },
-    { t: 'cmd', ...CMD_RETRY_CI },
-  ],
-  default: () => [
-    { t: 'tool', label: 'Reading fleet state', detail: '17 tasks · 8 repos', ms: 850 },
-    { t: 'text', text: 'Across `prod`: **17 tasks**, **5 need attention**, 4 running, 4 in PR lifecycle, 2 queued. Workers are at 3 of 8.' },
-    { t: 'text', text: 'The thing most worth your time: two tasks are hard-stuck (`hij456` worktree, `ghi789` loop) and holding worker slots. Ask *what needs attention?* for full triage.' },
-    R.worktree,
-    R.loop,
-  ],
-};
+function start(messageId: string, model: string): AgentScriptStep {
+  return { event: { type: 'message_start', messageId, role: 'agent', model } };
+}
+
+function done(messageId: string): AgentScriptStep {
+  return { event: { type: 'message_done', messageId } };
+}
+
+function tool(messageId: string, toolCallId: string, label: string, detail: string, ms: number): AgentScriptStep[] {
+  return [
+    { event: { type: 'tool_call', messageId, toolCallId, label, detail, status: 'running' } },
+    { event: { type: 'tool_call', messageId, toolCallId, label, detail, status: 'done' }, delayMs: ms },
+  ];
+}
+
+function text(messageId: string, body: string): AgentScriptStep {
+  return { event: { type: 'text_delta', messageId, text: `${body}\n` }, streamText: true };
+}
+
+function ref(messageId: string, item: DemoReference): AgentScriptStep {
+  return {
+    event: {
+      type: 'reference',
+      messageId,
+      kind: item.kind,
+      id: item.id,
+      label: item.label,
+      tone: item.tone,
+    },
+    delayMs: 200,
+  };
+}
+
+function approval(messageId: string, item: DemoApproval): AgentScriptStep {
+  return {
+    event: {
+      type: 'approval_required',
+      messageId,
+      approvalId: `${messageId}:${item.key}`,
+      command: item.command,
+      description: item.description,
+      affects: item.affects,
+      note: item.note,
+    },
+    delayMs: 240,
+    approvalResult: item.result,
+  };
+}
+
+function planFor(intent: string, messageId: string, model: string): AgentScriptStep[] {
+  const commonStart = [start(messageId, model)];
+  const commonEnd = [done(messageId)];
+
+  const plans: Record<string, AgentScriptStep[]> = {
+    attention: [
+      ...commonStart,
+      ...tool(messageId, 'attention-queue', 'Reading attention queue', '5 items', 700),
+      ...tool(messageId, 'recent-events', 'Correlating recent events', 'last tick', 900),
+      text(
+        messageId,
+        'Five tasks need you. Two are hard-stuck and will not clear themselves; one is waiting on your reply; two are gated on a check or review.',
+      ),
+      text(messageId, '**Act now - stuck:**'),
+      ref(messageId, R.worktree),
+      ref(messageId, R.loop),
+      text(messageId, '**Waiting on you:**'),
+      ref(messageId, R.operatorReply),
+      text(messageId, '**Gated:**'),
+      ref(messageId, R.ci),
+      ref(messageId, R.review),
+      text(messageId, 'Suggested order: clear the two stuck tasks first, answer `jkl012`, then retry `bcd890` CI. Here are the two stuck ones:'),
+      approval(messageId, CMD_RETRY_WT),
+      approval(messageId, CMD_HALT_LOOP),
+      ...commonEnd,
+    ],
+    stuck: [
+      ...commonStart,
+      ...tool(messageId, 'stuck-scan', 'Scanning for stuck tasks', '17 tasks', 800),
+      ...tool(messageId, 'worker-state', 'Reading worker + worktree state', '', 950),
+      text(messageId, 'Two tasks are hard-stuck - both are holding a worker slot and neither recovers on its own:'),
+      ref(messageId, R.worktree),
+      text(messageId, '`hij456` (quay-ui) hit a **corrupt worktree**. No PR exists yet, so a clean retry is risk-free.'),
+      approval(messageId, CMD_RETRY_WT),
+      ref(messageId, R.loop),
+      text(
+        messageId,
+        '`ghi789` (brix-indexer) is in a **non-budget loop**. Budget is exhausted (5/5), so retrying will not help; halt it first so it stops eating a slot:',
+      ),
+      approval(messageId, CMD_HALT_LOOP),
+      ...commonEnd,
+    ],
+    ready: [
+      ...commonStart,
+      ...tool(messageId, 'pr-lifecycle', 'Scanning PR lifecycle', '4 open PRs', 750),
+      ...tool(messageId, 'merge-gates', 'Checking merge gates', 'CI + reviews', 800),
+      text(messageId, 'One PR is merge-ready. The other three are still gated:'),
+      ref(messageId, R.prReady),
+      text(messageId, '`PR #50` (`klm234`, iTRY-monorepo) is **CI-green with no requested changes** - it only needs a human reviewer.'),
+      approval(messageId, CMD_ASSIGN_REVIEWER),
+      text(messageId, 'The rest are not ready yet:'),
+      ref(messageId, R.prMno),
+      ref(messageId, R.prEfg),
+      ref(messageId, R.prWxc),
+      text(
+        messageId,
+        '`#53` is mid-CI, `#45` has a reviewer running now, and `#44` is waiting on the author to push the requested changes - nothing for you to do on those.',
+      ),
+      ...commonEnd,
+    ],
+    review: [
+      ...commonStart,
+      ...tool(messageId, 'review-threads', 'Fetching review threads', 'open PRs', 800),
+      ...tool(messageId, 'review-summary', 'Summarizing comments', '', 750),
+      text(messageId, 'The only PR with actionable review feedback is `abc123`:'),
+      ref(messageId, R.review),
+      text(
+        messageId,
+        'On `PR #42` (quay-ui), the reviewer left **5 inline comments** requesting changes, mostly around timezone handling in the activity-log formatter.',
+      ),
+      ref(messageId, R.prEfg),
+      ...commonEnd,
+    ],
+    fail: [
+      ...commonStart,
+      ...tool(messageId, 'failure-scan', 'Scanning for failures', '17 tasks', 700),
+      text(
+        messageId,
+        'The most urgent failure is `bcd890`. PR #48 opened cleanly, but `e2e:respawn` exited non-zero after a worktree lock timeout.',
+      ),
+      ref(messageId, R.ciRun),
+      text(messageId, 'Budget is **3 of 5**, so a clean retry is the cheap fix:'),
+      approval(messageId, CMD_RETRY_CI),
+      ...commonEnd,
+    ],
+    default: [
+      ...commonStart,
+      ...tool(messageId, 'fleet-state', 'Reading fleet state', '17 tasks · 8 repos', 850),
+      text(messageId, 'Across `prod`: **17 tasks**, **5 need attention**, 4 running, 4 in PR lifecycle, 2 queued. Workers are at 3 of 8.'),
+      text(
+        messageId,
+        'The thing most worth your time: two tasks are hard-stuck (`hij456` worktree, `ghi789` loop) and holding worker slots. Ask *what needs attention?* for full triage.',
+      ),
+      ref(messageId, R.worktree),
+      ref(messageId, R.loop),
+      ...commonEnd,
+    ],
+  };
+
+  return plans[intent] ?? plans.default;
+}
 
 export const hermesAdapter: AgentAdapter = {
   id: 'hermes',
   name: 'Hermes',
   model: 'hermes-1.4',
   status: 'good',
-  plan(userText) {
-    return PLANS[matchIntent(userText)]?.() ?? PLANS.default();
+  plan(userText, _ctx, messageId) {
+    return planFor(matchIntent(userText), messageId, this.model);
   },
 };

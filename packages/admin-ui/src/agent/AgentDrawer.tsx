@@ -6,50 +6,48 @@ import { HStack } from '../components/Stack';
 import { StatusDot } from '../components/StatusDot';
 import { T } from '../components/Typography';
 import { Icon } from '../icons/Icon';
-import { TONES, type Tone } from '../styles/tones';
-import {
-  type AgentAdapter,
-  type AgentContext,
-  type AgentEvent,
-  type CommandEvent,
-  type RefEvent,
-} from './agentData';
+import { TONES } from '../styles/tones';
+import { type AgentAdapter, type AgentContext, type AgentScriptStep, type DemoCommandResult } from './agentData';
+import { EMPTY_AGENT_THREAD, appendUserMessage, applyAgentEvent, stopAgentThread } from './agentState';
+import type { AgentConnectionStatus, AgentContextSummary, AgentEvent, AgentMessage, AgentMessagePart } from './agentTypes';
 
-type AgentPart =
-  | { id: number; kind: 'tool'; label: string; detail?: string; status: 'running' | 'done'; ms: number }
-  | { id: number; kind: 'text'; text: string; done: boolean }
-  | { id: number; kind: 'ref'; refKind: RefEvent['kind']; refId: string; label: string; meta?: string; tone?: Tone }
-  | {
-      id: number;
-      kind: 'cmd';
-      cmd: string;
-      desc: string;
-      affects: CommandEvent['affects'];
-      note: string;
-      runTone?: Tone;
-      result: CommandEvent['result'];
-      state: 'proposed' | 'running' | 'ran' | 'cancelled';
-      output: string[];
-    };
-
-interface AgentMessage {
-  id: number;
-  role: 'user' | 'agent';
-  model?: string;
-  ts: Date;
-  streaming?: boolean;
-  parts: AgentPart[];
-}
-
-interface AgentDrawerProps {
+interface DemoAgentDrawerProps {
   open: boolean;
   onClose: () => void;
   adapter: AgentAdapter;
   ctx: AgentContext;
 }
 
-export function AgentDrawer({ open, onClose, adapter, ctx }: AgentDrawerProps) {
+export function DemoAgentDrawer({ open, onClose, adapter, ctx }: DemoAgentDrawerProps) {
+  const thread = useAgentThread(adapter, ctx);
+  const contextSummary: AgentContextSummary = {
+    agentId: adapter.id,
+    agentName: adapter.name,
+    model: adapter.model,
+    statusLabel: 'connected',
+    scopeLabel: `${ctx.scope} · ${ctx.tasks} tasks · ${ctx.attention} attention`,
+  };
+
+  return (
+    <AgentDrawer
+      open={open}
+      status={adapter.status}
+      messages={thread.messages}
+      busy={thread.busy}
+      contextSummary={contextSummary}
+      onClose={onClose}
+      onNewThread={thread.clear}
+      onSendMessage={thread.send}
+      onStop={thread.stop}
+      onApprove={thread.approve}
+      onReject={thread.reject}
+    />
+  );
+}
+
+export function AgentDrawer(props: AgentPanelProps) {
   const drawerRef = useRef<HTMLElement | null>(null);
+  const { open, onClose } = props;
 
   useEffect(() => {
     const drawer = drawerRef.current;
@@ -65,7 +63,7 @@ export function AgentDrawer({ open, onClose, adapter, ctx }: AgentDrawerProps) {
     <>
       <div className="qa-backdrop" data-open={open ? '1' : '0'} onClick={onClose} />
       <aside ref={drawerRef} className="qa-drawer" data-open={open ? '1' : '0'} aria-hidden={!open}>
-        <AgentPanel adapter={adapter} ctx={ctx} onClose={onClose} />
+        <AgentPanel {...props} />
       </aside>
     </>
   );
@@ -106,18 +104,43 @@ export const AgentTrigger = forwardRef<HTMLButtonElement, AgentTriggerProps>(fun
   );
 });
 
-function AgentPanel({ adapter, ctx, onClose }: { adapter: AgentAdapter; ctx: AgentContext; onClose: () => void }) {
-  const thread = useAgentThread(adapter, ctx);
+export interface AgentPanelProps {
+  open: boolean;
+  status: AgentConnectionStatus;
+  messages: AgentMessage[];
+  busy: boolean;
+  contextSummary: AgentContextSummary;
+  onClose: () => void;
+  onNewThread: () => void;
+  onSendMessage: (text: string) => void;
+  onStop: () => void;
+  onApprove: (approvalId: string) => void;
+  onReject: (approvalId: string) => void;
+}
+
+export function AgentPanel({
+  open,
+  status,
+  messages,
+  busy,
+  contextSummary,
+  onClose,
+  onNewThread,
+  onSendMessage,
+  onStop,
+  onApprove,
+  onReject,
+}: AgentPanelProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const empty = thread.messages.length === 0;
+  const empty = messages.length === 0;
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [thread.messages]);
+  }, [messages]);
 
   return (
-    <div className="qa-agent" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    <div className="qa-agent" data-open={open ? '1' : '0'} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div
         style={{
           display: 'flex',
@@ -135,13 +158,13 @@ function AgentPanel({ adapter, ctx, onClose }: { adapter: AgentAdapter; ctx: Age
             Quay Agent
           </T>
           <HStack gap={5}>
-            <StatusDot tone={adapter.status} size={6} />
+            <StatusDot tone={status} size={6} />
             <T kind="mono-sm" color="var(--ink-3)" style={{ whiteSpace: 'nowrap', lineHeight: 1 }}>
-              {adapter.id} · connected
+              {contextSummary.agentId} · {contextSummary.statusLabel}
             </T>
           </HStack>
         </div>
-        <IconButton onClick={thread.clear} title="New thread">
+        <IconButton onClick={onNewThread} title="New thread">
           <Icon.Plus size={15} />
         </IconButton>
         <IconButton onClick={onClose} title="Close (Esc)">
@@ -154,245 +177,174 @@ function AgentPanel({ adapter, ctx, onClose }: { adapter: AgentAdapter; ctx: Age
           <EmptyState />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-            {thread.messages.map((message) => (
+            {messages.map((message) => (
               <Turn
                 key={message.id}
                 msg={message}
-                onRun={thread.runCommand}
-                onCancel={thread.cancelCommand}
+                agentName={contextSummary.agentName}
+                onApprove={onApprove}
+                onReject={onReject}
               />
             ))}
           </div>
         )}
       </div>
 
-      <Composer busy={thread.busy} onSend={thread.send} onStop={thread.stop} />
+      <Composer busy={busy} model={contextSummary.model} onSend={onSendMessage} onStop={onStop} />
     </div>
   );
 }
 
 function useAgentThread(adapter: AgentAdapter, ctx: AgentContext) {
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [state, setState] = useState(EMPTY_AGENT_THREAD);
   const runRef = useRef(0);
+  const threadTokenRef = useRef(0);
   const idRef = useRef(0);
-  const nid = () => {
+  const approvalResultsRef = useRef(new Map<string, { messageId: string; result: DemoCommandResult }>());
+  const nid = (prefix: string) => {
     idRef.current += 1;
-    return idRef.current;
-  };
-
-  const setLastParts = (fn: (parts: AgentPart[]) => AgentPart[]) => {
-    setMessages((current) => {
-      if (current.length === 0) return current;
-      const copy = current.slice();
-      const last = { ...copy[copy.length - 1]! };
-      last.parts = fn(last.parts);
-      copy[copy.length - 1] = last;
-      return copy;
-    });
-  };
-
-  const updateLast = (fn: (part: AgentPart) => AgentPart) => {
-    setLastParts((parts) => {
-      if (parts.length === 0) return parts;
-      const copy = parts.slice();
-      copy[copy.length - 1] = fn(copy[copy.length - 1]!);
-      return copy;
-    });
+    return `${prefix}-${idRef.current}`;
   };
 
   const send = (text: string) => {
     const trimmed = text.trim();
-    if (!trimmed || busy) return;
+    if (!trimmed || state.busy) return;
 
     const myRun = ++runRef.current;
-    const agentId = nid();
-    setMessages((current) => [
-      ...current,
-      { id: nid(), role: 'user', ts: new Date(), parts: [{ id: nid(), kind: 'text', text: trimmed, done: true }] },
-      { id: agentId, role: 'agent', model: adapter.model, ts: new Date(), streaming: true, parts: [] },
-    ]);
-    setBusy(true);
+    const messageId = nid('agent');
+    const userId = nid('user');
+    const plan = adapter.plan(trimmed, ctx, messageId);
+    for (const step of plan) {
+      if (step.event.type === 'approval_required' && step.approvalResult) {
+        approvalResultsRef.current.set(step.event.approvalId, { messageId, result: step.approvalResult });
+      }
+    }
+
+    setState((current) => ({
+      ...appendUserMessage(current, userId, trimmed, new Date().toISOString()),
+      busy: true,
+    }));
 
     const alive = () => runRef.current === myRun;
-    runPlan(adapter.plan(trimmed, ctx), {
-      addTool: (event) =>
-        setLastParts((parts) => [
-          ...parts,
-          { id: nid(), kind: 'tool', label: event.label, detail: event.detail, status: 'running', ms: event.ms },
-        ]),
-      completeTool: () => updateLast((part) => (part.kind === 'tool' ? { ...part, status: 'done' } : part)),
-      addText: () => setLastParts((parts) => [...parts, { id: nid(), kind: 'text', text: '', done: false }]),
-      growText: (textChunk) => updateLast((part) => (part.kind === 'text' ? { ...part, text: textChunk } : part)),
-      doneText: () => updateLast((part) => (part.kind === 'text' ? { ...part, done: true } : part)),
-      addRef: (event) =>
-        setLastParts((parts) => [
-          ...parts,
-          {
-            id: nid(),
-            kind: 'ref',
-            refKind: event.kind,
-            refId: event.id,
-            label: event.label,
-            meta: event.meta,
-            tone: event.tone,
-          },
-        ]),
-      addCmd: (event) =>
-        setLastParts((parts) => [
-          ...parts,
-          {
-            id: nid(),
-            kind: 'cmd',
-            cmd: event.cmd,
-            desc: event.desc,
-            affects: event.affects,
-            note: event.note,
-            runTone: event.runTone,
-            result: event.result,
-            state: 'proposed',
-            output: [],
-          },
-        ]),
-      done: () => {
-        setMessages((current) => current.map((message) => (message.id === agentId ? { ...message, streaming: false } : message)));
-        setBusy(false);
-      },
-    }, alive);
+    runScript(plan, emitAgentEvent, alive, () => setState((current) => stopAgentThread(current)));
   };
 
   const stop = () => {
     runRef.current += 1;
-    setBusy(false);
-    setMessages((current) => current.map((message) => (message.streaming ? { ...message, streaming: false } : message)));
+    setState((current) => stopAgentThread(current));
   };
 
   const clear = () => {
     runRef.current += 1;
-    setBusy(false);
-    setMessages([]);
+    threadTokenRef.current += 1;
+    approvalResultsRef.current.clear();
+    setState(EMPTY_AGENT_THREAD);
   };
 
-  const updatePart = (msgId: number, partId: number, fn: (part: AgentPart) => AgentPart) => {
-    setMessages((current) =>
-      current.map((message) =>
-        message.id !== msgId ? message : { ...message, parts: message.parts.map((part) => (part.id === partId ? fn(part) : part)) },
-      ),
-    );
+  const emitAgentEvent = (event: AgentEvent) => {
+    setState((current) => applyAgentEvent(current, event, new Date().toISOString()));
   };
 
-  const runCommand = (msgId: number, partId: number) => {
-    let result: CommandEvent['result'] | null = null;
-    updatePart(msgId, partId, (part) => {
-      if (part.kind !== 'cmd') return part;
-      result = part.result;
-      return { ...part, state: 'running', output: [] };
-    });
-    const commandResult = result as CommandEvent['result'] | null;
-    if (!commandResult) return;
+  const approve = (approvalId: string) => {
+    const target = findApproval(state.messages, approvalId);
+    if (!target) return;
+    const result = approvalResultsRef.current.get(approvalId)?.result;
+    const threadToken = threadTokenRef.current;
+    emitAgentEvent({ type: 'approval_result', messageId: target.messageId, approvalId, status: 'running' });
+    if (!result) {
+      emitAgentEvent({ type: 'approval_result', messageId: target.messageId, approvalId, status: 'succeeded', exitCode: 0 });
+      return;
+    }
 
-    const perLine = Math.max(260, Math.round(commandResult.ms / (commandResult.lines.length + 1)));
+    const perLine = Math.max(260, Math.round(result.ms / (result.lines.length + 1)));
     let index = 0;
     const tick = () => {
-      if (index < commandResult.lines.length) {
-        const line = commandResult.lines[index]!;
-        updatePart(msgId, partId, (part) => (part.kind === 'cmd' ? { ...part, output: [...part.output, line] } : part));
+      if (threadTokenRef.current !== threadToken) return;
+      if (index < result.lines.length) {
+        emitAgentEvent({ type: 'command_output', messageId: target.messageId, approvalId, line: result.lines[index]! });
         index += 1;
         window.setTimeout(tick, perLine);
       } else {
-        updatePart(msgId, partId, (part) => (part.kind === 'cmd' ? { ...part, state: 'ran' } : part));
+        emitAgentEvent({
+          type: 'approval_result',
+          messageId: target.messageId,
+          approvalId,
+          status: result.exitCode === 0 ? 'succeeded' : 'failed',
+          exitCode: result.exitCode,
+        });
       }
     };
     window.setTimeout(tick, perLine);
   };
 
-  const cancelCommand = (msgId: number, partId: number) => {
-    updatePart(msgId, partId, (part) => (part.kind === 'cmd' ? { ...part, state: 'cancelled' } : part));
+  const reject = (approvalId: string) => {
+    const target = findApproval(state.messages, approvalId);
+    if (!target) return;
+    emitAgentEvent({ type: 'approval_result', messageId: target.messageId, approvalId, status: 'rejected' });
   };
 
-  return { messages, busy, send, stop, clear, runCommand, cancelCommand };
+  return { messages: state.messages, busy: state.busy, send, stop, clear, approve, reject };
 }
 
-interface PlanHandlers {
-  addTool: (event: Extract<AgentEvent, { t: 'tool' }>) => void;
-  completeTool: () => void;
-  addText: () => void;
-  growText: (text: string) => void;
-  doneText: () => void;
-  addRef: (event: RefEvent) => void;
-  addCmd: (event: CommandEvent) => void;
-  done: () => void;
-}
-
-function runPlan(plan: AgentEvent[], handlers: PlanHandlers, alive: () => boolean) {
+function runScript(plan: AgentScriptStep[], emit: (event: AgentEvent) => void, alive: () => boolean, done: () => void) {
   let index = 0;
   const step = () => {
     if (!alive()) return;
     if (index >= plan.length) {
-      handlers.done();
+      done();
       return;
     }
 
-    const event = plan[index++]!;
-    if (event.t === 'tool') {
-      handlers.addTool(event);
-      window.setTimeout(() => {
-        if (!alive()) return;
-        handlers.completeTool();
-        window.setTimeout(step, 150);
-      }, event.ms);
-      return;
-    }
-    if (event.t === 'text') {
-      handlers.addText();
-      streamText(event.text, handlers.growText, alive, () => {
-        handlers.doneText();
-        window.setTimeout(step, 130);
-      });
-      return;
-    }
-    if (event.t === 'ref') {
-      window.setTimeout(() => {
-        if (!alive()) return;
-        handlers.addRef(event);
-        window.setTimeout(step, 130);
-      }, 200);
-      return;
-    }
-    if (event.t === 'cmd') {
-      window.setTimeout(() => {
-        if (!alive()) return;
-        handlers.addCmd(event);
-        window.setTimeout(step, 120);
-      }, 240);
-    }
+    const scriptStep = plan[index++]!;
+    const delay = scriptStep.delayMs ?? 0;
+    window.setTimeout(() => {
+      if (!alive()) return;
+      if (scriptStep.streamText && scriptStep.event.type === 'text_delta') {
+        streamText(scriptStep.event, emit, alive, () => window.setTimeout(step, 130));
+        return;
+      }
+      emit(scriptStep.event);
+      window.setTimeout(step, 130);
+    }, delay);
   };
   step();
 }
 
-function streamText(full: string, grow: (text: string) => void, alive: () => boolean, done: () => void) {
+function streamText(event: Extract<AgentEvent, { type: 'text_delta' }>, emit: (event: AgentEvent) => void, alive: () => boolean, done: () => void) {
   let index = 0;
   const tick = () => {
     if (!alive()) return;
-    index += 3;
-    grow(full.slice(0, Math.min(index, full.length)));
-    if (index < full.length) {
+    const chunk = event.text.slice(index, index + 3);
+    index += chunk.length;
+    if (chunk) emit({ ...event, text: chunk });
+    if (index < event.text.length) {
       window.setTimeout(tick, 12);
-    } else {
-      done();
+      return;
     }
+    done();
   };
   tick();
 }
 
+function findApproval(messages: AgentMessage[], approvalId: string) {
+  for (const message of messages) {
+    if (message.parts.some((part) => part.kind === 'approval' && part.approvalId === approvalId)) {
+      return { messageId: message.id };
+    }
+  }
+  return null;
+}
+
 function Turn({
   msg,
-  onRun,
-  onCancel,
+  agentName,
+  onApprove,
+  onReject,
 }: {
   msg: AgentMessage;
-  onRun: (msgId: number, partId: number) => void;
-  onCancel: (msgId: number, partId: number) => void;
+  agentName: string;
+  onApprove: (approvalId: string) => void;
+  onReject: (approvalId: string) => void;
 }) {
   const isUser = msg.role === 'user';
   const groups = groupParts(msg.parts);
@@ -402,7 +354,7 @@ function Turn({
       <HStack gap={8}>
         {isUser ? <Avatar name="Mira Tonio" size={20} tone="accent" /> : <AgentMark size={20} />}
         <T kind="body-strong" style={{ fontSize: 13 }}>
-          {isUser ? 'Mira' : 'Hermes'}
+          {isUser ? 'Mira' : agentName}
         </T>
         {!isUser && (
           <T kind="mono-sm" color="var(--ink-4)">
@@ -411,7 +363,7 @@ function Turn({
         )}
         <span style={{ flex: 1 }} />
         <T kind="mono-sm" color="var(--ink-4)">
-          {formatTime(msg.ts)}
+          {formatTime(msg.createdAt)}
         </T>
       </HStack>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10, paddingLeft: 28 }}>
@@ -422,9 +374,8 @@ function Turn({
             <Part
               key={group.part.id}
               part={group.part}
-              msgId={msg.id}
-              onRun={() => onRun(msg.id, group.part.id)}
-              onCancel={() => onCancel(msg.id, group.part.id)}
+              onApprove={onApprove}
+              onReject={onReject}
             />
           ),
         )}
@@ -441,15 +392,24 @@ function Turn({
   );
 }
 
-function Part({ part, msgId, onRun, onCancel }: { part: AgentPart; msgId: number; onRun: () => void; onCancel: () => void }) {
+function Part({
+  part,
+  onApprove,
+  onReject,
+}: {
+  part: AgentMessagePart;
+  onApprove: (approvalId: string) => void;
+  onReject: (approvalId: string) => void;
+}) {
   if (part.kind === 'text') return <MarkdownLite text={part.text} streaming={!part.done} />;
-  if (part.kind === 'ref') return <RefRow part={part} />;
-  if (part.kind === 'cmd') return <CommandCard part={part} msgId={msgId} onRun={onRun} onCancel={onCancel} />;
+  if (part.kind === 'reference') return <RefRow part={part} />;
+  if (part.kind === 'approval') return <ApprovalCard part={part} onApprove={() => onApprove(part.approvalId)} onReject={() => onReject(part.approvalId)} />;
+  if (part.kind === 'error') return <ErrorRow part={part} />;
   return null;
 }
 
-function groupParts(parts: AgentPart[]) {
-  const groups: Array<{ type: 'tools'; items: Extract<AgentPart, { kind: 'tool' }>[] } | { type: 'single'; part: AgentPart }> = [];
+function groupParts(parts: AgentMessagePart[]) {
+  const groups: Array<{ type: 'tools'; items: Extract<AgentMessagePart, { kind: 'tool' }>[] } | { type: 'single'; part: AgentMessagePart }> = [];
   for (const part of parts) {
     if (part.kind === 'tool') {
       const last = groups[groups.length - 1];
@@ -533,7 +493,7 @@ function renderInline(text: string) {
   return out;
 }
 
-function ToolGroup({ items }: { items: Extract<AgentPart, { kind: 'tool' }>[] }) {
+function ToolGroup({ items }: { items: Extract<AgentMessagePart, { kind: 'tool' }>[] }) {
   return (
     <div
       style={{
@@ -548,12 +508,23 @@ function ToolGroup({ items }: { items: Extract<AgentPart, { kind: 'tool' }>[] })
     >
       {items.map((item) => {
         const running = item.status === 'running';
+        const failed = item.status === 'failed';
         return (
           <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 22 }}>
             <span style={{ display: 'inline-flex', width: 13, justifyContent: 'center', flexShrink: 0 }}>
-              {running ? <span className="qa-spin" /> : <Icon.Check size={13} style={{ color: 'var(--ink-3)' }} />}
+              {running ? (
+                <span className="qa-spin" />
+              ) : failed ? (
+                <Icon.X size={13} style={{ color: 'var(--danger)' }} />
+              ) : (
+                <Icon.Check size={13} style={{ color: 'var(--ink-3)' }} />
+              )}
             </span>
-            <T kind="body-sm" color={running ? 'var(--ink-2)' : 'var(--ink-3)'} style={{ fontWeight: running ? 500 : 400, whiteSpace: 'nowrap', flexShrink: 0 }}>
+            <T
+              kind="body-sm"
+              color={running ? 'var(--ink-2)' : failed ? 'var(--danger-ink)' : 'var(--ink-3)'}
+              style={{ fontWeight: running ? 500 : 400, whiteSpace: 'nowrap', flexShrink: 0 }}
+            >
               {item.label}
               {running ? '...' : ''}
             </T>
@@ -566,7 +537,7 @@ function ToolGroup({ items }: { items: Extract<AgentPart, { kind: 'tool' }>[] })
             )}
             {!running && (
               <T kind="mono-sm" color="var(--ink-4)" style={{ flexShrink: 0 }}>
-                {(item.ms / 1000).toFixed(1)}s
+                {failed ? 'failed' : 'done'}
               </T>
             )}
           </div>
@@ -576,13 +547,15 @@ function ToolGroup({ items }: { items: Extract<AgentPart, { kind: 'tool' }>[] })
   );
 }
 
-function RefRow({ part }: { part: Extract<AgentPart, { kind: 'ref' }> }) {
+function RefRow({ part }: { part: Extract<AgentMessagePart, { kind: 'reference' }> }) {
   const RefIcon = REF_ICONS[part.refKind] ?? Icon.Dot;
   const tone = TONES[part.tone ?? 'neutral'];
   return (
     <a
-      href="#"
-      onClick={(event) => event.preventDefault()}
+      href={part.url ?? '#'}
+      onClick={(event) => {
+        if (!part.url) event.preventDefault();
+      }}
       title={`${part.refId} - ${part.label}`}
       style={{
         display: 'flex',
@@ -603,11 +576,6 @@ function RefRow({ part }: { part: Extract<AgentPart, { kind: 'ref' }> }) {
       <T kind="body-sm" color="var(--ink-3)" style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {part.label}
       </T>
-      {part.meta && (
-        <T kind="mono-sm" color={tone.fg} style={{ flexShrink: 0 }}>
-          {part.meta}
-        </T>
-      )}
       <Icon.ExternalLink size={12} style={{ color: 'var(--ink-4)', flexShrink: 0 }} />
     </a>
   );
@@ -618,27 +586,27 @@ const REF_ICONS = {
   log: Icon.Alert,
   pr: Icon.GitPR,
   task: Icon.Anchor,
-  slack: Icon.Slack,
   file: Icon.Repo,
+  config: Icon.Filter,
 };
 
-function CommandCard({
+function ApprovalCard({
   part,
-  onRun,
-  onCancel,
+  onApprove,
+  onReject,
 }: {
-  part: Extract<AgentPart, { kind: 'cmd' }>;
-  msgId: number;
-  onRun: () => void;
-  onCancel: () => void;
+  part: Extract<AgentMessagePart, { kind: 'approval' }>;
+  onApprove: () => void;
+  onReject: () => void;
 }) {
-  const dim = part.state === 'cancelled';
-  const resultOk = part.result.exit === 0;
+  const dim = part.status === 'rejected';
+  const completed = part.status === 'succeeded' || part.status === 'failed';
+  const resultOk = part.status === 'succeeded' && (part.exitCode ?? 0) === 0;
 
   return (
     <div
       style={{
-        border: `1px solid ${part.state === 'proposed' ? 'var(--line-2)' : 'var(--line)'}`,
+        border: `1px solid ${part.status === 'proposed' ? 'var(--line-2)' : 'var(--line)'}`,
         borderRadius: 'var(--r-md)',
         background: 'var(--surface)',
         overflow: 'hidden',
@@ -646,7 +614,7 @@ function CommandCard({
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '7px 10px', background: 'var(--surface-2)', borderBottom: '1px solid var(--line)' }}>
-        {part.state === 'proposed' && (
+        {part.status === 'proposed' && (
           <>
             <Icon.Filter size={12} style={{ color: 'var(--ink-3)' }} />
             <T kind="caption" color="var(--ink-3)">
@@ -658,7 +626,7 @@ function CommandCard({
             </T>
           </>
         )}
-        {part.state === 'running' && (
+        {part.status === 'running' && (
           <>
             <span className="qa-spin" />
             <T kind="caption" color="var(--accent-ink)">
@@ -667,21 +635,21 @@ function CommandCard({
             <span style={{ flex: 1 }} />
           </>
         )}
-        {part.state === 'ran' && (
+        {completed && (
           <>
-            <Icon.Check size={13} style={{ color: resultOk ? 'var(--good)' : 'var(--danger)' }} />
+            {resultOk ? <Icon.Check size={13} style={{ color: 'var(--good)' }} /> : <Icon.X size={13} style={{ color: 'var(--danger)' }} />}
             <T kind="caption" color={resultOk ? 'var(--good-ink)' : 'var(--danger-ink)'}>
-              Ran · exit {part.result.exit} · {(part.result.ms / 1000).toFixed(1)}s
+              {resultOk ? 'Succeeded' : 'Failed'} · exit {part.exitCode ?? 1}
             </T>
             <span style={{ flex: 1 }} />
-            <CopyButton text={part.cmd} />
+            <CopyButton text={part.command} />
           </>
         )}
-        {part.state === 'cancelled' && (
+        {part.status === 'rejected' && (
           <>
             <Icon.X size={12} style={{ color: 'var(--ink-4)' }} />
             <T kind="caption" color="var(--ink-4)">
-              Cancelled
+              Rejected
             </T>
             <span style={{ flex: 1 }} />
           </>
@@ -704,14 +672,14 @@ function CommandCard({
             $
           </T>
           <T kind="mono-md" color="var(--ink)" style={{ flex: 1, wordBreak: 'break-word', textDecoration: dim ? 'line-through' : 'none' }}>
-            {part.cmd}
+            {part.command}
           </T>
-          {part.state === 'proposed' && <CopyButton text={part.cmd} />}
+          {part.status === 'proposed' && <CopyButton text={part.command} />}
         </div>
 
-        {part.state === 'proposed' && (
+        {part.status === 'proposed' && (
           <>
-            <MarkdownLite text={part.desc} />
+            <MarkdownLite text={part.description} />
             <div style={{ background: 'var(--surface-2)', border: '1px solid var(--line)', borderRadius: 'var(--r-sm)', padding: '8px 10px' }}>
               <T kind="caption" color="var(--ink-4)" style={{ display: 'block', marginBottom: 6 }}>
                 Will affect
@@ -723,26 +691,39 @@ function CommandCard({
                       {affect.label}
                     </T>
                     <T kind="mono-sm" color="var(--ink-2)" style={{ textAlign: 'right' }}>
-                      {affect.val}
+                      {affect.value}
                     </T>
                   </Fragment>
                 ))}
               </div>
             </div>
             <HStack gap={8} justify="flex-end">
-              <Button variant="ghost" size="sm" onClick={onCancel}>
-                Cancel
+              <Button variant="ghost" size="sm" onClick={onReject}>
+                Reject
               </Button>
-              <Button variant="accent" size="sm" leading={<Icon.Check size={13} />} onClick={onRun}>
+              <Button variant="accent" size="sm" leading={<Icon.Check size={13} />} onClick={onApprove}>
                 Run command
               </Button>
             </HStack>
           </>
         )}
 
-        {(part.state === 'running' || part.state === 'ran') && part.output.length > 0 && <OutputBlock lines={part.output} running={part.state === 'running'} />}
-        {part.state === 'running' && part.output.length === 0 && <OutputBlock lines={['-> starting...']} running />}
+        {(part.status === 'running' || completed) && part.output.length > 0 && <OutputBlock lines={part.output} running={part.status === 'running'} />}
+        {part.status === 'running' && part.output.length === 0 && <OutputBlock lines={['-> starting...']} running />}
       </div>
+    </div>
+  );
+}
+
+function ErrorRow({ part }: { part: Extract<AgentMessagePart, { kind: 'error' }> }) {
+  return (
+    <div style={{ border: '1px solid var(--danger-line)', borderRadius: 'var(--r-sm)', background: 'var(--danger-soft)', padding: '8px 10px' }}>
+      <T kind="body-sm" color="var(--danger-ink)" style={{ fontWeight: 600 }}>
+        {part.message}
+      </T>
+      <T kind="mono-sm" color="var(--danger-ink)" style={{ display: 'block', marginTop: 4 }}>
+        {part.code} · {part.recoverable ? 'recoverable' : 'not recoverable'}
+      </T>
     </div>
   );
 }
@@ -801,7 +782,7 @@ function EmptyState() {
   );
 }
 
-function Composer({ busy, onSend, onStop }: { busy: boolean; onSend: (text: string) => void; onStop: () => void }) {
+function Composer({ busy, model, onSend, onStop }: { busy: boolean; model?: string; onSend: (text: string) => void; onStop: () => void }) {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const canSend = value.trim().length > 0 && !busy;
@@ -878,7 +859,7 @@ function Composer({ busy, onSend, onStop }: { busy: boolean; onSend: (text: stri
         </T>
         <span style={{ flex: 1 }} />
         <T kind="mono-sm" color="var(--ink-4)">
-          hermes-1.4
+          {model ?? 'agent'}
         </T>
       </HStack>
     </div>
@@ -968,6 +949,6 @@ const iconButtonStyle: CSSProperties = {
   flexShrink: 0,
 };
 
-function formatTime(date: Date) {
-  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+function formatTime(value: string) {
+  return new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
