@@ -147,6 +147,17 @@ export async function handleEnqueueLinearIssue(
     }
   }
 
+  if (ctx.umbrella !== null) {
+    return emitError(
+      io,
+      new QuayError(
+        "validation_error",
+        "quay-config umbrella metadata is not supported for Linear-backed enqueue; use native Linear parent/child relations for umbrella membership and native Linear blocked-by relations for ordering",
+        { external_ref: externalRef },
+      ),
+    );
+  }
+
   // Block tags are already normalised inside `fetchTicketContextWithIssue`;
   // merge in the CLI `--tag` values (lower-cased + deduped against the block
   // set, first occurrence wins) and route the merged set through the
@@ -216,21 +227,6 @@ export async function handleEnqueueLinearIssue(
       return emitError(io, err);
     }
   }
-  if (
-    ctx.umbrella !== null &&
-    ctx.umbrella.depends_on.length > 0 &&
-    resolvedLinearUmbrella === null
-  ) {
-    return emitError(
-      io,
-      new QuayError(
-        "validation_error",
-        "quay-config umbrella.depends_on is not supported for Linear-backed enqueue; use native Linear blocked-by relations",
-        { external_ref: externalRef },
-      ),
-    );
-  }
-
   let dependencyResolution: LinearDependencyResolution;
   try {
     const now = deps.enqueueDeps.clock.nowISO();
@@ -284,14 +280,7 @@ export async function handleEnqueueLinearIssue(
                   ? undefined
                   : dependencyResolution.umbrellaCompletions,
             }
-          : ctx.umbrella === null
-          ? undefined
-          : {
-              external_ref: ctx.umbrella.external_ref,
-              base_branch:
-                ctx.umbrella.base_branch ?? resolvedBaseBranch ?? undefined,
-              feature_branch: ctx.umbrella.feature_branch ?? undefined,
-            },
+          : undefined,
       request_pr_screenshots: args.requestPrScreenshots,
       require_pr_screenshots: args.requirePrScreenshots,
       dependencies: dependencyResolution.dependencies,
