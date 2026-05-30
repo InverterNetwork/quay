@@ -4,6 +4,7 @@
 // PR is merged — the human's merge decision overrides CI.
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, existsSync } from "node:fs";
+import { getTask } from "../../src/cli/format.ts";
 import { tick_once } from "../../src/core/tick.ts";
 import { createTaskDependency } from "../../src/core/task_dependencies.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
@@ -291,6 +292,117 @@ test("umbrella pr merge marks blocker merged to feature branch and releases depe
     event_type: "merged",
     from_state: "pr-open",
     to_state: "merged_to_feature_branch",
+  });
+});
+
+test("merged final umbrella PR marks workflow completed", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-29T12:45:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-final-umbrella-pr-merged");
+  const finalTaskId = insertTask(h.db, {
+    taskId: "umbrella-final-pr-1538",
+    repoId,
+    state: "pr-open",
+  });
+  const subtaskId = insertTask(h.db, {
+    taskId: "task-final-umbrella-subtask",
+    repoId,
+    state: "merged_to_feature_branch",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1538',
+              branch_name = 'quay/umbrella/BRIX-1538',
+              base_branch = 'dev',
+              pr_number = 1538,
+              pr_url = 'https://github.example/repo/pull/1538'
+        WHERE task_id = ?`,
+    )
+    .run(finalTaskId);
+  insertAttempt(h.db, {
+    taskId: finalTaskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-04-29T12:30:00.000Z",
+  });
+  const workflow = h.db
+    .query<{ umbrella_workflow_id: number }, [string, string, string, string, string, number, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, final_pr_task_id,
+         final_pr_number, final_pr_url, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id`,
+    )
+    .get(
+      "BRIX-1538",
+      repoId,
+      "dev",
+      "quay/umbrella/BRIX-1538",
+      finalTaskId,
+      1538,
+      "https://github.example/repo/pull/1538",
+      "2026-04-29T12:00:00.000Z",
+      "2026-04-29T12:00:00.000Z",
+    );
+  expect(workflow).not.toBeNull();
+  h.db
+    .query(
+      `INSERT INTO umbrella_tasks (
+         umbrella_workflow_id, task_id, external_ref, created_at
+       ) VALUES (?, ?, ?, ?)`,
+    )
+    .run(
+      workflow!.umbrella_workflow_id,
+      subtaskId,
+      "BRIX-1539",
+      "2026-04-29T12:05:00.000Z",
+    );
+
+  const worktreePath = h.db
+    .query<{ worktree_path: string }, [string]>(
+      `SELECT worktree_path FROM tasks WHERE task_id = ?`,
+    )
+    .get(finalTaskId)!.worktree_path;
+  mkdirSync(worktreePath, { recursive: true });
+
+  const built = buildTickDeps(h);
+  built.git.setLocalBranches(repoId, ["quay/umbrella/BRIX-1538"]);
+  built.github.setPrSnapshot(repoId, "quay/umbrella/BRIX-1538", {
+    prNumber: 1538,
+    state: "merged",
+    headSha: "head-final-merge",
+    baseSha: "base-final-merge",
+    mergeable: "unknown",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: { checkSha: "head-final-merge", items: [] },
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([{ task_id: finalTaskId, action: "pr_merged" }]);
+  expect(built.github.mergePullRequestCalls).toEqual([]);
+
+  const workflowState = h.db
+    .query<{ state: string; updated_at: string }, [number]>(
+      `SELECT state, updated_at
+         FROM umbrella_workflows
+        WHERE umbrella_workflow_id = ?`,
+    )
+    .get(workflow!.umbrella_workflow_id);
+  expect(workflowState).toEqual({
+    state: "completed",
+    updated_at: "2026-04-29T12:45:00.000Z",
+  });
+  expect(getTask(h.db, finalTaskId)?.umbrella_status).toMatchObject({
+    role: "final_pr",
+    state: "completed",
+    final_pr_task_id: finalTaskId,
+    final_pr_number: 1538,
+  });
+  expect(getTask(h.db, subtaskId)?.umbrella_status).toMatchObject({
+    role: "subtask",
+    state: "completed",
+    final_pr_task_id: finalTaskId,
   });
 });
 
