@@ -70,42 +70,45 @@ test("worker token probe rejects tokens without repository write access", () => 
   const adapter = new RecordingAdapter();
   adapter.nextResults = [
     { exitCode: 0, stdout: "lafawnduh1966/quay\n", stderr: "" },
-    { exitCode: 0, stdout: "READ\n", stderr: "" },
+    { exitCode: 1, stdout: "", stderr: "write access denied\n" },
   ];
 
   expect(() =>
     adapter.probeTokenAccess("repo-x", "ghs_readonly_token", "worker"),
   ).toThrow(/worker token does not have write access/i);
   expect(adapter.calls).toHaveLength(2);
-  expect(adapter.calls[1]!.cmd).toEqual([
-    "gh",
-    "api",
-    "graphql",
-    "-f",
-    expect.stringContaining("viewerPermission"),
-    "-F",
-    "owner=lafawnduh1966",
-    "-F",
-    "name=quay",
-    "--jq",
-    ".data.repository.viewerPermission",
+  const workerProbe = adapter.calls[1]!;
+  expect(workerProbe.cmd.slice(0, 7)).toEqual([
+    "git",
+    "-c",
+    "credential.helper=",
+    "-c",
+    "credential.helper=!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f",
+    "push",
+    "--dry-run",
   ]);
+  expect(workerProbe.cmd[7]).toBe("https://github.com/lafawnduh1966/quay.git");
+  expect(workerProbe.cmd[8]).toMatch(
+    /^HEAD:refs\/heads\/quay\/token-write-probe-/,
+  );
   expect(adapter.calls[1]!.env.GH_TOKEN).toBe("ghs_readonly_token");
   expect(adapter.calls[1]!.env.GITHUB_TOKEN).toBeUndefined();
   expect(adapter.calls[1]!.env.QUAY_WORKER_GH_TOKEN).toBeUndefined();
   expect(adapter.calls[1]!.env.QUAY_REVIEWER_GH_TOKEN).toBeUndefined();
+  expect(adapter.calls[1]!.env.GIT_TERMINAL_PROMPT).toBe("0");
+  expect(adapter.calls[1]!.env.GIT_ASKPASS).toBe("");
 });
 
 test("worker token probe accepts writable repository permissions", () => {
-  for (const permission of ["WRITE", "MAINTAIN", "ADMIN"]) {
+  for (const stderr of ["", "dry run ok\n"]) {
     const adapter = new RecordingAdapter();
     adapter.nextResults = [
       { exitCode: 0, stdout: "lafawnduh1966/quay\n", stderr: "" },
-      { exitCode: 0, stdout: `${permission}\n`, stderr: "" },
+      { exitCode: 0, stdout: "", stderr },
     ];
 
     expect(() =>
-      adapter.probeTokenAccess("repo-x", `ghs_${permission}`, "worker"),
+      adapter.probeTokenAccess("repo-x", "ghs_installation_token", "worker"),
     ).not.toThrow();
   }
 });
