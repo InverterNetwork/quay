@@ -192,6 +192,370 @@ test("HermesAgentAdapter creates a run and maps basic Runs API SSE events", asyn
   expect(JSON.stringify(events)).not.toContain("secret-key");
 });
 
+test("HermesAgentAdapter maps Hermes tool events and run failures to normalized events", async () => {
+  const fetchImpl: AgentFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/health") return jsonResponse({ status: "ok" });
+    if (path === "/v1/capabilities") {
+      return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+    }
+    if (path === "/v1/runs") return jsonResponse({ run_id: "run-tools" });
+    return sseResponse([
+      {
+        type: "tool.started",
+        tool_call_id: "tool-1",
+        name: "quay status",
+        input: { repo: "quay", apiKey: "input-secret" },
+      },
+      {
+        type: "tool.progress",
+        tool_call_id: "tool-1",
+        name: "quay status",
+        detail: "Reading task queue",
+      },
+      {
+        type: "tool.completed",
+        tool_call_id: "tool-1",
+        name: "quay status",
+        output: { running: 2 },
+      },
+      {
+        type: "tool.failed",
+        tool_call_id: "tool-2",
+        name: "quay cancel",
+        message: "Command denied",
+      },
+      {
+        type: "run.failed",
+        code: "tool_failed",
+        message: "Authorization Bearer secret-key was echoed",
+      },
+    ]);
+  };
+  const adapter = new HermesAgentAdapter({
+    config: {
+      apiBaseUrl: "http://hermes.local",
+      apiKey: "secret-key",
+      model: "hermes-test",
+      sessionKeyPrefix: "quay-dev",
+    },
+    fetch: fetchImpl,
+  });
+  const session = makeSession();
+  await adapter.createSession({ session });
+
+  const events: AgentEvent[] = [];
+  for await (const event of adapter.sendMessage({
+    session,
+    message: "Inspect tools",
+    context: contextFixture,
+  })) {
+    events.push(event);
+  }
+
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "tool_call",
+    "tool_call",
+    "tool_call",
+    "tool_call",
+    "error",
+    "message_done",
+  ]);
+  expect(events.filter((event) => event.type === "tool_call")).toMatchObject([
+    { toolCallId: "tool-1", label: "quay status", status: "running", detail: "Tool input available" },
+    { toolCallId: "tool-1", label: "quay status", status: "running", detail: "Reading task queue" },
+    { toolCallId: "tool-1", label: "quay status", status: "done", detail: "Tool output available" },
+    { toolCallId: "tool-2", label: "quay cancel", status: "failed" },
+  ]);
+  expect(events.find((event) => event.type === "error")).toMatchObject({
+    type: "error",
+    code: "hermes_run_failed",
+    message: "Hermes run failed: tool_failed",
+    details: { event_type: "run.failed" },
+  });
+  const serialized = JSON.stringify(events);
+  expect(serialized).not.toContain("input-secret");
+  expect(serialized).not.toContain("Authorization Bearer");
+});
+
+test("HermesAgentAdapter does not expose raw tool payload content in tool details", async () => {
+  const fetchImpl: AgentFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/health") return jsonResponse({ status: "ok" });
+    if (path === "/v1/capabilities") {
+      return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+    }
+    if (path === "/v1/runs") return jsonResponse({ run_id: "run-tool-secrets" });
+    return sseResponse([
+      {
+        type: "tool.completed",
+        tool_call_id: "tool-secret",
+        name: "quay inspect",
+        output: "token=neutral-key-secret and raw task log",
+      },
+      {
+        type: "tool.progress",
+        tool_call_id: "tool-progress",
+        name: "quay inspect",
+        detail: "Bearer raw-progress-token",
+      },
+      { type: "run.completed" },
+    ]);
+  };
+  const adapter = new HermesAgentAdapter({
+    config: {
+      apiBaseUrl: "http://hermes.local",
+      apiKey: "secret-key",
+      model: "hermes-test",
+      sessionKeyPrefix: "quay-dev",
+    },
+    fetch: fetchImpl,
+  });
+  const session = makeSession();
+  await adapter.createSession({ session });
+
+  const events: AgentEvent[] = [];
+  for await (const event of adapter.sendMessage({
+    session,
+    message: "Inspect tool output",
+    context: contextFixture,
+  })) {
+    events.push(event);
+  }
+
+  expect(events.filter((event) => event.type === "tool_call")).toMatchObject([
+    { toolCallId: "tool-secret", detail: "Tool output available", status: "done" },
+    { toolCallId: "tool-progress", detail: "[redacted]", status: "running" },
+  ]);
+  const serialized = JSON.stringify(events);
+  expect(serialized).not.toContain("neutral-key-secret");
+  expect(serialized).not.toContain("raw task log");
+  expect(serialized).not.toContain("raw-progress-token");
+});
+
+test("HermesAgentAdapter emits structured errors for unsupported non-debug events", async () => {
+  const fetchImpl: AgentFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/health") return jsonResponse({ status: "ok" });
+    if (path === "/v1/capabilities") {
+      return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+    }
+    if (path === "/v1/runs") return jsonResponse({ run_id: "run-unsupported" });
+    return sseResponse([
+      { type: "hermes.debug", payload: { nativeEvent: "ignored" } },
+      { type: "run.snapshot", payload: { fullNativeShape: "not-for-frontend" } },
+      { type: "run.completed" },
+    ]);
+  };
+  const adapter = new HermesAgentAdapter({
+    config: {
+      apiBaseUrl: "http://hermes.local",
+      apiKey: "secret-key",
+      model: "hermes-test",
+      sessionKeyPrefix: "quay-dev",
+    },
+    fetch: fetchImpl,
+  });
+  const session = makeSession();
+  await adapter.createSession({ session });
+
+  const events: AgentEvent[] = [];
+  for await (const event of adapter.sendMessage({
+    session,
+    message: "Inspect unsupported event",
+    context: contextFixture,
+  })) {
+    events.push(event);
+  }
+
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "error",
+    "message_done",
+  ]);
+  expect(events.find((event) => event.type === "error")).toMatchObject({
+    type: "error",
+    code: "hermes_event_unsupported",
+    message: "Hermes emitted an unsupported event shape",
+    recoverable: true,
+    details: { event_type: "run.snapshot" },
+  });
+  const serialized = JSON.stringify(events);
+  expect(serialized).not.toContain("hermes.debug");
+  expect(serialized).not.toContain("nativeEvent");
+  expect(serialized).not.toContain("fullNativeShape");
+});
+
+test("HermesAgentAdapter extracts proposed actions from streamed assistant text", async () => {
+  const proposedAction = JSON.stringify({
+    quay_proposed_action: {
+      approval_id: "approve-cancel-bcd890",
+      command: "quay cancel bcd890 --keep-worktree",
+      description: "Cancel the task but preserve its worktree for inspection.",
+      affects: [
+        { label: "task", value: "bcd890" },
+        { label: "state", value: "running -> cancelled" },
+      ],
+      note: "Operator consent requested",
+    },
+  });
+  const fetchImpl: AgentFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/health") return jsonResponse({ status: "ok" });
+    if (path === "/v1/capabilities") {
+      return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+    }
+    if (path === "/v1/runs") return jsonResponse({ run_id: "run-approval-text" });
+    return sseResponse([
+      {
+        type: "assistant.delta",
+        delta: `I can prepare this action.\n${proposedAction.slice(0, 40)}`,
+      },
+      {
+        type: "assistant.delta",
+        delta: `${proposedAction.slice(40)}\nWaiting for approval.`,
+      },
+      { type: "run.completed" },
+    ]);
+  };
+  const adapter = new HermesAgentAdapter({
+    config: {
+      apiBaseUrl: "http://hermes.local",
+      apiKey: "secret-key",
+      model: "hermes-test",
+      sessionKeyPrefix: "quay-dev",
+    },
+    fetch: fetchImpl,
+  });
+  const session = makeSession();
+  await adapter.createSession({ session });
+
+  const events: AgentEvent[] = [];
+  for await (const event of adapter.sendMessage({
+    session,
+    message: "Cancel that task",
+    context: contextFixture,
+  })) {
+    events.push(event);
+  }
+
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "text_delta",
+    "approval_required",
+    "text_delta",
+    "message_done",
+  ]);
+  expect(events.find((event) => event.type === "approval_required")).toMatchObject({
+    type: "approval_required",
+    approvalId: "approve-cancel-bcd890",
+    command: "quay cancel bcd890 --keep-worktree",
+    description: "Cancel the task but preserve its worktree for inspection.",
+    affects: [
+      { label: "task", value: "bcd890" },
+      { label: "state", value: "running -> cancelled" },
+    ],
+    note: "Operator consent requested",
+  });
+  expect(events.filter((event) => event.type === "text_delta").map((event) => event.text).join("")).toContain(
+    "I can prepare this action.",
+  );
+  expect(events.filter((event) => event.type === "text_delta").map((event) => event.text).join("")).toContain(
+    "Waiting for approval.",
+  );
+  const serialized = JSON.stringify(events);
+  expect(serialized).not.toContain("quay_proposed_action");
+  expect(serialized).not.toContain("approval_id");
+});
+
+test("HermesAgentAdapter maps proposed actions from tool output and native approval events", async () => {
+  const proposedAction = {
+    quay_proposed_action: {
+      approval_id: "approve-retry-abc123",
+      command: "quay retry abc123",
+      description: "Retry the failed task.",
+      affects: [{ label: "task", value: "abc123" }],
+    },
+  };
+  const fetchImpl: AgentFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/health") return jsonResponse({ status: "ok" });
+    if (path === "/v1/capabilities") {
+      return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+    }
+    if (path === "/v1/runs") return jsonResponse({ run_id: "run-approval-tool" });
+    return sseResponse([
+      { type: "hermes.debug", payload: { nativeEvent: "ignored" } },
+      {
+        type: "tool.completed",
+        tool_call_id: "tool-plan",
+        name: "planner",
+        output: JSON.stringify(proposedAction),
+      },
+      {
+        type: "approval.required",
+        approval_id: "native-approve-cleanup",
+        command: "quay cleanup stale",
+        description: "Clean up stale Quay worktrees.",
+        affects: [{ label: "scope", value: "stale worktrees" }],
+      },
+      { type: "run.completed" },
+    ]);
+  };
+  const adapter = new HermesAgentAdapter({
+    config: {
+      apiBaseUrl: "http://hermes.local",
+      apiKey: "secret-key",
+      model: "hermes-test",
+      sessionKeyPrefix: "quay-dev",
+    },
+    fetch: fetchImpl,
+  });
+  const session = makeSession();
+  await adapter.createSession({ session });
+
+  const events: AgentEvent[] = [];
+  for await (const event of adapter.sendMessage({
+    session,
+    message: "Plan a retry",
+    context: contextFixture,
+  })) {
+    events.push(event);
+  }
+
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "tool_call",
+    "approval_required",
+    "approval_required",
+    "message_done",
+  ]);
+  expect(events.filter((event) => event.type === "approval_required")).toMatchObject([
+    {
+      approvalId: "approve-retry-abc123",
+      command: "quay retry abc123",
+      description: "Retry the failed task.",
+    },
+    {
+      approvalId: "native-approve-cleanup",
+      command: "quay cleanup stale",
+      description: "Clean up stale Quay worktrees.",
+    },
+  ]);
+  expect(events.find((event) => event.type === "tool_call")).toMatchObject({
+    type: "tool_call",
+    toolCallId: "tool-plan",
+    label: "planner",
+    detail: "Proposed Quay action",
+    status: "done",
+  });
+  const serialized = JSON.stringify(events);
+  expect(serialized).not.toContain("hermes.debug");
+  expect(serialized).not.toContain("nativeEvent");
+  expect(serialized).not.toContain("quay_proposed_action");
+});
+
 test("HermesAgentAdapter sends fresh Mission Control and Configuration context per run", async () => {
   const runBodies: Array<Record<string, unknown>> = [];
   const fetchImpl: AgentFetch = async (input, init = {}) => {
