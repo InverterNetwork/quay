@@ -216,6 +216,20 @@ export async function handleEnqueueLinearIssue(
       return emitError(io, err);
     }
   }
+  if (
+    ctx.umbrella !== null &&
+    ctx.umbrella.depends_on.length > 0 &&
+    resolvedLinearUmbrella === null
+  ) {
+    return emitError(
+      io,
+      new QuayError(
+        "validation_error",
+        "quay-config umbrella.depends_on is not supported for Linear-backed enqueue; use native Linear blocked-by relations",
+        { external_ref: externalRef },
+      ),
+    );
+  }
 
   let dependencyResolution: LinearDependencyResolution;
   try {
@@ -227,16 +241,6 @@ export async function handleEnqueueLinearIssue(
       now,
       { umbrellaWorkflow: resolvedLinearUmbrella?.workflow ?? null },
     );
-    if (ctx.umbrella !== null && resolvedLinearUmbrella === null) {
-      dependencyResolution.dependencies.push(
-        ...resolveUmbrellaDependencies(
-          deps.enqueueDeps.db,
-          ctx.umbrella.depends_on,
-          resolvedRepoId,
-          now,
-        ),
-      );
-    }
     ctx = {
       ...ctx,
       ticket_snapshot: augmentTicketSnapshot(
@@ -275,6 +279,10 @@ export async function handleEnqueueLinearIssue(
               base_branch: resolvedLinearUmbrella.workflow.base_branch,
               feature_branch: resolvedLinearUmbrella.workflow.feature_branch,
               expected_external_ref: externalRef,
+              complete_without_quay:
+                dependencyResolution.umbrellaCompletions.length === 0
+                  ? undefined
+                  : dependencyResolution.umbrellaCompletions,
             }
           : ctx.umbrella === null
           ? undefined
@@ -319,32 +327,6 @@ export async function handleEnqueueLinearIssue(
   return { exitCode: 0 };
 }
 
-function resolveUmbrellaDependencies(
-  db: DB,
-  externalRefs: string[],
-  repoId: string,
-  now: string,
-): EnqueueResolvedDependency[] {
-  const dependencies: EnqueueResolvedDependency[] = [];
-  const seen = new Set<string>();
-  for (const rawExternalRef of externalRefs) {
-    const externalRef = rawExternalRef.toUpperCase();
-    if (seen.has(externalRef)) continue;
-    seen.add(externalRef);
-    const tracked = lookupDependencyTask(db, repoId, externalRef);
-    dependencies.push({
-      dependency_task_id: tracked?.task_id ?? null,
-      dependency_source: "quay",
-      dependency_external_ref: externalRef,
-      dependency_repo_id: repoId,
-      scope: "umbrella",
-      required_state: "merged_to_feature_branch",
-      satisfied_at: tracked?.state === "merged_to_feature_branch" ? now : null,
-    });
-  }
-  return dependencies;
-}
-
 interface DependencyTaskRow {
   task_id: string;
   state: string;
@@ -366,6 +348,14 @@ interface LinearDependencySnapshot {
 interface LinearDependencyResolution {
   dependencies: EnqueueResolvedDependency[];
   snapshotRelations: LinearDependencySnapshot[];
+  umbrellaCompletions: LinearUmbrellaCompletionWithoutQuay[];
+}
+
+interface LinearUmbrellaCompletionWithoutQuay {
+  external_ref: string;
+  completion_source: "linear";
+  completion_reason: string;
+  completed_at: string;
 }
 
 interface LinearHierarchySnapshotIssue {
@@ -555,6 +545,7 @@ function resolveLinearDependencies(
 ): LinearDependencyResolution {
   const dependencies: EnqueueResolvedDependency[] = [];
   const snapshotRelations: LinearDependencySnapshot[] = [];
+  const umbrellaCompletions: LinearUmbrellaCompletionWithoutQuay[] = [];
   const missing: Array<{ external_ref: string; repo_id: string }> = [];
   const seen = new Set<string>();
   const umbrellaWorkflow = options.umbrellaWorkflow ?? null;
@@ -587,14 +578,31 @@ function resolveLinearDependencies(
               task_id: sameUmbrellaBlocker.task_id,
               state: sameUmbrellaBlocker.task_state ?? "",
             };
+      if (
+        sameUmbrellaBlocker.task_id === null &&
+        completeInLinear &&
+        sameUmbrellaBlocker.expected_state !== "complete_without_quay"
+      ) {
+        umbrellaCompletions.push({
+          external_ref: blockerExternalRef,
+          completion_source: "linear",
+          completion_reason:
+            "Linear issue was complete when used as an umbrella dependency",
+          completed_at: now,
+        });
+      }
       dependencies.push({
         dependency_task_id: sameUmbrellaBlocker.task_id,
         dependency_source: "linear",
         dependency_external_ref: blockerExternalRef,
         dependency_repo_id: dependencyRepoId,
+        umbrella_workflow_id: umbrellaWorkflow!.umbrella_workflow_id,
         scope: "umbrella",
         required_state: "merged_to_feature_branch",
-        satisfied_at: sameUmbrellaDependencySatisfied(sameUmbrellaBlocker)
+        satisfied_at: sameUmbrellaDependencySatisfied(
+          sameUmbrellaBlocker,
+          completeInLinear,
+        )
           ? now
           : null,
       });
@@ -641,7 +649,7 @@ function resolveLinearDependencies(
     );
   }
 
-  return { dependencies, snapshotRelations };
+  return { dependencies, snapshotRelations, umbrellaCompletions };
 }
 
 interface SameUmbrellaDependencyRow {
@@ -677,10 +685,12 @@ function lookupSameUmbrellaDependency(
 
 function sameUmbrellaDependencySatisfied(
   row: SameUmbrellaDependencyRow,
+  completeInLinear: boolean,
 ): boolean {
   return (
     row.task_state === "merged_to_feature_branch" ||
-    row.expected_state === "complete_without_quay"
+    row.expected_state === "complete_without_quay" ||
+    (row.task_id === null && completeInLinear)
   );
 }
 

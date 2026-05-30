@@ -169,6 +169,32 @@ test("umbrella pr merge marks blocker merged to feature branch and releases depe
   expect(workflow).not.toBeNull();
   h.db
     .query(
+      `INSERT INTO umbrella_expected_tasks (
+         umbrella_workflow_id, external_ref, title, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(
+      workflow!.umbrella_workflow_id,
+      "BRIX-1510",
+      "Blocker",
+      "2026-04-29T12:00:00.000Z",
+      "2026-04-29T12:00:00.000Z",
+    );
+  h.db
+    .query(
+      `INSERT INTO umbrella_expected_tasks (
+         umbrella_workflow_id, external_ref, title, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(
+      workflow!.umbrella_workflow_id,
+      "BRIX-1511",
+      "Dependent",
+      "2026-04-29T12:00:00.000Z",
+      "2026-04-29T12:00:00.000Z",
+    );
+  h.db
+    .query(
       `INSERT INTO umbrella_tasks (
          umbrella_workflow_id, task_id, external_ref, created_at
        ) VALUES (?, ?, ?, ?)`,
@@ -197,6 +223,7 @@ test("umbrella pr merge marks blocker merged to feature branch and releases depe
     dependencySource: "quay",
     dependencyExternalRef: "BRIX-1510",
     dependencyRepoId: repoId,
+    umbrellaWorkflowId: workflow!.umbrella_workflow_id,
     scope: "umbrella",
     requiredState: "merged_to_feature_branch",
     now: "2026-04-29T12:01:00.000Z",
