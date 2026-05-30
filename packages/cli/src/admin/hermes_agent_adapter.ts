@@ -4,8 +4,20 @@ import type { AgentAdapter, AgentEvent, AgentFetch, AgentSession, AgentUiContext
 const DEFAULT_HERMES_API_BASE_URL = "http://127.0.0.1:8642";
 const DEFAULT_HERMES_MODEL = "hermes-agent";
 const DEFAULT_HERMES_SESSION_KEY_PREFIX = "quay";
+const CONTEXT_MAX_STRING_LENGTH = 1000;
+const CONTEXT_MAX_ARRAY_ITEMS = 50;
+const CONTEXT_MAX_OBJECT_KEYS = 100;
+const CONTEXT_MAX_DEPTH = 8;
+const CONTEXT_OMITTED_VALUE = "[omitted: fetch by stable ID when needed]";
 const QUAY_AGENT_INSTRUCTIONS =
-  "You are assisting inside Quay Admin UI. The user message includes a current UI context snapshot. Use it to understand what the operator is looking at. You may inspect broader Quay data with your available tools/CLI. When proposing a mutating Quay action, first explain the action and emit it in the agreed proposed-action format so Quay can render an approval card.";
+  [
+    "You are assisting inside Quay Admin UI.",
+    "The user message includes a current UI context snapshot that describes what the operator is looking at.",
+    "Treat the snapshot as grounding, not as the full data source or an access boundary.",
+    "You may inspect broader Quay data through your available tools and Quay CLI access.",
+    "Full logs, review threads, artifacts, prompt bodies, preamble bodies, diffs, and patches are not included in the snapshot by default; fetch those by stable ID when needed.",
+    "When proposing a mutating Quay action, first explain the action and emit it in the agreed proposed-action format so Quay can render an approval card.",
+  ].join(" ");
 
 export interface HermesAgentConfig {
   apiBaseUrl: string;
@@ -511,7 +523,95 @@ function isAvailabilityError(err: unknown): boolean {
 }
 
 function hermesInput(message: string, context: AgentUiContext): string {
-  return `${message}\n\n<quay-ui-context>${JSON.stringify(context)}</quay-ui-context>`;
+  return `${message}\n\n<quay-ui-context>${escapedContextJson(sanitizeAgentUiContext(context))}</quay-ui-context>`;
+}
+
+function sanitizeAgentUiContext(context: AgentUiContext): AgentUiContext {
+  return {
+    view: context.view,
+    scope: truncateContextString(context.scope),
+    urlPath: truncateContextString(context.urlPath),
+    capturedAt: truncateContextString(context.capturedAt),
+    summary: truncateContextString(context.summary),
+    payload: sanitizeContextObject(context.payload, 0),
+  };
+}
+
+function escapedContextJson(context: AgentUiContext): string {
+  return JSON.stringify(context).replace(/[<>&]/g, (char) => {
+    if (char === "<") return "\\u003c";
+    if (char === ">") return "\\u003e";
+    return "\\u0026";
+  });
+}
+
+function sanitizeContextValue(value: unknown, depth: number, key?: string): unknown {
+  if (key !== undefined && shouldOmitContextKey(key)) return CONTEXT_OMITTED_VALUE;
+  if (typeof value === "string") return truncateContextString(value);
+  if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
+  if (Array.isArray(value)) {
+    if (depth >= CONTEXT_MAX_DEPTH) return "[truncated: maximum context depth reached]";
+    return value
+      .slice(0, CONTEXT_MAX_ARRAY_ITEMS)
+      .map((item) => sanitizeContextValue(item, depth + 1));
+  }
+  if (value !== null && typeof value === "object") {
+    if (depth >= CONTEXT_MAX_DEPTH) return "[truncated: maximum context depth reached]";
+    return sanitizeContextObject(value as Record<string, unknown>, depth + 1);
+  }
+  return undefined;
+}
+
+function sanitizeContextObject(
+  value: Record<string, unknown>,
+  depth: number,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value).slice(0, CONTEXT_MAX_OBJECT_KEYS)) {
+    const sanitized = sanitizeContextValue(child, depth, key);
+    if (sanitized !== undefined) out[key] = sanitized;
+  }
+  return out;
+}
+
+function truncateContextString(value: string): string {
+  return value.length <= CONTEXT_MAX_STRING_LENGTH
+    ? value
+    : `${value.slice(0, CONTEXT_MAX_STRING_LENGTH)}...[truncated]`;
+}
+
+function shouldOmitContextKey(key: string): boolean {
+  const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return [
+    "log",
+    "logs",
+    "fulllog",
+    "fulllogs",
+    "rawlog",
+    "rawlogs",
+    "reviewthread",
+    "reviewthreads",
+    "fullreviewthread",
+    "fullreviewthreads",
+    "reviewthreadbody",
+    "artifact",
+    "artifacts",
+    "fullartifact",
+    "fullartifacts",
+    "diff",
+    "diffs",
+    "fulldiff",
+    "fulldiffs",
+    "rawdiff",
+    "rawdiffs",
+    "patch",
+    "patches",
+    "preamblebody",
+    "preamblebodies",
+    "promptbody",
+    "promptbodies",
+    "body",
+  ].includes(normalized);
 }
 
 function hermesBinding(session: AgentSession): HermesSessionBinding {
