@@ -459,7 +459,7 @@ test("incomplete tracked Linear blocker creates dependency and waits", async () 
   expect(JSON.parse(outbox!.route_hint_json!)).toEqual({ attention: "normal" });
 });
 
-test("Linear enqueue rejects legacy umbrella depends_on config", async () => {
+test("Linear enqueue rejects legacy umbrella config before substrate work", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -472,7 +472,6 @@ test("Linear enqueue rejects legacy umbrella depends_on config", async () => {
           external_ref: "BRIX-1509",
           base_branch: "dev",
           feature_branch: "feature/brix-1509",
-          depends_on: ["ENG-2199"],
         },
       },
     }),
@@ -489,7 +488,9 @@ test("Linear enqueue rejects legacy umbrella depends_on config", async () => {
   expect(io.out()).toBe("");
   const err = JSON.parse(io.err().trim());
   expect(err.error).toBe("validation_error");
-  expect(err.message).toContain("umbrella.depends_on is not supported");
+  expect(err.message).toContain("umbrella metadata is not supported");
+  expect(built.linear.getBlockedByRelationsCalls).toEqual([]);
+  expect(built.linear.getIssueHierarchyCalls).toEqual([]);
   expect(built.git.countCalls("worktreeAdd")).toBe(0);
   const counts = h.db
     .query<{ tasks: number; dependencies: number }, []>(
@@ -499,6 +500,54 @@ test("Linear enqueue rejects legacy umbrella depends_on config", async () => {
     )
     .get();
   expect(counts).toEqual({ tasks: 0, dependencies: 0 });
+});
+
+test("Linear parent enqueue rejects legacy umbrella config instead of creating workflow", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2201",
+      block: {
+        umbrella: {
+          external_ref: "ENG-2201",
+          base_branch: "dev",
+        },
+      },
+    }),
+  );
+  built.linear.setIssueHierarchy("ENG-2201", {
+    parent: null,
+    children: [
+      {
+        identifier: "ENG-2202",
+        url: "https://linear.app/inverter/issue/ENG-2202",
+        title: "Child",
+        stateType: "started",
+      },
+    ],
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2201"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("validation_error");
+  expect(err.message).toContain("umbrella metadata is not supported");
+  expect(built.linear.getIssueHierarchyCalls).toEqual([]);
+  expect(built.git.countCalls("ensureRemoteBranchFromBase")).toBe(0);
+  expect(
+    h.db.query<{ count: number }, []>(
+      `SELECT COUNT(*) AS count FROM umbrella_workflows`,
+    ).get()?.count,
+  ).toBe(0);
 });
 
 test("Linear parent enqueue creates idempotent umbrella workflow and expected children", async () => {
@@ -772,10 +821,6 @@ test("Linear umbrella subtask blocked by linked same-umbrella task waits for fea
       identifier: "ENG-2502",
       block: {
         tags: ["umbrella"],
-        umbrella: {
-          external_ref: "legacy-config-is-ignored",
-          depends_on: ["ENG-9999"],
-        },
       },
     }),
   );
@@ -1272,6 +1317,108 @@ test("Linear child as-normal override ignores umbrella membership but keeps depe
     identifier: "ENG-2429",
   });
   expect(parsed.linear_umbrella_membership_override).toBe("as_normal_task");
+});
+
+test("Linear child enqueue rejects legacy umbrella config before membership resolution", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+  const workflowId = insertUmbrellaWorkflow("ENG-2435", {
+    baseBranch: "dev",
+    featureBranch: "quay/umbrella/ENG-2435",
+  });
+  insertExpectedUmbrellaTask(workflowId, "ENG-2436", "Child with stale config");
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2436",
+      block: {
+        umbrella: {
+          external_ref: "legacy-child-parent",
+          feature_branch: "legacy/feature",
+        },
+      },
+    }),
+  );
+  built.linear.setIssueHierarchy("ENG-2436", {
+    parent: {
+      identifier: "ENG-2435",
+      url: "https://linear.app/inverter/issue/ENG-2435",
+      title: "Umbrella parent",
+      stateType: "started",
+    },
+    children: [],
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2436"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("validation_error");
+  expect(err.message).toContain("umbrella metadata is not supported");
+  expect(built.linear.getIssueHierarchyCalls).toEqual([]);
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
+  const counts = h.db
+    .query<{ tasks: number; links: number }, []>(
+      `SELECT
+         (SELECT COUNT(*) FROM tasks) AS tasks,
+         (SELECT COUNT(*) FROM umbrella_tasks) AS links`,
+    )
+    .get();
+  expect(counts).toEqual({ tasks: 0, links: 0 });
+});
+
+test("Linear child as-normal override still rejects legacy umbrella config", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2437",
+      block: {
+        umbrella: {
+          external_ref: "legacy-as-normal-parent",
+          base_branch: "dev",
+        },
+      },
+    }),
+  );
+  built.linear.setIssueHierarchy("ENG-2437", {
+    parent: {
+      identifier: "ENG-2435",
+      url: "https://linear.app/inverter/issue/ENG-2435",
+      title: "Umbrella parent",
+      stateType: "started",
+    },
+    children: [],
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      REPO_ID,
+      "--linear-issue",
+      "ENG-2437",
+      "--as-normal-task",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  const err = JSON.parse(io.err().trim());
+  expect(err.error).toBe("validation_error");
+  expect(err.message).toContain("umbrella metadata is not supported");
+  expect(built.linear.getIssueHierarchyCalls).toEqual([]);
+  expect(built.git.countCalls("worktreeAdd")).toBe(0);
 });
 
 test("Linear child enqueue fails before substrate when child is not expected", async () => {

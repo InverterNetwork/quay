@@ -48,10 +48,9 @@ define task ordering. The umbrella parent uses the ordinary `repo` and optional
 - `slack_thread`, when present, must be a Slack permalink that can be converted
   to `<channel>:<ts>`.
 - `worker_execution`, when present, must be `oneshot` or `goal`.
-- Linear-backed tickets should not use an `umbrella:` object. Legacy umbrella
-  config without `depends_on` may still be accepted for compatibility, but it
-  is not the Linear-native happy path. `umbrella.depends_on` is rejected on
-  Linear enqueue; use native Linear blocked-by relations for ordering.
+- Linear-backed tickets must not use an `umbrella:` object. Linear enqueue
+  rejects umbrella config metadata; use native Linear parent/child relations
+  for umbrella membership and native Linear blocked-by relations for ordering.
 
 ## Validation
 
