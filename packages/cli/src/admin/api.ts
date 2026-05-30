@@ -77,7 +77,18 @@ export interface AdminApiRuntime {
 }
 
 export interface AdminAuditEvent extends AdminRequestAuditContext {
-  action: "changes.preview" | "changes.apply" | "agent.approval.decide";
+  action:
+    | "changes.preview"
+    | "changes.apply"
+    | "agent.session.create"
+    | "agent.session.stop"
+    | "agent.message.send"
+    | "agent.tool.call"
+    | "agent.approval.required"
+    | "agent.approval.decide"
+    | "agent.approval.result"
+    | "agent.command.output"
+    | "agent.error";
   method: string;
   path: string;
   timestamp: string;
@@ -85,6 +96,25 @@ export interface AdminAuditEvent extends AdminRequestAuditContext {
   status: number;
   operation_summary: string[];
   target_resources: string[];
+  retention_bucket?:
+    | "agent_chat_7d"
+    | "agent_tool_7d"
+    | "agent_rejected_approval_7d"
+    | "agent_approved_action_30d";
+  expires_at?: string;
+  adapter_id?: string;
+  agent_id?: string;
+  message_id?: string;
+  message_summary?: string;
+  context_view?: string;
+  context_scope?: string;
+  context_url_path?: string;
+  context_summary?: string;
+  context_captured_at?: string;
+  tool_call_id?: string;
+  tool_name?: string;
+  arguments_summary?: string;
+  effect?: "read_only" | "mutating" | "unknown";
   error_code?: string;
   error_message?: string;
   session_id?: string;
