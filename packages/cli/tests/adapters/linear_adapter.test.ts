@@ -96,6 +96,22 @@ function relationsPayload(nodes: Array<Record<string, unknown>>): Record<string,
   };
 }
 
+function inverseRelationsPayload(
+  nodes: Array<Record<string, unknown>>,
+): Record<string, unknown> {
+  return {
+    data: {
+      issue: {
+        identifier: "ENG-2000",
+        inverseRelations: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes,
+        },
+      },
+    },
+  };
+}
+
 function hierarchyPayload(overrides: {
   identifier?: string;
   parent?: Record<string, unknown> | null;
@@ -174,8 +190,11 @@ test("test_linear_adapter_get_issue_returns_structured_payload", async () => {
 });
 
 test("linear adapter returns native blocked-by relations with blocker metadata", async () => {
-  const handle = recorder(() =>
-    jsonResponse(
+  const handle = recorder((req) => {
+    if (req.parsedBody.query.includes("inverseRelations")) {
+      return jsonResponse(inverseRelationsPayload([]));
+    }
+    return jsonResponse(
       relationsPayload([
         {
           id: "rel-1",
@@ -250,8 +269,8 @@ test("linear adapter returns native blocked-by relations with blocker metadata",
           },
         },
       ]),
-    ),
-  );
+    );
+  });
   const adapter = new LinearAdapter({
     token: "test-token",
     transport: handle.transport,
@@ -281,7 +300,61 @@ test("linear adapter returns native blocked-by relations with blocker metadata",
       },
     },
   ]);
-  expect(handle.requests[0]!.parsedBody.query).toContain("relations");
+  expect(
+    handle.requests.some((req) => req.parsedBody.query.includes("relations")),
+  ).toBe(true);
+  expect(
+    handle.requests.some((req) => req.parsedBody.query.includes("inverseRelations")),
+  ).toBe(true);
+});
+
+test("linear adapter includes dependent-side inverse blocked-by relations", async () => {
+  const handle = recorder((req) => {
+    if (req.parsedBody.query.includes("inverseRelations")) {
+      return jsonResponse(
+        inverseRelationsPayload([
+          {
+            id: "rel-inverse-1",
+            type: "blocks",
+            issue: {
+              identifier: "ENG-1999",
+              url: "https://linear.app/inverter/issue/ENG-1999",
+              title: "Prerequisite from inverse relation",
+              description: "inverse blocker body",
+              state: { type: "started" },
+            },
+            relatedIssue: {
+              identifier: "ENG-2000",
+              url: "https://linear.app/inverter/issue/ENG-2000",
+              title: "Dependent",
+              description: "dependent body",
+              state: { type: "started" },
+            },
+          },
+        ]),
+      );
+    }
+    return jsonResponse(relationsPayload([]));
+  });
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    transport: handle.transport,
+  });
+
+  const relations = await adapter.getBlockedByRelations("ENG-2000");
+
+  expect(relations).toEqual([
+    {
+      relationId: "rel-inverse-1",
+      blocker: {
+        identifier: "ENG-1999",
+        url: "https://linear.app/inverter/issue/ENG-1999",
+        title: "Prerequisite from inverse relation",
+        body: "inverse blocker body",
+        stateType: "started",
+      },
+    },
+  ]);
 });
 
 test("linear adapter returns empty native hierarchy for standalone issues", async () => {
