@@ -3,6 +3,7 @@ import { DemoAgentDrawer } from './agent/AgentDrawer';
 import { AGENT_CTX, hermesAdapter } from './agent/agentData';
 import { PrimarySidebar, type AppRoute } from './app/PrimarySidebar';
 import { useQuayAdminReadModel } from './api/quayAdmin';
+import { buildMissionControlAgentContext } from './mission-control/agentContext';
 import { MissionControlPage } from './mission-control/MissionControlPage';
 import { useMissionControlTasks } from './mission-control/useMissionControlTasks';
 import { ApiErrorScreen, ApiLoadingScreen } from './screens/ApiStateScreen';
@@ -15,6 +16,7 @@ import { RepoScreen } from './screens/RepoScreen';
 import { SaveFooter } from './screens/SaveFooter';
 import { SavePreviewModal } from './screens/SavePreviewModal';
 import { TopBar } from './screens/TopBar';
+import { buildConfigurationAgentContext } from './screens/configurationAgentContext';
 import { useChangeStore } from './store/dirty';
 
 type Scope = 'global' | string;
@@ -186,6 +188,23 @@ export function App() {
   }, [admin, store]);
 
   const onSaveDirect = useCallback(() => setOverlay({ type: 'save-preview' }), []);
+  const buildAgentUiContext = useCallback(() => {
+    const urlPath = window.location.pathname;
+    if (route === 'mission-control') {
+      return buildMissionControlAgentContext({
+        scope: 'prod',
+        urlPath,
+        tasks: missionControl.tasks,
+      });
+    }
+    return buildConfigurationAgentContext({
+      scope,
+      urlPath,
+      global: admin.global,
+      repo: selectedRepo,
+      changes: store.changes,
+    });
+  }, [admin.global, missionControl.tasks, route, scope, selectedRepo, store.changes]);
 
   const isEmpty = !admin.loading && !admin.error && repos.length === 0;
   const scopeLabel = scope === 'global' ? 'Global' : scope;
@@ -319,6 +338,7 @@ export function App() {
         onClose={closeAgent}
         adapter={hermesAdapter}
         ctx={AGENT_CTX}
+        getUiContext={buildAgentUiContext}
       />
 
       {import.meta.env.DEV && route === 'configuration' && <DevToggle empty={empty} onToggle={() => setEmpty((e) => !e)} />}

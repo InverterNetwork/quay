@@ -1,3 +1,4 @@
+import type { AgentUiContext } from './agentContext';
 import type { AgentConnectionStatus, AgentEvent, AgentReferenceKind } from './agentTypes';
 
 export interface AgentContext {
@@ -35,7 +36,7 @@ export interface AgentAdapter {
   name: string;
   model: string;
   status: AgentConnectionStatus;
-  plan: (userText: string, ctx: AgentContext, messageId: string) => AgentScriptStep[];
+  plan: (userText: string, ctx: AgentContext, messageId: string, uiContext: AgentUiContext) => AgentScriptStep[];
 }
 
 export const AGENT_CTX: AgentContext = {
@@ -238,13 +239,19 @@ function approval(messageId: string, item: DemoApproval): AgentScriptStep {
   };
 }
 
-function planFor(intent: string, messageId: string, model: string): AgentScriptStep[] {
+function contextPreamble(messageId: string, uiContext: AgentUiContext): AgentScriptStep {
+  return text(messageId, `I am looking at ${uiContext.summary}`);
+}
+
+function planFor(intent: string, messageId: string, model: string, uiContext: AgentUiContext): AgentScriptStep[] {
   const commonStart = [start(messageId, model)];
+  const withContext = [contextPreamble(messageId, uiContext)];
   const commonEnd = [done(messageId)];
 
   const plans: Record<string, AgentScriptStep[]> = {
     attention: [
       ...commonStart,
+      ...withContext,
       ...tool(messageId, 'attention-queue', 'Reading attention queue', '5 items', 700),
       ...tool(messageId, 'recent-events', 'Correlating recent events', 'last tick', 900),
       text(
@@ -266,6 +273,7 @@ function planFor(intent: string, messageId: string, model: string): AgentScriptS
     ],
     stuck: [
       ...commonStart,
+      ...withContext,
       ...tool(messageId, 'stuck-scan', 'Scanning for stuck tasks', '17 tasks', 800),
       ...tool(messageId, 'worker-state', 'Reading worker + worktree state', '', 950),
       text(messageId, 'Two tasks are hard-stuck - both are holding a worker slot and neither recovers on its own:'),
@@ -282,6 +290,7 @@ function planFor(intent: string, messageId: string, model: string): AgentScriptS
     ],
     ready: [
       ...commonStart,
+      ...withContext,
       ...tool(messageId, 'pr-lifecycle', 'Scanning PR lifecycle', '4 open PRs', 750),
       ...tool(messageId, 'merge-gates', 'Checking merge gates', 'CI + reviews', 800),
       text(messageId, 'One PR is merge-ready. The other three are still gated:'),
@@ -300,6 +309,7 @@ function planFor(intent: string, messageId: string, model: string): AgentScriptS
     ],
     review: [
       ...commonStart,
+      ...withContext,
       ...tool(messageId, 'review-threads', 'Fetching review threads', 'open PRs', 800),
       ...tool(messageId, 'review-summary', 'Summarizing comments', '', 750),
       text(messageId, 'The only PR with actionable review feedback is `abc123`:'),
@@ -313,6 +323,7 @@ function planFor(intent: string, messageId: string, model: string): AgentScriptS
     ],
     fail: [
       ...commonStart,
+      ...withContext,
       ...tool(messageId, 'failure-scan', 'Scanning for failures', '17 tasks', 700),
       text(
         messageId,
@@ -325,6 +336,7 @@ function planFor(intent: string, messageId: string, model: string): AgentScriptS
     ],
     default: [
       ...commonStart,
+      ...withContext,
       ...tool(messageId, 'fleet-state', 'Reading fleet state', '17 tasks · 8 repos', 850),
       text(messageId, 'Across `prod`: **17 tasks**, **5 need attention**, 4 running, 4 in PR lifecycle, 2 queued. Workers are at 3 of 8.'),
       text(
@@ -345,7 +357,7 @@ export const hermesAdapter: AgentAdapter = {
   name: 'Hermes',
   model: 'hermes-1.4',
   status: 'good',
-  plan(userText, _ctx, messageId) {
-    return planFor(matchIntent(userText), messageId, this.model);
+  plan(userText, _ctx, messageId, uiContext) {
+    return planFor(matchIntent(userText), messageId, this.model, uiContext);
   },
 };

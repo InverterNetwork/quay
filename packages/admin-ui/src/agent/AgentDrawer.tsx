@@ -7,6 +7,7 @@ import { StatusDot } from '../components/StatusDot';
 import { T } from '../components/Typography';
 import { Icon } from '../icons/Icon';
 import { TONES } from '../styles/tones';
+import type { AgentUiContext } from './agentContext';
 import { type AgentAdapter, type AgentContext, type AgentScriptStep, type DemoCommandResult } from './agentData';
 import { EMPTY_AGENT_THREAD, appendUserMessage, applyAgentEvent, stopAgentThread } from './agentState';
 import type { AgentConnectionStatus, AgentContextSummary, AgentEvent, AgentMessage, AgentMessagePart } from './agentTypes';
@@ -16,10 +17,11 @@ interface DemoAgentDrawerProps {
   onClose: () => void;
   adapter: AgentAdapter;
   ctx: AgentContext;
+  getUiContext: () => AgentUiContext;
 }
 
-export function DemoAgentDrawer({ open, onClose, adapter, ctx }: DemoAgentDrawerProps) {
-  const thread = useAgentThread(adapter, ctx);
+export function DemoAgentDrawer({ open, onClose, adapter, ctx, getUiContext }: DemoAgentDrawerProps) {
+  const thread = useAgentThread(adapter, ctx, getUiContext);
   const contextSummary: AgentContextSummary = {
     agentId: adapter.id,
     agentName: adapter.name,
@@ -195,7 +197,7 @@ export function AgentPanel({
   );
 }
 
-function useAgentThread(adapter: AgentAdapter, ctx: AgentContext) {
+function useAgentThread(adapter: AgentAdapter, ctx: AgentContext, getUiContext: () => AgentUiContext) {
   const [state, setState] = useState(EMPTY_AGENT_THREAD);
   const runRef = useRef(0);
   const threadTokenRef = useRef(0);
@@ -213,7 +215,7 @@ function useAgentThread(adapter: AgentAdapter, ctx: AgentContext) {
     const myRun = ++runRef.current;
     const messageId = nid('agent');
     const userId = nid('user');
-    const plan = adapter.plan(trimmed, ctx, messageId);
+    const plan = adapter.plan(trimmed, ctx, messageId, getUiContext());
     for (const step of plan) {
       if (step.event.type === 'approval_required' && step.approvalResult) {
         approvalResultsRef.current.set(step.event.approvalId, { messageId, result: step.approvalResult });
