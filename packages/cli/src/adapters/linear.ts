@@ -102,6 +102,16 @@ interface RawLinearIssueRelations {
   relations: RawLinearRelationsPage;
 }
 
+interface RawLinearIssueInverseRelations {
+  identifier: string;
+  inverseRelations: RawLinearRelationsPage;
+}
+
+interface CollectedLinearRelationPages {
+  identifier: string;
+  nodes: RawLinearIssueRelation[];
+}
+
 interface RawLinearHierarchyIssue {
   identifier: string;
   url: string;
@@ -235,39 +245,17 @@ export class LinearAdapter implements LinearPort {
   async getBlockedByRelations(
     identifier: string,
   ): Promise<LinearBlockedByRelation[]> {
-    const first = await this.queryIssueRelationsPage(identifier, null);
-    if (first === null) {
-      throw new QuayError(
-        "adapter_error",
-        `Linear ${identifier}: ticket disappeared before relation fetch`,
-        { adapter: "linear", retryable: true },
-      );
-    }
-    const allRaw: RawLinearIssueRelation[] = [...first.relations.nodes];
-    let cursor = first.relations.pageInfo.endCursor;
-    let hasNext = first.relations.pageInfo.hasNextPage;
-    while (hasNext) {
-      if (cursor === null) {
-        throw new QuayError(
-          "adapter_error",
-          `Linear ${identifier}: relations hasNextPage=true with null endCursor`,
-          { adapter: "linear", retryable: false },
-        );
-      }
-      const next = await this.queryIssueRelationsPage(identifier, cursor);
-      if (next === null) {
-        throw new QuayError(
-          "adapter_error",
-          `Linear ${identifier}: ticket disappeared mid-relation-pagination`,
-          { adapter: "linear", retryable: true },
-        );
-      }
-      allRaw.push(...next.relations.nodes);
-      cursor = next.relations.pageInfo.endCursor;
-      hasNext = next.relations.pageInfo.hasNextPage;
-    }
+    const forward = await this.collectIssueRelationPages(
+      identifier,
+      "relations",
+    );
+    const inverse = await this.collectIssueRelationPages(
+      identifier,
+      "inverseRelations",
+    );
+    const allRaw = [...forward.nodes, ...inverse.nodes];
 
-    const current = first.identifier.toUpperCase();
+    const current = forward.identifier.toUpperCase();
     const blockers: LinearBlockedByRelation[] = [];
     for (const relation of allRaw) {
       const blocker = extractBlockingIssue(relation, current);
@@ -474,6 +462,85 @@ export class LinearAdapter implements LinearPort {
       );
     }
     return data.issue;
+  }
+
+  private async queryIssueInverseRelationsPage(
+    identifier: string,
+    relationsAfter: string | null,
+  ): Promise<RawLinearIssueInverseRelations | null> {
+    const response = await this.postGraphQL(
+      identifier,
+      GET_ISSUE_INVERSE_RELATIONS_QUERY,
+      {
+        id: identifier,
+        relationsFirst: RELATIONS_PAGE_SIZE,
+        relationsAfter,
+      },
+    );
+    const data = this.parseGraphQLEnvelope<{
+      issue: RawLinearIssueInverseRelations | null;
+    }>(identifier, response);
+    if (data === null) return null;
+    if (!("issue" in data)) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: response missing issue field`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+    return data.issue;
+  }
+
+  private async collectIssueRelationPages(
+    identifier: string,
+    direction: "relations" | "inverseRelations",
+  ): Promise<CollectedLinearRelationPages> {
+    const queryPage =
+      direction === "relations"
+        ? (after: string | null) =>
+            this.queryIssueRelationsPage(identifier, after)
+        : (after: string | null) =>
+            this.queryIssueInverseRelationsPage(identifier, after);
+    const first = await queryPage(null);
+    if (first === null) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: ticket disappeared before relation fetch`,
+        { adapter: "linear", retryable: true },
+      );
+    }
+    const page =
+      direction === "relations"
+        ? (first as RawLinearIssueRelations).relations
+        : (first as RawLinearIssueInverseRelations).inverseRelations;
+    const allRaw: RawLinearIssueRelation[] = [...page.nodes];
+    let cursor = page.pageInfo.endCursor;
+    let hasNext = page.pageInfo.hasNextPage;
+    while (hasNext) {
+      if (cursor === null) {
+        throw new QuayError(
+          "adapter_error",
+          `Linear ${identifier}: ${direction} hasNextPage=true with null endCursor`,
+          { adapter: "linear", retryable: false },
+        );
+      }
+      const next = await queryPage(cursor);
+      if (next === null) {
+        throw new QuayError(
+          "adapter_error",
+          `Linear ${identifier}: ticket disappeared mid-relation-pagination`,
+          { adapter: "linear", retryable: true },
+        );
+      }
+      const nextPage =
+        direction === "relations"
+          ? (next as RawLinearIssueRelations).relations
+          : (next as RawLinearIssueInverseRelations).inverseRelations;
+      allRaw.push(...nextPage.nodes);
+      cursor = nextPage.pageInfo.endCursor;
+      hasNext = nextPage.pageInfo.hasNextPage;
+    }
+    return { identifier: first.identifier, nodes: allRaw };
   }
 
   private async queryIssueHierarchyPage(
@@ -699,6 +766,33 @@ const GET_ISSUE_RELATIONS_QUERY = `query GetIssueRelations($id: String!, $relati
   issue(id: $id) {
     identifier
     relations(first: $relationsFirst, after: $relationsAfter) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id
+        type
+        issue {
+          identifier
+          url
+          title
+          description
+          state { type }
+        }
+        relatedIssue {
+          identifier
+          url
+          title
+          description
+          state { type }
+        }
+      }
+    }
+  }
+}`;
+
+const GET_ISSUE_INVERSE_RELATIONS_QUERY = `query GetIssueInverseRelations($id: String!, $relationsFirst: Int!, $relationsAfter: String) {
+  issue(id: $id) {
+    identifier
+    inverseRelations(first: $relationsFirst, after: $relationsAfter) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id
