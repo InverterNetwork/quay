@@ -224,6 +224,7 @@ quay enqueue \
   [--reviewer-agent <name>] \
   [--reviewer-model <model>] \
   [--worker-execution <oneshot|goal>] \
+  [--as-normal-task] \
   [--tag <tag>]...
 ```
 
@@ -252,10 +253,21 @@ enqueue. Complete blockers do not block. Incomplete tracked blockers persist
 dependency rows and create the dependent task in `waiting_dependencies`;
 incomplete untracked blockers fail with `dependency_not_tracked`.
 
-When a Linear ticket has `umbrella` metadata in `quay-config`, Quay creates or
-reuses the one-repo umbrella workflow and targets the subtask at the shared
-feature branch. `umbrella.depends_on` entries become `scope: "umbrella"`
-dependencies that wait for blockers to reach `merged_to_feature_branch`.
+Linear-backed umbrella workflows use native Linear parent/child hierarchy. If
+the issue has Linear children, enqueue creates the umbrella workflow, derives
+the shared feature branch, and records the expected child set without spawning
+a subtask worker. If the issue has a Linear parent, enqueue requires that the
+parent umbrella has already been enqueued, verifies the child is expected, and
+targets the child task at the umbrella feature branch.
+
+Umbrella parent enqueue returns coordination JSON instead of the normal task
+enqueue payload. The `expected_tasks` array exposes each persisted child row,
+including state values such as `expected` and `complete_without_quay`.
+
+`--as-normal-task` applies to Linear child issues only. It ignores the child's
+native parent umbrella membership for this enqueue, but it does not turn a
+parent issue with children into a normal task. It still processes native
+Linear blocked-by relations as normal dependencies.
 
 ## PR Review
 

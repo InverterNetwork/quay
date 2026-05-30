@@ -159,8 +159,10 @@ C123456:1712345678.901234
 
 ## Linear
 
-Linear is only used by `quay enqueue --linear-issue`. Quay reads the issue,
-comments, and the `quay-config` block. Quay does not write Linear state.
+Linear is used by `quay enqueue --linear-issue` and optional best-effort state
+sync. Enqueue reads the issue, comments, native blocked-by relations, native
+parent/child hierarchy, and the `quay-config` block. State writeback, when
+enabled, is driven from persisted Quay task state.
 
 ### Create A Linear API Key
 
@@ -183,9 +185,11 @@ export QUAY_LINEAR_API_KEY=...
 ```
 
 Linear supports restricted personal API keys. For Quay's current adapter, grant
-read access to the teams/issues the deployment will enqueue. If you restrict
-the key to specific teams, tickets outside those teams will fail as not found or
-as an adapter error.
+read access to the teams/issues the deployment will enqueue, including blocker,
+parent, and child issues used by dependency and umbrella workflows. If Linear
+state writeback is enabled, the key must also be allowed to update issue state.
+If you restrict the key to specific teams, tickets outside those teams will
+fail as not found or as an adapter error.
 
 ### Ticket Requirements
 
@@ -196,6 +200,8 @@ Each Linear ticket used with `--linear-issue` must:
 - Include at least one author.
 - Include at least one tag after schema validation.
 - Optionally include a Slack permalink.
+- Use native Linear blocked-by relations for task ordering.
+- Use native Linear parent/child relations for umbrella membership.
 
 See [Ticket Authoring](ticket-authoring.md).
 

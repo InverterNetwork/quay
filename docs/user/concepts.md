@@ -129,15 +129,30 @@ recover the blocked workflow.
 
 ## Umbrella Workflows
 
-One-repo umbrella workflows use a shared feature branch. Each umbrella subtask
-targets that feature branch as its effective PR base, and dependency rows with
-`scope: "umbrella"` wait for blockers to reach `merged_to_feature_branch`.
+One-repo umbrella workflows use a shared feature branch. For Linear-backed
+umbrellas, Linear's native parent/child hierarchy is the membership source of
+truth. Enqueueing the parent issue creates the umbrella workflow, derives the
+feature branch, and snapshots the expected Linear child set. Tick never polls
+Linear to discover changed membership later.
+
+Each umbrella child target uses the shared feature branch as its effective PR
+base. Child enqueue links the concrete Quay task to an expected child row. If a
+child was already complete in Linear when discovered, Quay can mark that
+expected row `complete_without_quay`; it then counts toward final readiness
+without requiring a Quay task.
+
+Linear blocked-by relations define ordering. Same-umbrella dependency rows use
+`scope: "umbrella"` and wait for blockers to reach
+`merged_to_feature_branch`; blockers outside the umbrella keep normal
+`merged` semantics.
 
 Quay may auto-merge only approved and green umbrella subtask PRs into the
 umbrella feature branch. It must never auto-merge normal task PRs or the final
 umbrella PR into the repository base branch.
 
-When all subtasks are integrated, tick creates or reuses the final umbrella PR
-and a final Quay-owned task already in `pr-open`. That final task follows the
-normal Quay-owned PR lifecycle: CI polling, review, review feedback, worker
-fixes, and merge observation.
+When every expected child is either linked to a task in
+`merged_to_feature_branch` or marked `complete_without_quay`, tick creates or
+reuses the final umbrella PR and a final Quay-owned task already in `pr-open`.
+That final task follows the normal Quay-owned PR lifecycle: CI polling,
+review, review feedback, worker fixes, and merge observation. Quay observes
+that final PR merge, but never performs it.

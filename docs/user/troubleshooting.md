@@ -104,6 +104,39 @@ Fix one of:
   blockers do not block enqueue.
 - Remove the Linear blocked-by relation if it is not a real dependency.
 
+## `umbrella_not_enqueued`
+
+`quay enqueue --linear-issue` found that the Linear issue is a child of an
+umbrella parent, but Quay has no persisted umbrella workflow for that parent.
+Quay stops before creating the child task because it would not know the shared
+feature branch or expected child set.
+
+Fix one of:
+
+- Enqueue the Linear parent issue first, then enqueue the child again.
+- Pass `--as-normal-task` if this child should intentionally run outside the
+  umbrella workflow. This ignores the child's Linear parent membership only;
+  Linear blocked-by relations are still processed as normal dependencies.
+
+## `umbrella_subtask_not_expected`
+
+The Linear child has a parent umbrella workflow, but its external ref is not in
+the expected child set that Quay persisted when the parent was enqueued.
+
+Fix one of:
+
+- Confirm the child is attached to the correct Linear parent.
+- Recreate or manually repair the umbrella workflow if the Linear child set was
+  changed after parent enqueue. Automatic resync is not part of the current
+  tick loop.
+- Pass `--as-normal-task` only if this child issue should run outside the
+  umbrella.
+
+## `dependency_cycle`
+
+The requested dependency edge would make tasks wait on each other. Remove or
+correct the Linear blocked-by relation, then enqueue again.
+
 ## `branch_collision_unresolvable`
 
 Quay could not find an unused `quay/<slug>` branch for the task. Check local
