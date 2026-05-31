@@ -3,6 +3,18 @@ import type { Tone } from '../styles/tones';
 export type AgentConnectionStatus = Tone;
 export type AgentReferenceKind = 'task' | 'pr' | 'log' | 'file' | 'ci' | 'config';
 export type AgentReferenceTone = Exclude<Tone, 'accent'>;
+export type AgentApprovalPreviewKind = 'command' | 'intent';
+
+export type AgentApprovalAction =
+  | {
+      type: 'quay.resume_task';
+      taskId: string;
+      reason?: string;
+      brief: string;
+      expectedOutcome?: string;
+      scope?: string;
+      externalRef?: string;
+    };
 
 export interface AgentContextSummary {
   agentId: string;
@@ -36,10 +48,13 @@ export type AgentEvent =
       type: 'approval_required';
       messageId: string;
       approvalId: string;
+      title?: string;
+      previewKind?: AgentApprovalPreviewKind;
       command: string;
       description: string;
       affects: Array<{ label: string; value: string }>;
       note?: string;
+      action?: AgentApprovalAction;
     }
   | { type: 'command_output'; messageId: string; approvalId: string; line: string }
   | {
@@ -77,10 +92,13 @@ export type AgentMessagePart =
       id: string;
       kind: 'approval';
       approvalId: string;
+      title?: string;
+      previewKind?: AgentApprovalPreviewKind;
       command: string;
       description: string;
       affects: Array<{ label: string; value: string }>;
       note?: string;
+      action?: AgentApprovalAction;
       status: 'proposed' | 'running' | 'rejected' | 'succeeded' | 'failed';
       exitCode?: number;
       output: string[];

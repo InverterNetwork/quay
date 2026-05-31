@@ -469,6 +469,162 @@ test("HermesAgentAdapter extracts proposed actions from streamed assistant text"
   expect(serialized).not.toContain("approval_id");
 });
 
+test("HermesAgentAdapter extracts typed resume-task actions from raw JSON and proposed-action envelopes", async () => {
+  const rawAction = JSON.stringify({
+    type: "quay.resume_task",
+    task_id: "task-raw",
+    reason: "blocker_resolved",
+    brief: "Dependency landed. Continue wiring the scheduler.",
+    expected_outcome: "task transitions back to queued",
+    scope: "prod",
+    external_ref: "BRIX-1505",
+  });
+  const envelopedAction = JSON.stringify({
+    type: "quay.resume_task",
+    task_id: "task-envelope",
+    reason: "human_followup",
+    brief: "Human confirmed the config value. Continue implementation.",
+  });
+  const fetchImpl: AgentFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/health") return jsonResponse({ status: "ok" });
+    if (path === "/v1/capabilities") {
+      return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+    }
+    if (path === "/v1/runs") return jsonResponse({ run_id: "run-typed-actions" });
+    return sseResponse([
+      { type: "assistant.delta", delta: `I can resume it.\n${rawAction}\n<proposed-` },
+      { type: "assistant.delta", delta: `action>\n${envelopedAction}\n</proposed-action>\nReady for approval.` },
+      { type: "run.completed" },
+    ]);
+  };
+  const adapter = new HermesAgentAdapter({
+    config: {
+      apiBaseUrl: "http://hermes.local",
+      apiKey: "secret-key",
+      model: "hermes-test",
+      sessionKeyPrefix: "quay-dev",
+    },
+    fetch: fetchImpl,
+  });
+  const session = makeSession();
+  await adapter.createSession({ session });
+
+  const events: AgentEvent[] = [];
+  for await (const event of adapter.sendMessage({
+    session,
+    message: "Resume the task",
+    context: contextFixture,
+  })) {
+    events.push(event);
+  }
+
+  const approvals = events.filter((event) => event.type === "approval_required");
+  expect(approvals).toHaveLength(2);
+  expect(approvals[0]).toMatchObject({
+    type: "approval_required",
+    title: "Resume task",
+    previewKind: "intent",
+    command: "quay.resume_task task_id=task-raw reason=blocker_resolved scope=prod",
+    action: {
+      type: "quay.resume_task",
+      taskId: "task-raw",
+      reason: "blocker_resolved",
+      brief: "Dependency landed. Continue wiring the scheduler.",
+      expectedOutcome: "task transitions back to queued",
+      scope: "prod",
+      externalRef: "BRIX-1505",
+    },
+    affects: [
+      { label: "task", value: "task-raw" },
+      { label: "external ref", value: "BRIX-1505" },
+      { label: "scope", value: "prod" },
+      { label: "reason", value: "blocker_resolved" },
+    ],
+  });
+  expect(approvals[1]).toMatchObject({
+    type: "approval_required",
+    title: "Resume task",
+    previewKind: "intent",
+    command: "quay.resume_task task_id=task-envelope reason=human_followup",
+    action: {
+      type: "quay.resume_task",
+      taskId: "task-envelope",
+      reason: "human_followup",
+      brief: "Human confirmed the config value. Continue implementation.",
+    },
+  });
+  const text = events.filter((event) => event.type === "text_delta").map((event) => event.text).join("");
+  expect(text).toContain("I can resume it.");
+  expect(text).toContain("Ready for approval.");
+  expect(text).not.toContain("<proposed-action>");
+  expect(text).not.toContain("quay.resume_task");
+});
+
+test("HermesAgentAdapter maps unknown and partial typed actions to non-approvable errors", async () => {
+  const fetchImpl: AgentFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/health") return jsonResponse({ status: "ok" });
+    if (path === "/v1/capabilities") {
+      return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+    }
+    if (path === "/v1/runs") return jsonResponse({ run_id: "run-invalid-actions" });
+    return sseResponse([
+      {
+        type: "assistant.delta",
+        delta: '<proposed-action>{"type":"quay.cancel_task","task_id":"task-unknown","brief":"Cancel it."}</proposed-action>',
+      },
+      {
+        type: "assistant.delta",
+        delta: '<proposed-action>{"type":"quay.resume_task","task_id":"task-partial","api_key":"secret-key"}</proposed-action>',
+      },
+      { type: "run.completed" },
+    ]);
+  };
+  const adapter = new HermesAgentAdapter({
+    config: {
+      apiBaseUrl: "http://hermes.local",
+      apiKey: "secret-key",
+      model: "hermes-test",
+      sessionKeyPrefix: "quay-dev",
+    },
+    fetch: fetchImpl,
+  });
+  const session = makeSession();
+  await adapter.createSession({ session });
+
+  const events: AgentEvent[] = [];
+  for await (const event of adapter.sendMessage({
+    session,
+    message: "Try unsupported actions",
+    context: contextFixture,
+  })) {
+    events.push(event);
+  }
+
+  expect(events.filter((event) => event.type === "approval_required")).toEqual([]);
+  expect(events.filter((event) => event.type === "error")).toMatchObject([
+    {
+      type: "error",
+      code: "quay_proposed_action_unsupported",
+      message: "Unsupported Quay proposed action: quay.cancel_task",
+      recoverable: true,
+      details: { action_type: "quay.cancel_task" },
+    },
+    {
+      type: "error",
+      code: "quay_proposed_action_invalid",
+      message: "Invalid quay.resume_task proposed action",
+      recoverable: true,
+      details: { action_type: "quay.resume_task", missing_fields: ["brief"] },
+    },
+  ]);
+  const serialized = JSON.stringify(events);
+  expect(serialized).not.toContain("<proposed-action>");
+  expect(serialized).not.toContain("secret-key");
+  expect(serialized).not.toContain("api_key");
+});
+
 test("HermesAgentAdapter maps proposed actions from tool output and native approval events", async () => {
   const proposedAction = {
     quay_proposed_action: {
@@ -554,6 +710,62 @@ test("HermesAgentAdapter maps proposed actions from tool output and native appro
   expect(serialized).not.toContain("hermes.debug");
   expect(serialized).not.toContain("nativeEvent");
   expect(serialized).not.toContain("quay_proposed_action");
+});
+
+test("HermesAgentAdapter approval continuation includes typed action context", async () => {
+  const runBodies: Array<Record<string, unknown>> = [];
+  const fetchImpl: AgentFetch = async (input, init = {}) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/health") return jsonResponse({ status: "ok" });
+    if (path === "/v1/capabilities") {
+      return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+    }
+    if (path === "/v1/runs") {
+      runBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return jsonResponse({ run_id: "run-approval-continuation" });
+    }
+    return sseResponse([{ type: "run.completed" }]);
+  };
+  const adapter = new HermesAgentAdapter({
+    config: {
+      apiBaseUrl: "http://hermes.local",
+      apiKey: "secret-key",
+      model: "hermes-test",
+      sessionKeyPrefix: "quay-dev",
+    },
+    fetch: fetchImpl,
+  });
+  const session = makeSession();
+  await adapter.createSession({ session });
+
+  const events: AgentEvent[] = [];
+  for await (const event of adapter.decideApproval({
+    session,
+    approvalId: "approve-resume",
+    decision: "approved",
+    approval: {
+      messageId: "agent-1",
+      approvalId: "approve-resume",
+      title: "Resume task",
+      previewKind: "intent",
+      command: "quay.resume_task task_id=task-raw reason=blocker_resolved",
+      description: "Resume task task-raw.",
+      affects: [{ label: "task", value: "task-raw" }],
+      action: {
+        type: "quay.resume_task",
+        taskId: "task-raw",
+        reason: "blocker_resolved",
+        brief: "Dependency landed. Continue wiring the scheduler.",
+      },
+    },
+  })) {
+    events.push(event);
+  }
+
+  expect(events.map((event) => event.type)).toContain("approval_result");
+  expect(String(runBodies[0]?.input)).toContain("operator approved proposed Quay action approve-resume");
+  expect(String(runBodies[0]?.input)).toContain('"type":"quay.resume_task"');
+  expect(String(runBodies[0]?.input)).toContain('"taskId":"task-raw"');
 });
 
 test("HermesAgentAdapter sends fresh Mission Control and Configuration context per run", async () => {

@@ -380,10 +380,13 @@ function rememberAgentEvent(state: AgentGatewaySessionState, event: AgentEvent):
     state.approvals.set(event.approvalId, {
       messageId: event.messageId,
       approvalId: event.approvalId,
+      ...(event.title === undefined ? {} : { title: event.title }),
+      ...(event.previewKind === undefined ? {} : { previewKind: event.previewKind }),
       command: event.command,
       description: event.description,
       affects: event.affects,
       ...(event.note === undefined ? {} : { note: event.note }),
+      ...(event.action === undefined ? {} : { action: event.action }),
       status: "proposed",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
