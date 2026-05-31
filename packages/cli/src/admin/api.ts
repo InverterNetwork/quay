@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { SQLQueryBindings } from "bun:sqlite";
 import { z } from "zod";
 import type { QuayConfig } from "../cli/config.ts";
+import type { AgentFetch } from "./agent_types.ts";
 import { DEFAULT_RETRY_BUDGET } from "../core/enqueue.ts";
 import {
   buildAgentSelection,
@@ -17,6 +18,10 @@ import {
   authorizeAdminRequest,
   type AdminRequestAuditContext,
 } from "./auth.ts";
+import {
+  agentGatewayAllowedMethods,
+  createAgentGateway,
+} from "./agent_gateway.ts";
 import {
   assertPreambleKind,
   DEFAULT_PREAMBLE_BODY,
@@ -61,6 +66,7 @@ export interface AdminApiRuntime {
   dataDir: string;
   db: DB;
   env?: NodeJS.ProcessEnv;
+  agentFetch?: AgentFetch;
   adminAudit?: (event: AdminAuditEvent) => void;
   paths: {
     reposRoot: string;
@@ -72,7 +78,18 @@ export interface AdminApiRuntime {
 }
 
 export interface AdminAuditEvent extends AdminRequestAuditContext {
-  action: "changes.preview" | "changes.apply";
+  action:
+    | "changes.preview"
+    | "changes.apply"
+    | "agent.session.create"
+    | "agent.session.stop"
+    | "agent.message.send"
+    | "agent.tool.call"
+    | "agent.approval.required"
+    | "agent.approval.decide"
+    | "agent.approval.result"
+    | "agent.command.output"
+    | "agent.error";
   method: string;
   path: string;
   timestamp: string;
@@ -80,8 +97,34 @@ export interface AdminAuditEvent extends AdminRequestAuditContext {
   status: number;
   operation_summary: string[];
   target_resources: string[];
+  retention_bucket?:
+    | "agent_chat_7d"
+    | "agent_tool_7d"
+    | "agent_rejected_approval_7d"
+    | "agent_approved_action_30d";
+  expires_at?: string;
+  adapter_id?: string;
+  agent_id?: string;
+  message_id?: string;
+  message_summary?: string;
+  context_view?: string;
+  context_scope?: string;
+  context_url_path?: string;
+  context_summary?: string;
+  context_captured_at?: string;
+  tool_call_id?: string;
+  tool_name?: string;
+  arguments_summary?: string;
+  effect?: "read_only" | "mutating" | "unknown";
   error_code?: string;
   error_message?: string;
+  session_id?: string;
+  approval_id?: string;
+  decision?: "approved" | "rejected";
+  result_status?: "proposed" | "running" | "rejected" | "succeeded" | "failed";
+  command?: string;
+  affects?: Array<{ label: string; value: string }>;
+  exit_code?: number;
 }
 
 type AdminAuditOutcome = Omit<
@@ -311,6 +354,7 @@ const ACTIVE_TASK_STATES = [
 ] as const;
 
 export function createAdminApiHandler(runtime: AdminApiRuntime) {
+  const agentGateway = createAgentGateway(runtime);
   return async function handleAdminApi(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const segments = pathSegments(url.pathname);
@@ -358,6 +402,8 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
     }
 
     if (request.method === "POST") {
+      const agentResponse = await agentGateway.handle(request, segments, cors.headers, auth.audit);
+      if (agentResponse !== null) return agentResponse;
       if (isWriteRoute(segments, "preview")) {
         return handleAdminMutation(
           cors.headers,
@@ -526,6 +572,8 @@ function isVersionedRoute(segments: string[]): boolean {
 
 function allowedMethodsForRoute(segments: string[]): string | null {
   if (segments[0] !== "v1") return null;
+  const agentMethods = agentGatewayAllowedMethods(segments);
+  if (agentMethods !== null) return agentMethods;
   if (segments.length === 2) {
     return [
       "global",

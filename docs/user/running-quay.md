@@ -73,18 +73,33 @@ Initial endpoints:
 - `GET /v1/matrix`
 - `POST /v1/changes/preview`
 - `POST /v1/changes/apply`
+- `POST /v1/agent/sessions`
+- `POST /v1/agent/sessions/<session_id>/messages`
+- `POST /v1/agent/sessions/<session_id>/approvals/<approval_id>`
+- `POST /v1/agent/sessions/<session_id>/stop`
 
-Writes are limited to structured Admin UI change requests that Quay validates
-and fences with the read-model revision returned by the API. Clients should
-preview a change set before applying it, and must reload when the server returns
-`stale_revision`.
+Configuration writes are limited to structured Admin UI change requests that
+Quay validates and fences with the read-model revision returned by the API.
+Clients should preview a change set before applying it, and must reload when the
+server returns `stale_revision`. Agent Gateway `POST` routes create temporary
+chat sessions, stream normalized events, record approval decisions, and stop the
+active turn; they do not use the configuration change-set revision contract.
 
 Each `POST /v1/changes/preview` and `POST /v1/changes/apply` emits a structured
 `quay_admin_audit` JSON line on server stderr with the Slack user ID when a
 protected proxy supplied it, timestamp, success or failure status, sanitized
-operation summaries, and target resources. Audit summaries name fields and
-targets but omit raw repository URLs, commands, token values, and other full
-configuration values.
+operation summaries, and target resources. Agent Gateway routes under
+`POST /v1/agent/*` use the same audit stream for session lifecycle, message
+summaries, UI context summaries, visible tool calls, approval prompts,
+approval decisions, approved action results, command output summaries, and
+errors. Agent records include a retention bucket and `expires_at`; chat,
+context, tool, error, and rejected-approval summaries default to 7 days, while
+approved action records default to 30 days. Change-set audit summaries name
+fields and targets but omit raw repository URLs, commands, token values, and
+other full configuration values. Agent audit summaries retain bounded message,
+context, tool, command, and result summaries; they omit full UI payloads and raw
+tool payloads, but proposed commands and affected resources may still appear in
+truncated form.
 
 The API returns JSON and uses a stable error envelope:
 
