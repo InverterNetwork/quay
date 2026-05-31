@@ -45,6 +45,7 @@ max_thread_messages = 200
 require_auth = true
 token_env = "QUAY_ADMIN_TOKEN"
 forwarded_identity_header = "X-Hermes-User-Id"
+forwarded_display_name_header = "X-Hermes-User-Display-Name"
 
 [context]
 reference_repos_root = "/home/hermes/.hermes/code"
@@ -101,6 +102,7 @@ capabilities = ["browser", "screenshots"]
 | `[admin].require_auth` | `false` unless the token env is set | Requires `Authorization: Bearer <token>` for the Admin API and served UI data requests. |
 | `[admin].token_env` | `QUAY_ADMIN_TOKEN` | Environment variable containing the admin bearer token. If `require_auth = true`, `quay serve` fails clearly when this env var is unset. |
 | `[admin].forwarded_identity_header` | `X-Hermes-User-Id` | Optional upstream identity header accepted for audit context without coupling Quay to Hermes. |
+| `[admin].forwarded_display_name_header` | `X-Hermes-User-Display-Name` | Optional upstream display-name header used for Admin UI operator labels and audit context. |
 | `[context].reference_repos_root` | unset | Optional root containing read-only working-tree mirrors. Immediate child repos are listed in worker and reviewer prompts. |
 
 ## Admin API Auth
@@ -127,15 +129,17 @@ proxies and non-browser clients can keep sending the `Authorization` header
 directly.
 
 When auth is enabled, Quay accepts the configured forwarded identity header as
-the Slack admin identity for Admin API audit records. In standalone
-unauthenticated mode, Quay marks audit identity as `standalone` and ignores that
-header instead of trusting a spoofable client value.
+the Slack admin identity for Admin API audit records. It also accepts the
+configured forwarded display-name header for Admin UI operator labels and audit
+context. In standalone unauthenticated mode, Quay marks audit identity as
+`standalone` and ignores those headers instead of trusting spoofable client
+values.
 
-The forwarded identity header is a trusted upstream assertion, not something
-Quay independently verifies. Any client with the Admin bearer token can send
-that header directly if it can reach `quay serve`, so deployments that expose
-Quay through a proxy must strip client-supplied identity headers and inject the
-configured header only after authenticating and allowlisting the Slack user.
+Forwarded identity headers are trusted upstream assertions, not something Quay
+independently verifies. Any client with the Admin bearer token can send those
+headers directly if it can reach `quay serve`, so deployments that expose Quay
+through a proxy must strip client-supplied identity headers and inject the
+configured headers only after authenticating and allowlisting the Slack user.
 
 ## Reviewer
 

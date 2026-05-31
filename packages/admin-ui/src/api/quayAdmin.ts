@@ -21,6 +21,13 @@ export interface QuayAdminMeta {
   service: 'quay';
   api_version: 'v1';
   quay_version: string;
+  viewer?: QuayAdminViewer;
+}
+
+export interface QuayAdminViewer {
+  label: string;
+  display_name: string | null;
+  slack_user_id: string | null;
 }
 
 export interface QuayAdminRepo {

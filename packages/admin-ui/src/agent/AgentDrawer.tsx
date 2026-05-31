@@ -6,6 +6,7 @@ import { HStack } from '../components/Stack';
 import { StatusDot } from '../components/StatusDot';
 import { T } from '../components/Typography';
 import { Icon } from '../icons/Icon';
+import type { OperatorIdentity } from '../operatorIdentity';
 import { TONES } from '../styles/tones';
 import { createAgentGatewayClient } from './agentClient';
 import type { AgentUiContext } from './agentContext';
@@ -19,9 +20,10 @@ interface DemoAgentDrawerProps {
   adapter: AgentAdapter;
   ctx: AgentContext;
   getUiContext: () => AgentUiContext;
+  operatorIdentity: OperatorIdentity;
 }
 
-export function DemoAgentDrawer({ open, onClose, adapter, ctx, getUiContext }: DemoAgentDrawerProps) {
+export function DemoAgentDrawer({ open, onClose, adapter, ctx, getUiContext, operatorIdentity }: DemoAgentDrawerProps) {
   const thread = useAgentThread(adapter, getUiContext);
   const contextSummary: AgentContextSummary = {
     agentId: adapter.id,
@@ -38,6 +40,7 @@ export function DemoAgentDrawer({ open, onClose, adapter, ctx, getUiContext }: D
       messages={thread.messages}
       busy={thread.busy}
       contextSummary={contextSummary}
+      operatorIdentity={operatorIdentity}
       onClose={onClose}
       onNewThread={thread.clear}
       onSendMessage={thread.send}
@@ -113,6 +116,7 @@ export interface AgentPanelProps {
   messages: AgentMessage[];
   busy: boolean;
   contextSummary: AgentContextSummary;
+  operatorIdentity: OperatorIdentity;
   onClose: () => void;
   onNewThread: () => void;
   onSendMessage: (text: string) => void;
@@ -127,6 +131,7 @@ export function AgentPanel({
   messages,
   busy,
   contextSummary,
+  operatorIdentity,
   onClose,
   onNewThread,
   onSendMessage,
@@ -185,6 +190,7 @@ export function AgentPanel({
                 key={message.id}
                 msg={message}
                 agentName={contextSummary.agentName}
+                operatorIdentity={operatorIdentity}
                 busy={busy}
                 onApprove={onApprove}
                 onReject={onReject}
@@ -364,12 +370,14 @@ function findApproval(messages: AgentMessage[], approvalId: string) {
 function Turn({
   msg,
   agentName,
+  operatorIdentity,
   busy,
   onApprove,
   onReject,
 }: {
   msg: AgentMessage;
   agentName: string;
+  operatorIdentity: OperatorIdentity;
   busy: boolean;
   onApprove: (approvalId: string) => void;
   onReject: (approvalId: string) => void;
@@ -380,9 +388,9 @@ function Turn({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
       <HStack gap={8}>
-        {isUser ? <Avatar name="Mira Tonio" size={20} tone="accent" /> : <AgentMark size={20} />}
+        {isUser ? <Avatar name={operatorIdentity.avatarName} size={20} tone="accent" /> : <AgentMark size={20} />}
         <T kind="body-strong" style={{ fontSize: 13 }}>
-          {isUser ? 'Mira' : agentName}
+          {isUser ? operatorIdentity.label : agentName}
         </T>
         {!isUser && (
           <T kind="mono-sm" color="var(--ink-4)">

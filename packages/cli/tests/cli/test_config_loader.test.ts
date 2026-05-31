@@ -378,6 +378,7 @@ test("loads [admin] bearer auth configuration", () => {
 require_auth = true
 token_env = "CUSTOM_QUAY_ADMIN_TOKEN"
 forwarded_identity_header = "X-Quay-User"
+forwarded_display_name_header = "X-Quay-User-Display-Name"
 `,
   );
   const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
@@ -385,6 +386,7 @@ forwarded_identity_header = "X-Quay-User"
     require_auth: true,
     token_env: "CUSTOM_QUAY_ADMIN_TOKEN",
     forwarded_identity_header: "X-Quay-User",
+    forwarded_display_name_header: "X-Quay-User-Display-Name",
   });
 });
 
@@ -413,6 +415,20 @@ forwarded_identity_header = "Authorization"
   );
   expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
     /forwarded_identity_header|secret-bearing/i,
+  );
+});
+
+test("[admin].forwarded_display_name_header rejects secret-bearing header names", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[admin]
+forwarded_display_name_header = "Authorization"
+`,
+  );
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /forwarded_display_name_header|secret-bearing/i,
   );
 });
 

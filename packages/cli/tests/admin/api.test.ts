@@ -204,6 +204,38 @@ test("GET /v1/meta returns API and Quay version metadata", async () => {
     service: "quay",
     api_version: "v1",
     quay_version: "test-version",
+    viewer: {
+      label: "You",
+      display_name: null,
+      slack_user_id: null,
+    },
+  });
+});
+
+test("GET /v1/meta resolves forwarded operator display name", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: { QUAY_ADMIN_TOKEN: "secret-token" },
+  });
+
+  const response = await handler(
+    new Request("http://quay.local/v1/meta", {
+      headers: {
+        Authorization: "Bearer secret-token",
+        "X-Hermes-User-Id": "U06TDC56VJB",
+        "X-Hermes-User-Display-Name": "  Fabian Scherer  ",
+      },
+    }),
+  );
+
+  expect(response.status).toBe(200);
+  expect(await responseJson(response)).toMatchObject({
+    viewer: {
+      label: "Fabian Scherer",
+      display_name: "Fabian Scherer",
+      slack_user_id: "U06TDC56VJB",
+    },
   });
 });
 
@@ -1270,9 +1302,12 @@ test("admin bearer auth protects reads and writes when configured", async () => 
     success: true,
     status: 200,
     slack_user_id: "hermes-user-123",
+    display_name: null,
     identity_status: "forwarded",
     forwarded_identity: "hermes-user-123",
     forwarded_identity_header: "X-Hermes-User-Id",
+    forwarded_display_name: null,
+    forwarded_display_name_header: "X-Hermes-User-Display-Name",
     operation_summary: ["repo repo-a: update base_branch"],
     target_resources: ["repo:repo-a"],
   });
@@ -2163,7 +2198,7 @@ test("Admin API handles CORS preflight for read-only versioned routes", async ()
     "GET, OPTIONS",
   );
   expect(response.headers.get("access-control-allow-headers")).toBe(
-    "Accept, Authorization, Content-Type, X-Hermes-User-Id",
+    "Accept, Authorization, Content-Type, X-Hermes-User-Id, X-Hermes-User-Display-Name",
   );
 });
 
