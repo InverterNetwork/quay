@@ -8,6 +8,7 @@ import { T } from '../components/Typography';
 import { Icon } from '../icons/Icon';
 import type { OperatorIdentity } from '../operatorIdentity';
 import { TONES } from '../styles/tones';
+import { approvalCardView } from './approvalCardView';
 import { createAgentGatewayClient } from './agentClient';
 import type { AgentUiContext } from './agentContext';
 import { type AgentAdapter, type AgentContext } from './agentData';
@@ -643,6 +644,7 @@ function ApprovalCard({
   const dim = part.status === 'rejected';
   const completed = part.status === 'succeeded' || part.status === 'failed';
   const resultOk = part.status === 'succeeded' && (part.exitCode ?? 0) === 0;
+  const view = approvalCardView(part);
   const completionLabel = part.status === 'succeeded' && part.exitCode === undefined
     ? 'Continued'
     : `${resultOk ? 'Succeeded' : 'Failed'} · exit ${part.exitCode ?? 1}`;
@@ -662,7 +664,7 @@ function ApprovalCard({
           <>
             <Icon.Filter size={12} style={{ color: 'var(--ink-3)' }} />
             <T kind="caption" color="var(--ink-3)">
-              Proposed command
+              {view.title}
             </T>
             <span style={{ flex: 1 }} />
             <T kind="mono-sm" color="var(--ink-4)">
@@ -712,8 +714,15 @@ function ApprovalCard({
             padding: '8px 10px',
           }}
         >
-          <T kind="mono-md" color="var(--good)" style={{ flexShrink: 0, userSelect: 'none' }}>
-            $
+          {part.previewKind === 'intent' ? (
+            <Icon.Anchor size={13} style={{ color: 'var(--good)', marginTop: 2 }} />
+          ) : (
+            <T kind="mono-md" color="var(--good)" style={{ flexShrink: 0, userSelect: 'none' }}>
+              $
+            </T>
+          )}
+          <T kind="caption" color="var(--ink-4)" style={{ width: 86, flexShrink: 0, paddingTop: 1 }}>
+            {view.previewLabel}
           </T>
           <T kind="mono-md" color="var(--ink)" style={{ flex: 1, wordBreak: 'break-word', textDecoration: dim ? 'line-through' : 'none' }}>
             {part.command}
@@ -746,7 +755,7 @@ function ApprovalCard({
                 Reject
               </Button>
               <Button variant="accent" size="sm" leading={<Icon.Check size={13} />} onClick={onApprove} disabled={busy}>
-                Run command
+                {view.approveLabel}
               </Button>
             </HStack>
           </>

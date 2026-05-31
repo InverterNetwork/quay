@@ -282,6 +282,8 @@ function toAgentEvent(value: unknown): AgentEvent {
     case 'approval_required':
       requireString(value, 'messageId');
       requireString(value, 'approvalId');
+      if (value.title !== undefined) requireString(value, 'title');
+      if (value.previewKind !== undefined && !['command', 'intent'].includes(String(value.previewKind))) throw invalidEvent(value, 'approval_required has an invalid previewKind.');
       requireString(value, 'command');
       requireString(value, 'description');
       if (!Array.isArray(value.affects)) throw invalidEvent(value, 'approval_required requires affects.');
@@ -291,6 +293,7 @@ function toAgentEvent(value: unknown): AgentEvent {
         }
       }
       if (value.note !== undefined) requireString(value, 'note');
+      if (value.action !== undefined) validateApprovalAction(value.action, value);
       return value as AgentEvent;
     case 'command_output':
       requireString(value, 'messageId');
@@ -315,6 +318,17 @@ function toAgentEvent(value: unknown): AgentEvent {
     default:
       throw invalidEvent(value, `Unsupported AgentEvent type "${String(value.type)}".`);
   }
+}
+
+function validateApprovalAction(action: unknown, event: Record<string, unknown>): void {
+  if (!isRecord(action)) throw invalidEvent(event, 'approval_required action must be an object.');
+  if (action.type !== 'quay.resume_task') throw invalidEvent(event, 'approval_required action has an unsupported type.');
+  requireString(action, 'taskId');
+  requireString(action, 'brief');
+  if (action.reason !== undefined) requireString(action, 'reason');
+  if (action.expectedOutcome !== undefined) requireString(action, 'expectedOutcome');
+  if (action.scope !== undefined) requireString(action, 'scope');
+  if (action.externalRef !== undefined) requireString(action, 'externalRef');
 }
 
 async function assertOk(response: Response): Promise<void> {

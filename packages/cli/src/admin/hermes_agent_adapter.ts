@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type { AgentAdapter, AgentApproval, AgentEvent, AgentFetch, AgentSession, AgentUiContext } from "./agent_types.ts";
+import type {
+  AgentAdapter,
+  AgentApproval,
+  AgentApprovalAction,
+  AgentEvent,
+  AgentFetch,
+  AgentSession,
+  AgentUiContext,
+} from "./agent_types.ts";
 
 const DEFAULT_HERMES_API_BASE_URL = "http://127.0.0.1:8642";
 const DEFAULT_HERMES_MODEL = "hermes-agent";
@@ -10,6 +18,8 @@ const CONTEXT_MAX_OBJECT_KEYS = 100;
 const CONTEXT_MAX_DEPTH = 8;
 const CONTEXT_OMITTED_VALUE = "[omitted: fetch by stable ID when needed]";
 const PROPOSED_ACTION_BUFFER_LIMIT = 8000;
+const PROPOSED_ACTION_OPEN_TAG = "<proposed-action>";
+const PROPOSED_ACTION_CLOSE_TAG = "</proposed-action>";
 const EVENT_DETAIL_MAX_LENGTH = 500;
 const QUAY_AGENT_INSTRUCTIONS =
   [
@@ -18,7 +28,8 @@ const QUAY_AGENT_INSTRUCTIONS =
     "Treat the snapshot as grounding, not as the full data source or an access boundary.",
     "You may inspect broader Quay data through your available tools and Quay CLI access.",
     "Full logs, review threads, artifacts, prompt bodies, preamble bodies, diffs, and patches are not included in the snapshot by default; fetch those by stable ID when needed.",
-    "When proposing a mutating Quay action, first explain the action and emit it in the agreed proposed-action format so Quay can render an approval card.",
+    "When proposing a mutating Quay action, first explain the action and emit one typed JSON object inside <proposed-action>...</proposed-action> so Quay can render an approval card.",
+    "For task resumes, use {\"type\":\"quay.resume_task\",\"task_id\":\"...\",\"reason\":\"blocker_resolved|human_followup|operator_request\",\"brief\":\"...\",\"expected_outcome\":\"...\",\"scope\":\"prod\",\"external_ref\":\"...\"}.",
   ].join(" ");
 
 export interface HermesAgentConfig {
@@ -38,16 +49,31 @@ export interface HermesSessionBinding {
 
 interface ProposedAction {
   approvalId: string;
+  title?: string;
+  previewKind?: "command" | "intent";
   command: string;
   description: string;
   affects: Array<{ label: string; value: string }>;
   note?: string;
+  action?: AgentApprovalAction;
+}
+
+interface ProposedActionIssue {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+interface ProposedActionCollection {
+  actions: ProposedAction[];
+  issues: ProposedActionIssue[];
+  recognized: boolean;
 }
 
 interface ProposedActionMatch {
   start: number;
   end: number;
-  actions: ProposedAction[];
+  collection: ProposedActionCollection;
 }
 
 interface HermesAgentAdapterOptions {
@@ -547,15 +573,6 @@ class HermesEventMapper {
   }
 
   private mapText(text: string): AgentEvent[] {
-    if (this.pendingText === "") {
-      const objectStart = text.indexOf("{");
-      if (objectStart === -1) {
-        return [{ type: "text_delta", messageId: this.messageId, text }];
-      }
-      const events = textDeltaEvent(this.messageId, text.slice(0, objectStart));
-      this.pendingText = text.slice(objectStart);
-      return [...events, ...this.drainPendingText(false)];
-    }
     this.pendingText = `${this.pendingText}${text}`;
     return this.drainPendingText(false);
   }
@@ -563,9 +580,33 @@ class HermesEventMapper {
   private drainPendingText(final: boolean): AgentEvent[] {
     const events: AgentEvent[] = [];
     while (this.pendingText !== "") {
-      const objectStart = this.pendingText.indexOf("{");
+      if (this.pendingText.startsWith(PROPOSED_ACTION_OPEN_TAG)) {
+        const closeStart = this.pendingText.indexOf(PROPOSED_ACTION_CLOSE_TAG, PROPOSED_ACTION_OPEN_TAG.length);
+        if (closeStart === -1) {
+          if (final || this.pendingText.length > PROPOSED_ACTION_BUFFER_LIMIT) {
+            events.push(proposedActionErrorEvent(this.messageId, {
+              code: "quay_proposed_action_invalid",
+              message: "Malformed proposed action envelope",
+            }));
+            this.pendingText = "";
+          }
+          break;
+        }
+        const closeEnd = closeStart + PROPOSED_ACTION_CLOSE_TAG.length;
+        const body = this.pendingText.slice(PROPOSED_ACTION_OPEN_TAG.length, closeStart).trim();
+        const parsed = proposedActionCollectionFromEnvelopeText(body);
+        events.push(...eventsFromProposedActionCollection(parsed, this.messageId));
+        this.pendingText = this.pendingText.slice(closeEnd);
+        continue;
+      }
+
+      const objectStart = firstProposedActionTokenIndex(this.pendingText);
       if (objectStart === -1) {
-        if (final || events.length > 0 || this.pendingText.length > PROPOSED_ACTION_BUFFER_LIMIT) {
+        const partialStart = trailingProposedActionOpenPrefixStart(this.pendingText);
+        if (!final && partialStart !== -1 && this.pendingText.length <= PROPOSED_ACTION_BUFFER_LIMIT) {
+          events.push(...textDeltaEvent(this.messageId, this.pendingText.slice(0, partialStart)));
+          this.pendingText = this.pendingText.slice(partialStart);
+        } else {
           events.push(...textDeltaEvent(this.messageId, this.pendingText));
           this.pendingText = "";
         }
@@ -580,16 +621,23 @@ class HermesEventMapper {
       const objectEnd = findJsonObjectEnd(this.pendingText, 0);
       if (objectEnd === null) {
         if (final || this.pendingText.length > PROPOSED_ACTION_BUFFER_LIMIT) {
-          events.push(...textDeltaEvent(this.messageId, this.pendingText));
+          if (containsProposedAction(this.pendingText, 0)) {
+            events.push(proposedActionErrorEvent(this.messageId, {
+              code: "quay_proposed_action_invalid",
+              message: "Malformed proposed action JSON",
+            }));
+          } else {
+            events.push(...textDeltaEvent(this.messageId, this.pendingText));
+          }
           this.pendingText = "";
         }
         break;
       }
 
       const block = this.pendingText.slice(0, objectEnd);
-      const actions = proposedActionsFromJsonText(block);
-      if (actions.length > 0) {
-        events.push(...actions.map((action) => approvalEventFromProposedAction(action, this.messageId)));
+      const parsed = proposedActionCollectionFromJsonBlock(block, false);
+      if (parsed.recognized) {
+        events.push(...eventsFromProposedActionCollection(parsed, this.messageId));
       } else {
         events.push(...textDeltaEvent(this.messageId, block));
       }
@@ -787,21 +835,24 @@ function approvalEventsFromHermesEvent(
   type: string,
   messageId: string,
 ): AgentEvent[] {
-  const actions: ProposedAction[] = [];
-  collectProposedActions(record, actions, 0);
+  const collected = proposedActionCollectionFromValue(record);
   if (isNativeApprovalEvent(type)) {
-    actions.push(...proposedActionsFromValue(record));
     for (const key of ["data", "action", "approval", "proposed_action", "proposedAction"]) {
       const child = record[key];
-      if (child !== undefined) actions.push(...proposedActionsFromValue(child));
+      if (child !== undefined) {
+        mergeProposedActionCollection(collected, proposedActionCollectionFromValue(child));
+      }
     }
   }
 
   const deduped = new Map<string, ProposedAction>();
-  for (const action of actions) {
+  for (const action of collected.actions) {
     deduped.set(`${action.approvalId}:${action.command}`, action);
   }
-  return [...deduped.values()].map((action) => approvalEventFromProposedAction(action, messageId));
+  return [
+    ...[...deduped.values()].map((action) => approvalEventFromProposedAction(action, messageId)),
+    ...collected.issues.map((issue) => proposedActionErrorEvent(messageId, issue)),
+  ];
 }
 
 function isNativeApprovalEvent(type: string): boolean {
@@ -815,37 +866,93 @@ function approvalEventFromProposedAction(action: ProposedAction, messageId: stri
     type: "approval_required",
     messageId,
     approvalId: action.approvalId,
+    ...(action.title === undefined ? {} : { title: action.title }),
+    ...(action.previewKind === undefined ? {} : { previewKind: action.previewKind }),
     command: action.command,
     description: action.description,
     affects: action.affects,
     ...(action.note === undefined ? {} : { note: action.note }),
+    ...(action.action === undefined ? {} : { action: action.action }),
   };
 }
 
-function collectProposedActions(value: unknown, out: ProposedAction[], depth: number): void {
-  if (depth > 6) return;
-  if (typeof value === "string") {
-    if (value.includes("quay_proposed_action")) out.push(...proposedActionsFromJsonText(value));
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) collectProposedActions(item, out, depth + 1);
-    return;
-  }
-  if (value === null || typeof value !== "object") return;
-  const record = value as Record<string, unknown>;
-  if (record.quay_proposed_action !== undefined) {
-    out.push(...proposedActionsFromValue(record.quay_proposed_action));
-  }
-  for (const child of Object.values(record)) collectProposedActions(child, out, depth + 1);
+function proposedActionErrorEvent(messageId: string, issue: ProposedActionIssue): AgentEvent {
+  return {
+    type: "error",
+    messageId,
+    code: issue.code,
+    message: issue.message,
+    recoverable: true,
+    ...(issue.details === undefined ? {} : { details: issue.details }),
+  };
 }
 
-function proposedActionsFromJsonText(text: string): ProposedAction[] {
-  const actions: ProposedAction[] = [];
-  for (const match of proposedActionMatchesFromText(text)) {
-    actions.push(...match.actions);
+function eventsFromProposedActionCollection(collection: ProposedActionCollection, messageId: string): AgentEvent[] {
+  return [
+    ...collection.actions.map((action) => approvalEventFromProposedAction(action, messageId)),
+    ...collection.issues.map((issue) => proposedActionErrorEvent(messageId, issue)),
+  ];
+}
+
+function proposedActionCollectionFromEnvelopeText(text: string): ProposedActionCollection {
+  const collection = proposedActionCollectionFromJsonText(text);
+  if (!collection.recognized) {
+    collection.recognized = true;
+    collection.issues.push({
+      code: "quay_proposed_action_invalid",
+      message: "Proposed action envelope did not contain a valid Quay action",
+    });
   }
-  return actions;
+  return collection;
+}
+
+function proposedActionCollectionFromJsonText(text: string): ProposedActionCollection {
+  const collection = emptyProposedActionCollection();
+  for (const match of proposedActionMatchesFromText(text)) {
+    mergeProposedActionCollection(collection, match.collection);
+  }
+  return collection;
+}
+
+function proposedActionCollectionFromJsonBlock(block: string, forceProposedAction: boolean): ProposedActionCollection {
+  try {
+    const collection = proposedActionCollectionFromValue(JSON.parse(block) as unknown);
+    if (forceProposedAction && !collection.recognized) {
+      collection.recognized = true;
+      collection.issues.push({
+        code: "quay_proposed_action_invalid",
+        message: "Proposed action JSON did not contain a valid Quay action",
+      });
+    }
+    return collection;
+  } catch {
+    return {
+      actions: [],
+      issues: forceProposedAction || containsProposedAction(block, 0)
+        ? [{
+          code: "quay_proposed_action_invalid",
+          message: "Malformed proposed action JSON",
+        }]
+        : [],
+      recognized: forceProposedAction || containsProposedAction(block, 0),
+    };
+  }
+}
+
+function proposedActionCollectionFromValue(value: unknown): ProposedActionCollection {
+  const collection = emptyProposedActionCollection();
+  collectProposedActionCandidates(value, collection, 0);
+  return collection;
+}
+
+function emptyProposedActionCollection(): ProposedActionCollection {
+  return { actions: [], issues: [], recognized: false };
+}
+
+function mergeProposedActionCollection(target: ProposedActionCollection, source: ProposedActionCollection): void {
+  target.actions.push(...source.actions);
+  target.issues.push(...source.issues);
+  target.recognized = target.recognized || source.recognized;
 }
 
 function proposedActionMatchesFromText(text: string): ProposedActionMatch[] {
@@ -857,28 +964,20 @@ function proposedActionMatchesFromText(text: string): ProposedActionMatch[] {
     const end = findJsonObjectEnd(text, start);
     if (end === null) break;
     const block = text.slice(start, end);
-    const actions = proposedActionsFromJsonBlock(block);
-    if (actions.length > 0) matches.push({ start, end, actions });
+    const collection = proposedActionCollectionFromJsonBlock(block, false);
+    if (collection.recognized) matches.push({ start, end, collection });
     index = end;
   }
   return matches;
 }
 
-function proposedActionsFromJsonBlock(block: string): ProposedAction[] {
-  try {
-    return proposedActionsFromValue(JSON.parse(block) as unknown);
-  } catch {
-    return [];
+function collectProposedActionCandidates(value: unknown, out: ProposedActionCollection, depth: number): void {
+  if (depth > 6 || typeof value === "string") {
+    if (typeof value === "string" && containsProposedAction(value, 0)) {
+      mergeProposedActionCollection(out, proposedActionCollectionFromJsonText(value));
+    }
+    return;
   }
-}
-
-function proposedActionsFromValue(value: unknown): ProposedAction[] {
-  const actions: ProposedAction[] = [];
-  collectProposedActionCandidates(value, actions, 0);
-  return actions;
-}
-
-function collectProposedActionCandidates(value: unknown, out: ProposedAction[], depth: number): void {
   if (depth > 6 || value === null || typeof value !== "object") return;
   if (Array.isArray(value)) {
     for (const item of value) collectProposedActionCandidates(item, out, depth + 1);
@@ -886,13 +985,90 @@ function collectProposedActionCandidates(value: unknown, out: ProposedAction[], 
   }
   const record = value as Record<string, unknown>;
   if (record.quay_proposed_action !== undefined) {
+    out.recognized = true;
     collectProposedActionCandidates(record.quay_proposed_action, out, depth + 1);
     return;
   }
 
+  const typed = typedProposedActionFromRecord(record);
+  if (typed !== null) {
+    out.recognized = true;
+    if ("action" in typed) out.actions.push(typed.action);
+    else out.issues.push(typed.issue);
+    return;
+  }
+
   const action = proposedActionFromRecord(record);
-  if (action !== null) out.push(action);
+  if (action !== null) {
+    out.recognized = true;
+    out.actions.push(action);
+  }
   for (const child of Object.values(record)) collectProposedActionCandidates(child, out, depth + 1);
+}
+
+function typedProposedActionFromRecord(
+  record: Record<string, unknown>,
+): { action: ProposedAction } | { issue: ProposedActionIssue } | null {
+  const rawType = readString(record, "type");
+  if (rawType === null) return null;
+  const type = rawType.trim();
+  if (!type.startsWith("quay.")) return null;
+  if (type !== "quay.resume_task") {
+    return {
+      issue: {
+        code: "quay_proposed_action_unsupported",
+        message: `Unsupported Quay proposed action: ${truncateEventDetail(type)}`,
+        details: { action_type: truncateEventDetail(type) },
+      },
+    };
+  }
+
+  const taskId = readString(record, "task_id") ?? readString(record, "taskId");
+  const brief = readString(record, "brief");
+  const missing: string[] = [];
+  if (taskId === null || taskId.trim() === "") missing.push("task_id");
+  if (brief === null || brief.trim() === "") missing.push("brief");
+  if (missing.length > 0) {
+    return {
+      issue: {
+        code: "quay_proposed_action_invalid",
+        message: "Invalid quay.resume_task proposed action",
+        details: { action_type: "quay.resume_task", missing_fields: missing },
+      },
+    };
+  }
+
+  const reason = cleanOptionalActionString(readString(record, "reason"));
+  const expectedOutcome = cleanOptionalActionString(
+    readString(record, "expected_outcome") ?? readString(record, "expectedOutcome"),
+  );
+  const scope = cleanOptionalActionString(readString(record, "scope"));
+  const externalRef = cleanOptionalActionString(readString(record, "external_ref") ?? readString(record, "externalRef"));
+  const normalized: AgentApprovalAction = {
+    type: "quay.resume_task",
+    taskId: truncateEventDetail(taskId!.trim()),
+    ...(reason === undefined ? {} : { reason }),
+    brief: truncateEventDetail(brief!.trim()),
+    ...(expectedOutcome === undefined ? {} : { expectedOutcome }),
+    ...(scope === undefined ? {} : { scope }),
+    ...(externalRef === undefined ? {} : { externalRef }),
+  };
+  const approvalId = readString(record, "approval_id") ??
+    readString(record, "approvalId") ??
+    `approval_${hashString(JSON.stringify(normalized))}`;
+
+  return {
+    action: {
+      approvalId: truncateEventDetail(approvalId.trim()),
+      title: "Resume task",
+      previewKind: "intent",
+      command: resumeTaskIntentPreview(normalized),
+      description: resumeTaskDescription(normalized),
+      affects: resumeTaskAffects(normalized),
+      note: "Typed Quay action",
+      action: normalized,
+    },
+  };
 }
 
 function proposedActionFromRecord(record: Record<string, unknown>): ProposedAction | null {
@@ -906,11 +1082,44 @@ function proposedActionFromRecord(record: Record<string, unknown>): ProposedActi
   const note = readString(record, "note");
   return {
     approvalId: truncateEventDetail(approvalId.trim()),
+    previewKind: "command",
     command: truncateEventDetail(command.trim()),
     description: truncateEventDetail(description.trim()),
     affects: affectsFromProposedAction(record.affects),
     ...(note === null || note.trim() === "" ? {} : { note: truncateEventDetail(note.trim()) }),
   };
+}
+
+function cleanOptionalActionString(value: string | null): string | undefined {
+  if (value === null || value.trim() === "") return undefined;
+  return truncateEventDetail(value.trim());
+}
+
+function resumeTaskIntentPreview(action: Extract<AgentApprovalAction, { type: "quay.resume_task" }>): string {
+  return [
+    `quay.resume_task task_id=${action.taskId}`,
+    action.reason === undefined ? "" : `reason=${action.reason}`,
+    action.scope === undefined ? "" : `scope=${action.scope}`,
+  ].filter((part) => part !== "").join(" ");
+}
+
+function resumeTaskDescription(action: Extract<AgentApprovalAction, { type: "quay.resume_task" }>): string {
+  const lines = [
+    `Resume task ${action.taskId}${action.externalRef === undefined ? "" : ` (${action.externalRef})`}.`,
+  ];
+  if (action.reason !== undefined) lines.push(`Reason: ${action.reason}`);
+  lines.push(`Brief: ${action.brief}`);
+  if (action.expectedOutcome !== undefined) lines.push(`Expected outcome: ${action.expectedOutcome}`);
+  return truncateEventDetail(lines.join("\n"));
+}
+
+function resumeTaskAffects(action: Extract<AgentApprovalAction, { type: "quay.resume_task" }>): Array<{ label: string; value: string }> {
+  return [
+    { label: "task", value: action.taskId },
+    ...(action.externalRef === undefined ? [] : [{ label: "external ref", value: action.externalRef }]),
+    ...(action.scope === undefined ? [] : [{ label: "scope", value: action.scope }]),
+    ...(action.reason === undefined ? [] : [{ label: "reason", value: action.reason }]),
+  ];
 }
 
 function affectsFromProposedAction(value: unknown): Array<{ label: string; value: string }> {
@@ -966,13 +1175,37 @@ function readRecord(value: unknown, key: string): Record<string, unknown> | null
     : null;
 }
 
+function firstProposedActionTokenIndex(text: string): number {
+  const objectStart = text.indexOf("{");
+  const envelopeStart = text.indexOf(PROPOSED_ACTION_OPEN_TAG);
+  if (objectStart === -1) return envelopeStart;
+  if (envelopeStart === -1) return objectStart;
+  return Math.min(objectStart, envelopeStart);
+}
+
+function trailingProposedActionOpenPrefixStart(text: string): number {
+  const maxLength = Math.min(PROPOSED_ACTION_OPEN_TAG.length - 1, text.length);
+  for (let length = maxLength; length > 0; length -= 1) {
+    if (PROPOSED_ACTION_OPEN_TAG.startsWith(text.slice(text.length - length))) {
+      return text.length - length;
+    }
+  }
+  return -1;
+}
+
 function containsProposedAction(value: unknown, depth: number): boolean {
   if (depth > 6) return false;
-  if (typeof value === "string") return value.includes("quay_proposed_action");
+  if (typeof value === "string") {
+    return value.includes("quay_proposed_action") ||
+      value.includes(PROPOSED_ACTION_OPEN_TAG) ||
+      /"type"\s*:\s*"quay\./.test(value);
+  }
   if (Array.isArray(value)) return value.some((item) => containsProposedAction(item, depth + 1));
   if (value === null || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
+  const type = readString(record, "type");
   return record.quay_proposed_action !== undefined ||
+    (type !== null && type.trim().startsWith("quay.")) ||
     Object.values(record).some((child) => containsProposedAction(child, depth + 1));
 }
 
@@ -1100,6 +1333,9 @@ function approvalDecisionFollowUp(input: {
   if (approval !== undefined) {
     lines.push(`Command: ${approval.command}`);
     lines.push(`Description: ${approval.description}`);
+    if (approval.action !== undefined) {
+      lines.push(`Typed action: ${JSON.stringify(approval.action)}`);
+    }
     if (approval.affects.length > 0) {
       lines.push(`Affected resources: ${approval.affects.map((item) => `${item.label}=${item.value}`).join(", ")}`);
     }

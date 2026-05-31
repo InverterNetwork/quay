@@ -33,10 +33,18 @@ test('normalizes tool, reference, and approval lifecycle events', () => {
       type: 'approval_required',
       messageId: 'agent-1',
       approvalId: 'approval-1',
+      title: 'Resume task',
+      previewKind: 'intent',
       command: 'quay task retry abc123',
       description: 'Retry task abc123.',
       affects: [{ label: 'task', value: 'abc123' }],
       note: 'Safe retry',
+      action: {
+        type: 'quay.resume_task',
+        taskId: 'abc123',
+        reason: 'blocker_resolved',
+        brief: 'Retry with the resolved dependency.',
+      },
     },
     capturedAt,
   );
@@ -47,7 +55,15 @@ test('normalizes tool, reference, and approval lifecycle events', () => {
   expect(parts.map((part) => part.kind)).toEqual(['tool', 'reference', 'approval']);
   expect(parts[0]).toMatchObject({ kind: 'tool', toolCallId: 'scan', detail: '17 tasks', status: 'done' });
   expect(parts[1]).toMatchObject({ kind: 'reference', refKind: 'task', refId: 'abc123', tone: 'warn' });
-  expect(parts[2]).toMatchObject({ kind: 'approval', status: 'succeeded', exitCode: 0, output: ['ok'] });
+  expect(parts[2]).toMatchObject({
+    kind: 'approval',
+    title: 'Resume task',
+    previewKind: 'intent',
+    action: { type: 'quay.resume_task', taskId: 'abc123' },
+    status: 'succeeded',
+    exitCode: 0,
+    output: ['ok'],
+  });
 });
 
 test('ignores approval updates for missing messages', () => {

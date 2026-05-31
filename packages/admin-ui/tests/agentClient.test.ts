@@ -44,6 +44,33 @@ test('parses Server-Sent Events AgentEvents', async () => {
   ]);
 });
 
+test('parses typed resume-task approval AgentEvents', async () => {
+  const approval = {
+    type: 'approval_required',
+    messageId: 'agent-1',
+    approvalId: 'approval-resume',
+    title: 'Resume task',
+    previewKind: 'intent',
+    command: 'quay.resume_task task_id=abc123 reason=blocker_resolved',
+    description: 'Resume task abc123.',
+    affects: [{ label: 'task', value: 'abc123' }],
+    action: {
+      type: 'quay.resume_task',
+      taskId: 'abc123',
+      reason: 'blocker_resolved',
+      brief: 'Continue after the dependency landed.',
+    },
+  };
+  const response = streamResponse([`${JSON.stringify(approval)}\n`], 'application/x-ndjson');
+
+  const events: AgentEvent[] = [];
+  for await (const event of parseAgentEventStream(response)) {
+    events.push(event);
+  }
+
+  expect(events).toEqual([approval]);
+});
+
 test('client posts context to gateway endpoints and streams normalized events', async () => {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const client = new AgentGatewayClient({

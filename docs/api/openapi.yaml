@@ -1425,6 +1425,13 @@ components:
           type: string
         approvalId:
           type: string
+        title:
+          type: string
+        previewKind:
+          type: string
+          enum:
+            - command
+            - intent
         command:
           type: string
         description:
@@ -1434,6 +1441,38 @@ components:
           items:
             $ref: "#/components/schemas/AgentAffectedResource"
         note:
+          type: string
+        action:
+          $ref: "#/components/schemas/AgentApprovalAction"
+    AgentApprovalAction:
+      oneOf:
+        - $ref: "#/components/schemas/AgentResumeTaskAction"
+      discriminator:
+        propertyName: type
+        mapping:
+          quay.resume_task: "#/components/schemas/AgentResumeTaskAction"
+    AgentResumeTaskAction:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - taskId
+        - brief
+      properties:
+        type:
+          type: string
+          const: quay.resume_task
+        taskId:
+          type: string
+        reason:
+          type: string
+        brief:
+          type: string
+        expectedOutcome:
+          type: string
+        scope:
+          type: string
+        externalRef:
           type: string
     AgentCommandOutputEvent:
       type: object

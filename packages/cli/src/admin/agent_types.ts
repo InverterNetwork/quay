@@ -1,4 +1,16 @@
 export type AgentReferenceTone = "neutral" | "good" | "warn" | "danger";
+export type AgentApprovalPreviewKind = "command" | "intent";
+
+export type AgentApprovalAction =
+  | {
+    type: "quay.resume_task";
+    taskId: string;
+    reason?: string;
+    brief: string;
+    expectedOutcome?: string;
+    scope?: string;
+    externalRef?: string;
+  };
 
 export type AgentEvent =
   | { type: "message_start"; messageId: string; role: "agent"; model?: string }
@@ -24,10 +36,13 @@ export type AgentEvent =
     type: "approval_required";
     messageId: string;
     approvalId: string;
+    title?: string;
+    previewKind?: AgentApprovalPreviewKind;
     command: string;
     description: string;
     affects: Array<{ label: string; value: string }>;
     note?: string;
+    action?: AgentApprovalAction;
   }
   | { type: "command_output"; messageId: string; approvalId: string; line: string }
   | {
@@ -54,10 +69,13 @@ export type AgentFetch = (input: string | URL | Request, init?: RequestInit) => 
 export interface AgentApproval {
   messageId: string;
   approvalId: string;
+  title?: string;
+  previewKind?: AgentApprovalPreviewKind;
   command: string;
   description: string;
   affects: Array<{ label: string; value: string }>;
   note?: string;
+  action?: AgentApprovalAction;
 }
 
 export interface AgentSession {
