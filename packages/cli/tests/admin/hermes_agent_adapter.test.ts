@@ -347,6 +347,7 @@ test("HermesAgentAdapter ignores harmless lifecycle events without exposing raw 
       { type: "run.snapshot", status: "running", payload: { fullNativeShape: "not-for-frontend" } },
       { type: "session.snapshot", payload: { raw: "SESSION_SNAPSHOT_SECRET" } },
       { type: "response.in_progress", payload: { raw: "RESPONSE_STATUS_SECRET" } },
+      { type: "reasoning.available", payload: { raw: "REASONING_AVAILABLE_SECRET" } },
       { type: "thread.run.step.created", payload: { raw: "STEP_STATUS_SECRET" } },
       { type: "thread.run.step.completed", payload: { raw: "STEP_DONE_SECRET" } },
       { type: "response.output_text.done", text: "FULL_DUPLICATE_TEXT", payload: { raw: "OUTPUT_TEXT_DONE_SECRET" } },
@@ -408,6 +409,7 @@ test("HermesAgentAdapter ignores harmless lifecycle events without exposing raw 
   expect(serialized).not.toContain("fullNativeShape");
   expect(serialized).not.toContain("SESSION_SNAPSHOT_SECRET");
   expect(serialized).not.toContain("RESPONSE_STATUS_SECRET");
+  expect(serialized).not.toContain("REASONING_AVAILABLE_SECRET");
   expect(serialized).not.toContain("STEP_STATUS_SECRET");
   expect(serialized).not.toContain("STEP_DONE_SECRET");
   expect(serialized).not.toContain("FULL_DUPLICATE_TEXT");

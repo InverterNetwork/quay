@@ -884,6 +884,7 @@ function isIgnorableHermesEvent(record: Record<string, unknown>, type: string): 
     type.includes("queue") ||
     type.includes("queued") ||
     type.includes("progress") ||
+    type === "reasoning.available" ||
     type.includes("status") ||
     type.includes("session") ||
     type.includes("thread") ||
