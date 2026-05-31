@@ -515,10 +515,10 @@ class HermesEventMapper {
       return { events: approvals, done: false };
     }
 
-    if (isRunCompletedEvent(type)) {
+    if (isRunCompletedEvent(type, record)) {
       return { events: [...this.flush(), { type: "message_done", messageId: this.messageId }], done: true };
     }
-    if (isRunCancelledEvent(type)) {
+    if (isRunCancelledEvent(type, record)) {
       return {
         events: [
           ...this.flush(),
@@ -534,7 +534,7 @@ class HermesEventMapper {
         done: true,
       };
     }
-    if (isRunFailedEvent(type)) {
+    if (isRunFailedEvent(type, record)) {
       return {
         events: [
           ...this.flush(),
@@ -655,6 +655,7 @@ function textDeltaFromHermesEvent(
   record: Record<string, unknown>,
   type: string,
 ): string | null {
+  if (isTextBookkeepingEvent(type)) return null;
   const isTextSignal = type.includes("delta") || type.includes("text") || type.includes("assistant");
   const direct = readString(record, "text") ??
     readString(record, "delta") ??
@@ -670,26 +671,76 @@ function textDeltaFromHermesEvent(
   return null;
 }
 
+function isTextBookkeepingEvent(type: string): boolean {
+  return (
+    type.includes("output.text") ||
+    type.includes("output_text") ||
+    type.includes("content.part")
+  ) && (
+    type.includes(".done") ||
+    type.includes("completed") ||
+    type.includes("snapshot")
+  );
+}
+
 function normalizeHermesEventType(type: string): string {
   return type.toLowerCase().replace(/_/g, ".").replace(/:/g, ".");
 }
 
 function isRunStartEvent(type: string): boolean {
-  return type.includes("run") && (type.includes("created") || type.includes("started") || type.endsWith(".start"));
+  return isRunLikeEvent(type) &&
+    (type.includes("created") || type.includes("started") || type.endsWith(".start"));
 }
 
-function isRunCompletedEvent(type: string): boolean {
-  return (type.includes("run") || type.includes("response")) &&
-    (type.includes("completed") || type.endsWith(".done") || type.endsWith(".succeeded"));
+function isRunCompletedEvent(type: string, record: Record<string, unknown>): boolean {
+  const combined = `${type}.${hermesEventLifecycleStatus(record)}`;
+  return isRunLikeEvent(type) &&
+    (combined.includes("completed") || type.endsWith(".done") || combined.includes(".done.") ||
+      combined.includes("succeeded"));
 }
 
-function isRunCancelledEvent(type: string): boolean {
-  return type.includes("run") && (type.includes("cancelled") || type.includes("canceled"));
+function isRunCancelledEvent(type: string, record: Record<string, unknown>): boolean {
+  const combined = `${type}.${hermesEventLifecycleStatus(record)}`;
+  return isRunLikeEvent(type) && (combined.includes("cancelled") || combined.includes("canceled"));
 }
 
-function isRunFailedEvent(type: string): boolean {
-  return (type.includes("run") || type.includes("response")) &&
-    (type.includes("failed") || type.endsWith(".error"));
+function isRunFailedEvent(type: string, record: Record<string, unknown>): boolean {
+  const combined = `${type}.${hermesEventLifecycleStatus(record)}.${hermesEventCode(record)}`;
+  return isRunLikeEvent(type) &&
+    (combined.includes("failed") || combined.endsWith(".error") || combined.includes(".error."));
+}
+
+function isRunLikeEvent(type: string): boolean {
+  if (
+    type.includes(".step.") ||
+    type.includes(".message.") ||
+    type.includes(".output.text.") ||
+    type.includes(".output.item.") ||
+    type.includes(".content.part.")
+  ) {
+    return false;
+  }
+  return type === "run" ||
+    type.startsWith("run.") ||
+    type === "response" ||
+    type.startsWith("response.") ||
+    type === "thread.run" ||
+    type.startsWith("thread.run.");
+}
+
+function hermesEventLifecycleStatus(record: Record<string, unknown>): string {
+  return normalizeHermesEventType(
+    readString(record, "status") ??
+      readString(record, "state") ??
+      readString(record, "phase") ??
+      readString(record, "run_status") ??
+      readString(record, "runStatus") ??
+      "",
+  );
+}
+
+function hermesEventCode(record: Record<string, unknown>): string {
+  return normalizeHermesEventType(readString(record, "code") ?? readString(record, "error_code") ?? "");
 }
 
 function toolCallFromHermesEvent(
@@ -823,11 +874,36 @@ function isCommandOutputEvent(type: string): boolean {
 
 function isIgnorableHermesEvent(record: Record<string, unknown>, type: string): boolean {
   if (type === "" && Object.keys(record).length === 0) return true;
+  if (isFailureLikeHermesEvent(record, type)) return false;
   return type.includes("debug") ||
     type.includes("heartbeat") ||
     type.includes("ping") ||
     type.includes("metrics") ||
-    type.includes("trace");
+    type.includes("trace") ||
+    type.includes("snapshot") ||
+    type.includes("queue") ||
+    type.includes("queued") ||
+    type.includes("progress") ||
+    type.includes("status") ||
+    type.includes("session") ||
+    type.includes("thread") ||
+    type.includes("message") ||
+    type.includes("step") ||
+    type.includes("created") ||
+    type.includes("in.progress") ||
+    type.includes("output.text") ||
+    type.includes("output.item") ||
+    type.includes("content.part");
+}
+
+function isFailureLikeHermesEvent(record: Record<string, unknown>, type: string): boolean {
+  const combined = `${type}.${hermesEventLifecycleStatus(record)}.${hermesEventCode(record)}`;
+  return combined.includes("failed") ||
+    combined.includes("failure") ||
+    combined.includes("cancelled") ||
+    combined.includes("canceled") ||
+    combined.endsWith(".error") ||
+    combined.includes(".error.");
 }
 
 function approvalEventsFromHermesEvent(

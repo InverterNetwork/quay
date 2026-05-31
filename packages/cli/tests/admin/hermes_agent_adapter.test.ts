@@ -334,17 +334,36 @@ test("HermesAgentAdapter does not expose raw tool payload content in tool detail
   expect(serialized).not.toContain("raw-progress-token");
 });
 
-test("HermesAgentAdapter emits structured errors for unsupported non-debug events", async () => {
+test("HermesAgentAdapter ignores harmless lifecycle events without exposing raw payloads", async () => {
   const fetchImpl: AgentFetch = async (input) => {
     const path = new URL(String(input)).pathname;
     if (path === "/health") return jsonResponse({ status: "ok" });
     if (path === "/v1/capabilities") {
       return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
     }
-    if (path === "/v1/runs") return jsonResponse({ run_id: "run-unsupported" });
+    if (path === "/v1/runs") return jsonResponse({ run_id: "run-lifecycle-noise" });
     return sseResponse([
       { type: "hermes.debug", payload: { nativeEvent: "ignored" } },
-      { type: "run.snapshot", payload: { fullNativeShape: "not-for-frontend" } },
+      { type: "run.snapshot", status: "running", payload: { fullNativeShape: "not-for-frontend" } },
+      { type: "session.snapshot", payload: { raw: "SESSION_SNAPSHOT_SECRET" } },
+      { type: "response.in_progress", payload: { raw: "RESPONSE_STATUS_SECRET" } },
+      { type: "thread.run.step.created", payload: { raw: "STEP_STATUS_SECRET" } },
+      { type: "thread.run.step.completed", payload: { raw: "STEP_DONE_SECRET" } },
+      { type: "response.output_text.done", text: "FULL_DUPLICATE_TEXT", payload: { raw: "OUTPUT_TEXT_DONE_SECRET" } },
+      {
+        type: "tool.started",
+        tool_call_id: "tool-noise",
+        name: "quay status",
+        input: { raw: "TOOL_INPUT_SECRET" },
+      },
+      {
+        type: "tool.completed",
+        tool_call_id: "tool-noise",
+        name: "quay status",
+        output: { raw: "TOOL_OUTPUT_SECRET" },
+      },
+      { type: "message.snapshot", payload: { raw: "MESSAGE_SNAPSHOT_SECRET" } },
+      { type: "assistant.delta", delta: "Done." },
       { type: "run.completed" },
     ]);
   };
@@ -371,20 +390,79 @@ test("HermesAgentAdapter emits structured errors for unsupported non-debug event
 
   expect(events.map((event) => event.type)).toEqual([
     "message_start",
+    "tool_call",
+    "tool_call",
+    "text_delta",
+    "message_done",
+  ]);
+  expect(events.filter((event) => event.type === "tool_call")).toMatchObject([
+    { toolCallId: "tool-noise", label: "quay status", status: "running", detail: "Tool input available" },
+    { toolCallId: "tool-noise", label: "quay status", status: "done", detail: "Tool output available" },
+  ]);
+  expect(events.filter((event) => event.type === "text_delta")).toEqual([
+    { type: "text_delta", messageId: expect.any(String), text: "Done." },
+  ]);
+  const serialized = JSON.stringify(events);
+  expect(serialized).not.toContain("hermes.debug");
+  expect(serialized).not.toContain("nativeEvent");
+  expect(serialized).not.toContain("fullNativeShape");
+  expect(serialized).not.toContain("SESSION_SNAPSHOT_SECRET");
+  expect(serialized).not.toContain("RESPONSE_STATUS_SECRET");
+  expect(serialized).not.toContain("STEP_STATUS_SECRET");
+  expect(serialized).not.toContain("STEP_DONE_SECRET");
+  expect(serialized).not.toContain("FULL_DUPLICATE_TEXT");
+  expect(serialized).not.toContain("OUTPUT_TEXT_DONE_SECRET");
+  expect(serialized).not.toContain("MESSAGE_SNAPSHOT_SECRET");
+  expect(serialized).not.toContain("TOOL_INPUT_SECRET");
+  expect(serialized).not.toContain("TOOL_OUTPUT_SECRET");
+});
+
+test("HermesAgentAdapter surfaces failed run snapshots as visible run errors", async () => {
+  const fetchImpl: AgentFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/health") return jsonResponse({ status: "ok" });
+    if (path === "/v1/capabilities") {
+      return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+    }
+    if (path === "/v1/runs") return jsonResponse({ run_id: "run-failed-snapshot" });
+    return sseResponse([
+      { type: "run.snapshot", status: "failed", code: "tool_failed", payload: { raw: "FAILED_SNAPSHOT_SECRET" } },
+    ]);
+  };
+  const adapter = new HermesAgentAdapter({
+    config: {
+      apiBaseUrl: "http://hermes.local",
+      apiKey: "secret-key",
+      model: "hermes-test",
+      sessionKeyPrefix: "quay-dev",
+    },
+    fetch: fetchImpl,
+  });
+  const session = makeSession();
+  await adapter.createSession({ session });
+
+  const events: AgentEvent[] = [];
+  for await (const event of adapter.sendMessage({
+    session,
+    message: "Inspect failed snapshot",
+    context: contextFixture,
+  })) {
+    events.push(event);
+  }
+
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
     "error",
     "message_done",
   ]);
   expect(events.find((event) => event.type === "error")).toMatchObject({
     type: "error",
-    code: "hermes_event_unsupported",
-    message: "Hermes emitted an unsupported event shape",
+    code: "hermes_run_failed",
+    message: "Hermes run failed: tool_failed",
     recoverable: true,
     details: { event_type: "run.snapshot" },
   });
-  const serialized = JSON.stringify(events);
-  expect(serialized).not.toContain("hermes.debug");
-  expect(serialized).not.toContain("nativeEvent");
-  expect(serialized).not.toContain("fullNativeShape");
+  expect(JSON.stringify(events)).not.toContain("FAILED_SNAPSHOT_SECRET");
 });
 
 test("HermesAgentAdapter extracts proposed actions from streamed assistant text", async () => {
