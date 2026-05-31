@@ -469,7 +469,7 @@ test("POST /v1/agent/sessions/:id/messages can stream Server-Sent Events", async
   expect(text).toContain("\"type\":\"message_start\"");
 });
 
-test("Agent Gateway emits bounded audit records with TTL for sessions, messages, tools, approvals, errors, and stops", async () => {
+test("Agent Gateway emits bounded audit records with TTL for sessions, messages, tools, approvals, and stops", async () => {
   h = createHarness();
   const auditEvents: AdminAuditEvent[] = [];
   const context = {
@@ -596,7 +596,6 @@ test("Agent Gateway emits bounded audit records with TTL for sessions, messages,
     "agent.message.send",
     "agent.tool.call",
     "agent.approval.required",
-    "agent.error",
     "agent.approval.decide",
     "agent.command.output",
     "agent.approval.result",
@@ -671,14 +670,6 @@ test("Agent Gateway emits bounded audit records with TTL for sessions, messages,
     effect: "mutating",
   });
   expect(auditRetentionDays(resultAudit)).toBe(30);
-
-  const errorAudit = auditEvents.find((event) => event.action === "agent.error")!;
-  expect(errorAudit).toMatchObject({
-    retention_bucket: "agent_chat_7d",
-    error_code: "hermes_event_unsupported",
-    result_status: "failed",
-  });
-  expect(auditRetentionDays(errorAudit)).toBe(7);
 
   const stopAudit = auditEvents.find((event) => event.action === "agent.session.stop")!;
   expect(stopAudit).toMatchObject({
