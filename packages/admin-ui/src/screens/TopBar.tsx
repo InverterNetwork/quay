@@ -11,6 +11,7 @@ import { Icon } from '../icons/Icon';
 import { Button } from '../components/Button';
 import type { Tone } from '../styles/tones';
 import { AgentTrigger } from '../agent/AgentDrawer';
+import type { OperatorIdentity } from '../operatorIdentity';
 
 interface BackendStatus {
   tone: Tone;
@@ -24,11 +25,21 @@ interface TopBarProps {
   backendStatus: BackendStatus;
   agentOpen: boolean;
   agentTriggerRef: RefObject<HTMLButtonElement>;
+  operatorIdentity: OperatorIdentity;
   onAgentToggle: () => void;
   onModeToggle: () => void;
 }
 
-export function TopBar({ crumbs, mode, backendStatus, agentOpen, agentTriggerRef, onAgentToggle, onModeToggle }: TopBarProps) {
+export function TopBar({
+  crumbs,
+  mode,
+  backendStatus,
+  agentOpen,
+  agentTriggerRef,
+  operatorIdentity,
+  onAgentToggle,
+  onModeToggle,
+}: TopBarProps) {
   return (
     <header
       style={{
@@ -80,7 +91,7 @@ export function TopBar({ crumbs, mode, backendStatus, agentOpen, agentTriggerRef
       >
         {mode === 'light' ? <Icon.Moon size={14} /> : <Icon.Sun size={14} />}
       </Button>
-      <Avatar name="Mira Tonio" size={28} tone="accent" />
+      <Avatar name={operatorIdentity.avatarName} size={28} tone="accent" />
     </header>
   );
 }

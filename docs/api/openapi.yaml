@@ -553,6 +553,7 @@ components:
         - service
         - api_version
         - quay_version
+        - viewer
       properties:
         service:
           type: string
@@ -562,6 +563,29 @@ components:
           const: v1
         quay_version:
           type: string
+        viewer:
+          $ref: "#/components/schemas/MetaViewer"
+    MetaViewer:
+      type: object
+      additionalProperties: false
+      required:
+        - label
+        - display_name
+        - slack_user_id
+      properties:
+        label:
+          type: string
+          description: Display label for the current Admin UI operator.
+        display_name:
+          type:
+            - string
+            - "null"
+          description: Trusted upstream display name, when forwarded.
+        slack_user_id:
+          type:
+            - string
+            - "null"
+          description: Trusted upstream Slack user id, when forwarded.
     MissionControlReadModel:
       type: object
       additionalProperties: false

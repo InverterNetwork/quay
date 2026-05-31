@@ -463,6 +463,11 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
         service: "quay",
         api_version: ADMIN_API_VERSION,
         quay_version: runtime.version,
+        viewer: {
+          label: auth.audit.display_name ?? "You",
+          display_name: auth.audit.display_name,
+          slack_user_id: auth.audit.slack_user_id,
+        },
       }, 200, cors.headers);
     }
 

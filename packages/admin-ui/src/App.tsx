@@ -6,6 +6,7 @@ import { useQuayAdminReadModel } from './api/quayAdmin';
 import { buildMissionControlAgentContext } from './mission-control/agentContext';
 import { MissionControlPage } from './mission-control/MissionControlPage';
 import { useMissionControlTasks } from './mission-control/useMissionControlTasks';
+import { resolveOperatorIdentity } from './operatorIdentity';
 import { ApiErrorScreen, ApiLoadingScreen } from './screens/ApiStateScreen';
 import { ArchiveConfirmDialog } from './screens/ArchiveConfirmDialog';
 import { EmptyScreen } from './screens/EmptyScreen';
@@ -77,6 +78,7 @@ export function App() {
   const repos = empty ? [] : admin.repos;
   const workerPreamble = admin.global?.preambles.find((preamble) => preamble.kind === 'code') ?? null;
   const reviewerPreamble = admin.global?.preambles.find((preamble) => preamble.kind === 'review') ?? null;
+  const operatorIdentity = resolveOperatorIdentity(admin.meta?.viewer);
   const drawerPreamble =
     overlay?.type === 'preamble-drawer'
       ? overlay.kind === 'worker'
@@ -237,6 +239,7 @@ export function App() {
         backendStatus={status}
         agentOpen={agentOpen}
         agentTriggerRef={agentTriggerRef}
+        operatorIdentity={operatorIdentity}
         onAgentToggle={toggleAgent}
         onModeToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
       />
@@ -339,6 +342,7 @@ export function App() {
         adapter={hermesAdapter}
         ctx={AGENT_CTX}
         getUiContext={buildAgentUiContext}
+        operatorIdentity={operatorIdentity}
       />
 
       {import.meta.env.DEV && route === 'configuration' && <DevToggle empty={empty} onToggle={() => setEmpty((e) => !e)} />}
