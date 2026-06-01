@@ -355,23 +355,6 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
         </T>
       </div>
 
-      <HStack gap={5} wrap>
-        {task.repoUrl !== null ? (
-          <LinkChip href={task.repoUrl} leading={<Icon.Repo size={11} />} title={`Open ${task.repo} repository`}>
-            {task.repo}
-          </LinkChip>
-        ) : (
-          <Chip leading={<Icon.Repo size={11} />}>{task.repo}</Chip>
-        )}
-        {task.pr !== null && task.prUrl !== null && (
-          <LinkChip href={task.prUrl} leading={<Icon.GitPR size={11} />} title={`Open PR #${task.pr}`}>
-            {isUmbrella ? `final PR #${task.pr}` : `#${task.pr}`}
-          </LinkChip>
-        )}
-        {task.pr !== null && task.prUrl === null && <Chip leading={<Icon.GitPR size={11} />}>#{task.pr}</Chip>}
-        {agent !== null && <Chip leading={<Icon.Bot size={11} />}>{agent}</Chip>}
-      </HStack>
-
       {umbrellaChildren !== null && (
         <HStack gap={8} wrap>
           <T kind="caption" color="var(--ink-3)">
@@ -396,6 +379,23 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
           </T>
         </HStack>
       )}
+
+      <HStack gap={5} wrap>
+        {task.repoUrl !== null ? (
+          <LinkChip href={task.repoUrl} leading={<Icon.Repo size={11} />} title={`Open ${task.repo} repository`}>
+            {task.repo}
+          </LinkChip>
+        ) : (
+          <Chip leading={<Icon.Repo size={11} />}>{task.repo}</Chip>
+        )}
+        {task.pr !== null && task.prUrl !== null && (
+          <LinkChip href={task.prUrl} leading={<Icon.GitPR size={11} />} title={`Open PR #${task.pr}`}>
+            {isUmbrella ? `final PR #${task.pr}` : `#${task.pr}`}
+          </LinkChip>
+        )}
+        {task.pr !== null && task.prUrl === null && <Chip leading={<Icon.GitPR size={11} />}>#{task.pr}</Chip>}
+        {agent !== null && <Chip leading={<Icon.Bot size={11} />}>{agent}</Chip>}
+      </HStack>
 
       <Divider dashed />
 
