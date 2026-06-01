@@ -235,12 +235,16 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
   const attnTone = task.attnTone ?? (needsAttention(task) ? 'danger' : undefined);
   const agent = formatAgent(task.agent);
   const isReview = task.role === 'review';
+  const isUmbrella = task.role === 'umbrella';
+  const identity = isUmbrella ? task.umbrellaRef ?? task.ext : task.id;
+  const umbrellaChildren = isUmbrella ? task.umbrellaChildren : null;
   return (
     <article
       aria-label={`${task.id} · ${task.title}`}
       style={{
         background: 'var(--surface)',
         border: `1px solid ${highlight ? 'var(--accent-line)' : 'var(--line)'}`,
+        borderTop: isUmbrella ? '3px solid var(--accent)' : `1px solid ${highlight ? 'var(--accent-line)' : 'var(--line)'}`,
         borderRadius: 'var(--r-md)',
         padding: 12,
         display: 'flex',
@@ -270,9 +274,9 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
       <HStack gap={6}>
         <RoleTag role={task.role} />
         <T kind="mono-sm" color="var(--ink-3)">
-          {task.id}
+          {identity}
         </T>
-        {task.ext !== '—' && (
+        {!isUmbrella && task.ext !== '—' && (
           <>
             <T kind="mono-sm" color="var(--ink-4)">
               ·
@@ -328,12 +332,39 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
         )}
         {task.pr !== null && task.prUrl !== null && (
           <LinkChip href={task.prUrl} leading={<Icon.GitPR size={11} />} title={`Open PR #${task.pr}`}>
-            #{task.pr}
+            {isUmbrella ? `final PR #${task.pr}` : `#${task.pr}`}
           </LinkChip>
         )}
         {task.pr !== null && task.prUrl === null && <Chip leading={<Icon.GitPR size={11} />}>#{task.pr}</Chip>}
         {agent !== null && <Chip leading={<Icon.Bot size={11} />}>{agent}</Chip>}
       </HStack>
+
+      {umbrellaChildren !== null && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <T kind="caption" color="var(--ink-3)">
+            children
+          </T>
+          <HStack gap={6}>
+            <HStack gap={2}>
+              {Array.from({ length: Math.max(umbrellaChildren.total, 1) }, (_, index) => (
+                <span
+                  key={index}
+                  aria-hidden="true"
+                  style={{
+                    width: 8,
+                    height: 7,
+                    borderRadius: 1,
+                    background: index < umbrellaChildren.done ? 'var(--good)' : 'var(--line-2)',
+                  }}
+                />
+              ))}
+            </HStack>
+            <T kind="mono-sm" color="var(--ink-3)">
+              {umbrellaChildren.done}/{umbrellaChildren.total} merged
+            </T>
+          </HStack>
+        </div>
+      )}
 
       <Divider dashed />
 
@@ -341,6 +372,10 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
         {isReview ? (
           <T kind="mono-sm" color="var(--ink-4)" style={{ flexShrink: 0 }}>
             review · non-budget
+          </T>
+        ) : isUmbrella ? (
+          <T kind="mono-sm" color="var(--ink-4)" style={{ flexShrink: 0 }}>
+            umbrella workflow
           </T>
         ) : (
           <BudgetMeter used={task.budget} total={task.total} />
@@ -369,6 +404,7 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
 
 function RoleTag({ role }: { role: MissionControlTaskRole }) {
   const isReview = role === 'review';
+  const isUmbrella = role === 'umbrella';
   return (
     <span
       style={{
@@ -387,10 +423,10 @@ function RoleTag({ role }: { role: MissionControlTaskRole }) {
         lineHeight: 1,
         flexShrink: 0,
       }}
-      title={isReview ? 'Review task' : 'Worker task'}
+      title={isUmbrella ? 'Umbrella workflow' : isReview ? 'Review task' : 'Worker task'}
     >
-      {isReview ? <Icon.GitPR size={11} /> : <Icon.Bot size={11} />}
-      {isReview ? 'Review' : 'Worker'}
+      {isUmbrella ? <Icon.Anchor size={11} /> : isReview ? <Icon.GitPR size={11} /> : <Icon.Bot size={11} />}
+      {isUmbrella ? 'Umbrella' : isReview ? 'Review' : 'Worker'}
     </span>
   );
 }

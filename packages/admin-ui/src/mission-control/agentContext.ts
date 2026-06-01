@@ -57,6 +57,8 @@ function taskToContextSummary(task: MissionControlTask): MissionControlContext['
     id: task.id,
     role: task.role,
     reviewStatus: task.reviewStatus,
+    umbrellaRef: task.umbrellaRef,
+    umbrellaChildren: task.umbrellaChildren,
     externalRef: task.ext === '—' ? null : task.ext,
     repo: task.repo,
     title: task.title,

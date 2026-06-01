@@ -191,7 +191,12 @@ type AdminMissionControlAttnReason =
   | "budget"
   | "loop"
   | "worktree";
-type AdminMissionControlTaskRole = "worker" | "review";
+type AdminMissionControlTaskRole = "worker" | "review" | "umbrella";
+
+interface AdminMissionControlUmbrellaChildren {
+  done: number;
+  total: number;
+}
 
 interface AdminMissionControlTask {
   id: string;
@@ -206,6 +211,8 @@ interface AdminMissionControlTask {
   isReviewOnly: boolean;
   role: AdminMissionControlTaskRole;
   reviewStatus: string | null;
+  umbrellaRef: string | null;
+  umbrellaChildren: AdminMissionControlUmbrellaChildren | null;
   budget: number;
   total: number;
   latest: string;
@@ -635,6 +642,10 @@ interface MissionControlTaskRow {
   reviewer_model: string | null;
   goal_objective: string | null;
   objective_file_path: string | null;
+  umbrella_ref: string | null;
+  umbrella_title: string | null;
+  umbrella_children_done: number | null;
+  umbrella_children_total: number | null;
   updated_at: string;
   created_at: string;
 }
@@ -695,7 +706,9 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
     .query<MissionControlTaskRow, SQLQueryBindings[]>(
       `WITH candidate_tasks AS (
          SELECT t.task_id, t.repo_id, r.repo_url, t.external_ref, t.state, t.authoring_mode, t.branch_name,
-                t.pr_number, t.pr_url, t.pr_title, t.attempts_consumed, t.retry_budget, t.authors_json,
+                COALESCE(t.pr_number, uw.final_pr_number) AS pr_number,
+                COALESCE(t.pr_url, uw.final_pr_url) AS pr_url,
+                t.pr_title, t.attempts_consumed, t.retry_budget, t.authors_json,
                 t.worker_agent, t.worker_model, t.reviewer_agent, t.reviewer_model,
                 tg.objective AS goal_objective,
                 (
@@ -707,6 +720,27 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                    ORDER BY ar.artifact_id ASC
                    LIMIT 1
                 ) AS objective_file_path,
+                uw.external_ref AS umbrella_ref,
+                uw.linear_issue_title AS umbrella_title,
+                (
+                  SELECT COUNT(*)
+                    FROM umbrella_expected_tasks uet
+                    LEFT JOIN umbrella_tasks ut
+                      ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
+                     AND ut.external_ref = uet.external_ref
+                    LEFT JOIN tasks child
+                      ON child.task_id = ut.task_id
+                   WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+                     AND (
+                          uet.state = 'complete_without_quay'
+                       OR child.state = 'merged_to_feature_branch'
+                     )
+                ) AS umbrella_children_done,
+                (
+                  SELECT COUNT(*)
+                    FROM umbrella_expected_tasks uet
+                   WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+                ) AS umbrella_children_total,
                 t.updated_at, t.created_at,
                 CASE
                   WHEN t.state IN (${sqlPlaceholders(MISSION_CONTROL_TERMINAL_STATE_LIST)})
@@ -716,6 +750,7 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
            FROM tasks t
            JOIN repos r ON r.repo_id = t.repo_id
            LEFT JOIN task_goals tg ON tg.task_id = t.task_id
+           LEFT JOIN umbrella_workflows uw ON uw.final_pr_task_id = t.task_id
           WHERE r.archived_at IS NULL
             AND t.state IN (${sqlPlaceholders(TASK_STATES)})
        ),
@@ -730,7 +765,9 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
        SELECT task_id, repo_id, repo_url, external_ref, state, authoring_mode, branch_name,
               pr_number, pr_url, pr_title, attempts_consumed, retry_budget, authors_json,
               worker_agent, worker_model, reviewer_agent, reviewer_model,
-              goal_objective, objective_file_path, updated_at, created_at
+              goal_objective, objective_file_path, umbrella_ref, umbrella_title,
+              umbrella_children_done, umbrella_children_total, updated_at,
+              created_at
          FROM ranked_tasks
         WHERE (terminal_bucket = 0 AND bucket_rank <= ?)
            OR (terminal_bucket = 1 AND bucket_rank <= ?)
@@ -766,6 +803,7 @@ async function missionControlTaskFromRow(
   if (state === null) return null;
   const attention = deriveMissionControlAttention(state, recentEvents);
   const isReviewOnly = isReviewOnlyMissionControlTask(row);
+  const role = missionControlTaskRole(row, isReviewOnly);
   const task: AdminMissionControlTask = {
     id: row.task_id,
     ext: row.external_ref ?? "—",
@@ -777,11 +815,20 @@ async function missionControlTaskFromRow(
     pr: row.pr_number,
     prUrl: row.pr_url,
     isReviewOnly,
-    role: isReviewOnly ? "review" : "worker",
+    role,
     reviewStatus: isReviewOnly ? missionControlReviewStatus(state, recentEvents) : null,
+    umbrellaRef: row.umbrella_ref,
+    umbrellaChildren: row.umbrella_ref === null
+      ? null
+      : {
+        done: row.umbrella_children_done ?? 0,
+        total: row.umbrella_children_total ?? 0,
+      },
     budget: row.attempts_consumed,
     total: row.retry_budget,
-    latest: formatLatestMissionControlEvent(recentEvents[0]),
+    latest: role === "umbrella"
+      ? formatUmbrellaLatest(row, recentEvents[0])
+      : formatLatestMissionControlEvent(recentEvents[0]),
     agent: missionControlAgent(row, state),
     age: formatAge(row.updated_at, now),
     updatedAt: row.updated_at,
@@ -853,6 +900,11 @@ function deriveMissionControlAttention(
 }
 
 async function titleForMissionControl(row: MissionControlTaskRow): Promise<string> {
+  if (row.umbrella_ref !== null) {
+    const title = row.umbrella_title?.trim();
+    if (title !== undefined && title !== "") return title;
+    return `${row.umbrella_ref} umbrella workflow`;
+  }
   if (isReviewOnlyMissionControlTask(row) && row.pr_title !== null && row.pr_title.trim() !== "") {
     return row.pr_title.trim();
   }
@@ -865,6 +917,14 @@ async function titleForMissionControl(row: MissionControlTaskRow): Promise<strin
 
 function isReviewOnlyMissionControlTask(row: MissionControlTaskRow): boolean {
   return row.authoring_mode === "synthetic_review" || row.authoring_mode === "adopted_external_pr";
+}
+
+function missionControlTaskRole(
+  row: MissionControlTaskRow,
+  isReviewOnly: boolean,
+): AdminMissionControlTaskRole {
+  if (row.umbrella_ref !== null) return "umbrella";
+  return isReviewOnly ? "review" : "worker";
 }
 
 function missionControlReviewStatus(
@@ -977,6 +1037,24 @@ function formatLatestMissionControlEvent(event: MissionControlEventRow | undefin
     default:
       return event.event_type.replace(/_/g, " ");
   }
+}
+
+function formatUmbrellaLatest(
+  row: MissionControlTaskRow,
+  event: MissionControlEventRow | undefined,
+): string {
+  const done = row.umbrella_children_done ?? 0;
+  const total = row.umbrella_children_total ?? 0;
+  if (
+    row.pr_number !== null &&
+    row.state !== "merged" &&
+    row.state !== "closed_unmerged" &&
+    row.state !== "cancelled"
+  ) {
+    return `final PR open · ${done} of ${total} children merged to feature branch`;
+  }
+  if (event !== undefined) return formatLatestMissionControlEvent(event);
+  return `${done} of ${total} children merged to feature branch`;
 }
 
 function missionControlAgent(row: MissionControlTaskRow, state: TaskState): string {
