@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
 import { Avatar } from '../components/Avatar';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
@@ -8,6 +8,7 @@ import { HStack, VStack } from '../components/Stack';
 import { StatusDot } from '../components/StatusDot';
 import { T } from '../components/Typography';
 import { Icon } from '../icons/Icon';
+import { TONES } from '../styles/tones';
 import type { Tone } from '../styles/tones';
 import {
   ATTN_LABEL,
@@ -243,6 +244,12 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
   return (
     <article
       aria-label={`${task.id} · ${task.title}`}
+      onMouseEnter={(event) => {
+        event.currentTarget.style.borderColor = 'var(--accent-line)';
+      }}
+      onMouseLeave={(event) => {
+        event.currentTarget.style.borderColor = highlight ? 'var(--accent-line)' : 'var(--line)';
+      }}
       style={{
         background: 'var(--surface)',
         border: `1px solid ${highlight ? 'var(--accent-line)' : 'var(--line)'}`,
@@ -252,7 +259,8 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
         display: 'flex',
         flexDirection: 'column',
         gap: 9,
-        cursor: 'default',
+        cursor: 'pointer',
+        transition: 'border-color 80ms, box-shadow 80ms',
         position: 'relative',
         minWidth: 0,
       }}
@@ -365,43 +373,47 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
       </HStack>
 
       {umbrellaChildren !== null && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+        <HStack gap={8} wrap>
           <T kind="caption" color="var(--ink-3)">
             children
           </T>
-          <HStack gap={6}>
-            <HStack gap={2}>
-              {Array.from({ length: Math.max(umbrellaChildren.total, 1) }, (_, index) => (
-                <span
-                  key={index}
-                  aria-hidden="true"
-                  style={{
-                    width: 8,
-                    height: 7,
-                    borderRadius: 1,
-                    background: index < umbrellaChildren.done ? 'var(--good)' : 'var(--line-2)',
-                  }}
-                />
-              ))}
-            </HStack>
-            <T kind="mono-sm" color="var(--ink-3)">
-              {umbrellaChildren.done}/{umbrellaChildren.total} merged
-            </T>
+          <HStack gap={3}>
+            {Array.from({ length: Math.max(umbrellaChildren.total, 1) }, (_, index) => (
+              <span
+                key={index}
+                aria-hidden="true"
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: 2,
+                  background: index < umbrellaChildren.done ? 'var(--good)' : 'var(--line-2)',
+                }}
+              />
+            ))}
           </HStack>
-        </div>
+          <T kind="mono-sm" color="var(--ink-3)" style={{ whiteSpace: 'nowrap' }}>
+            {umbrellaChildren.done}/{umbrellaChildren.total} merged
+          </T>
+        </HStack>
       )}
 
       <Divider dashed />
 
       <HStack gap={8}>
         {isReview ? (
-          <T kind="mono-sm" color="var(--ink-4)" style={{ flexShrink: 0 }}>
-            review · non-budget
-          </T>
+          <HStack gap={5} style={{ flexShrink: 0 }}>
+            <Icon.Eye size={12} style={{ color: 'var(--ink-4)' }} />
+            <T kind="mono-sm" color="var(--ink-4)">
+              review · non-budget
+            </T>
+          </HStack>
         ) : isUmbrella ? (
-          <T kind="mono-sm" color="var(--ink-4)" style={{ flexShrink: 0 }}>
-            umbrella workflow
-          </T>
+          <HStack gap={5} style={{ flexShrink: 0 }}>
+            <Icon.Layers size={12} style={{ color: 'var(--ink-4)' }} />
+            <T kind="mono-sm" color="var(--ink-4)">
+              umbrella workflow
+            </T>
+          </HStack>
         ) : (
           <BudgetMeter used={task.budget} total={task.total} />
         )}
@@ -430,21 +442,23 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
 function RoleTag({ role }: { role: MissionControlTaskRole }) {
   const isReview = role === 'review';
   const isUmbrella = role === 'umbrella';
+  const tone = isUmbrella ? TONES.accent : isReview ? TONES.warn : TONES.neutral;
   return (
     <span
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 5,
-        height: 22,
-        padding: '0 7px',
+        gap: 4,
+        height: 18,
+        padding: '0 6px 0 5px',
         borderRadius: 'var(--r-sm)',
-        border: '1px solid var(--line-2)',
-        background: 'var(--surface)',
-        color: 'var(--ink-2)',
+        border: `1px solid ${tone.line}`,
+        background: tone.bg,
+        color: tone.fg,
         fontFamily: 'var(--sans)',
-        fontSize: 12,
-        fontWeight: 650,
+        fontSize: 10.5,
+        fontWeight: 600,
+        letterSpacing: '0.02em',
         lineHeight: 1,
         flexShrink: 0,
       }}
@@ -474,6 +488,7 @@ function LinkChip({
       target="_blank"
       rel="noreferrer"
       title={title}
+      {...linkAffordanceHandlers()}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -488,12 +503,36 @@ function LinkChip({
         border: '1px solid var(--line-2)',
         borderRadius: 'var(--r-sm)',
         cursor: 'pointer',
+        textDecoration: 'none',
+        whiteSpace: 'nowrap',
       }}
     >
       {leading}
       {children}
+      <Icon.ExternalLink size={9} style={{ opacity: 0.45, marginLeft: 1 }} />
     </a>
   );
+}
+
+function linkAffordanceHandlers(
+  tone: 'accent' | 'neutral' = 'accent',
+): {
+  onMouseEnter: (event: MouseEvent<HTMLElement>) => void;
+  onMouseLeave: (event: MouseEvent<HTMLElement>) => void;
+} {
+  const activeTone = TONES[tone];
+  return {
+    onMouseEnter: (event) => {
+      event.currentTarget.style.borderColor = activeTone.line;
+      event.currentTarget.style.color = activeTone.fg;
+      event.currentTarget.style.background = activeTone.bg;
+    },
+    onMouseLeave: (event) => {
+      event.currentTarget.style.borderColor = 'var(--line-2)';
+      event.currentTarget.style.color = 'var(--ink-2)';
+      event.currentTarget.style.background = 'var(--surface)';
+    },
+  };
 }
 
 function IdentityLink({ href, children }: { href: string; children: ReactNode }) {
@@ -502,13 +541,21 @@ function IdentityLink({ href, children }: { href: string; children: ReactNode })
       href={href}
       target="_blank"
       rel="noreferrer"
+      onMouseEnter={(event) => {
+        event.currentTarget.style.color = 'var(--accent-ink)';
+        event.currentTarget.style.borderBottomColor = 'var(--accent-line)';
+      }}
+      onMouseLeave={(event) => {
+        event.currentTarget.style.color = 'var(--ink-3)';
+        event.currentTarget.style.borderBottomColor = 'var(--line-3)';
+      }}
       style={{
         color: 'var(--ink-3)',
         fontFamily: 'var(--mono)',
         fontSize: 12,
-        textDecoration: 'underline',
-        textDecorationStyle: 'dotted',
-        textUnderlineOffset: 3,
+        textDecoration: 'none',
+        borderBottom: '1px dotted var(--line-3)',
+        transition: 'color 80ms, border-color 80ms',
         cursor: 'pointer',
       }}
     >
