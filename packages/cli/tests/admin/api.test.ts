@@ -3,6 +3,7 @@ import {
   createAdminApiHandler,
   type AdminAuditEvent,
 } from "../../src/admin/api.ts";
+import { createArtifactStore } from "../../src/artifacts/store.ts";
 import {
   DEFAULT_CLAUDE_REVIEWER_INVOCATION,
   DEFAULT_CLAUDE_WORKER_INVOCATION,
@@ -161,6 +162,7 @@ interface MissionControlResponse {
   tasks: Array<{
     id: string;
     ext: string;
+    extUrl: string | null;
     repo: string;
     repoUrl: string | null;
     title: string;
@@ -172,6 +174,7 @@ interface MissionControlResponse {
     role: "worker" | "review" | "umbrella";
     reviewStatus: string | null;
     umbrellaRef: string | null;
+    umbrellaUrl: string | null;
     umbrellaChildren: { done: number; total: number } | null;
     blockedBy: string | null;
     budget: number;
@@ -198,6 +201,34 @@ function insertTaskEvent(
        VALUES (?, ?, NULL, NULL, ?)`,
     )
     .run(taskId, eventType, occurredAt);
+}
+
+function seedTicketSnapshot(
+  taskId: string,
+  identifier: string,
+  url: string,
+): void {
+  if (h === null) throw new Error("harness not initialized");
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId: null,
+    kind: "ticket_snapshot",
+    content: JSON.stringify({
+      linear_issue: {
+        identifier,
+        url,
+        title: `${identifier} title`,
+        body: "",
+        comments: [],
+      },
+    }),
+    extension: "json",
+  });
 }
 
 test("GET /v1/meta returns API and Quay version metadata", async () => {
@@ -269,6 +300,7 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
     .run(taskId);
   insertTaskEvent(taskId, "spawned", "2026-01-01T00:00:01.000Z");
   insertTaskEvent(taskId, "ci_failed", "2026-01-01T00:00:11.000Z");
+  seedTicketSnapshot(taskId, "ITRY-1001", "https://linear.app/inverter/issue/ITRY-1001");
   const handler = createHandler();
 
   const response = await handler(new Request("http://quay.local/v1/tasks"));
@@ -284,6 +316,7 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
   expect(task).toMatchObject({
     id: "task-ci",
     ext: "ITRY-1001",
+    extUrl: "https://linear.app/inverter/issue/ITRY-1001",
     repo: "repo-a",
     repoUrl: "https://example/r",
     title: "Fix checkout flow after retry regression.",
@@ -295,6 +328,7 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
     role: "worker",
     reviewStatus: null,
     umbrellaRef: null,
+    umbrellaUrl: null,
     umbrellaChildren: null,
     budget: 3,
     total: 5,
@@ -390,7 +424,9 @@ test("GET /v1/tasks exposes review-only PR title and link targets", async () => 
     role: "review",
     reviewStatus: "reviewing",
     umbrellaRef: null,
+    umbrellaUrl: null,
     umbrellaChildren: null,
+    extUrl: null,
     total: 1,
     latest: "reviewer spawned",
   });
@@ -415,11 +451,11 @@ test("GET /v1/tasks exposes umbrella parent card metadata", async () => {
     )
     .run(taskId);
   const workflow = h.db
-    .query<{ id: number }, [string, string, string, string, string, string, number, string, string, string]>(
+    .query<{ id: number }, [string, string, string, string, string, string, string, number, string, string, string]>(
       `INSERT INTO umbrella_workflows (
          external_ref, repo_id, base_branch, feature_branch, linear_issue_title,
-         final_pr_task_id, final_pr_number, final_pr_url, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         linear_issue_url, final_pr_task_id, final_pr_number, final_pr_url, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING umbrella_workflow_id AS id`,
     )
     .get(
@@ -428,6 +464,7 @@ test("GET /v1/tasks exposes umbrella parent card metadata", async () => {
       "main",
       "quay/umbrella/BRIX-1579",
       "Holiday-gap epic — split across child PRs",
+      "https://linear.app/inverter/issue/BRIX-1579",
       taskId,
       17,
       "https://github.com/acme/test-factory-code/pull/17",
@@ -473,6 +510,7 @@ test("GET /v1/tasks exposes umbrella parent card metadata", async () => {
     role: "umbrella",
     reviewStatus: null,
     umbrellaRef: "BRIX-1579",
+    umbrellaUrl: "https://linear.app/inverter/issue/BRIX-1579",
     umbrellaChildren: { done: 1, total: 2 },
     total: 5,
     latest: "final PR open · 1 of 2 children merged to feature branch",
@@ -511,6 +549,7 @@ test("GET /v1/tasks exposes umbrella child relationship and unsatisfied blocker"
     )
     .run(childTaskId);
   seedTaskObjective(h, childTaskId, "Child 2 — gap calculation (needs scaffolding)");
+  seedTicketSnapshot(childTaskId, "BRIX-1575", "https://linear.app/inverter/issue/BRIX-1575");
   const workflow = h.db
     .query<{ id: number }, [string, string, string, string, string, string, string]>(
       `INSERT INTO umbrella_workflows (
@@ -564,6 +603,7 @@ test("GET /v1/tasks exposes umbrella child relationship and unsatisfied blocker"
   expect(task).toMatchObject({
     id: "brix-1575-gap",
     ext: "BRIX-1575",
+    extUrl: "https://linear.app/inverter/issue/BRIX-1575",
     repo: "test-factory-code",
     title: "Child 2 — gap calculation (needs scaffolding)",
     branch: "quay/brix-1575-gap-calc",
@@ -572,6 +612,7 @@ test("GET /v1/tasks exposes umbrella child relationship and unsatisfied blocker"
     role: "worker",
     reviewStatus: null,
     umbrellaRef: "BRIX-1579",
+    umbrellaUrl: null,
     umbrellaChildren: null,
     blockedBy: "BRIX-1571",
     latest: "blocked on BRIX-1571 → feature branch",

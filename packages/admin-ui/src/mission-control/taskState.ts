@@ -32,6 +32,7 @@ export interface MissionControlUmbrellaChildren {
 export interface MissionControlTask {
   id: string;
   ext: string;
+  extUrl: string | null;
   repo: string;
   repoUrl: string | null;
   title: string;
@@ -43,6 +44,7 @@ export interface MissionControlTask {
   role: MissionControlTaskRole;
   reviewStatus: string | null;
   umbrellaRef: string | null;
+  umbrellaUrl: string | null;
   umbrellaChildren: MissionControlUmbrellaChildren | null;
   blockedBy: string | null;
   budget: number;

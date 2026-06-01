@@ -237,6 +237,7 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
   const isReview = task.role === 'review';
   const isUmbrella = task.role === 'umbrella';
   const identity = isUmbrella ? task.umbrellaRef ?? task.ext : task.id;
+  const identityUrl = isUmbrella ? task.umbrellaUrl : null;
   const umbrellaChildren = isUmbrella ? task.umbrellaChildren : null;
   const isChild = !isUmbrella && task.umbrellaRef !== null;
   return (
@@ -274,17 +275,25 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
 
       <HStack gap={6}>
         <RoleTag role={task.role} />
-        <T kind="mono-sm" color="var(--ink-3)">
-          {identity}
-        </T>
+        {identityUrl !== null ? (
+          <IdentityLink href={identityUrl}>{identity}</IdentityLink>
+        ) : (
+          <T kind="mono-sm" color="var(--ink-3)">
+            {identity}
+          </T>
+        )}
         {!isUmbrella && task.ext !== '—' && (
           <>
             <T kind="mono-sm" color="var(--ink-4)">
               ·
             </T>
-            <T kind="mono-sm" color="var(--ink-3)">
-              {task.ext}
-            </T>
+            {task.extUrl !== null ? (
+              <IdentityLink href={task.extUrl}>{task.ext}</IdentityLink>
+            ) : (
+              <T kind="mono-sm" color="var(--ink-3)">
+                {task.ext}
+              </T>
+            )}
           </>
         )}
         <span style={{ flex: 1 }} />
@@ -482,6 +491,27 @@ function LinkChip({
       }}
     >
       {leading}
+      {children}
+    </a>
+  );
+}
+
+function IdentityLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      style={{
+        color: 'var(--ink-3)',
+        fontFamily: 'var(--mono)',
+        fontSize: 12,
+        textDecoration: 'underline',
+        textDecorationStyle: 'dotted',
+        textUnderlineOffset: 3,
+        cursor: 'pointer',
+      }}
+    >
       {children}
     </a>
   );
