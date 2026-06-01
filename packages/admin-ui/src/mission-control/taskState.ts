@@ -22,15 +22,31 @@ export const TASK_STATES = [
 
 export type TaskState = (typeof TASK_STATES)[number];
 export type AttnReason = 'changes' | 'ci' | 'slack' | 'brief' | 'dependency' | 'budget' | 'loop' | 'worktree';
+export type MissionControlTaskRole = 'worker' | 'review' | 'umbrella';
+
+export interface MissionControlUmbrellaChildren {
+  done: number;
+  total: number;
+}
 
 export interface MissionControlTask {
   id: string;
   ext: string;
+  extUrl: string | null;
   repo: string;
+  repoUrl: string | null;
   title: string;
   branch: string;
   state: TaskState;
   pr: number | null;
+  prUrl: string | null;
+  isReviewOnly: boolean;
+  role: MissionControlTaskRole;
+  reviewStatus: string | null;
+  umbrellaRef: string | null;
+  umbrellaUrl: string | null;
+  umbrellaChildren: MissionControlUmbrellaChildren | null;
+  blockedBy: string | null;
   budget: number;
   total: number;
   latest: string;
@@ -56,7 +72,6 @@ export const ATTENTION_STATES = [
   'non_budget_loop',
   'worktree_error',
   'orchestrator_loop',
-  'waiting_dependencies',
   'waiting_human',
 ] as const satisfies readonly TaskState[];
 

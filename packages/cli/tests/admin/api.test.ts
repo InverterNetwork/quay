@@ -3,6 +3,7 @@ import {
   createAdminApiHandler,
   type AdminAuditEvent,
 } from "../../src/admin/api.ts";
+import { createArtifactStore } from "../../src/artifacts/store.ts";
 import {
   DEFAULT_CLAUDE_REVIEWER_INVOCATION,
   DEFAULT_CLAUDE_WORKER_INVOCATION,
@@ -26,6 +27,7 @@ afterEach(() => {
 function createHandler(opts: {
   config?: Parameters<typeof createAdminApiHandler>[0]["config"];
   env?: NodeJS.ProcessEnv;
+  agentFetch?: Parameters<typeof createAdminApiHandler>[0]["agentFetch"];
   adminAudit?: Parameters<typeof createAdminApiHandler>[0]["adminAudit"];
   repoService?: ReturnType<typeof createRepoService>;
 } = {}) {
@@ -39,6 +41,7 @@ function createHandler(opts: {
     dataDir: h.dataDir,
     db: h.db,
     env: opts.env ?? {},
+    ...(opts.agentFetch !== undefined ? { agentFetch: opts.agentFetch } : {}),
     ...(opts.adminAudit !== undefined ? { adminAudit: opts.adminAudit } : {}),
     paths: {
       reposRoot: `${h.dataDir}/repos`,
@@ -54,12 +57,57 @@ async function responseJson(response: Response): Promise<Record<string, unknown>
   return (await response.json()) as Record<string, unknown>;
 }
 
+async function responseNdjson(response: Response): Promise<Record<string, unknown>[]> {
+  const text = await response.text();
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 function postJson(path: string, body: unknown): Request {
   return new Request(`http://quay.local${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+function authPostJson(path: string, body: unknown): Request {
+  return new Request(`http://quay.local${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer secret-token",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      ...init.headers,
+    },
+  });
+}
+
+function sseResponse(events: Array<Record<string, unknown>>): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const event of events) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        }
+        controller.close();
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  );
 }
 
 async function currentRevision(
@@ -70,6 +118,43 @@ async function currentRevision(
   return body.revision as string;
 }
 
+const agentContextFixture = {
+  view: "mission-control",
+  scope: "all repos",
+  urlPath: "/mission-control",
+  capturedAt: "2026-05-30T09:00:00.000Z",
+  summary: "Mission Control: 1 task visible.",
+  payload: {
+    taskCounts: {
+      total: 1,
+      attention: 0,
+      running: 1,
+      prLifecycle: 0,
+      waiting: 0,
+      terminal: 0,
+    },
+    filters: {
+      repo: null,
+      lane: null,
+      sort: "updated",
+    },
+    visibleTasks: [],
+    limits: {
+      maxTasks: 50,
+      truncatedFields: [],
+    },
+  },
+} as const;
+
+function auditRetentionDays(event: AdminAuditEvent): number {
+  if (event.expires_at === undefined) throw new Error(`audit event ${event.action} missing expires_at`);
+  const timestamp = Date.parse(event.timestamp);
+  const expiresAt = Date.parse(event.expires_at);
+  expect(timestamp).not.toBeNaN();
+  expect(expiresAt).not.toBeNaN();
+  return Math.round((expiresAt - timestamp) / (24 * 60 * 60 * 1000));
+}
+
 interface MissionControlResponse {
   refreshedAt: string;
   activeTaskCount: number;
@@ -77,11 +162,21 @@ interface MissionControlResponse {
   tasks: Array<{
     id: string;
     ext: string;
+    extUrl: string | null;
     repo: string;
+    repoUrl: string | null;
     title: string;
     branch: string;
     state: string;
     pr: number | null;
+    prUrl: string | null;
+    isReviewOnly: boolean;
+    role: "worker" | "review" | "umbrella";
+    reviewStatus: string | null;
+    umbrellaRef: string | null;
+    umbrellaUrl: string | null;
+    umbrellaChildren: { done: number; total: number } | null;
+    blockedBy: string | null;
     budget: number;
     total: number;
     latest: string;
@@ -108,6 +203,34 @@ function insertTaskEvent(
     .run(taskId, eventType, occurredAt);
 }
 
+function seedTicketSnapshot(
+  taskId: string,
+  identifier: string,
+  url: string,
+): void {
+  if (h === null) throw new Error("harness not initialized");
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId: null,
+    kind: "ticket_snapshot",
+    content: JSON.stringify({
+      linear_issue: {
+        identifier,
+        url,
+        title: `${identifier} title`,
+        body: "",
+        comments: [],
+      },
+    }),
+    extension: "json",
+  });
+}
+
 test("GET /v1/meta returns API and Quay version metadata", async () => {
   h = createHarness();
   const handler = createHandler();
@@ -120,6 +243,38 @@ test("GET /v1/meta returns API and Quay version metadata", async () => {
     service: "quay",
     api_version: "v1",
     quay_version: "test-version",
+    viewer: {
+      label: "You",
+      display_name: null,
+      slack_user_id: null,
+    },
+  });
+});
+
+test("GET /v1/meta resolves forwarded operator display name", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: { QUAY_ADMIN_TOKEN: "secret-token" },
+  });
+
+  const response = await handler(
+    new Request("http://quay.local/v1/meta", {
+      headers: {
+        Authorization: "Bearer secret-token",
+        "X-Hermes-User-Id": "U06TDC56VJB",
+        "X-Hermes-User-Display-Name": "  Fabian Scherer  ",
+      },
+    }),
+  );
+
+  expect(response.status).toBe(200);
+  expect(await responseJson(response)).toMatchObject({
+    viewer: {
+      label: "Fabian Scherer",
+      display_name: "Fabian Scherer",
+      slack_user_id: "U06TDC56VJB",
+    },
   });
 });
 
@@ -134,6 +289,7 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
           SET external_ref = 'ITRY-1001',
               branch_name = 'quay/itry-1001-checkout',
               pr_number = 42,
+              pr_url = 'https://github.example/repo-a/pull/42',
               attempts_consumed = 3,
               retry_budget = 5,
               worker_model = 'gpt-5.3',
@@ -144,6 +300,7 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
     .run(taskId);
   insertTaskEvent(taskId, "spawned", "2026-01-01T00:00:01.000Z");
   insertTaskEvent(taskId, "ci_failed", "2026-01-01T00:00:11.000Z");
+  seedTicketSnapshot(taskId, "ITRY-1001", "https://linear.app/inverter/issue/ITRY-1001");
   const handler = createHandler();
 
   const response = await handler(new Request("http://quay.local/v1/tasks"));
@@ -159,11 +316,20 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
   expect(task).toMatchObject({
     id: "task-ci",
     ext: "ITRY-1001",
+    extUrl: "https://linear.app/inverter/issue/ITRY-1001",
     repo: "repo-a",
+    repoUrl: "https://example/r",
     title: "Fix checkout flow after retry regression.",
     branch: "quay/itry-1001-checkout",
     state: "pr-open",
     pr: 42,
+    prUrl: "https://github.example/repo-a/pull/42",
+    isReviewOnly: false,
+    role: "worker",
+    reviewStatus: null,
+    umbrellaRef: null,
+    umbrellaUrl: null,
+    umbrellaChildren: null,
     budget: 3,
     total: 5,
     latest: "CI failed",
@@ -174,6 +340,284 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
     attnTone: "danger",
   });
   expect(task.age).toEqual(expect.any(String));
+});
+
+test("GET /v1/tasks exposes sanitized browser repo URLs", async () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-ssh");
+  const sshTaskId = insertTask(h.db, {
+    taskId: "task-ssh",
+    repoId: "repo-ssh",
+    state: "pr-open",
+  });
+  h.db
+    .query(`UPDATE repos SET repo_url = 'git@github.com:owner/repo-ssh.git' WHERE repo_id = 'repo-ssh'`)
+    .run();
+
+  insertRepo(h.db, "repo-token");
+  const tokenTaskId = insertTask(h.db, {
+    taskId: "task-token",
+    repoId: "repo-token",
+    state: "pr-open",
+  });
+  h.db
+    .query(`UPDATE repos SET repo_url = 'https://secret-token@github.com/owner/repo-token.git' WHERE repo_id = 'repo-token'`)
+    .run();
+
+  const handler = createHandler();
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+  const byId = new Map(body.tasks.map((task) => [task.id, task]));
+
+  expect(response.status).toBe(200);
+  expect(byId.get(sshTaskId)?.repoUrl).toBe("https://github.com/owner/repo-ssh");
+  expect(byId.get(tokenTaskId)?.repoUrl).toBe("https://github.com/owner/repo-token");
+  expect(JSON.stringify(body.tasks)).not.toContain("secret-token");
+});
+
+test("GET /v1/tasks exposes review-only PR title and link targets", async () => {
+  h = createHarness();
+  insertRepo(h.db, "test-factory-code");
+  const taskId = insertTask(h.db, {
+    taskId: "pr-review-test-factory-code-8",
+    repoId: "test-factory-code",
+    state: "pr-review",
+  });
+  h.db
+    .query(
+      `UPDATE repos
+          SET repo_url = 'https://github.com/acme/test-factory-code'
+        WHERE repo_id = 'test-factory-code'`,
+    )
+    .run();
+  h.db
+    .query(
+      `UPDATE tasks
+          SET authoring_mode = 'synthetic_review',
+              branch_name = 'quay-review/8',
+              pr_number = 8,
+              pr_url = 'https://github.com/acme/test-factory-code/pull/8',
+              pr_title = 'Add NavHolidayGapChecker service + Lambda handler',
+              retry_budget = 1
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+  insertTaskEvent(taskId, "review_spawned");
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+
+  expect(response.status).toBe(200);
+  expect(body.tasks).toHaveLength(1);
+  expect(body.tasks[0]).toMatchObject({
+    id: "pr-review-test-factory-code-8",
+    ext: "—",
+    repo: "test-factory-code",
+    repoUrl: "https://github.com/acme/test-factory-code",
+    title: "Add NavHolidayGapChecker service + Lambda handler",
+    branch: "quay-review/8",
+    state: "pr-review",
+    pr: 8,
+    prUrl: "https://github.com/acme/test-factory-code/pull/8",
+    isReviewOnly: true,
+    role: "review",
+    reviewStatus: "reviewing",
+    umbrellaRef: null,
+    umbrellaUrl: null,
+    umbrellaChildren: null,
+    extUrl: null,
+    total: 1,
+    latest: "reviewer spawned",
+  });
+});
+
+test("GET /v1/tasks exposes umbrella parent card metadata", async () => {
+  h = createHarness();
+  insertRepo(h.db, "test-factory-code");
+  const taskId = insertTask(h.db, {
+    taskId: "umbrella-final-pr-4",
+    repoId: "test-factory-code",
+    state: "pr-open",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1579',
+              branch_name = 'quay/umbrella/BRIX-1579',
+              worker_agent = 'codex',
+              retry_budget = 5
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+  const workflow = h.db
+    .query<{ id: number }, [string, string, string, string, string, string, string, number, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, linear_issue_title,
+         linear_issue_url, final_pr_task_id, final_pr_number, final_pr_url, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id AS id`,
+    )
+    .get(
+      "BRIX-1579",
+      "test-factory-code",
+      "main",
+      "quay/umbrella/BRIX-1579",
+      "Holiday-gap epic — split across child PRs",
+      "https://linear.app/inverter/issue/BRIX-1579",
+      taskId,
+      17,
+      "https://github.com/acme/test-factory-code/pull/17",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:12.000Z",
+    );
+  if (workflow === null || workflow === undefined) throw new Error("expected umbrella workflow");
+  h.db
+    .query(
+      `INSERT INTO umbrella_expected_tasks (
+         umbrella_workflow_id, external_ref, title, state, completion_source,
+         completion_reason, completed_at, created_at, updated_at
+       ) VALUES
+         (?, 'BRIX-1571', 'Child 1', 'complete_without_quay', 'manual', 'merged to feature branch', ?, ?, ?),
+         (?, 'BRIX-1575', 'Child 2', 'expected', NULL, NULL, NULL, ?, ?)`,
+    )
+    .run(
+      workflow.id,
+      "2026-01-01T00:00:10.000Z",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:10.000Z",
+      workflow.id,
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+    );
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+  const task = body.tasks.find((item) => item.id === taskId);
+
+  expect(response.status).toBe(200);
+  expect(task).toMatchObject({
+    id: "umbrella-final-pr-4",
+    ext: "BRIX-1579",
+    repo: "test-factory-code",
+    title: "Holiday-gap epic — split across child PRs",
+    branch: "quay/umbrella/BRIX-1579",
+    state: "pr-open",
+    pr: 17,
+    prUrl: "https://github.com/acme/test-factory-code/pull/17",
+    isReviewOnly: false,
+    role: "umbrella",
+    reviewStatus: null,
+    umbrellaRef: "BRIX-1579",
+    umbrellaUrl: "https://linear.app/inverter/issue/BRIX-1579",
+    umbrellaChildren: { done: 1, total: 2 },
+    total: 5,
+    latest: "final PR open · 1 of 2 children merged to feature branch",
+    agent: "codex",
+  });
+});
+
+test("GET /v1/tasks exposes umbrella child relationship and unsatisfied blocker", async () => {
+  h = createHarness();
+  insertRepo(h.db, "test-factory-code");
+  const blockerTaskId = insertTask(h.db, {
+    taskId: "brix-1571-base",
+    repoId: "test-factory-code",
+    state: "running",
+  });
+  const childTaskId = insertTask(h.db, {
+    taskId: "brix-1575-gap",
+    repoId: "test-factory-code",
+    state: "waiting_dependencies",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1571',
+              branch_name = 'quay/brix-1571-base-scaffold'
+        WHERE task_id = ?`,
+    )
+    .run(blockerTaskId);
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1575',
+              branch_name = 'quay/brix-1575-gap-calc',
+              retry_budget = 5
+        WHERE task_id = ?`,
+    )
+    .run(childTaskId);
+  seedTaskObjective(h, childTaskId, "Child 2 — gap calculation (needs scaffolding)");
+  seedTicketSnapshot(childTaskId, "BRIX-1575", "https://linear.app/inverter/issue/BRIX-1575");
+  const workflow = h.db
+    .query<{ id: number }, [string, string, string, string, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, linear_issue_title,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id AS id`,
+    )
+    .get(
+      "BRIX-1579",
+      "test-factory-code",
+      "main",
+      "quay/umbrella/BRIX-1579",
+      "Holiday-gap epic — split across child PRs",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:12.000Z",
+    );
+  if (workflow === null || workflow === undefined) throw new Error("expected umbrella workflow");
+  h.db
+    .query(
+      `INSERT INTO umbrella_tasks (
+         umbrella_workflow_id, task_id, external_ref, created_at
+       ) VALUES (?, ?, ?, ?)`,
+    )
+    .run(workflow.id, childTaskId, "BRIX-1575", "2026-01-01T00:00:00.000Z");
+  h.db
+    .query(
+      `INSERT INTO task_dependencies (
+         dependent_task_id, dependency_task_id, dependency_source,
+         dependency_external_ref, dependency_repo_id, umbrella_workflow_id,
+         kind, scope, required_state, created_at, updated_at
+       ) VALUES (?, ?, 'linear', ?, ?, ?, 'blocked_by', 'umbrella', 'merged_to_feature_branch', ?, ?)`,
+    )
+    .run(
+      childTaskId,
+      blockerTaskId,
+      "BRIX-1571",
+      "test-factory-code",
+      workflow.id,
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+    );
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+  const task = body.tasks.find((item) => item.id === childTaskId);
+
+  expect(response.status).toBe(200);
+  expect(body.hasAttention).toBe(false);
+  expect(task).toMatchObject({
+    id: "brix-1575-gap",
+    ext: "BRIX-1575",
+    extUrl: "https://linear.app/inverter/issue/BRIX-1575",
+    repo: "test-factory-code",
+    title: "Child 2 — gap calculation (needs scaffolding)",
+    branch: "quay/brix-1575-gap-calc",
+    state: "waiting_dependencies",
+    isReviewOnly: false,
+    role: "worker",
+    reviewStatus: null,
+    umbrellaRef: "BRIX-1579",
+    umbrellaUrl: null,
+    umbrellaChildren: null,
+    blockedBy: "BRIX-1571",
+    latest: "blocked on BRIX-1571 → feature branch",
+  });
+  expect(task?.attn).toBeUndefined();
 });
 
 test("GET /v1/tasks derives attention from stuck and human states", async () => {
@@ -263,6 +707,836 @@ test("GET /v1/tasks skips rows with unknown task states", async () => {
   expect(body.tasks.map((task) => task.id)).toEqual(["task-running"]);
 });
 
+test("POST /v1/agent/sessions creates a temporary agent session", async () => {
+  h = createHarness();
+  const handler = createHandler();
+
+  const response = await handler(postJson("/v1/agent/sessions", {
+    agent: "hermes",
+    context: agentContextFixture,
+  }));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("application/json");
+  expect(body).toMatchObject({
+    agent: "hermes",
+    created_at: expect.any(String),
+  });
+  expect(body.session_id).toEqual(expect.stringMatching(/^agent_[0-9a-f-]+$/));
+});
+
+test("POST /v1/agent/sessions/:id/messages streams no-op NDJSON AgentEvents with UI context", async () => {
+  h = createHarness();
+  const handler = createHandler();
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "What needs attention?",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  const events = await responseNdjson(response);
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("application/x-ndjson");
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "text_delta",
+    "reference",
+    "message_done",
+  ]);
+  expect(events[0]).toMatchObject({ role: "agent", model: "hermes" });
+  expect(events[1]?.text).toContain("What needs attention?");
+  expect(events[1]?.text).toContain("Mission Control: 1 task visible.");
+  expect(events[2]).toMatchObject({
+    kind: "config",
+    id: "mission-control",
+    label: "Mission Control: 1 task visible.",
+  });
+});
+
+test("POST /v1/agent/sessions/:id/messages can stream Server-Sent Events", async () => {
+  h = createHarness();
+  const handler = createHandler();
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Accept: "text/event-stream",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "Summarize this page",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  const text = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("text/event-stream");
+  expect(text).toContain("event: agent_event");
+  expect(text).toContain("data: [DONE]");
+  expect(text).toContain("\"type\":\"message_start\"");
+});
+
+test("Agent Gateway emits bounded audit records with TTL for sessions, messages, tools, approvals, and stops", async () => {
+  h = createHarness();
+  const auditEvents: AdminAuditEvent[] = [];
+  const context = {
+    ...agentContextFixture,
+    payload: {
+      ...agentContextFixture.payload,
+      hidden: { raw: "RAW_CONTEXT_PAYLOAD_SECRET" },
+    },
+  };
+  const longMessage = `Summarize current task health ${"m".repeat(500)} RAW_MESSAGE_TAIL_SECRET`;
+  const longCommand = `quay retry ${"x".repeat(420)} RAW_COMMAND_TAIL_SECRET`;
+  const longAffect = `${"task-".repeat(80)}RAW_AFFECT_TAIL_SECRET`;
+  const longCommandOutput = `quay output ${"o".repeat(600)} RAW_COMMAND_OUTPUT_TAIL_SECRET`;
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: {
+      QUAY_ADMIN_TOKEN: "secret-token",
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "hermes-secret",
+    },
+    adminAudit: (event) => auditEvents.push(event),
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return jsonResponse({ run_id: String(body.input).includes("operator approved") ? "audit-run-2" : "audit-run-1" });
+      }
+      if (path === "/v1/runs/audit-run-1/events") {
+        return sseResponse([
+          {
+            type: "tool.started",
+            tool_call_id: "tool-read",
+            tool_name: "list tasks",
+            input: { raw: "RAW_TOOL_INPUT_SECRET" },
+          },
+          {
+            type: "tool.completed",
+            tool_call_id: "tool-read",
+            tool_name: "list tasks",
+            result: { raw: "RAW_TOOL_OUTPUT_SECRET" },
+          },
+          {
+            type: "approval.required",
+            approval_id: "approval-audit",
+            command: longCommand,
+            description: "Retry the stale task.",
+            affects: [{ label: "task", value: longAffect }],
+          },
+          { type: "run.snapshot", raw: "RAW_UNSUPPORTED_EVENT_SECRET" },
+          { type: "run.completed" },
+        ]);
+      }
+      return sseResponse([
+        { type: "command.output", approval_id: "approval-audit", line: longCommandOutput },
+        { type: "assistant.delta", delta: "Approval recorded." },
+        { type: "run.completed" },
+      ]);
+    },
+  });
+
+  const sessionResponse = await handler(
+    new Request("http://quay.local/v1/agent/sessions", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "operator-audit",
+      },
+      body: JSON.stringify({ context }),
+    }),
+  );
+  const session = await responseJson(sessionResponse);
+  const sessionId = session.session_id as string;
+
+  const messageResponse = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "operator-audit",
+      },
+      body: JSON.stringify({
+        message: longMessage,
+        context,
+      }),
+    }),
+  );
+  await responseNdjson(messageResponse);
+
+  const approvalResponse = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/approvals/approval-audit`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "operator-audit",
+      },
+      body: JSON.stringify({ decision: "approved" }),
+    }),
+  );
+  await responseNdjson(approvalResponse);
+
+  await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/stop`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "operator-audit",
+      },
+      body: JSON.stringify({}),
+    }),
+  );
+
+  const actions = auditEvents.map((event) => event.action);
+  expect(actions).toEqual(expect.arrayContaining([
+    "agent.session.create",
+    "agent.message.send",
+    "agent.tool.call",
+    "agent.approval.required",
+    "agent.approval.decide",
+    "agent.command.output",
+    "agent.approval.result",
+    "agent.session.stop",
+  ]));
+
+  const sessionAudit = auditEvents.find((event) => event.action === "agent.session.create")!;
+  expect(sessionAudit).toMatchObject({
+    retention_bucket: "agent_chat_7d",
+    adapter_id: "hermes",
+    agent_id: "hermes",
+    session_id: sessionId,
+    slack_user_id: "operator-audit",
+    context_view: "mission-control",
+    context_summary: "Mission Control: 1 task visible.",
+  });
+  expect(auditRetentionDays(sessionAudit)).toBe(7);
+
+  const messageAudit = auditEvents.find((event) => event.action === "agent.message.send")!;
+  expect(messageAudit).toMatchObject({
+    retention_bucket: "agent_chat_7d",
+    message_summary: expect.any(String),
+    effect: "unknown",
+  });
+  expect(auditRetentionDays(messageAudit)).toBe(7);
+
+  const toolAudit = auditEvents.find((event) => event.action === "agent.tool.call" && event.result_status === "succeeded")!;
+  expect(toolAudit).toMatchObject({
+    retention_bucket: "agent_tool_7d",
+    tool_call_id: "tool-read",
+    tool_name: "list tasks",
+    arguments_summary: "Tool output available",
+    effect: "read_only",
+  });
+  expect(auditRetentionDays(toolAudit)).toBe(7);
+
+  const requiredAudit = auditEvents.find((event) => event.action === "agent.approval.required")!;
+  expect(requiredAudit).toMatchObject({
+    retention_bucket: "agent_chat_7d",
+    approval_id: "approval-audit",
+    result_status: "proposed",
+    effect: "mutating",
+  });
+  expect(auditRetentionDays(requiredAudit)).toBe(7);
+
+  const decisionAudit = auditEvents.find((event) => event.action === "agent.approval.decide")!;
+  expect(decisionAudit).toMatchObject({
+    retention_bucket: "agent_approved_action_30d",
+    approval_id: "approval-audit",
+    decision: "approved",
+    result_status: "running",
+    effect: "mutating",
+  });
+  expect(auditRetentionDays(decisionAudit)).toBe(30);
+
+  const outputAudit = auditEvents.find((event) => event.action === "agent.command.output")!;
+  expect(outputAudit).toMatchObject({
+    retention_bucket: "agent_approved_action_30d",
+    approval_id: "approval-audit",
+    result_status: "running",
+    arguments_summary: expect.any(String),
+    effect: "mutating",
+  });
+  expect(auditRetentionDays(outputAudit)).toBe(30);
+
+  const resultAudit = auditEvents.find((event) => event.action === "agent.approval.result")!;
+  expect(resultAudit).toMatchObject({
+    retention_bucket: "agent_approved_action_30d",
+    approval_id: "approval-audit",
+    decision: "approved",
+    result_status: "succeeded",
+    effect: "mutating",
+  });
+  expect(auditRetentionDays(resultAudit)).toBe(30);
+
+  const stopAudit = auditEvents.find((event) => event.action === "agent.session.stop")!;
+  expect(stopAudit).toMatchObject({
+    retention_bucket: "agent_chat_7d",
+    session_id: sessionId,
+  });
+  expect(auditRetentionDays(stopAudit)).toBe(7);
+
+  const serializedAudit = JSON.stringify(auditEvents);
+  expect(serializedAudit).not.toContain("RAW_CONTEXT_PAYLOAD_SECRET");
+  expect(serializedAudit).not.toContain("RAW_TOOL_INPUT_SECRET");
+  expect(serializedAudit).not.toContain("RAW_TOOL_OUTPUT_SECRET");
+  expect(serializedAudit).not.toContain("RAW_UNSUPPORTED_EVENT_SECRET");
+  expect(serializedAudit).not.toContain("RAW_MESSAGE_TAIL_SECRET");
+  expect(serializedAudit).not.toContain("RAW_COMMAND_TAIL_SECRET");
+  expect(serializedAudit).not.toContain("RAW_AFFECT_TAIL_SECRET");
+  expect(serializedAudit).not.toContain("RAW_COMMAND_OUTPUT_TAIL_SECRET");
+});
+
+test("POST /v1/agent/sessions/:id/approvals/:approvalId approves trusted Hermes actions and audits decision", async () => {
+  h = createHarness();
+  const auditEvents: AdminAuditEvent[] = [];
+  const runBodies: Array<Record<string, unknown>> = [];
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: {
+      QUAY_ADMIN_TOKEN: "secret-token",
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "hermes-secret",
+    },
+    adminAudit: (event) => auditEvents.push(event),
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") {
+        runBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return jsonResponse({ run_id: `run-${runBodies.length}` });
+      }
+      if (path === "/v1/runs/run-1/events") {
+        return sseResponse([
+          {
+            type: "approval.required",
+            approval_id: "approval-1",
+            command: "quay cancel bcd890 --keep-worktree",
+            description: "Cancel the task but preserve its worktree.",
+            affects: [{ label: "task", value: "bcd890" }],
+            note: "Operator consent requested",
+          },
+          { type: "run.completed" },
+        ]);
+      }
+      return sseResponse([
+        { type: "assistant.delta", delta: "Approval recorded; continuing trusted Hermes workflow." },
+        { type: "run.completed" },
+      ]);
+    },
+  });
+  const session = await responseJson(await handler(authPostJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const messageResponse = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "Prepare cancellation",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  const messageEvents = await responseNdjson(messageResponse);
+  const approval = messageEvents.find((event) => event.type === "approval_required");
+  expect(approval).toMatchObject({
+    approvalId: "approval-1",
+    command: "quay cancel bcd890 --keep-worktree",
+  });
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/approvals/approval-1`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+        "X-Hermes-User-Id": "operator-123",
+      },
+      body: JSON.stringify({ decision: "approved" }),
+    }),
+  );
+  const events = await responseNdjson(response);
+
+  expect(response.status).toBe(200);
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "approval_result",
+    "text_delta",
+    "message_done",
+    "approval_result",
+  ]);
+  expect(events[1]).toMatchObject({
+    approvalId: "approval-1",
+    status: "running",
+  });
+  expect(events[4]).toMatchObject({
+    approvalId: "approval-1",
+    status: "succeeded",
+  });
+  expect(String(runBodies[1]?.input)).toContain("operator approved proposed Quay action approval-1");
+  expect(String(runBodies[1]?.input)).toContain("trusted-Hermes v1");
+  const decisionAudit = auditEvents.find((event) => event.action === "agent.approval.decide");
+  expect(decisionAudit).toMatchObject({
+    action: "agent.approval.decide",
+    path: `/v1/agent/sessions/${sessionId}/approvals/approval-1`,
+    success: true,
+    status: 200,
+    slack_user_id: "operator-123",
+    identity_status: "forwarded",
+    session_id: sessionId,
+    approval_id: "approval-1",
+    decision: "approved",
+    result_status: "running",
+    command: "quay cancel bcd890 --keep-worktree",
+    operation_summary: ["agent approval approved: quay cancel bcd890 --keep-worktree"],
+    target_resources: [
+      `agent-session:${sessionId}`,
+      "agent-approval:approval-1",
+      "task:bcd890",
+    ],
+  });
+  expect(Date.parse(decisionAudit!.timestamp)).not.toBeNaN();
+  const resultAudit = auditEvents.find((event) => event.action === "agent.approval.result");
+  expect(resultAudit).toMatchObject({
+    action: "agent.approval.result",
+    approval_id: "approval-1",
+    decision: "approved",
+    result_status: "succeeded",
+    command: "quay cancel bcd890 --keep-worktree",
+  });
+});
+
+test("POST /v1/agent/sessions/:id/approvals/:approvalId rejects trusted Hermes actions inline", async () => {
+  h = createHarness();
+  const auditEvents: AdminAuditEvent[] = [];
+  const runBodies: Array<Record<string, unknown>> = [];
+  const handler = createHandler({
+    env: {
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "hermes-secret",
+    },
+    adminAudit: (event) => auditEvents.push(event),
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") {
+        runBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return jsonResponse({ run_id: `reject-run-${runBodies.length}` });
+      }
+      if (path === "/v1/runs/reject-run-1/events") {
+        return sseResponse([
+          {
+            type: "approval.required",
+            approval_id: "approval-reject",
+            command: "quay retry abc123",
+            description: "Retry failed task.",
+            affects: [{ label: "task", value: "abc123" }],
+          },
+          { type: "run.completed" },
+        ]);
+      }
+      return sseResponse([
+        { type: "assistant.delta", delta: "Rejected action acknowledged." },
+        { type: "run.completed" },
+      ]);
+    },
+  });
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+  await responseNdjson(await handler(new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+    method: "POST",
+    headers: {
+      Accept: "application/x-ndjson",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message: "Prepare retry",
+      context: agentContextFixture,
+    }),
+  })));
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/approvals/approval-reject`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ decision: "rejected" }),
+    }),
+  );
+  const events = await responseNdjson(response);
+
+  expect(response.status).toBe(200);
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "approval_result",
+    "text_delta",
+    "message_done",
+  ]);
+  expect(events[1]).toMatchObject({
+    approvalId: "approval-reject",
+    status: "rejected",
+  });
+  expect(events[2]?.text).toContain("Rejected action acknowledged.");
+  expect(String(runBodies[1]?.input)).toContain("operator rejected proposed Quay action approval-reject");
+  expect(String(runBodies[1]?.input)).toContain("Do not run the rejected action");
+  const decisionAudit = auditEvents.find((event) => event.action === "agent.approval.decide");
+  expect(decisionAudit).toMatchObject({
+    retention_bucket: "agent_rejected_approval_7d",
+    approval_id: "approval-reject",
+    decision: "rejected",
+    result_status: "rejected",
+  });
+  expect(auditRetentionDays(decisionAudit!)).toBe(7);
+});
+
+test("POST /v1/agent/sessions/:id/approvals/:approvalId rejects repeated approval decisions", async () => {
+  h = createHarness();
+  const runBodies: Array<Record<string, unknown>> = [];
+  const handler = createHandler({
+    env: {
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "hermes-secret",
+    },
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") {
+        runBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return jsonResponse({ run_id: `repeat-run-${runBodies.length}` });
+      }
+      if (path === "/v1/runs/repeat-run-1/events") {
+        return sseResponse([
+          {
+            type: "approval.required",
+            approval_id: "approval-repeat",
+            command: "quay retry repeated",
+            description: "Retry once.",
+            affects: [{ label: "task", value: "repeated" }],
+          },
+          { type: "run.completed" },
+        ]);
+      }
+      return sseResponse([
+        {
+          type: "approval.required",
+          approval_id: "approval-repeat",
+          command: "quay retry repeated",
+          description: "Retry once.",
+          affects: [{ label: "task", value: "repeated" }],
+        },
+        { type: "assistant.delta", delta: "Continued once." },
+        { type: "run.completed" },
+      ]);
+    },
+  });
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+  await responseNdjson(await handler(new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+    method: "POST",
+    headers: {
+      Accept: "application/x-ndjson",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message: "Prepare repeat",
+      context: agentContextFixture,
+    }),
+  })));
+
+  const first = await handler(postJson(`/v1/agent/sessions/${sessionId}/approvals/approval-repeat`, {
+    decision: "approved",
+  }));
+  expect(first.status).toBe(200);
+  const firstEvents = await responseNdjson(first);
+
+  const repeated = await handler(postJson(`/v1/agent/sessions/${sessionId}/approvals/approval-repeat`, {
+    decision: "approved",
+  }));
+  const body = await responseJson(repeated);
+
+  expect(repeated.status).toBe(409);
+  expect(body).toMatchObject({
+    error: "agent_approval_already_decided",
+    details: {
+      approval_id: "approval-repeat",
+      status: "succeeded",
+      decision: "approved",
+    },
+  });
+  expect(firstEvents.map((event) => event.type)).toEqual([
+    "message_start",
+    "approval_result",
+    "text_delta",
+    "message_done",
+    "approval_result",
+  ]);
+  expect(runBodies).toHaveLength(2);
+});
+
+test("POST /v1/agent/sessions/:id/approvals/:approvalId marks failed Hermes continuations as failed", async () => {
+  h = createHarness();
+  const auditEvents: AdminAuditEvent[] = [];
+  const handler = createHandler({
+    env: {
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "hermes-secret",
+    },
+    adminAudit: (event) => auditEvents.push(event),
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const runId = String(body.input).includes("operator approved") ? "approval-failed-run" : "proposal-run";
+        return jsonResponse({ run_id: runId });
+      }
+      if (path === "/v1/runs/proposal-run/events") {
+        return sseResponse([
+          {
+            type: "approval.required",
+            approval_id: "approval-fails",
+            command: "quay cancel failed-task",
+            description: "Cancel task.",
+            affects: [{ label: "task", value: "failed-task" }],
+          },
+          { type: "run.completed" },
+        ]);
+      }
+      return sseResponse([
+        { type: "run.failed", code: "tool_failed" },
+      ]);
+    },
+  });
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+  await responseNdjson(await handler(new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+    method: "POST",
+    headers: {
+      Accept: "application/x-ndjson",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message: "Prepare failing approval",
+      context: agentContextFixture,
+    }),
+  })));
+
+  const response = await handler(postJson(`/v1/agent/sessions/${sessionId}/approvals/approval-fails`, {
+    decision: "approved",
+  }));
+  const events = await responseNdjson(response);
+
+  expect(response.status).toBe(200);
+  expect(events.map((event) => event.type)).toEqual([
+    "message_start",
+    "approval_result",
+    "error",
+    "message_done",
+    "approval_result",
+  ]);
+  expect(events[1]).toMatchObject({ approvalId: "approval-fails", status: "running" });
+  expect(events[4]).toMatchObject({ approvalId: "approval-fails", status: "failed" });
+  const decisionAudit = auditEvents.find((event) => event.action === "agent.approval.decide");
+  expect(decisionAudit).toMatchObject({
+    action: "agent.approval.decide",
+    result_status: "running",
+    approval_id: "approval-fails",
+  });
+  const resultAudit = auditEvents.find((event) => event.action === "agent.approval.result");
+  expect(resultAudit).toMatchObject({
+    action: "agent.approval.result",
+    result_status: "failed",
+    approval_id: "approval-fails",
+    success: false,
+  });
+});
+
+test("POST /v1/agent/sessions/:id/stop interrupts the temporary session", async () => {
+  h = createHarness();
+  const handler = createHandler();
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(postJson(`/v1/agent/sessions/${sessionId}/stop`, {}));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(body).toEqual({
+    session_id: sessionId,
+    stopped: true,
+  });
+});
+
+test("Agent Gateway routes use Admin API auth, CORS, validation, and method handling", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: { admin: { require_auth: true } },
+    env: { QUAY_ADMIN_TOKEN: "secret-token" },
+  });
+
+  const missingAuth = await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  }));
+  expect(missingAuth.status).toBe(401);
+
+  const preflight = await handler(
+    new Request("http://quay.local/v1/agent/sessions/session-1/messages", {
+      method: "OPTIONS",
+      headers: { Origin: "http://127.0.0.1:5173" },
+    }),
+  );
+  expect(preflight.status).toBe(204);
+  expect(preflight.headers.get("access-control-allow-methods")).toBe(
+    "POST, OPTIONS",
+  );
+
+  const invalid = await handler(
+    new Request("http://quay.local/v1/agent/sessions", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ context: { view: "unknown" } }),
+    }),
+  );
+  expect(invalid.status).toBe(400);
+  expect(await responseJson(invalid)).toMatchObject({
+    error: "validation_error",
+  });
+
+  const unknownSession = await handler(
+    new Request("http://quay.local/v1/agent/sessions/missing/messages", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "hello",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  expect(unknownSession.status).toBe(404);
+  expect(await responseJson(unknownSession)).toMatchObject({
+    error: "agent_session_not_found",
+  });
+
+  const getSession = await handler(
+    new Request("http://quay.local/v1/agent/sessions", {
+      headers: { Authorization: "Bearer secret-token" },
+    }),
+  );
+  expect(getSession.status).toBe(405);
+  expect(getSession.headers.get("allow")).toBe("POST, OPTIONS");
+});
+
+test("Hermes provider stays server-side and maps health failures to AgentEvent errors", async () => {
+  h = createHarness();
+  const calls: string[] = [];
+  const handler = createHandler({
+    env: {
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "secret-key",
+    },
+    agentFetch: async (input) => {
+      calls.push(new URL(String(input)).pathname);
+      return new Response(JSON.stringify({ error: "offline" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "hello",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  const events = await responseNdjson(response);
+
+  expect(session.provider).toBe("hermes");
+  expect(response.status).toBe(200);
+  expect(calls).toEqual(["/health"]);
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({
+    type: "error",
+    code: "hermes_health_failed",
+    recoverable: true,
+  });
+  expect(JSON.stringify(events)).not.toContain("secret-key");
+});
+
 test("admin bearer auth protects reads and writes when configured", async () => {
   h = createHarness();
   const repoService = createRepoService({ db: h.db, clock: h.clock });
@@ -347,9 +1621,12 @@ test("admin bearer auth protects reads and writes when configured", async () => 
     success: true,
     status: 200,
     slack_user_id: "hermes-user-123",
+    display_name: null,
     identity_status: "forwarded",
     forwarded_identity: "hermes-user-123",
     forwarded_identity_header: "X-Hermes-User-Id",
+    forwarded_display_name: null,
+    forwarded_display_name_header: "X-Hermes-User-Display-Name",
     operation_summary: ["repo repo-a: update base_branch"],
     target_resources: ["repo:repo-a"],
   });
@@ -1240,7 +2517,7 @@ test("Admin API handles CORS preflight for read-only versioned routes", async ()
     "GET, OPTIONS",
   );
   expect(response.headers.get("access-control-allow-headers")).toBe(
-    "Accept, Authorization, Content-Type, X-Hermes-User-Id",
+    "Accept, Authorization, Content-Type, X-Hermes-User-Id, X-Hermes-User-Display-Name",
   );
 });
 

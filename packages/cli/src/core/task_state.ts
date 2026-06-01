@@ -382,11 +382,13 @@ export interface TransitionTaskStateDeps {
 export interface TaskTransitionPrMetadata {
   number?: number | null;
   url?: string | null;
+  title?: string | null;
   headSha?: string | null;
   baseSha?: string | null;
   coalesce?: "input" | "existing";
   numberCoalesce?: "input" | "existing";
   urlCoalesce?: "input" | "existing";
+  titleCoalesce?: "input" | "existing";
   headShaCoalesce?: "input" | "existing";
   baseShaCoalesce?: "input" | "existing";
 }
@@ -593,6 +595,7 @@ function appendPrMetadataUpdate(
   };
   col("pr_number", pr.number, pr.numberCoalesce ?? pr.coalesce);
   col("pr_url", pr.url, pr.urlCoalesce ?? pr.coalesce);
+  col("pr_title", pr.title, pr.titleCoalesce ?? pr.coalesce);
   col("head_sha", pr.headSha, pr.headShaCoalesce ?? pr.coalesce);
   col("base_sha", pr.baseSha, pr.baseShaCoalesce ?? pr.coalesce);
 }

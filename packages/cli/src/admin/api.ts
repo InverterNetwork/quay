@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { SQLQueryBindings } from "bun:sqlite";
 import { z } from "zod";
 import type { QuayConfig } from "../cli/config.ts";
+import type { AgentFetch } from "./agent_types.ts";
 import { DEFAULT_RETRY_BUDGET } from "../core/enqueue.ts";
 import {
   buildAgentSelection,
@@ -17,6 +18,10 @@ import {
   authorizeAdminRequest,
   type AdminRequestAuditContext,
 } from "./auth.ts";
+import {
+  agentGatewayAllowedMethods,
+  createAgentGateway,
+} from "./agent_gateway.ts";
 import {
   assertPreambleKind,
   DEFAULT_PREAMBLE_BODY,
@@ -61,6 +66,7 @@ export interface AdminApiRuntime {
   dataDir: string;
   db: DB;
   env?: NodeJS.ProcessEnv;
+  agentFetch?: AgentFetch;
   adminAudit?: (event: AdminAuditEvent) => void;
   paths: {
     reposRoot: string;
@@ -72,7 +78,18 @@ export interface AdminApiRuntime {
 }
 
 export interface AdminAuditEvent extends AdminRequestAuditContext {
-  action: "changes.preview" | "changes.apply";
+  action:
+    | "changes.preview"
+    | "changes.apply"
+    | "agent.session.create"
+    | "agent.session.stop"
+    | "agent.message.send"
+    | "agent.tool.call"
+    | "agent.approval.required"
+    | "agent.approval.decide"
+    | "agent.approval.result"
+    | "agent.command.output"
+    | "agent.error";
   method: string;
   path: string;
   timestamp: string;
@@ -80,8 +97,34 @@ export interface AdminAuditEvent extends AdminRequestAuditContext {
   status: number;
   operation_summary: string[];
   target_resources: string[];
+  retention_bucket?:
+    | "agent_chat_7d"
+    | "agent_tool_7d"
+    | "agent_rejected_approval_7d"
+    | "agent_approved_action_30d";
+  expires_at?: string;
+  adapter_id?: string;
+  agent_id?: string;
+  message_id?: string;
+  message_summary?: string;
+  context_view?: string;
+  context_scope?: string;
+  context_url_path?: string;
+  context_summary?: string;
+  context_captured_at?: string;
+  tool_call_id?: string;
+  tool_name?: string;
+  arguments_summary?: string;
+  effect?: "read_only" | "mutating" | "unknown";
   error_code?: string;
   error_message?: string;
+  session_id?: string;
+  approval_id?: string;
+  decision?: "approved" | "rejected";
+  result_status?: "proposed" | "running" | "rejected" | "succeeded" | "failed";
+  command?: string;
+  affects?: Array<{ label: string; value: string }>;
+  exit_code?: number;
 }
 
 type AdminAuditOutcome = Omit<
@@ -148,15 +191,31 @@ type AdminMissionControlAttnReason =
   | "budget"
   | "loop"
   | "worktree";
+type AdminMissionControlTaskRole = "worker" | "review" | "umbrella";
+
+interface AdminMissionControlUmbrellaChildren {
+  done: number;
+  total: number;
+}
 
 interface AdminMissionControlTask {
   id: string;
   ext: string;
+  extUrl: string | null;
   repo: string;
+  repoUrl: string | null;
   title: string;
   branch: string;
   state: TaskState;
   pr: number | null;
+  prUrl: string | null;
+  isReviewOnly: boolean;
+  role: AdminMissionControlTaskRole;
+  reviewStatus: string | null;
+  umbrellaRef: string | null;
+  umbrellaUrl: string | null;
+  umbrellaChildren: AdminMissionControlUmbrellaChildren | null;
+  blockedBy: string | null;
   budget: number;
   total: number;
   latest: string;
@@ -311,6 +370,7 @@ const ACTIVE_TASK_STATES = [
 ] as const;
 
 export function createAdminApiHandler(runtime: AdminApiRuntime) {
+  const agentGateway = createAgentGateway(runtime);
   return async function handleAdminApi(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const segments = pathSegments(url.pathname);
@@ -358,6 +418,8 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
     }
 
     if (request.method === "POST") {
+      const agentResponse = await agentGateway.handle(request, segments, cors.headers, auth.audit);
+      if (agentResponse !== null) return agentResponse;
       if (isWriteRoute(segments, "preview")) {
         return handleAdminMutation(
           cors.headers,
@@ -417,6 +479,11 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
         service: "quay",
         api_version: ADMIN_API_VERSION,
         quay_version: runtime.version,
+        viewer: {
+          label: auth.audit.display_name ?? "You",
+          display_name: auth.audit.display_name,
+          slack_user_id: auth.audit.slack_user_id,
+        },
       }, 200, cors.headers);
     }
 
@@ -526,6 +593,8 @@ function isVersionedRoute(segments: string[]): boolean {
 
 function allowedMethodsForRoute(segments: string[]): string | null {
   if (segments[0] !== "v1") return null;
+  const agentMethods = agentGatewayAllowedMethods(segments);
+  if (agentMethods !== null) return agentMethods;
   if (segments.length === 2) {
     return [
       "global",
@@ -559,10 +628,14 @@ function isWriteRoute(
 interface MissionControlTaskRow {
   task_id: string;
   repo_id: string;
+  repo_url: string;
   external_ref: string | null;
   state: string;
+  authoring_mode: string;
   branch_name: string;
   pr_number: number | null;
+  pr_url: string | null;
+  pr_title: string | null;
   attempts_consumed: number;
   retry_budget: number;
   authors_json: string | null;
@@ -572,6 +645,14 @@ interface MissionControlTaskRow {
   reviewer_model: string | null;
   goal_objective: string | null;
   objective_file_path: string | null;
+  ticket_snapshot_file_path: string | null;
+  umbrella_kind: string | null;
+  umbrella_ref: string | null;
+  umbrella_url: string | null;
+  umbrella_title: string | null;
+  umbrella_children_done: number | null;
+  umbrella_children_total: number | null;
+  blocked_by: string | null;
   updated_at: string;
   created_at: string;
 }
@@ -631,8 +712,10 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
   return db
     .query<MissionControlTaskRow, SQLQueryBindings[]>(
       `WITH candidate_tasks AS (
-         SELECT t.task_id, t.repo_id, t.external_ref, t.state, t.branch_name,
-                t.pr_number, t.attempts_consumed, t.retry_budget, t.authors_json,
+         SELECT t.task_id, t.repo_id, r.repo_url, t.external_ref, t.state, t.authoring_mode, t.branch_name,
+                COALESCE(t.pr_number, parent_uw.final_pr_number) AS pr_number,
+                COALESCE(t.pr_url, parent_uw.final_pr_url) AS pr_url,
+                t.pr_title, t.attempts_consumed, t.retry_budget, t.authors_json,
                 t.worker_agent, t.worker_model, t.reviewer_agent, t.reviewer_model,
                 tg.objective AS goal_objective,
                 (
@@ -644,6 +727,53 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                    ORDER BY ar.artifact_id ASC
                    LIMIT 1
                 ) AS objective_file_path,
+                (
+                  SELECT ar.file_path
+                    FROM artifacts ar
+                   WHERE ar.task_id = t.task_id
+                     AND ar.kind = 'ticket_snapshot'
+                     AND ar.attempt_id IS NULL
+                   ORDER BY ar.artifact_id ASC
+                   LIMIT 1
+                ) AS ticket_snapshot_file_path,
+                CASE
+                  WHEN parent_uw.umbrella_workflow_id IS NOT NULL THEN 'parent'
+                  WHEN child_uw.umbrella_workflow_id IS NOT NULL THEN 'child'
+                  ELSE NULL
+                END AS umbrella_kind,
+                COALESCE(parent_uw.external_ref, child_uw.external_ref) AS umbrella_ref,
+                parent_uw.linear_issue_url AS umbrella_url,
+                parent_uw.linear_issue_title AS umbrella_title,
+                (
+                  SELECT COUNT(*)
+                    FROM umbrella_expected_tasks uet
+                    LEFT JOIN umbrella_tasks ut
+                      ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
+                     AND ut.external_ref = uet.external_ref
+                    LEFT JOIN tasks child
+                      ON child.task_id = ut.task_id
+                   WHERE uet.umbrella_workflow_id = parent_uw.umbrella_workflow_id
+                     AND (
+                          uet.state = 'complete_without_quay'
+                       OR child.state = 'merged_to_feature_branch'
+                     )
+                ) AS umbrella_children_done,
+                (
+                  SELECT COUNT(*)
+                    FROM umbrella_expected_tasks uet
+                   WHERE uet.umbrella_workflow_id = parent_uw.umbrella_workflow_id
+                ) AS umbrella_children_total,
+                (
+                  SELECT COALESCE(td.dependency_external_ref, dependency_task.external_ref, td.dependency_task_id)
+                    FROM task_dependencies td
+                    LEFT JOIN tasks dependency_task
+                      ON dependency_task.task_id = td.dependency_task_id
+                   WHERE td.dependent_task_id = t.task_id
+                     AND td.kind = 'blocked_by'
+                     AND td.satisfied_at IS NULL
+                   ORDER BY td.dependency_id ASC
+                   LIMIT 1
+                ) AS blocked_by,
                 t.updated_at, t.created_at,
                 CASE
                   WHEN t.state IN (${sqlPlaceholders(MISSION_CONTROL_TERMINAL_STATE_LIST)})
@@ -653,6 +783,9 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
            FROM tasks t
            JOIN repos r ON r.repo_id = t.repo_id
            LEFT JOIN task_goals tg ON tg.task_id = t.task_id
+           LEFT JOIN umbrella_workflows parent_uw ON parent_uw.final_pr_task_id = t.task_id
+           LEFT JOIN umbrella_tasks child_ut ON child_ut.task_id = t.task_id
+           LEFT JOIN umbrella_workflows child_uw ON child_uw.umbrella_workflow_id = child_ut.umbrella_workflow_id
           WHERE r.archived_at IS NULL
             AND t.state IN (${sqlPlaceholders(TASK_STATES)})
        ),
@@ -664,10 +797,13 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                 ) AS bucket_rank
            FROM candidate_tasks
        )
-       SELECT task_id, repo_id, external_ref, state, branch_name,
-              pr_number, attempts_consumed, retry_budget, authors_json,
+       SELECT task_id, repo_id, repo_url, external_ref, state, authoring_mode, branch_name,
+              pr_number, pr_url, pr_title, attempts_consumed, retry_budget, authors_json,
               worker_agent, worker_model, reviewer_agent, reviewer_model,
-              goal_objective, objective_file_path, updated_at, created_at
+              goal_objective, objective_file_path, ticket_snapshot_file_path,
+              umbrella_kind, umbrella_ref, umbrella_url, umbrella_title,
+              umbrella_children_done, umbrella_children_total, blocked_by, updated_at,
+              created_at
          FROM ranked_tasks
         WHERE (terminal_bucket = 0 AND bucket_rank <= ?)
            OR (terminal_bucket = 1 AND bucket_rank <= ?)
@@ -702,17 +838,36 @@ async function missionControlTaskFromRow(
   const state = toTaskState(row.state);
   if (state === null) return null;
   const attention = deriveMissionControlAttention(state, recentEvents);
+  const isReviewOnly = isReviewOnlyMissionControlTask(row);
+  const role = missionControlTaskRole(row, isReviewOnly);
   const task: AdminMissionControlTask = {
     id: row.task_id,
     ext: row.external_ref ?? "—",
+    extUrl: await linearIssueUrlForMissionControl(row),
     repo: row.repo_id,
+    repoUrl: repoBrowserUrl(row.repo_url),
     title: await titleForMissionControl(row),
     branch: row.branch_name.trim() === "" ? "—" : row.branch_name,
     state,
     pr: row.pr_number,
+    prUrl: row.pr_url,
+    isReviewOnly,
+    role,
+    reviewStatus: isReviewOnly ? missionControlReviewStatus(state, recentEvents) : null,
+    umbrellaRef: row.umbrella_ref,
+    umbrellaUrl: validateHttpUrl(row.umbrella_url),
+    umbrellaChildren: row.umbrella_kind !== "parent"
+      ? null
+      : {
+        done: row.umbrella_children_done ?? 0,
+        total: row.umbrella_children_total ?? 0,
+      },
+    blockedBy: row.blocked_by,
     budget: row.attempts_consumed,
     total: row.retry_budget,
-    latest: formatLatestMissionControlEvent(recentEvents[0]),
+    latest: role === "umbrella"
+      ? formatUmbrellaLatest(row, recentEvents[0])
+      : formatMissionControlLatest(row, state, recentEvents[0]),
     agent: missionControlAgent(row, state),
     age: formatAge(row.updated_at, now),
     updatedAt: row.updated_at,
@@ -775,7 +930,6 @@ function deriveMissionControlAttention(
   const latest = recentEvents[0]?.event_type;
   if (latest === "ci_failed") return { reason: "ci", tone: "danger" };
   if (latest === "budget_exhausted") return { reason: "budget", tone: "danger" };
-  if (state === "waiting_dependencies") return { reason: "dependency", tone: "warn" };
   if (state === "waiting_human") return { reason: "slack", tone: "warn" };
   if (state === "awaiting-next-brief") return { reason: "brief", tone: "warn" };
   if (latest === "changes_requested") return { reason: "changes", tone: "warn" };
@@ -784,11 +938,126 @@ function deriveMissionControlAttention(
 }
 
 async function titleForMissionControl(row: MissionControlTaskRow): Promise<string> {
+  if (row.umbrella_kind === "parent" && row.umbrella_ref !== null) {
+    const title = row.umbrella_title?.trim();
+    if (title !== undefined && title !== "") return title;
+    return `${row.umbrella_ref} umbrella workflow`;
+  }
+  if (isReviewOnlyMissionControlTask(row) && row.pr_title !== null && row.pr_title.trim() !== "") {
+    return row.pr_title.trim();
+  }
   const fromGoal = summarizeTaskObjective(row.goal_objective);
   if (fromGoal !== null) return fromGoal;
   const fromArtifact = summarizeTaskObjective(await readOptionalTextFile(row.objective_file_path));
   if (fromArtifact !== null) return fromArtifact;
   return row.external_ref ?? row.task_id;
+}
+
+async function linearIssueUrlForMissionControl(row: MissionControlTaskRow): Promise<string | null> {
+  if (isReviewOnlyMissionControlTask(row)) return null;
+  if (row.external_ref === null) return null;
+  const snapshot = await readOptionalTextFile(row.ticket_snapshot_file_path);
+  if (snapshot === null) return null;
+
+  try {
+    const parsed = JSON.parse(snapshot) as unknown;
+    if (!isRecord(parsed)) return null;
+    const issue = parsed.linear_issue;
+    if (!isRecord(issue)) return null;
+    const identifier = typeof issue.identifier === "string" ? issue.identifier.trim() : "";
+    if (identifier.toUpperCase() !== row.external_ref.toUpperCase()) return null;
+    return validateHttpUrl(typeof issue.url === "string" ? issue.url : null);
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isReviewOnlyMissionControlTask(row: MissionControlTaskRow): boolean {
+  return row.authoring_mode === "synthetic_review" || row.authoring_mode === "adopted_external_pr";
+}
+
+function missionControlTaskRole(
+  row: MissionControlTaskRow,
+  isReviewOnly: boolean,
+): AdminMissionControlTaskRole {
+  if (row.umbrella_kind === "parent") return "umbrella";
+  return isReviewOnly ? "review" : "worker";
+}
+
+function missionControlReviewStatus(
+  state: TaskState,
+  recentEvents: readonly MissionControlEventRow[],
+): string {
+  const latestReviewEvent = recentEvents.find((event) =>
+    event.event_type === "review_approved" ||
+    event.event_type === "review_changes_requested" ||
+    event.event_type === "changes_requested" ||
+    event.event_type === "review_requested" ||
+    event.event_type === "review_spawned"
+  )?.event_type;
+
+  switch (latestReviewEvent) {
+    case "review_approved":
+      return "approved";
+    case "review_changes_requested":
+    case "changes_requested":
+      return "changes requested";
+    case "review_requested":
+    case "review_spawned":
+      return "reviewing";
+    default:
+      return state === "pr-review" ? "reviewing" : "review";
+  }
+}
+
+function repoBrowserUrl(repoUrl: string): string | null {
+  const trimmed = repoUrl.trim();
+  if (trimmed === "") return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      parsed.username = "";
+      parsed.password = "";
+      parsed.pathname = `/${stripGitSuffix(parsed.pathname.replace(/^\/+/, ""))}`;
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString().replace(/\/$/, "");
+    }
+    if (parsed.protocol === "ssh:" && parsed.hostname !== "" && parsed.pathname !== "") {
+      return `https://${parsed.hostname}/${stripGitSuffix(parsed.pathname.replace(/^\/+/, ""))}`;
+    }
+  } catch {
+    const scpLike = /^(?:[^@\s/:]+@)?([^:\s]+):(.+)$/.exec(trimmed);
+    if (scpLike !== null) {
+      const host = scpLike[1];
+      const path = scpLike[2];
+      if (host === undefined || path === undefined || host === "" || path === "") return null;
+      return `https://${host}/${stripGitSuffix(path.replace(/^\/+/, ""))}`;
+    }
+    return null;
+  }
+
+  return null;
+}
+
+function validateHttpUrl(value: string | null): string | null {
+  const trimmed = value?.trim();
+  if (trimmed === undefined || trimmed === "") return null;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function stripGitSuffix(path: string): string {
+  return path.endsWith(".git") ? path.slice(0, -4) : path;
 }
 
 function summarizeTaskObjective(value: string | null): string | null {
@@ -821,8 +1090,14 @@ function formatLatestMissionControlEvent(event: MissionControlEventRow | undefin
       return "budget exhausted";
     case "changes_requested":
       return "changes requested";
+    case "review_changes_requested":
+      return "review changes requested";
+    case "review_approved":
+      return "review approved";
     case "review_requested":
       return "review requested";
+    case "review_spawned":
+      return "reviewer spawned";
     case "spawned":
       return "worker spawned";
     case "pr_opened":
@@ -834,6 +1109,35 @@ function formatLatestMissionControlEvent(event: MissionControlEventRow | undefin
     default:
       return event.event_type.replace(/_/g, " ");
   }
+}
+
+function formatMissionControlLatest(
+  row: MissionControlTaskRow,
+  state: TaskState,
+  event: MissionControlEventRow | undefined,
+): string {
+  if (state === "waiting_dependencies" && row.blocked_by !== null) {
+    return `blocked on ${row.blocked_by} → feature branch`;
+  }
+  return formatLatestMissionControlEvent(event);
+}
+
+function formatUmbrellaLatest(
+  row: MissionControlTaskRow,
+  event: MissionControlEventRow | undefined,
+): string {
+  const done = row.umbrella_children_done ?? 0;
+  const total = row.umbrella_children_total ?? 0;
+  if (
+    row.pr_number !== null &&
+    row.state !== "merged" &&
+    row.state !== "closed_unmerged" &&
+    row.state !== "cancelled"
+  ) {
+    return `final PR open · ${done} of ${total} children merged to feature branch`;
+  }
+  if (event !== undefined) return formatLatestMissionControlEvent(event);
+  return `${done} of ${total} children merged to feature branch`;
 }
 
 function missionControlAgent(row: MissionControlTaskRow, state: TaskState): string {

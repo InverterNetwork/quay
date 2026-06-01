@@ -829,10 +829,10 @@ function createSyntheticTask(
     .query(
       `INSERT OR IGNORE INTO tasks (
          task_id, repo_id, external_ref, state, authoring_mode, branch_name, tmux_id,
-         worktree_path, pr_number, pr_url, head_sha, retry_budget,
+         worktree_path, pr_number, pr_url, pr_title, head_sha, retry_budget,
          worker_agent, worker_model, reviewer_agent, reviewer_model,
          created_at, updated_at
-       ) VALUES (?, ?, NULL, 'pr-review', 'synthetic_review', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, NULL, 'pr-review', 'synthetic_review', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       taskId,
@@ -842,6 +842,7 @@ function createSyntheticTask(
       worktreePath,
       prNumber,
       pr.url,
+      pr.title,
       pr.headSha,
       snapshot.worker_agent,
       snapshot.worker_model,
@@ -1071,6 +1072,7 @@ function ensureAdoptionMetadata(
             base_branch = ?,
             pr_number = ?,
             pr_url = ?,
+            pr_title = ?,
             head_sha = ?,
             tick_error = NULL,
             updated_at = ?
@@ -1080,6 +1082,7 @@ function ensureAdoptionMetadata(
     input.baseBranch,
     input.pr.number,
     input.pr.url,
+    input.pr.title,
     input.headSha,
     input.now,
     input.taskId,

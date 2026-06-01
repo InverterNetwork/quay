@@ -175,6 +175,7 @@ export interface PrSnapshot {
   // them missing — tick treats absent values as "don't update".
   prNumber?: number | null;
   prUrl?: string | null;
+  prTitle?: string | null;
   // The base branch name (`gh pr view --json baseRefName`). Captured so
   // callers that need the base ref for diffing can compute against it
   // without re-scraping. Optional for the same reason as prNumber/prUrl.
@@ -194,6 +195,7 @@ export interface PrSnapshot {
 
 export interface OpenBranchPr {
   number: number;
+  title?: string | null;
   url: string | null;
   headSha: string;
   baseSha: string | null;

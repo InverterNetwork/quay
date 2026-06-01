@@ -4733,12 +4733,14 @@ function persistPrMetadata(
 ): void {
   const prNumber = snapshot.prNumber ?? null;
   const prUrl = snapshot.prUrl ?? null;
+  const prTitle = snapshot.prTitle ?? null;
   const headSha = snapshot.headSha === "" ? null : snapshot.headSha;
   const baseSha = snapshot.baseSha;
   const baseRef = normalizePrBaseRef(snapshot.baseRef);
   if (
     prNumber === null &&
     prUrl === null &&
+    prTitle === null &&
     headSha === null &&
     baseSha === null &&
     baseRef === null
@@ -4751,12 +4753,13 @@ function persistPrMetadata(
         `UPDATE tasks
             SET pr_number = COALESCE(?, pr_number),
                 pr_url    = COALESCE(?, pr_url),
+                pr_title  = COALESCE(?, pr_title),
                 head_sha  = COALESCE(?, head_sha),
                 base_sha  = COALESCE(?, base_sha),
                 base_branch = COALESCE(?, base_branch)
           WHERE task_id = ?`,
       )
-      .run(prNumber, prUrl, headSha, baseSha, baseRef, taskId);
+      .run(prNumber, prUrl, prTitle, headSha, baseSha, baseRef, taskId);
   } catch {
     // Best-effort: PR-metadata observability never blocks the state
     // machine. A SQL failure here will be retried on the next tick.

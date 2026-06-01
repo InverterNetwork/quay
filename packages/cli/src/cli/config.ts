@@ -71,6 +71,7 @@ const AdminConfigSchema = z
     require_auth: z.boolean().optional(),
     token_env: z.string().min(1).optional(),
     forwarded_identity_header: HttpHeaderNameSchema.optional(),
+    forwarded_display_name_header: HttpHeaderNameSchema.optional(),
   })
   .strict();
 

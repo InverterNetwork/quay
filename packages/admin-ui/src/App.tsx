@@ -1,8 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { DemoAgentDrawer } from './agent/AgentDrawer';
+import { AGENT_CTX, hermesAdapter } from './agent/agentData';
 import { PrimarySidebar, type AppRoute } from './app/PrimarySidebar';
 import { useQuayAdminReadModel } from './api/quayAdmin';
+import { buildMissionControlAgentContext } from './mission-control/agentContext';
 import { MissionControlPage } from './mission-control/MissionControlPage';
 import { useMissionControlTasks } from './mission-control/useMissionControlTasks';
+import { resolveOperatorIdentity } from './operatorIdentity';
 import { ApiErrorScreen, ApiLoadingScreen } from './screens/ApiStateScreen';
 import { ArchiveConfirmDialog } from './screens/ArchiveConfirmDialog';
 import { EmptyScreen } from './screens/EmptyScreen';
@@ -13,6 +17,7 @@ import { RepoScreen } from './screens/RepoScreen';
 import { SaveFooter } from './screens/SaveFooter';
 import { SavePreviewModal } from './screens/SavePreviewModal';
 import { TopBar } from './screens/TopBar';
+import { buildConfigurationAgentContext } from './screens/configurationAgentContext';
 import { useChangeStore } from './store/dirty';
 
 type Scope = 'global' | string;
@@ -62,8 +67,10 @@ function routePath(basePath: string, route: AppRoute, scope: Scope = 'global'): 
 export function App() {
   const [routeState, setRouteState] = useState<RouteState>(readRouteState);
   const [overlay, setOverlay] = useState<Overlay>(null);
+  const [agentOpen, setAgentOpen] = useState(true);
   const [empty, setEmpty] = useState(false);
   const [mode, setMode] = useState<Mode>(readModeFromStorage);
+  const agentTriggerRef = useRef<HTMLButtonElement>(null);
   const admin = useQuayAdminReadModel();
   const missionControl = useMissionControlTasks();
   const store = useChangeStore();
@@ -71,6 +78,7 @@ export function App() {
   const repos = empty ? [] : admin.repos;
   const workerPreamble = admin.global?.preambles.find((preamble) => preamble.kind === 'code') ?? null;
   const reviewerPreamble = admin.global?.preambles.find((preamble) => preamble.kind === 'review') ?? null;
+  const operatorIdentity = resolveOperatorIdentity(admin.meta?.viewer);
   const drawerPreamble =
     overlay?.type === 'preamble-drawer'
       ? overlay.kind === 'worker'
@@ -119,9 +127,33 @@ export function App() {
     }
   }, [admin.loading, navigateTo, route, scope, selectedRepo]);
 
+  const closeAgent = useCallback(() => {
+    setAgentOpen(false);
+    window.requestAnimationFrame(() => agentTriggerRef.current?.focus());
+  }, []);
+
+  const toggleAgent = useCallback(() => {
+    setAgentOpen((open) => {
+      const nextOpen = !open;
+      if (!nextOpen) {
+        window.requestAnimationFrame(() => agentTriggerRef.current?.focus());
+      }
+      return nextOpen;
+    });
+  }, []);
+
   // Cmd/Ctrl + Enter → preview diff (opens the save-preview modal)
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'j') {
+        e.preventDefault();
+        toggleAgent();
+        return;
+      }
+      if (e.key === 'Escape') {
+        closeAgent();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         if (store.changes.length > 0) {
           e.preventDefault();
@@ -131,7 +163,7 @@ export function App() {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [store.changes.length]);
+  }, [closeAgent, store.changes.length, toggleAgent]);
 
   const handleAddRepo = useCallback(() => undefined, []);
   const handleArchive = useCallback(
@@ -158,6 +190,23 @@ export function App() {
   }, [admin, store]);
 
   const onSaveDirect = useCallback(() => setOverlay({ type: 'save-preview' }), []);
+  const buildAgentUiContext = useCallback(() => {
+    const urlPath = window.location.pathname;
+    if (route === 'mission-control') {
+      return buildMissionControlAgentContext({
+        scope: 'prod',
+        urlPath,
+        tasks: missionControl.tasks,
+      });
+    }
+    return buildConfigurationAgentContext({
+      scope,
+      urlPath,
+      global: admin.global,
+      repo: selectedRepo,
+      changes: store.changes,
+    });
+  }, [admin.global, missionControl.tasks, route, scope, selectedRepo, store.changes]);
 
   const isEmpty = !admin.loading && !admin.error && repos.length === 0;
   const scopeLabel = scope === 'global' ? 'Global' : scope;
@@ -188,6 +237,10 @@ export function App() {
         crumbs={crumbs}
         mode={mode}
         backendStatus={status}
+        agentOpen={agentOpen}
+        agentTriggerRef={agentTriggerRef}
+        operatorIdentity={operatorIdentity}
+        onAgentToggle={toggleAgent}
         onModeToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
       />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
@@ -282,6 +335,15 @@ export function App() {
           </>
         )}
       </div>
+
+      <DemoAgentDrawer
+        open={agentOpen}
+        onClose={closeAgent}
+        adapter={hermesAdapter}
+        ctx={AGENT_CTX}
+        getUiContext={buildAgentUiContext}
+        operatorIdentity={operatorIdentity}
+      />
 
       {import.meta.env.DEV && route === 'configuration' && <DevToggle empty={empty} onToggle={() => setEmpty((e) => !e)} />}
 

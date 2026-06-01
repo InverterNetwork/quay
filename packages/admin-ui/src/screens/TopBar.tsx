@@ -1,3 +1,4 @@
+import type { RefObject } from 'react';
 import { Avatar } from '../components/Avatar';
 import { Divider } from '../components/Divider';
 import { Input } from '../components/Input';
@@ -9,6 +10,8 @@ import { QuayWordmark } from '../components/Brand';
 import { Icon } from '../icons/Icon';
 import { Button } from '../components/Button';
 import type { Tone } from '../styles/tones';
+import { AgentTrigger } from '../agent/AgentDrawer';
+import type { OperatorIdentity } from '../operatorIdentity';
 
 interface BackendStatus {
   tone: Tone;
@@ -20,10 +23,23 @@ interface TopBarProps {
   crumbs: string[];
   mode: 'light' | 'dark';
   backendStatus: BackendStatus;
+  agentOpen: boolean;
+  agentTriggerRef: RefObject<HTMLButtonElement>;
+  operatorIdentity: OperatorIdentity;
+  onAgentToggle: () => void;
   onModeToggle: () => void;
 }
 
-export function TopBar({ crumbs, mode, backendStatus, onModeToggle }: TopBarProps) {
+export function TopBar({
+  crumbs,
+  mode,
+  backendStatus,
+  agentOpen,
+  agentTriggerRef,
+  operatorIdentity,
+  onAgentToggle,
+  onModeToggle,
+}: TopBarProps) {
   return (
     <header
       style={{
@@ -66,6 +82,7 @@ export function TopBar({ crumbs, mode, backendStatus, onModeToggle }: TopBarProp
         trailing={<Kbd>⌘K</Kbd>}
         shellStyle={{ width: 280 }}
       />
+      <AgentTrigger ref={agentTriggerRef} open={agentOpen} onToggle={onAgentToggle} />
       <Button
         variant="ghost"
         size="sm"
@@ -74,7 +91,7 @@ export function TopBar({ crumbs, mode, backendStatus, onModeToggle }: TopBarProp
       >
         {mode === 'light' ? <Icon.Moon size={14} /> : <Icon.Sun size={14} />}
       </Button>
-      <Avatar name="Mira Tonio" size={28} tone="accent" />
+      <Avatar name={operatorIdentity.avatarName} size={28} tone="accent" />
     </header>
   );
 }
