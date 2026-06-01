@@ -152,6 +152,19 @@ export const Icon = {
       <path d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6" />
     </IconBase>
   ),
+  Eye: ({ size, style }: IconProps) => (
+    <IconBase size={size} style={style}>
+      <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z" />
+      <circle cx="12" cy="12" r="3" />
+    </IconBase>
+  ),
+  Layers: ({ size, style }: IconProps) => (
+    <IconBase size={size} style={style}>
+      <path d="M12 3 3 8l9 5 9-5-9-5z" />
+      <path d="m3 12 9 5 9-5" />
+      <path d="m3 16 9 5 9-5" />
+    </IconBase>
+  ),
   More: ({ size, style }: IconProps) => (
     <IconBase size={size} style={style}>
       <circle cx="5" cy="12" r="1.4" fill="currentColor" />
