@@ -238,6 +238,7 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
   const isUmbrella = task.role === 'umbrella';
   const identity = isUmbrella ? task.umbrellaRef ?? task.ext : task.id;
   const umbrellaChildren = isUmbrella ? task.umbrellaChildren : null;
+  const isChild = !isUmbrella && task.umbrellaRef !== null;
   return (
     <article
       aria-label={`${task.id} · ${task.title}`}
@@ -312,6 +313,21 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
       >
         {task.title}
       </T>
+
+      {(isChild || task.blockedBy !== null) && (
+        <HStack gap={5} wrap>
+          {isChild && (
+            <RelationshipChip tone="accent" leading={<Icon.GitBranch size={11} />}>
+              child of {task.umbrellaRef}
+            </RelationshipChip>
+          )}
+          {task.blockedBy !== null && (
+            <RelationshipChip tone="warn" leading={<Icon.Clock size={11} />}>
+              blocked by {task.blockedBy}
+            </RelationshipChip>
+          )}
+        </HStack>
+      )}
 
       <div style={{ borderLeft: '2px solid var(--line)', paddingLeft: 8, display: 'flex', flexDirection: 'column', gap: 2 }}>
         <T kind="mono-sm" color={task.branch === '—' ? 'var(--ink-4)' : 'var(--ink-2)'} style={ellipsisStyle}>
@@ -468,6 +484,49 @@ function LinkChip({
       {leading}
       {children}
     </a>
+  );
+}
+
+function RelationshipChip({
+  tone,
+  leading,
+  children,
+}: {
+  tone: 'accent' | 'warn';
+  leading?: ReactNode;
+  children: ReactNode;
+}) {
+  const styles = tone === 'accent'
+    ? {
+      color: 'var(--accent-ink)',
+      background: 'var(--accent-soft)',
+      border: '1px solid var(--accent-line)',
+    }
+    : {
+      color: 'var(--warn-ink)',
+      background: 'var(--warn-soft)',
+      border: '1px solid var(--warn-line)',
+    };
+
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        minHeight: 22,
+        padding: '3px 8px',
+        fontFamily: 'var(--sans)',
+        fontSize: 12,
+        fontWeight: 600,
+        lineHeight: 1.2,
+        borderRadius: 'var(--r-sm)',
+        ...styles,
+      }}
+    >
+      {leading}
+      {children}
+    </span>
   );
 }
 

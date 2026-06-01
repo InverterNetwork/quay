@@ -27,6 +27,7 @@ export interface MissionControlContext {
     reviewStatus: string | null;
     umbrellaRef: string | null;
     umbrellaChildren: { done: number; total: number } | null;
+    blockedBy: string | null;
     externalRef: string | null;
     repo: string;
     title: string;
