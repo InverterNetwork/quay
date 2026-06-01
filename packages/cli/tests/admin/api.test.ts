@@ -169,8 +169,10 @@ interface MissionControlResponse {
     pr: number | null;
     prUrl: string | null;
     isReviewOnly: boolean;
-    role: "worker" | "review";
+    role: "worker" | "review" | "umbrella";
     reviewStatus: string | null;
+    umbrellaRef: string | null;
+    umbrellaChildren: { done: number; total: number } | null;
     budget: number;
     total: number;
     latest: string;
@@ -291,6 +293,8 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
     isReviewOnly: false,
     role: "worker",
     reviewStatus: null,
+    umbrellaRef: null,
+    umbrellaChildren: null,
     budget: 3,
     total: 5,
     latest: "CI failed",
@@ -384,8 +388,94 @@ test("GET /v1/tasks exposes review-only PR title and link targets", async () => 
     isReviewOnly: true,
     role: "review",
     reviewStatus: "reviewing",
+    umbrellaRef: null,
+    umbrellaChildren: null,
     total: 1,
     latest: "reviewer spawned",
+  });
+});
+
+test("GET /v1/tasks exposes umbrella parent card metadata", async () => {
+  h = createHarness();
+  insertRepo(h.db, "test-factory-code");
+  const taskId = insertTask(h.db, {
+    taskId: "umbrella-final-pr-4",
+    repoId: "test-factory-code",
+    state: "pr-open",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1579',
+              branch_name = 'quay/umbrella/BRIX-1579',
+              worker_agent = 'codex',
+              retry_budget = 5
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+  const workflow = h.db
+    .query<{ id: number }, [string, string, string, string, string, string, number, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, linear_issue_title,
+         final_pr_task_id, final_pr_number, final_pr_url, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id AS id`,
+    )
+    .get(
+      "BRIX-1579",
+      "test-factory-code",
+      "main",
+      "quay/umbrella/BRIX-1579",
+      "Holiday-gap epic — split across child PRs",
+      taskId,
+      17,
+      "https://github.com/acme/test-factory-code/pull/17",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:12.000Z",
+    );
+  if (workflow === null || workflow === undefined) throw new Error("expected umbrella workflow");
+  h.db
+    .query(
+      `INSERT INTO umbrella_expected_tasks (
+         umbrella_workflow_id, external_ref, title, state, completion_source,
+         completion_reason, completed_at, created_at, updated_at
+       ) VALUES
+         (?, 'BRIX-1571', 'Child 1', 'complete_without_quay', 'manual', 'merged to feature branch', ?, ?, ?),
+         (?, 'BRIX-1575', 'Child 2', 'expected', NULL, NULL, NULL, ?, ?)`,
+    )
+    .run(
+      workflow.id,
+      "2026-01-01T00:00:10.000Z",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:10.000Z",
+      workflow.id,
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+    );
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+  const task = body.tasks.find((item) => item.id === taskId);
+
+  expect(response.status).toBe(200);
+  expect(task).toMatchObject({
+    id: "umbrella-final-pr-4",
+    ext: "BRIX-1579",
+    repo: "test-factory-code",
+    title: "Holiday-gap epic — split across child PRs",
+    branch: "quay/umbrella/BRIX-1579",
+    state: "pr-open",
+    pr: 17,
+    prUrl: "https://github.com/acme/test-factory-code/pull/17",
+    isReviewOnly: false,
+    role: "umbrella",
+    reviewStatus: null,
+    umbrellaRef: "BRIX-1579",
+    umbrellaChildren: { done: 1, total: 2 },
+    total: 5,
+    latest: "final PR open · 1 of 2 children merged to feature branch",
+    agent: "codex",
   });
 });
 

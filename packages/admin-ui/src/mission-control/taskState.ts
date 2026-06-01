@@ -22,7 +22,12 @@ export const TASK_STATES = [
 
 export type TaskState = (typeof TASK_STATES)[number];
 export type AttnReason = 'changes' | 'ci' | 'slack' | 'brief' | 'dependency' | 'budget' | 'loop' | 'worktree';
-export type MissionControlTaskRole = 'worker' | 'review';
+export type MissionControlTaskRole = 'worker' | 'review' | 'umbrella';
+
+export interface MissionControlUmbrellaChildren {
+  done: number;
+  total: number;
+}
 
 export interface MissionControlTask {
   id: string;
@@ -37,6 +42,8 @@ export interface MissionControlTask {
   isReviewOnly: boolean;
   role: MissionControlTaskRole;
   reviewStatus: string | null;
+  umbrellaRef: string | null;
+  umbrellaChildren: MissionControlUmbrellaChildren | null;
   budget: number;
   total: number;
   latest: string;

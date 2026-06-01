@@ -25,6 +25,8 @@ export interface MissionControlContext {
     id: string;
     role: string;
     reviewStatus: string | null;
+    umbrellaRef: string | null;
+    umbrellaChildren: { done: number; total: number } | null;
     externalRef: string | null;
     repo: string;
     title: string;
