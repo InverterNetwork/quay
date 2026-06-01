@@ -82,6 +82,71 @@ Fix the ticket body and retry `quay enqueue --linear-issue`.
 
 The Linear issue exists but is a draft. Quay rejects draft tickets.
 
+## `dependency_not_tracked`
+
+`quay enqueue --linear-issue` found an incomplete Linear blocked-by issue that
+does not have a matching Quay task. Quay stops before creating the dependent
+task because it cannot later observe that blocker reaching `merged`.
+
+Inspect the error payload:
+
+```json
+{
+  "error": "dependency_not_tracked",
+  "dependencies": [{ "external_ref": "BRIX-1505", "repo_id": "myrepo" }]
+}
+```
+
+Fix one of:
+
+- Enqueue the blocker issue first, then enqueue the dependent issue again.
+- Mark the blocker complete in Linear if it is already done; complete Linear
+  blockers do not block enqueue.
+- Remove the Linear blocked-by relation if it is not a real dependency.
+
+## `umbrella_child_direct_enqueue`
+
+`quay enqueue --linear-issue` found that the Linear issue is a child of a
+Linear umbrella parent. Quay stops before creating or returning a task because
+the parent issue owns the umbrella flow and materializes child tasks itself.
+
+Fix one of:
+
+- Enqueue the Linear parent issue instead.
+- Pass `--as-normal-task` if this child should intentionally run outside the
+  umbrella workflow. This ignores the child's Linear parent membership only;
+  Linear blocked-by relations are still processed as normal dependencies.
+
+## `umbrella_dependency_cycle`
+
+Parent enqueue found a cycle among incomplete Linear children connected by
+same-umbrella blocked-by relations. Quay stops before creating tasks because no
+valid execution order exists.
+
+Fix one of:
+
+- Remove or correct one of the Linear blocked-by relations in the cycle.
+- Split the umbrella into smaller parent issues if the work is not actually a
+  strict dependency chain.
+- Mark a blocker complete in Linear if it is already done outside Quay.
+
+## `umbrella_feature_branch_missing`
+
+Quay found an existing umbrella workflow row, but the persisted feature branch
+no longer exists on the remote repository. Quay refuses to recreate existing
+umbrella branches from the base branch because that could hide deleted
+integrated work.
+
+Fix one of:
+
+- Restore the missing feature branch to the expected remote ref.
+- Cancel or repair the umbrella workflow before re-enqueueing the parent.
+
+## `dependency_cycle`
+
+The requested dependency edge would make tasks wait on each other. Remove or
+correct the Linear blocked-by relation, then enqueue again.
+
 ## `branch_collision_unresolvable`
 
 Quay could not find an unused `quay/<slug>` branch for the task. Check local
@@ -162,6 +227,21 @@ The task exceeded the configured cap for review/conflict respawns. Inspect the
 latest `review_comments` or `conflict_slice` artifact and decide whether to
 cancel or recover manually.
 
+For PR review tasks, a `tick_error` containing `reviewer identity mismatch`
+means Quay found a review at the PR head SHA, but it was authored by a
+different GitHub identity than `[reviewer].login`. Check the actual review
+authors with:
+
+```bash
+gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
+  --jq '.[] | select(.commit_id == "{head_sha}") | {state, login: .user.login, type: .user.type, node_id}'
+```
+
+Then update `[reviewer].login` to the identity that posts reviews. Use
+`login = "app/<slug>"` for GitHub App bot reviews whose API type is `Bot`
+and `login = "<slug>"` for regular user reviews whose API type is `User`.
+Restart or tick the Quay process after deploying the corrected config.
+
 ## Tick Shows `tick_error`
 
 Tick isolates errors per task and continues. Inspect:
@@ -174,6 +254,41 @@ quay task events <task_id>
 Many tick errors clear automatically after the next successful observation.
 Persistent tick errors usually point to adapter auth, GitHub CLI setup, missing
 tmux, or repo/worktree state.
+
+If the error contains `umbrella auto-merge guard failed`, Quay refused to
+auto-merge an umbrella subtask PR because the live PR no longer matched the
+guarded shape. Common causes are a changed PR base, a missing or stale PR
+snapshot, an unapproved review state, or failing checks.
+
+Inspect:
+
+```bash
+quay task get <task_id>
+gh pr view <pr_number> --repo <owner/repo> --json baseRefName,headRefName,reviewDecision,mergeStateStatus,statusCheckRollup
+```
+
+For an auto-mergeable umbrella subtask, the PR base must exactly match
+`umbrella_status.feature_branch`, the PR must be approved, and required checks
+must be green. Correct the PR base or review/CI state, then run `quay tick`
+again. If the task is the final umbrella PR, Quay will not auto-merge it; merge
+observation follows the normal final PR lifecycle.
+
+## Failed Blockers With Waiting Dependents
+
+Failed or cancelled blockers do not auto-unblock and do not auto-cancel their
+dependents. Waiting dependents remain in `waiting_dependencies` with
+unsatisfied rows.
+
+Inspect the dependent and blocker:
+
+```bash
+quay task get <dependent_task_id>
+quay task get <blocker_task_id>
+```
+
+Then decide whether to retry or recover the blocker, cancel the dependent, or
+create replacement work and retarget manually. Quay releases the dependent only
+when the persisted dependency row is satisfied by the required blocker state.
 
 ## Tick Shows `github_backoff_skipped`
 

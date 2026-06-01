@@ -3,12 +3,14 @@ import type {
   GitHubGraphqlRateLimit,
   OpenBranchPr,
   PostedReview,
+  PostedReviewAuthor,
   PrCheckStatus,
   PrSnapshot,
   PullRequestView,
 } from "../../../src/ports/github.ts";
 
 export class FakeGitHub implements GitHubPort {
+  readonly defaultWorkerToken = "ghs_fake_worker_test_token";
   readonly calls: { repoId: string; branch: string }[] = [];
   readonly snapshotCalls: { repoId: string; branch: string }[] = [];
   readonly snapshotByNumberCalls: { repoId: string; prNumber: number }[] = [];
@@ -22,6 +24,18 @@ export class FakeGitHub implements GitHubPort {
   readonly openPrsByBranchBase = new Map<string, OpenBranchPr[]>();
   readonly prOpen = new Map<string, boolean>();
   readonly checkStatuses = new Map<string, PrCheckStatus>();
+  readonly createPullRequestCalls: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }[] = [];
+  readonly updatePullRequestBodyCalls: {
+    repoId: string;
+    prNumber: number;
+    body: string;
+  }[] = [];
   // Explicit per-(repo, branch) PR snapshots take precedence over the legacy
   // `setPrCheckStatus`-derived synthesis.
   readonly snapshots = new Map<string, PrSnapshot | null>();
@@ -30,15 +44,46 @@ export class FakeGitHub implements GitHubPort {
   readonly lightweightSnapshotsByNumber = new Map<string, PrSnapshot | null>();
   readonly prViews = new Map<string, PullRequestView | null>();
   readonly postedReviews = new Map<string, PostedReview | null>();
-  readonly tokenAccessCalls: { repoId: string; token: string }[] = [];
+  readonly postedReviewAuthorsAtHead = new Map<string, PostedReviewAuthor[]>();
+  readonly tokenAccessCalls: {
+    repoId: string;
+    token: string;
+    actor: "worker" | "reviewer";
+  }[] = [];
+  readonly prExistsWithTokenCalls: {
+    repoId: string;
+    branch: string;
+    token: string;
+  }[] = [];
+  readonly mergePullRequestCalls: {
+    repoId: string;
+    prNumber: number;
+    expectedHeadSha: string;
+  }[] = [];
   private graphqlRateLimit: GitHubGraphqlRateLimit | null = null;
   private prSnapshotHandler:
     | ((repoId: string, branch: string) => PrSnapshot | null)
     | null = null;
-  private tokenAccessHandler: (repoId: string, token: string) => void = () => {};
+  private tokenAccessHandler: (
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ) => void = () => {};
+  private mergePullRequestHandler:
+    | ((repoId: string, prNumber: number, expectedHeadSha: string) => void)
+    | null = null;
 
   prExistsForBranch(repoId: string, branch: string): boolean {
     this.calls.push({ repoId, branch });
+    return this.prExisting.get(`${repoId}\0${branch}`) ?? false;
+  }
+
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean {
+    this.prExistsWithTokenCalls.push({ repoId, branch, token });
     return this.prExisting.get(`${repoId}\0${branch}`) ?? false;
   }
 
@@ -63,6 +108,46 @@ export class FakeGitHub implements GitHubPort {
     prs: OpenBranchPr[],
   ): void {
     this.openPrsByBranchBase.set(`${repoId}\0${branch}\0${baseBranch}`, [...prs]);
+  }
+
+  createPullRequest(input: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }): OpenBranchPr {
+    this.createPullRequestCalls.push({ ...input });
+    const prNumber = 1000 + this.createPullRequestCalls.length;
+    const pr: OpenBranchPr = {
+      number: prNumber,
+      url: `https://github.example/${input.repoId}/pull/${prNumber}`,
+      headSha: `head-${prNumber}`,
+      baseSha: `base-${prNumber}`,
+      baseRef: input.baseBranch,
+    };
+    this.setOpenPrsForBranchBase(input.repoId, input.headBranch, input.baseBranch, [
+      pr,
+    ]);
+    this.setPrView(input.repoId, prNumber, {
+      number: prNumber,
+      title: input.title,
+      body: input.body,
+      url: pr.url,
+      headRefName: input.headBranch,
+      headSha: pr.headSha,
+      baseRef: input.baseBranch,
+      isCrossRepository: false,
+    });
+    return pr;
+  }
+
+  updatePullRequestBody(repoId: string, prNumber: number, body: string): void {
+    this.updatePullRequestBodyCalls.push({ repoId, prNumber, body });
+    const existing = this.prView(repoId, prNumber);
+    if (existing !== null) {
+      this.setPrView(repoId, prNumber, { ...existing, body });
+    }
   }
 
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {
@@ -152,6 +237,31 @@ export class FakeGitHub implements GitHubPort {
     return this.prSnapshotByNumber(repoId, prNumber);
   }
 
+  freshPrSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null {
+    return this.prSnapshotByNumber(repoId, prNumber);
+  }
+
+  freshPrView(repoId: string, prNumber: number): PullRequestView | null {
+    return this.prView(repoId, prNumber);
+  }
+
+  mergePullRequest(
+    repoId: string,
+    prNumber: number,
+    expectedHeadSha: string,
+  ): void {
+    this.mergePullRequestCalls.push({ repoId, prNumber, expectedHeadSha });
+    this.mergePullRequestHandler?.(repoId, prNumber, expectedHeadSha);
+  }
+
+  setMergePullRequestHandler(
+    handler:
+      | ((repoId: string, prNumber: number, expectedHeadSha: string) => void)
+      | null,
+  ): void {
+    this.mergePullRequestHandler = handler;
+  }
+
   setPrLightweightSnapshotByNumber(
     repoId: string,
     prNumber: number,
@@ -185,6 +295,16 @@ export class FakeGitHub implements GitHubPort {
     return this.postedReviews.get(`${repoId}\0${prNumber}\0${headSha}`) ?? null;
   }
 
+  fetchPostedReviewAuthorsAtHead(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+  ): PostedReviewAuthor[] {
+    return [
+      ...(this.postedReviewAuthorsAtHead.get(`${repoId}\0${prNumber}\0${headSha}`) ?? []),
+    ];
+  }
+
   setPostedReview(
     repoId: string,
     prNumber: number,
@@ -194,12 +314,33 @@ export class FakeGitHub implements GitHubPort {
     this.postedReviews.set(`${repoId}\0${prNumber}\0${headSha}`, review);
   }
 
-  probeTokenAccess(repoId: string, token: string): void {
-    this.tokenAccessCalls.push({ repoId, token });
-    this.tokenAccessHandler(repoId, token);
+  setPostedReviewAuthorsAtHead(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+    authors: PostedReviewAuthor[],
+  ): void {
+    this.postedReviewAuthorsAtHead.set(`${repoId}\0${prNumber}\0${headSha}`, [
+      ...authors,
+    ]);
   }
 
-  setTokenAccessHandler(handler: (repoId: string, token: string) => void): void {
+  probeTokenAccess(
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ): void {
+    this.tokenAccessCalls.push({ repoId, token, actor });
+    this.tokenAccessHandler(repoId, token, actor);
+  }
+
+  setTokenAccessHandler(
+    handler: (
+      repoId: string,
+      token: string,
+      actor: "worker" | "reviewer",
+    ) => void,
+  ): void {
     this.tokenAccessHandler = handler;
   }
 }

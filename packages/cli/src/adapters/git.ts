@@ -192,6 +192,36 @@ export class LocalGitAdapter implements GitPort {
     );
   }
 
+  ensureRemoteBranchFromBase(
+    repoId: string,
+    branch: string,
+    baseBranch: string,
+  ): void {
+    if (this.hasRemoteBranch(repoId, branch)) {
+      this.fetchBranchIfExists(repoId, branch);
+      return;
+    }
+
+    this.fetch(repoId, baseBranch);
+    const result = runIn(this.bareDir(repoId), [
+      "git",
+      "push",
+      "origin",
+      `refs/remotes/origin/${baseBranch}:refs/heads/${branch}`,
+    ]);
+    if (result.exitCode === 0) {
+      this.fetchBranchIfExists(repoId, branch);
+      return;
+    }
+    if (result.stderr.toLowerCase().includes("already exists")) {
+      this.fetchBranchIfExists(repoId, branch);
+      return;
+    }
+    throw new Error(
+      `git push origin ${baseBranch}:${branch} failed for ${repoId}: ${result.stderr.trim()}`,
+    );
+  }
+
   worktreeAdd(
     repoId: string,
     worktreePath: string,
@@ -285,6 +315,19 @@ export class LocalGitAdapter implements GitPort {
         `git checkout --detach ${headSha} failed for PR #${prNumber}: ${detached.stderr.trim()}`,
       );
     }
+  }
+
+  worktreeCurrentBranch(worktreePath: string): string | null {
+    if (!existsSync(worktreePath)) return null;
+    const result = runIn(worktreePath, [
+      "git",
+      "rev-parse",
+      "--abbrev-ref",
+      "HEAD",
+    ]);
+    if (result.exitCode !== 0) return null;
+    const branch = result.stdout.trim();
+    return branch === "" || branch === "HEAD" ? null : branch;
   }
 
   worktreeDetach(worktreePath: string): void {

@@ -880,7 +880,11 @@ async function handleEnqueue(
 ): Promise<DispatchResult> {
   if (wantsHelp(argv)) return printHelp(io, ["enqueue"]);
   const validation = validateFlags(argv, {
-    boolean: ["--request-pr-screenshots", "--require-pr-screenshots"],
+    boolean: [
+      "--request-pr-screenshots",
+      "--require-pr-screenshots",
+      "--as-normal-task",
+    ],
     valued: [
       "--input",
       "--repo",
@@ -1056,6 +1060,7 @@ function handleReviewPr(
       reviewerAgent?: string;
       reviewerModel?: string;
       referenceReposRoot?: string | undefined;
+      ciIgnorePolicy?: TickOptions["ciIgnorePolicy"] | undefined;
     } = {
       repoId,
       prNumber: parsedPr.prNumber,
@@ -1063,6 +1068,7 @@ function handleReviewPr(
       reviewerEnabled: deps.tickOptions?.reviewerEnabled === true,
       gateQuayOwnedDone: deps.tickOptions?.gateQuayOwnedDone === true,
       referenceReposRoot: deps.tickOptions?.referenceReposRoot,
+      ciIgnorePolicy: deps.tickOptions?.ciIgnorePolicy,
     };
     if (headSha !== null) input.headSha = headSha;
     const reviewerAgent = readFlag(argv, "--reviewer-agent");
@@ -1156,9 +1162,12 @@ async function handleAdoptPr(
           clock: deps.clock,
           github: deps.github,
           git: deps.git,
+          tmux: deps.tmux,
           artifactStore: deps.artifactStore,
           paths: deps.paths,
           agentResolver: deps.agentResolver,
+          reviewerEnabled: deps.tickOptions?.reviewerEnabled === true,
+          gateQuayOwnedDone: deps.tickOptions?.gateQuayOwnedDone === true,
           referenceReposRoot: deps.tickOptions?.referenceReposRoot,
         },
         { repoId, prNumber: parsedPr.prNumber },
@@ -1249,6 +1258,7 @@ async function handleEnqueueLinearIssueFlow(
       baseBranch,
       requestPrScreenshots: argv.includes("--request-pr-screenshots"),
       requirePrScreenshots: argv.includes("--require-pr-screenshots"),
+      asNormalTask: argv.includes("--as-normal-task"),
       workerAgent: readFlag(argv, "--worker-agent"),
       workerModel: readFlag(argv, "--worker-model"),
       reviewerAgent: readFlag(argv, "--reviewer-agent"),

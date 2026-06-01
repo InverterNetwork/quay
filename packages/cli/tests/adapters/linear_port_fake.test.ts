@@ -62,6 +62,38 @@ test("test_linear_port_fake_get_issue_returns_null_on_404", async () => {
   expect(fake.getIssueCalls).toEqual(["ENG-9999"]);
 });
 
+test("test_linear_port_fake_returns_configured_issue_hierarchy", async () => {
+  const fake = new FakeLinearAdapter();
+  fake.setIssueHierarchy("ENG-2000", {
+    parent: {
+      identifier: "ENG-1000",
+      url: "https://linear.app/inverter/issue/ENG-1000",
+      title: "Umbrella workflow",
+      stateType: "started",
+    },
+    children: [
+      {
+        identifier: "ENG-2001",
+        url: "https://linear.app/inverter/issue/ENG-2001",
+        title: "Child task",
+        stateType: "completed",
+      },
+    ],
+  });
+
+  const hierarchy = await fake.getIssueHierarchy("ENG-2000");
+
+  expect(hierarchy.parent?.identifier).toBe("ENG-1000");
+  expect(hierarchy.children.map((child) => child.identifier)).toEqual([
+    "ENG-2001",
+  ]);
+  expect(fake.getIssueHierarchyCalls).toEqual(["ENG-2000"]);
+  expect(await fake.getIssueHierarchy("ENG-9999")).toEqual({
+    parent: null,
+    children: [],
+  });
+});
+
 test("test_linear_port_fake_throws_on_draft_issue", async () => {
   const fake = new FakeLinearAdapter();
   fake.setDraft("ENG-1234");

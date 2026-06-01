@@ -30,6 +30,12 @@ worker_execution: goal
 use durable goal mode and continue across worker attempts. `authors` is
 required and must contain at least one entry.
 
+For Linear-backed umbrella workflows, do not add umbrella membership or
+ordering to `quay-config`. Linear's native parent/child hierarchy defines the
+umbrella and its expected subtasks, and Linear's native blocked-by relations
+define task ordering. The umbrella parent uses the ordinary `repo` and optional
+`base_branch` fields; child tickets use ordinary execution metadata.
+
 ## Block Rules
 
 - The fence must be exactly `quay-config`.
@@ -42,6 +48,9 @@ required and must contain at least one entry.
 - `slack_thread`, when present, must be a Slack permalink that can be converted
   to `<channel>:<ts>`.
 - `worker_execution`, when present, must be `oneshot` or `goal`.
+- Linear-backed tickets must not use an `umbrella:` object. Linear enqueue
+  rejects umbrella config metadata; use native Linear parent/child relations
+  for umbrella membership and native Linear blocked-by relations for ordering.
 
 ## Validation
 

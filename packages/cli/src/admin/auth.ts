@@ -4,6 +4,8 @@ import type { QuayConfig } from "../cli/config.ts";
 
 export const DEFAULT_ADMIN_TOKEN_ENV = "QUAY_ADMIN_TOKEN";
 export const DEFAULT_ADMIN_FORWARDED_IDENTITY_HEADER = "X-Hermes-User-Id";
+export const DEFAULT_ADMIN_FORWARDED_DISPLAY_NAME_HEADER =
+  "X-Hermes-User-Display-Name";
 
 const BEARER_REALM = "quay-admin";
 const SECRET_BEARING_FORWARD_HEADER_NAMES = new Set([
@@ -26,6 +28,7 @@ export interface ResolvedAdminAuth {
   enabled: boolean;
   tokenEnv: string;
   forwardedIdentityHeader: string;
+  forwardedDisplayNameHeader: string;
   token?: string;
   startupFailure?: AdminAuthFailure;
 }
@@ -39,9 +42,12 @@ export interface AdminAuthFailure {
 
 export interface AdminRequestAuditContext {
   slack_user_id: string | null;
+  display_name: string | null;
   identity_status: "forwarded" | "missing" | "standalone";
   forwarded_identity: string | null;
   forwarded_identity_header: string;
+  forwarded_display_name: string | null;
+  forwarded_display_name_header: string;
 }
 
 export function resolveAdminAuth(runtime: AdminAuthRuntime): ResolvedAdminAuth {
@@ -53,15 +59,24 @@ export function resolveAdminAuth(runtime: AdminAuthRuntime): ResolvedAdminAuth {
   const requireAuth = adminConfig?.require_auth ?? token !== "";
   const forwardedIdentityHeader = adminConfig?.forwarded_identity_header ??
     DEFAULT_ADMIN_FORWARDED_IDENTITY_HEADER;
+  const forwardedDisplayNameHeader =
+    adminConfig?.forwarded_display_name_header ??
+      DEFAULT_ADMIN_FORWARDED_DISPLAY_NAME_HEADER;
 
   if (!requireAuth) {
-    return { enabled: false, tokenEnv, forwardedIdentityHeader };
+    return {
+      enabled: false,
+      tokenEnv,
+      forwardedIdentityHeader,
+      forwardedDisplayNameHeader,
+    };
   }
   if (isSecretBearingForwardedIdentityHeader(forwardedIdentityHeader)) {
     return {
       enabled: true,
       tokenEnv,
       forwardedIdentityHeader,
+      forwardedDisplayNameHeader,
       startupFailure: {
         status: 500,
         code: "admin_forwarded_identity_header_secret_bearing",
@@ -71,11 +86,27 @@ export function resolveAdminAuth(runtime: AdminAuthRuntime): ResolvedAdminAuth {
       },
     };
   }
+  if (isSecretBearingForwardedIdentityHeader(forwardedDisplayNameHeader)) {
+    return {
+      enabled: true,
+      tokenEnv,
+      forwardedIdentityHeader,
+      forwardedDisplayNameHeader,
+      startupFailure: {
+        status: 500,
+        code: "admin_forwarded_display_name_header_secret_bearing",
+        message:
+          `[admin].forwarded_display_name_header must not be a secret-bearing header: ${forwardedDisplayNameHeader}`,
+        headers: {},
+      },
+    };
+  }
   if (token === "") {
     return {
       enabled: true,
       tokenEnv,
       forwardedIdentityHeader,
+      forwardedDisplayNameHeader,
       startupFailure: {
         status: 500,
         code: "admin_auth_not_configured",
@@ -84,7 +115,13 @@ export function resolveAdminAuth(runtime: AdminAuthRuntime): ResolvedAdminAuth {
       },
     };
   }
-  return { enabled: true, tokenEnv, forwardedIdentityHeader, token };
+  return {
+    enabled: true,
+    tokenEnv,
+    forwardedIdentityHeader,
+    forwardedDisplayNameHeader,
+    token,
+  };
 }
 
 export function isSecretBearingForwardedIdentityHeader(name: string): boolean {
@@ -145,6 +182,7 @@ export function adminAuthAllowedHeaders(runtime: AdminAuthRuntime): string {
     "Authorization",
     "Content-Type",
     auth.forwardedIdentityHeader,
+    auth.forwardedDisplayNameHeader,
   ];
   return [...new Map(headers.map((header) => [header.toLowerCase(), header])).values()]
     .join(", ");
@@ -174,21 +212,35 @@ function adminRequestAuditContext(
   if (!auth.enabled) {
     return {
       slack_user_id: null,
+      display_name: null,
       identity_status: "standalone",
       forwarded_identity: null,
       forwarded_identity_header: auth.forwardedIdentityHeader,
+      forwarded_display_name: null,
+      forwarded_display_name_header: auth.forwardedDisplayNameHeader,
     };
   }
-  const rawIdentity = request.headers.get(auth.forwardedIdentityHeader);
-  const forwardedIdentity = rawIdentity === null || rawIdentity.trim() === ""
-    ? null
-    : rawIdentity.trim();
+  const forwardedIdentity = normalizeForwardedHeaderValue(
+    request.headers.get(auth.forwardedIdentityHeader),
+  );
+  const forwardedDisplayName = normalizeForwardedHeaderValue(
+    request.headers.get(auth.forwardedDisplayNameHeader),
+  );
   return {
     slack_user_id: forwardedIdentity,
+    display_name: forwardedDisplayName,
     identity_status: forwardedIdentity === null ? "missing" : "forwarded",
     forwarded_identity: forwardedIdentity,
     forwarded_identity_header: auth.forwardedIdentityHeader,
+    forwarded_display_name: forwardedDisplayName,
+    forwarded_display_name_header: auth.forwardedDisplayNameHeader,
   };
+}
+
+function normalizeForwardedHeaderValue(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 function bearerTokenFromAuthorization(header: string | null): string | null {

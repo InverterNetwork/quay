@@ -26,6 +26,28 @@ import {
   parseWorkerExecution,
   type WorkerExecution,
 } from "./goals.ts";
+import {
+  createTaskDependency,
+  enqueueDependencyWaitingOutboxItem,
+  TASK_DEPENDENCY_REQUIRED_STATES,
+  TASK_DEPENDENCY_SCOPES,
+  TASK_DEPENDENCY_SOURCES,
+  type TaskDependencyRow,
+  type TaskDependencyRequiredState,
+  type TaskDependencyScope,
+  type TaskDependencySource,
+} from "./task_dependencies.ts";
+import {
+  assertUmbrellaWorkflowBranchMetadata,
+  createOrVerifyUmbrellaWorkflow,
+  deriveUmbrellaFeatureBranch,
+  linkUmbrellaTask,
+  lookupUmbrellaWorkflow,
+  markUmbrellaExpectedTaskCompleteWithoutQuay,
+  markUmbrellaExpectedTaskLinked,
+  requireUmbrellaFeatureBranchExists,
+  UMBRELLA_EXPECTED_TASK_COMPLETION_SOURCES,
+} from "./umbrella_workflows.ts";
 
 export const DEFAULT_RETRY_BUDGET = 5;
 
@@ -75,6 +97,54 @@ export const enqueueInputSchema = z
     base_branch: baseBranchNameSchema.optional(),
     request_pr_screenshots: z.boolean().optional(),
     require_pr_screenshots: z.boolean().optional(),
+    dependencies: z
+      .array(
+        z
+          .object({
+            dependency_task_id: z.string().min(1).nullable().optional(),
+            dependency_source: z.enum(TASK_DEPENDENCY_SOURCES),
+            dependency_external_ref: z.string().min(1).nullable().optional(),
+            dependency_repo_id: z.string().min(1).nullable().optional(),
+            umbrella_workflow_id: z.number().int().positive().nullable().optional(),
+            scope: z.enum(TASK_DEPENDENCY_SCOPES).optional(),
+            required_state: z.enum(TASK_DEPENDENCY_REQUIRED_STATES).optional(),
+            satisfied_at: z.string().min(1).nullable().optional(),
+          })
+          .strict()
+          .refine(
+            (dep) =>
+              (dep.dependency_task_id !== null &&
+                dep.dependency_task_id !== undefined) ||
+              (dep.dependency_external_ref !== null &&
+                dep.dependency_external_ref !== undefined),
+            {
+              message:
+                "dependency_task_id or dependency_external_ref is required",
+            },
+          ),
+      )
+      .optional(),
+    umbrella: z
+      .object({
+        external_ref: z.string().min(1),
+        base_branch: baseBranchNameSchema.nullable().optional(),
+        feature_branch: baseBranchNameSchema.nullable().optional(),
+        expected_external_ref: z.string().min(1).nullable().optional(),
+        complete_without_quay: z
+          .array(
+            z
+              .object({
+                external_ref: z.string().min(1),
+                completion_source: z.enum(UMBRELLA_EXPECTED_TASK_COMPLETION_SOURCES),
+                completion_reason: z.string().nullable().optional(),
+                completed_at: z.string().min(1),
+              })
+              .strict(),
+          )
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -82,11 +152,22 @@ export type EnqueueInput = z.infer<typeof enqueueInputSchema>;
 
 export interface EnqueueResult {
   task_id: string;
-  state: "queued";
+  state: "queued" | "waiting_dependencies";
   branch_name: string;
   tmux_id: string;
   worktree_path: string;
   attempt_id: number;
+}
+
+export interface EnqueueResolvedDependency {
+  dependency_task_id?: string | null;
+  dependency_source: TaskDependencySource;
+  dependency_external_ref?: string | null;
+  dependency_repo_id?: string | null;
+  umbrella_workflow_id?: number | null;
+  scope?: TaskDependencyScope;
+  required_state?: TaskDependencyRequiredState;
+  satisfied_at?: string | null;
 }
 
 interface RepoRow {
@@ -126,7 +207,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     );
   }
 
-  const effectiveBaseBranch = input.base_branch ?? repo.base_branch;
+  let effectiveBaseBranch = input.base_branch ?? repo.base_branch;
   const prScreenshotsRequired = input.require_pr_screenshots === true;
   const prScreenshotsRequested =
     input.request_pr_screenshots === true || prScreenshotsRequired;
@@ -160,6 +241,11 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const tmuxId = computeTmuxId(input.external_ref, shortId);
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
   const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
+  const dependencies = input.dependencies ?? [];
+  const initialState =
+    dependencies.some((dep) => dep.satisfied_at === null || dep.satisfied_at === undefined)
+      ? "waiting_dependencies"
+      : "queued";
 
   // Track substrate side effects so rollback knows what to undo.
   let worktreeCreated = false;
@@ -212,6 +298,50 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         `bare clone for repo "${repo.repo_id}" not found at ${expectedPath}; materialize it before enqueuing (e.g. \`git clone --bare <repo_url> ${expectedPath}\` — look up <repo_url> via \`quay repo get ${repo.repo_id}\`)`,
         { repo_id: repo.repo_id, expected_path: expectedPath },
       );
+    }
+
+    let resolvedUmbrella:
+      | {
+          externalRef: string;
+          baseBranch: string;
+          featureBranch: string;
+          expectedExternalRef: string | null;
+        }
+      | null = null;
+    let resolvedUmbrellaWorkflowId: number | null = null;
+    if (input.umbrella !== undefined) {
+      const umbrellaBaseBranch =
+        input.umbrella.base_branch ?? effectiveBaseBranch;
+      const umbrellaFeatureBranch =
+        input.umbrella.feature_branch ??
+        deriveUmbrellaFeatureBranch(deps.git, input.umbrella.external_ref);
+      const existingUmbrella = lookupUmbrellaWorkflow(
+        deps.db,
+        repo.repo_id,
+        input.umbrella.external_ref,
+      );
+      if (existingUmbrella === null) {
+        deps.git.ensureRemoteBranchFromBase(
+          repo.repo_id,
+          umbrellaFeatureBranch,
+          umbrellaBaseBranch,
+        );
+      } else {
+        assertUmbrellaWorkflowBranchMetadata(existingUmbrella, {
+          repoId: repo.repo_id,
+          externalRef: input.umbrella.external_ref,
+          baseBranch: umbrellaBaseBranch,
+          featureBranch: umbrellaFeatureBranch,
+        });
+        requireUmbrellaFeatureBranchExists(deps, existingUmbrella);
+      }
+      resolvedUmbrella = {
+        externalRef: input.umbrella.external_ref,
+        baseBranch: umbrellaBaseBranch,
+        featureBranch: umbrellaFeatureBranch,
+        expectedExternalRef: input.umbrella.expected_external_ref ?? null,
+      };
+      effectiveBaseBranch = umbrellaFeatureBranch;
     }
 
     // Step 2: fetch the effective base branch. A task-level override does
@@ -278,12 +408,13 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
              pr_screenshots_requested, pr_screenshots_required,
              worker_agent, worker_model, reviewer_agent, reviewer_model,
              retargeted_from_task_id, created_at, updated_at
-           ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
           repo.repo_id,
           input.external_ref ?? null,
+          initialState,
           fullBranchName,
           effectiveBaseBranch,
           tmuxId,
@@ -302,6 +433,92 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           now,
           now,
         );
+
+      if (resolvedUmbrella !== null) {
+        const umbrellaWorkflow = createOrVerifyUmbrellaWorkflow(
+          { db: deps.db, git: deps.git },
+          {
+            repoId: repo.repo_id,
+            externalRef: resolvedUmbrella.externalRef,
+            baseBranch: resolvedUmbrella.baseBranch,
+            featureBranch: resolvedUmbrella.featureBranch,
+            now,
+            ensureBranch: false,
+          },
+        );
+        resolvedUmbrellaWorkflowId = umbrellaWorkflow.umbrella_workflow_id;
+        linkUmbrellaTask(deps.db, {
+          umbrellaWorkflowId: umbrellaWorkflow.umbrella_workflow_id,
+          taskId,
+          externalRef: input.external_ref ?? taskId,
+          now,
+        });
+        if (resolvedUmbrella.expectedExternalRef !== null) {
+          markUmbrellaExpectedTaskLinked(deps.db, {
+            umbrellaWorkflowId: umbrellaWorkflow.umbrella_workflow_id,
+            externalRef: resolvedUmbrella.expectedExternalRef,
+            now,
+          });
+        }
+        for (const completed of input.umbrella?.complete_without_quay ?? []) {
+          markUmbrellaExpectedTaskCompleteWithoutQuay(deps.db, {
+            umbrellaWorkflowId: umbrellaWorkflow.umbrella_workflow_id,
+            externalRef: completed.external_ref,
+            completionSource: completed.completion_source,
+            completionReason: completed.completion_reason ?? null,
+            completedAt: completed.completed_at,
+            now,
+          });
+        }
+      }
+
+      const createdDependencies: TaskDependencyRow[] = [];
+      for (const dep of dependencies) {
+        const dependencyInput: Parameters<typeof createTaskDependency>[1] = {
+          dependentTaskId: taskId,
+          dependencySource: dep.dependency_source,
+          dependencyExternalRef: dep.dependency_external_ref ?? null,
+          dependencyRepoId: dep.dependency_repo_id ?? null,
+          umbrellaWorkflowId:
+            dep.umbrella_workflow_id ??
+            (dep.scope === "umbrella" ? resolvedUmbrellaWorkflowId : null),
+          satisfiedAt: dep.satisfied_at ?? null,
+          now,
+        };
+        if (dep.dependency_task_id !== undefined) {
+          dependencyInput.dependencyTaskId = dep.dependency_task_id;
+        }
+        if (dep.scope !== undefined) dependencyInput.scope = dep.scope;
+        if (dep.required_state !== undefined) {
+          dependencyInput.requiredState = dep.required_state;
+        }
+        createdDependencies.push(createTaskDependency(deps.db, dependencyInput));
+      }
+
+      if (initialState === "waiting_dependencies") {
+        const eventRow = deps.db
+          .query<{ event_id: number }, [string, string, string]>(
+            `INSERT INTO events (
+               task_id, event_type, to_state, occurred_at, event_data
+             ) VALUES (?, 'dependency_waiting', 'waiting_dependencies', ?, ?)
+             RETURNING event_id`,
+          )
+          .get(
+            taskId,
+            now,
+            JSON.stringify({ dependency_count: createdDependencies.length }),
+          );
+        if (!eventRow) throw new Error("dependency_waiting event insert returned no row");
+        enqueueDependencyWaitingOutboxItem(
+          { db: deps.db, clock: deps.clock },
+          {
+            taskId,
+            sourceEventId: eventRow.event_id,
+            dependencyCount: createdDependencies.length,
+            dependencies: createdDependencies,
+          },
+        );
+      }
 
       if (deps.retargetIntent !== undefined) {
         deps.db
@@ -449,7 +666,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     // The branch_name column carries the full `quay/<slug>` form.
     return {
       task_id: taskId,
-      state: "queued",
+      state: initialState,
       branch_name: fullBranchName,
       tmux_id: tmuxId,
       worktree_path: worktreePath,

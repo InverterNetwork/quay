@@ -5,12 +5,18 @@
 // the PR's current head SHA — caller logs `tick_error` and skips the
 // transition (no budget consumed).
 import type { PrCheck, PrSnapshot } from "../ports/github.ts";
+import {
+  EMPTY_CI_IGNORE_POLICY,
+  normalizeCiIgnoreName,
+  type CiIgnorePolicy,
+} from "./ci_policy.ts";
 
 export type CiOutcome = "pass" | "fail" | "pending" | "stale";
 
 export function classifyCi(
   snapshot: PrSnapshot,
   _ciWorkflowName: string | null,
+  ignorePolicy: CiIgnorePolicy = EMPTY_CI_IGNORE_POLICY,
 ): CiOutcome {
   if (
     snapshot.checks.checkSha !== null &&
@@ -21,8 +27,12 @@ export function classifyCi(
 
   // `ci_workflow_name` is retained in the repo schema for compatibility, but
   // it is no longer authoritative for failure detection: any reported failing
-  // check blocks review/done, even when GitHub marks it non-required.
-  return classifySet(snapshot.checks.items);
+  // product-CI check blocks review/done, even when GitHub marks it
+  // non-required. Deployment/repo policy excludes checks that report on
+  // review/poke automation rather than on the PR's code health.
+  return classifySet(snapshot.checks.items.filter((check) => {
+    return !isIgnoredCiCheck(check, ignorePolicy);
+  }));
 }
 
 function classifySet(items: PrCheck[]): CiOutcome {
@@ -41,4 +51,14 @@ function classifySet(items: PrCheck[]): CiOutcome {
   if (hasFail) return "fail";
   if (hasPending) return "pending";
   return "pass";
+}
+
+function isIgnoredCiCheck(check: PrCheck, policy: CiIgnorePolicy): boolean {
+  const checkNames = new Set(policy.ignoredCheckNames.map(normalizeCiIgnoreName));
+  if (checkNames.has(normalizeCiIgnoreName(check.name))) return true;
+  if (check.workflow === null) return false;
+  const workflowNames = new Set(
+    policy.ignoredWorkflowNames.map(normalizeCiIgnoreName),
+  );
+  return workflowNames.has(normalizeCiIgnoreName(check.workflow));
 }

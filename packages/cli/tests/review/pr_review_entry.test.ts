@@ -6,7 +6,7 @@ import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { createAgentResolver } from "../../src/core/agents.ts";
 import type { SupervisorLock } from "../../src/core/supervisor_lock.ts";
-import { tick_once } from "../../src/core/tick.ts";
+import { WORKER_GH_TOKEN_ENV, tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
 import { insertRepo, insertTask } from "../support/fixtures.ts";
@@ -121,7 +121,7 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
     baseRef: "dev",
     isCrossRepository: false,
   });
-  built.github.setPrLightweightSnapshotByNumber("quay", 51, {
+  built.github.setPrSnapshotByNumber("quay", 51, {
     prNumber: 51,
     prUrl: "https://github.com/acc/quay/pull/51",
     state: "open",
@@ -129,7 +129,12 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
     baseSha: "base-51",
     baseRef: "dev",
     mergeable: "mergeable",
-    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    latestReview: {
+      decision: "CHANGES_REQUESTED",
+      latestReviewId: "R_current",
+      submittedHeadSha: "head-51",
+      comments: "Please fix the current head.",
+    },
     checks: { checkSha: "head-51", items: [] },
   });
 
@@ -220,7 +225,7 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
   built.git.setRemoteHeadSha("quay", "feature/human-adopt", "head-51");
   built.github.setPrExists("quay", "feature/human-adopt", true);
   const tickResults = await tick_once(built.deps, {
-    env: { GH_TOKEN: "ghs_worker_runtime_test" },
+    env: { [WORKER_GH_TOKEN_ENV]: "ghs_worker_runtime_test" },
   });
 
   expect(tickResults).toContainEqual({
@@ -256,6 +261,89 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
     remote_sha_at_spawn: "head-51",
     pr_existed_at_spawn: 1,
   });
+});
+
+test("adopt-pr does not schedule worker for stale requested changes on green current head", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "bun install",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.git.seedBareClone("quay");
+  built.github.setPrView("quay", 53, {
+    number: 53,
+    title: "Already fixed human PR",
+    body: "Older feedback was already addressed.",
+    url: "https://github.com/acc/quay/pull/53",
+    headRefName: "feature/already-fixed",
+    headSha: "head-new",
+    baseRef: "dev",
+    isCrossRepository: false,
+  });
+  built.github.setPrSnapshotByNumber("quay", 53, {
+    prNumber: 53,
+    prUrl: "https://github.com/acc/quay/pull/53",
+    state: "open",
+    headSha: "head-new",
+    baseSha: "base-53",
+    baseRef: "dev",
+    mergeable: "mergeable",
+    latestReview: {
+      decision: "CHANGES_REQUESTED",
+      latestReviewId: "R_stale",
+      submittedHeadSha: "head-old",
+      comments: "Old feedback that the new head addressed.",
+    },
+    checks: {
+      checkSha: "head-new",
+      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+    },
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(["adopt-pr", "--pr", "acc/quay:53"], built.deps, io);
+
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  expect(out).toMatchObject({
+    task_id: "pr-review-quay-53",
+    state: "done",
+    adopted: true,
+    scheduled: false,
+    skipped_reason: "ready",
+  });
+  expect(built.git.countCalls("worktreeAddExistingBranch")).toBe(0);
+  const task = h.db
+    .query<{ state: string; authoring_mode: string; branch_name: string }, [string]>(
+      `SELECT state, authoring_mode, branch_name FROM tasks WHERE task_id = ?`,
+    )
+    .get(out.task_id);
+  expect(task).toEqual({
+    state: "done",
+    authoring_mode: "adopted_external_pr",
+    branch_name: "feature/already-fixed",
+  });
+  const attempts = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM attempts WHERE task_id = ? AND reason <> 'review_only'`,
+    )
+    .get(out.task_id);
+  expect(attempts?.n).toBe(0);
 });
 
 test("adopt-pr rejects fork PRs", async () => {

@@ -1,7 +1,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
-import { REVIEWER_GH_TOKEN_ENV, tick_once } from "../../src/core/tick.ts";
+import {
+  REVIEWER_GH_TOKEN_ENV,
+  WORKER_GH_TOKEN_ENV,
+  tick_once,
+} from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
 import {
@@ -67,11 +71,15 @@ test("reviewer spawn passes only the token file path, never the token bytes", as
   });
 
   expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
-  expect(built.github.tokenAccessCalls).toEqual([{ repoId, token: tokenBytes }]);
+  expect(built.github.tokenAccessCalls).toEqual([
+    { repoId, token: tokenBytes, actor: "reviewer" },
+  ]);
   expect(built.tmux.spawnCalls).toHaveLength(1);
   const call = built.tmux.spawnCalls[0]!;
   expect(call.env).toEqual({
+    GH_TOKEN: undefined,
     GITHUB_TOKEN: undefined,
+    [WORKER_GH_TOKEN_ENV]: undefined,
     [REVIEWER_GH_TOKEN_ENV]: undefined,
   });
   expect(call.envFiles).toEqual([{ name: "GH_TOKEN", path: tokenPath }]);
@@ -110,16 +118,23 @@ test("worker spawn receives the worker token and not the reviewer token as GH_TO
 
   const results = await tick_once(built.deps, {
     reviewerGhTokenFile: tokenPath,
-    env: { GH_TOKEN: workerToken, [REVIEWER_GH_TOKEN_ENV]: reviewerToken },
+    env: {
+      [WORKER_GH_TOKEN_ENV]: workerToken,
+      [REVIEWER_GH_TOKEN_ENV]: reviewerToken,
+    },
   });
 
   expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
   expect(built.tmux.spawnCalls).toHaveLength(1);
   const call = built.tmux.spawnCalls[0]!;
   expect(call.env?.GH_TOKEN).toBe(workerToken);
+  expect(call.env?.GITHUB_TOKEN).toBeUndefined();
+  expect(call.env?.[WORKER_GH_TOKEN_ENV]).toBeUndefined();
   expect(call.env?.[REVIEWER_GH_TOKEN_ENV]).toBeUndefined();
   expect(call.envFiles).toBeUndefined();
-  expect(reviewSpawnedTokenSource(h, taskId, "spawned")).toBe("env:GH_TOKEN");
+  expect(reviewSpawnedTokenSource(h, taskId, "spawned")).toBe(
+    `env:${WORKER_GH_TOKEN_ENV}`,
+  );
 });
 
 test("reviewer spawn uses reviewer env token as GH_TOKEN", async () => {
@@ -139,7 +154,9 @@ test("reviewer spawn uses reviewer env token as GH_TOKEN", async () => {
   });
 
   expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
-  expect(built.github.tokenAccessCalls).toEqual([{ repoId, token: reviewerToken }]);
+  expect(built.github.tokenAccessCalls).toEqual([
+    { repoId, token: reviewerToken, actor: "reviewer" },
+  ]);
   expect(built.tmux.spawnCalls).toHaveLength(1);
   const call = built.tmux.spawnCalls[0]!;
   expect(call.env?.GH_TOKEN).toBe(reviewerToken);
@@ -172,7 +189,9 @@ test("reviewer env token wins over gh_token_file when both are present", async (
   });
 
   expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
-  expect(built.github.tokenAccessCalls).toEqual([{ repoId, token: reviewerToken }]);
+  expect(built.github.tokenAccessCalls).toEqual([
+    { repoId, token: reviewerToken, actor: "reviewer" },
+  ]);
   expect(built.tmux.spawnCalls).toHaveLength(1);
   const call = built.tmux.spawnCalls[0]!;
   expect(call.env?.GH_TOKEN).toBe(reviewerToken);
@@ -265,10 +284,12 @@ test("reviewer spawn validates non-empty gh_token_file credentials before promot
 
   const match = results.find((r) => r.task_id === taskId);
   expect(match?.action).toBe("spawn_substrate_failed");
-  expect(match?.error).toContain("token is invalid, expired");
+  expect(match?.error).toContain("is invalid, expired");
   expect(match?.error).toContain("HTTP 401");
   expect(match?.error).not.toContain(tokenBytes);
-  expect(built.github.tokenAccessCalls).toEqual([{ repoId, token: tokenBytes }]);
+  expect(built.github.tokenAccessCalls).toEqual([
+    { repoId, token: tokenBytes, actor: "reviewer" },
+  ]);
   expect(built.tmux.spawnCalls).toHaveLength(0);
   expect(reviewAttemptSpawnedAt(h, attemptId)).toBeNull();
   expect(reviewInfraFailureEventCount(h, taskId)).toBe(0);

@@ -224,6 +224,7 @@ quay enqueue \
   [--reviewer-agent <name>] \
   [--reviewer-model <model>] \
   [--worker-execution <oneshot|goal>] \
+  [--as-normal-task] \
   [--tag <tag>]...
 ```
 
@@ -246,6 +247,29 @@ the hard prompt mode, and fails before task creation if the capability is
 missing.
 `--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,
 and `--slack-thread-ref`.
+
+Linear-backed enqueue reads native Linear blocked-by relations once, during
+enqueue. Complete blockers do not block. Incomplete tracked blockers persist
+dependency rows and create the dependent task in `waiting_dependencies`;
+incomplete untracked blockers fail with `dependency_not_tracked`.
+
+Linear-backed umbrella workflows use native Linear parent/child hierarchy. If
+the issue has Linear children, enqueue creates the umbrella workflow, derives
+the shared feature branch, records the expected child set, and materializes
+incomplete children as Quay tasks targeted at that feature branch. Children
+that are already complete in Linear are recorded as `complete_without_quay` and
+do not get Quay tasks. If the issue has a Linear parent, direct enqueue fails
+with `umbrella_child_direct_enqueue` unless `--as-normal-task` is passed.
+
+Umbrella parent enqueue returns coordination JSON instead of the normal task
+enqueue payload. The `expected_tasks` array exposes each persisted child row,
+including state values such as `linked` and `complete_without_quay`; the
+`child_tasks` array exposes materialized child task enqueue results.
+
+`--as-normal-task` applies to Linear child issues only. It ignores the child's
+native parent umbrella membership for this enqueue, but it does not turn a
+parent issue with children into a normal task. It still processes native
+Linear blocked-by relations as normal dependencies.
 
 ## PR Review
 
@@ -336,8 +360,9 @@ must be an ISO-8601 instant and is stored in canonical UTC form.
 `pr_ready_approved` is a delivery item for Slack notification loops. Quay emits
 one when a Quay-owned task reaches `done` and the latest review-only attempt for
 the current `head_sha` is approved. The payload fields are `task_id`,
-`external_ref`, `repo_id`, `pr_number`, `pr_url`, `head_sha`, `review_id`,
-`review_attempt_id`, and `branch_name`. The route hint fields are
+`external_ref`, `repo_id`, `pr_number`, `pr_url`, optional `pr_title`,
+`head_sha`, `review_id`, `review_attempt_id`, `branch_name`, and
+`approval_status` (`approved` or `reapproved`). The route hint fields are
 `slack_thread_ref` and `fallback`, where `fallback` is
 `deployment_default_slack_channel`.
 
@@ -358,6 +383,55 @@ quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes
 It also includes `authors`, parsed from the ticket's `quay-config.authors`
 block as `{name, slack_id}` objects. Legacy or malformed rows return
 `authors: []`.
+
+`task list` and `task get` include dependency and umbrella read-model context.
+A waiting task looks like:
+
+```json
+{
+  "task_id": "task-dependent",
+  "state": "waiting_dependencies",
+  "dependency_status": {
+    "total": 1,
+    "satisfied": 0,
+    "unsatisfied": 1,
+    "dependencies": [
+      {
+        "dependency_source": "linear",
+        "dependency_external_ref": "BRIX-1505",
+        "dependency_task_id": "task-blocker",
+        "kind": "blocked_by",
+        "scope": "normal",
+        "required_state": "merged",
+        "satisfied_at": null
+      }
+    ]
+  },
+  "umbrella_status": null
+}
+```
+
+An umbrella subtask includes its workflow:
+
+```json
+{
+  "task_id": "task-umbrella-subtask",
+  "base_branch": "quay/umbrella/BRIX-1500",
+  "umbrella_status": {
+    "role": "subtask",
+    "umbrella_workflow_id": 12,
+    "external_ref": "BRIX-1500",
+    "repo_id": "myrepo",
+    "base_branch": "dev",
+    "feature_branch": "quay/umbrella/BRIX-1500",
+    "state": "active",
+    "task_external_ref": "BRIX-1512",
+    "final_pr_task_id": null,
+    "final_pr_number": null,
+    "final_pr_url": null
+  }
+}
+```
 
 `task retarget` clones the original `task_objective`, ticket snapshot, tags,
 author metadata, agent/model overrides, screenshot settings, worker execution

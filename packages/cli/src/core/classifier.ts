@@ -16,6 +16,7 @@ import type { Clock } from "../ports/clock.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, OpenBranchPr } from "../ports/github.ts";
 import type { PaneExitInfo, TmuxPort } from "../ports/tmux.ts";
+import { baseBranchNameSchema } from "./base_branch.ts";
 import { EXIT_INFO_NONE } from "./exit_status.ts";
 import { fireFailpoint } from "./failpoints.ts";
 import { enqueueOrchestratorHandoff } from "./orchestrator_handoffs.ts";
@@ -1924,7 +1925,23 @@ function reconcileExistingOpenPr(
     );
   }
 
-  if (matches.length === 0) return null;
+  if (matches.length === 0) {
+    const snapshot = deps.github.prSnapshot(task.repo_id, task.branch_name);
+    const pr = openBranchPrFromSnapshot(snapshot);
+    if (pr === null) return null;
+    const snapshotBaseBranch = normalizePrBaseRef(pr.baseRef);
+    if (snapshotBaseBranch === null) return null;
+    return transitionExistingPrAttached(
+      deps,
+      task,
+      attempt,
+      remoteShaAtExit,
+      exitInfo,
+      predicate,
+      snapshotBaseBranch,
+      pr,
+    );
+  }
   if (matches.length > 1) {
     const prList = matches.map((pr) => `#${pr.number}`).join(", ");
     throw new Error(
@@ -1932,6 +1949,7 @@ function reconcileExistingOpenPr(
     );
   }
 
+  const effectiveBaseBranch = normalizePrBaseRef(matches[0]!.baseRef) ?? baseBranch;
   return transitionExistingPrAttached(
     deps,
     task,
@@ -1939,9 +1957,29 @@ function reconcileExistingOpenPr(
     remoteShaAtExit,
     exitInfo,
     predicate,
-    baseBranch,
+    effectiveBaseBranch,
     matches[0]!,
   );
+}
+
+function openBranchPrFromSnapshot(
+  snapshot: ReturnType<GitHubPort["prSnapshot"]>,
+): OpenBranchPr | null {
+  if (snapshot === null || snapshot.state !== "open") return null;
+  if (snapshot.prNumber === undefined || snapshot.prNumber === null) return null;
+  return {
+    number: snapshot.prNumber,
+    url: snapshot.prUrl ?? null,
+    headSha: snapshot.headSha,
+    baseSha: snapshot.baseSha,
+    baseRef: snapshot.baseRef ?? null,
+  };
+}
+
+function normalizePrBaseRef(baseRef: string | null | undefined): string | null {
+  const trimmed = baseRef?.trim();
+  if (trimmed === undefined || trimmed.length === 0) return null;
+  return baseBranchNameSchema.safeParse(trimmed).success ? trimmed : null;
 }
 
 function transitionExistingPrAttached(
@@ -1991,6 +2029,7 @@ function transitionExistingPrAttached(
           baseSha: pr.baseSha,
           coalesce: "input",
         },
+        baseBranch,
         resetSpawnFailures: true,
         clearTickError: true,
       },

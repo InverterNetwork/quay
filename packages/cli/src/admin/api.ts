@@ -3,12 +3,14 @@ import { readFile } from "node:fs/promises";
 import type { SQLQueryBindings } from "bun:sqlite";
 import { z } from "zod";
 import type { QuayConfig } from "../cli/config.ts";
+import type { AgentFetch } from "./agent_types.ts";
 import { DEFAULT_RETRY_BUDGET } from "../core/enqueue.ts";
 import {
   buildAgentSelection,
   type AgentRole,
 } from "../core/agents.ts";
 import { QuayError } from "../core/errors.ts";
+import { ciPolicyFromConfig, resolveCiIgnorePolicy } from "../core/ci_policy.ts";
 import { TASK_STATES, type TaskState } from "../core/task_state.ts";
 import {
   adminAuthAllowedHeaders,
@@ -16,6 +18,10 @@ import {
   authorizeAdminRequest,
   type AdminRequestAuditContext,
 } from "./auth.ts";
+import {
+  agentGatewayAllowedMethods,
+  createAgentGateway,
+} from "./agent_gateway.ts";
 import {
   assertPreambleKind,
   DEFAULT_PREAMBLE_BODY,
@@ -36,6 +42,7 @@ import {
   DEFAULT_MAX_SPAWN_FAILURES,
   DEFAULT_STALENESS_THRESHOLD_SECONDS,
   REVIEWER_GH_TOKEN_ENV,
+  WORKER_GH_TOKEN_ENV,
 } from "../core/tick.ts";
 import type { DB } from "../db/connection.ts";
 
@@ -59,6 +66,7 @@ export interface AdminApiRuntime {
   dataDir: string;
   db: DB;
   env?: NodeJS.ProcessEnv;
+  agentFetch?: AgentFetch;
   adminAudit?: (event: AdminAuditEvent) => void;
   paths: {
     reposRoot: string;
@@ -70,7 +78,18 @@ export interface AdminApiRuntime {
 }
 
 export interface AdminAuditEvent extends AdminRequestAuditContext {
-  action: "changes.preview" | "changes.apply";
+  action:
+    | "changes.preview"
+    | "changes.apply"
+    | "agent.session.create"
+    | "agent.session.stop"
+    | "agent.message.send"
+    | "agent.tool.call"
+    | "agent.approval.required"
+    | "agent.approval.decide"
+    | "agent.approval.result"
+    | "agent.command.output"
+    | "agent.error";
   method: string;
   path: string;
   timestamp: string;
@@ -78,8 +97,34 @@ export interface AdminAuditEvent extends AdminRequestAuditContext {
   status: number;
   operation_summary: string[];
   target_resources: string[];
+  retention_bucket?:
+    | "agent_chat_7d"
+    | "agent_tool_7d"
+    | "agent_rejected_approval_7d"
+    | "agent_approved_action_30d";
+  expires_at?: string;
+  adapter_id?: string;
+  agent_id?: string;
+  message_id?: string;
+  message_summary?: string;
+  context_view?: string;
+  context_scope?: string;
+  context_url_path?: string;
+  context_summary?: string;
+  context_captured_at?: string;
+  tool_call_id?: string;
+  tool_name?: string;
+  arguments_summary?: string;
+  effect?: "read_only" | "mutating" | "unknown";
   error_code?: string;
   error_message?: string;
+  session_id?: string;
+  approval_id?: string;
+  decision?: "approved" | "rejected";
+  result_status?: "proposed" | "running" | "rejected" | "succeeded" | "failed";
+  command?: string;
+  affects?: Array<{ label: string; value: string }>;
+  exit_code?: number;
 }
 
 type AdminAuditOutcome = Omit<
@@ -142,6 +187,7 @@ type AdminMissionControlAttnReason =
   | "ci"
   | "slack"
   | "brief"
+  | "dependency"
   | "budget"
   | "loop"
   | "worktree";
@@ -300,6 +346,7 @@ const changeRequestSchema = z
 
 const ACTIVE_TASK_STATES = [
   "queued",
+  "waiting_dependencies",
   "running",
   "goal-completion-pending",
   "pr-open",
@@ -310,6 +357,7 @@ const ACTIVE_TASK_STATES = [
 ] as const;
 
 export function createAdminApiHandler(runtime: AdminApiRuntime) {
+  const agentGateway = createAgentGateway(runtime);
   return async function handleAdminApi(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const segments = pathSegments(url.pathname);
@@ -357,6 +405,8 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
     }
 
     if (request.method === "POST") {
+      const agentResponse = await agentGateway.handle(request, segments, cors.headers, auth.audit);
+      if (agentResponse !== null) return agentResponse;
       if (isWriteRoute(segments, "preview")) {
         return handleAdminMutation(
           cors.headers,
@@ -416,6 +466,11 @@ export function createAdminApiHandler(runtime: AdminApiRuntime) {
         service: "quay",
         api_version: ADMIN_API_VERSION,
         quay_version: runtime.version,
+        viewer: {
+          label: auth.audit.display_name ?? "You",
+          display_name: auth.audit.display_name,
+          slack_user_id: auth.audit.slack_user_id,
+        },
       }, 200, cors.headers);
     }
 
@@ -525,6 +580,8 @@ function isVersionedRoute(segments: string[]): boolean {
 
 function allowedMethodsForRoute(segments: string[]): string | null {
   if (segments[0] !== "v1") return null;
+  const agentMethods = agentGatewayAllowedMethods(segments);
+  if (agentMethods !== null) return agentMethods;
   if (segments.length === 2) {
     return [
       "global",
@@ -587,6 +644,7 @@ interface MissionControlEventRow {
 
 const TASK_STATE_SET = new Set<string>(TASK_STATES);
 const MISSION_CONTROL_TERMINAL_STATE_LIST = [
+  "merged_to_feature_branch",
   "merged",
   "cancelled",
   "closed_unmerged",
@@ -780,6 +838,7 @@ function deriveMissionControlAttention(
   const latest = recentEvents[0]?.event_type;
   if (latest === "ci_failed") return { reason: "ci", tone: "danger" };
   if (latest === "budget_exhausted") return { reason: "budget", tone: "danger" };
+  if (state === "waiting_dependencies") return { reason: "dependency", tone: "warn" };
   if (state === "waiting_human") return { reason: "slack", tone: "warn" };
   if (state === "awaiting-next-brief") return { reason: "brief", tone: "warn" };
   if (latest === "changes_requested") return { reason: "changes", tone: "warn" };
@@ -1016,6 +1075,10 @@ function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown>
         derivedField("artifacts_root", "ARTIFACTS_ROOT", runtime.paths.artifactsRoot),
       ],
     },
+    ci_policy: {
+      ignored_check_names: ciPolicyFromConfig(runtime.config).ignoredCheckNames,
+      ignored_workflow_names: ciPolicyFromConfig(runtime.config).ignoredWorkflowNames,
+    },
     adapters: buildAdapterSummaries(runtime),
     agents: {
       defaults: {
@@ -1033,6 +1096,8 @@ function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown>
 }
 
 function buildRepoDetail(runtime: AdminApiRuntime, row: RepoRow): Record<string, unknown> {
+  const globalCiPolicy = ciPolicyFromConfig(runtime.config);
+  const effectiveCiPolicy = resolveCiIgnorePolicy(globalCiPolicy, row);
   return {
     revision: computeAdminRevision(runtime),
     ...row,
@@ -1040,6 +1105,13 @@ function buildRepoDetail(runtime: AdminApiRuntime, row: RepoRow): Record<string,
     effective_preambles: {
       worker: buildRepoEffectivePreamble(runtime, row, "worker"),
       reviewer: buildRepoEffectivePreamble(runtime, row, "reviewer"),
+    },
+    ci_policy: {
+      ignore_mode: row.ci_ignore_mode,
+      ignored_check_names: row.ignored_check_names,
+      ignored_workflow_names: row.ignored_workflow_names,
+      effective_ignored_check_names: effectiveCiPolicy.ignoredCheckNames,
+      effective_ignored_workflow_names: effectiveCiPolicy.ignoredWorkflowNames,
     },
     tag_namespaces: tagNamespacesFromVocab(runtime.tagService.getVocab("repo", row.repo_id)),
     inherited_tag_namespaces: deploymentTagNamespaces(runtime),
@@ -1604,6 +1676,9 @@ const REPO_PATCH_FIELDS = [
   "model_reviewer",
   "preamble_worker",
   "preamble_reviewer",
+  "ci_ignore_mode",
+  "ignored_check_names",
+  "ignored_workflow_names",
 ] as const satisfies readonly (keyof RepoPatch)[];
 
 function assertActiveRepo(runtime: AdminApiRuntime, repoId: string): RepoRow {
@@ -1711,6 +1786,7 @@ function buildAdminReadModel(runtime: AdminApiRuntime): Record<string, unknown> 
 function computeAdminRevision(runtime: AdminApiRuntime): string {
   const state = {
     version: 1,
+    ci_policy: ciPolicyFromConfig(runtime.config),
     repos: runtime.repoService.list({ activeOnly: true }),
     deployment_tags: runtime.tagService.getVocab("deployment"),
     repo_tags: Object.fromEntries(
@@ -1793,6 +1869,9 @@ function buildAdapterSummaries(runtime: AdminApiRuntime): AdminAdapterSummary[] 
   const slackEnabled = runtime.config.adapters?.slack?.enabled === true;
   const slackEnv = runtime.config.adapters?.slack?.bot_token_env ?? "SLACK_TOKEN";
   const reviewerEnabled = runtime.config.reviewer?.enabled === true;
+  const workerReady =
+    hasEnv(env, WORKER_GH_TOKEN_ENV) ||
+    runtime.config.worker?.gh_token_file !== undefined;
   const reviewerReady =
     hasEnv(env, REVIEWER_GH_TOKEN_ENV) ||
     runtime.config.reviewer?.gh_token_file !== undefined;
@@ -1817,6 +1896,24 @@ function buildAdapterSummaries(runtime: AdminApiRuntime): AdminAdapterSummary[] 
         {
           label: "MAX_THREAD_MESSAGES",
           value: String(runtime.config.adapters?.slack?.max_thread_messages ?? 200),
+        },
+      ],
+    },
+    {
+      name: "github_worker",
+      title: "GitHub worker",
+      enabled: true,
+      ...adapterStatus(
+        true,
+        workerReady,
+        "worker token source configured",
+        `${WORKER_GH_TOKEN_ENV} or worker.gh_token_file not set`,
+      ),
+      fields: [
+        {
+          label: "WORKER_TOKEN_ENV",
+          value: WORKER_GH_TOKEN_ENV,
+          dot_tone: hasEnv(env, WORKER_GH_TOKEN_ENV) ? "good" : "warn",
         },
       ],
     },

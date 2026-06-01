@@ -504,6 +504,23 @@ test("adopted synthetic reviewer changes_requested schedules code respawn", asyn
     body: "Please address this.",
     comments: "Inline review comments (1):\n- src/a.ts:1 - fix this",
   });
+  built.github.setPrSnapshot(repoId, "feature/human", {
+    prNumber: 9,
+    state: "open",
+    headSha: "sha-9",
+    baseSha: "base-main",
+    baseRef: "main",
+    mergeable: "mergeable",
+    latestReview: {
+      decision: "CHANGES_REQUESTED",
+      latestReviewId: "R_adopted_changes",
+      comments: "Inline review comments (1):\n- src/a.ts:1 - fix this",
+    },
+    checks: {
+      checkSha: "sha-9",
+      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+    },
+  });
 
   const results = await tick_once(built.deps, reviewerTickOptions());
 
@@ -578,6 +595,23 @@ test("Quay-owned reviewer changes_requested schedules non-budget code respawn", 
     body: "Blocking issue.",
     comments: "Blocking issue.",
   });
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+    prNumber: 11,
+    state: "open",
+    headSha: "sha-11",
+    baseSha: "base-main",
+    baseRef: "main",
+    mergeable: "mergeable",
+    latestReview: {
+      decision: "CHANGES_REQUESTED",
+      latestReviewId: "R_quay_changes",
+      comments: "Blocking issue.",
+    },
+    checks: {
+      checkSha: "sha-11",
+      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+    },
+  });
 
   const results = await tick_once(built.deps, reviewerTickOptions());
 
@@ -598,6 +632,123 @@ test("Quay-owned reviewer changes_requested schedules non-budget code respawn", 
     )
     .get(taskId);
   expect(latest).toEqual({ reason: "review", consumed_budget: 0 });
+});
+
+test("review changes_requested respawn refreshes human-retargeted PR base", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-retargeted-base");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-review-retargeted-base",
+    state: "pr-review",
+  });
+  seedTaskObjective(h, taskId, "Preserve the live PR base.");
+  h.db
+    .query(
+      `UPDATE tasks
+          SET pr_number = 12,
+              head_sha = 'sha-12',
+              base_branch = 'main'
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+  const codeAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId: codeAttemptId,
+    kind: "brief",
+    content: "original code brief",
+    extension: "md",
+  });
+  const reviewAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-12', tmux_session = 'quay-review-session-12'
+        WHERE attempt_id = ?`,
+    )
+    .run(reviewAttemptId);
+  built.github.setPostedReview(repoId, 12, "sha-12", {
+    reviewId: "R_retargeted_changes",
+    decision: "CHANGES_REQUESTED",
+    body: "Retargeted PR needs fixes.",
+    comments: "Retargeted PR needs fixes.",
+  });
+  built.github.setPrLightweightSnapshotByNumber(repoId, 12, {
+    prNumber: 12,
+    state: "open",
+    headSha: "sha-12",
+    baseSha: "base-dev",
+    baseRef: "dev",
+    mergeable: "mergeable",
+    latestReview: {
+      decision: "CHANGES_REQUESTED",
+      latestReviewId: "R_retargeted_changes",
+      comments: "Retargeted PR needs fixes.",
+    },
+    checks: {
+      checkSha: "sha-12",
+      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+    },
+  });
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "review_respawn_scheduled",
+  });
+  expect(built.github.lightweightSnapshotByNumberCalls).toContainEqual({
+    repoId,
+    prNumber: 12,
+  });
+  const task = h.db
+    .query<{ state: string; base_branch: string | null }, [string]>(
+      `SELECT state, base_branch FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({ state: "queued", base_branch: "dev" });
+  const latest = h.db
+    .query<{ attempt_id: number; reason: string; consumed_budget: number }, [string]>(
+      `SELECT attempt_id, reason, consumed_budget FROM attempts
+        WHERE task_id = ? ORDER BY attempt_id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  expect(latest).toEqual({
+    attempt_id: expect.any(Number),
+    reason: "review",
+    consumed_budget: 0,
+  });
+  const finalPromptRow = h.db
+    .query<{ file_path: string }, [string, number]>(
+      `SELECT file_path FROM artifacts
+        WHERE task_id = ? AND attempt_id = ? AND kind = 'final_prompt'
+        ORDER BY artifact_id DESC LIMIT 1`,
+    )
+    .get(taskId, latest!.attempt_id);
+  expect(finalPromptRow).not.toBeNull();
+  const finalPrompt = readFileSync(finalPromptRow!.file_path, "utf8");
+  expect(finalPrompt).toContain('base-branch="dev"');
+  expect(finalPrompt).toContain("The effective PR base branch is dev");
+  expect(finalPrompt).not.toContain('base-branch="main"');
 });
 
 test("review after CHANGES_REQUESTED respawn gets reviewer-specific prompt", async () => {
@@ -1029,6 +1180,87 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
     { kind: "tool_trace", n: 1 },
     { kind: "usage", n: 1 },
   ]);
+});
+
+test("reviewer identity mismatch reports configured and observed identities", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-identity-mismatch");
+  const taskId = "pr-review-repo-review-identity-mismatch-9";
+  const worktreePath = `${h.dataDir}/worktrees/review-identity-mismatch-9`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, review_infra_failures_consecutive,
+         review_infra_failure_head_sha, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/9', 'quay-review-repo-review-identity-mismatch-9',
+                 ?, 9, 'sha-9', 1, 2, 'sha-9', ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-9', tmux_session = 'quay-review-session-9'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "brief",
+    content: "review brief",
+    extension: "md",
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "final_prompt",
+    content: "review prompt",
+    extension: "md",
+  });
+  built.github.setPostedReviewAuthorsAtHead(repoId, 9, "sha-9", [
+    {
+      login: "quay-reviewer[bot]",
+      type: "Bot",
+      reviewId: "PRR_mismatch",
+      decision: "CHANGES_REQUESTED",
+    },
+  ]);
+
+  const results = await tick_once(
+    built.deps,
+    reviewerTickOptions({ reviewerLogin: "app/didier-reviewer" }),
+  );
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "non_budget_loop_parked",
+  });
+  const task = h.db
+    .query<{ state: string; tick_error: string | null }, [string]>(
+      `SELECT state, tick_error FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task?.state).toBe("non_budget_loop");
+  expect(task?.tick_error).toContain("reviewer identity mismatch");
+  expect(task?.tick_error).toContain("app/didier-reviewer");
+  expect(task?.tick_error).toContain("quay-reviewer[bot] (Bot");
+  expect(task?.tick_error).toContain("Update [reviewer].login");
+  expect(task?.tick_error).not.toContain("no Quay-authored review found");
 });
 
 test("live stale reviewer is killed then retried on the same head", async () => {

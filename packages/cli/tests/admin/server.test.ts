@@ -60,6 +60,11 @@ test("hosted handler keeps /v1 API routes ahead of static files", async () => {
       service: "quay",
       api_version: "v1",
       quay_version: "test-version",
+      viewer: {
+        label: "You",
+        display_name: null,
+        slack_user_id: null,
+      },
     });
 
     const missingApi = await handler(
@@ -92,6 +97,11 @@ test("embedded handler keeps /v1 API routes ahead of static files", async () => 
     service: "quay",
     api_version: "v1",
     quay_version: "test-version",
+    viewer: {
+      label: "You",
+      display_name: null,
+      slack_user_id: null,
+    },
   });
 
   const missingApi = await handler(

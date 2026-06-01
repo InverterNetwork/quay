@@ -25,6 +25,8 @@ verify against the CLI implementation and tests, then fix the docs.
 - [Monitoring And Artifacts](monitoring-and-artifacts.md): task JSON, events,
   and artifact retrieval.
 - [Linear And Slack](linear-and-slack.md): adapter setup and behavior.
+- [Parent-Owned Umbrella QA Matrix](qa-parent-owned-umbrella.md): deployed
+  Linear and test-repo validation scenarios for dependency and umbrella flows.
 - [Ticket Authoring](ticket-authoring.md): the `quay-config` block and ticket
   validation.
 - [Troubleshooting](troubleshooting.md): common errors and recovery paths.

@@ -4,6 +4,10 @@ import { QuayError } from "../errors.ts";
 import { assertPreambleKind } from "../preamble.ts";
 import { parseOrThrow } from "../zod_helpers.ts";
 import {
+  parseCiIgnoreListJson,
+  type CiIgnoreMode,
+} from "../ci_policy.ts";
+import {
   repoAddInputSchema,
   repoImportInputSchema,
   repoUpdateInputSchema,
@@ -27,6 +31,9 @@ export interface RepoRow {
   model_reviewer: string | null;
   preamble_worker: number | null;
   preamble_reviewer: number | null;
+  ci_ignore_mode: CiIgnoreMode;
+  ignored_check_names: string[];
+  ignored_workflow_names: string[];
   archived_at: string | null;
   created_at: string;
 }
@@ -60,13 +67,20 @@ const SELECT_REPO_COLUMNS = `
   test_cmd, ci_workflow_name, contribution_guide_path,
   agent_worker, agent_reviewer, model_worker, model_reviewer,
   preamble_worker, preamble_reviewer,
+  ci_ignore_mode, ci_ignored_check_names, ci_ignored_workflow_names,
   archived_at, created_at
 `;
+
+type RepoDbRow = Omit<RepoRow, "ignored_check_names" | "ignored_workflow_names"> & {
+  ci_ignored_check_names: string;
+  ci_ignored_workflow_names: string;
+};
 
 // Mirrors spec §10: repo removal blocks non-terminal, non-parked tasks only.
 // Parked and terminal tasks keep their FK for forensics after archival.
 const ACTIVE_TASK_STATES = [
   "queued",
+  "waiting_dependencies",
   "running",
   "goal-completion-pending",
   "pr-open",
@@ -76,15 +90,27 @@ const ACTIVE_TASK_STATES = [
   "waiting_human",
 ] as const;
 
+function fromRepoDbRow(row: RepoDbRow): RepoRow {
+  const {
+    ci_ignored_check_names,
+    ci_ignored_workflow_names,
+    ...rest
+  } = row;
+  return {
+    ...rest,
+    ignored_check_names: parseCiIgnoreListJson(ci_ignored_check_names),
+    ignored_workflow_names: parseCiIgnoreListJson(ci_ignored_workflow_names),
+  };
+}
+
 export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
   function get(repoId: string): RepoRow | null {
-    return (
-      db
-        .query<RepoRow, [string]>(
-          `SELECT ${SELECT_REPO_COLUMNS} FROM repos WHERE repo_id = ?`,
-        )
-        .get(repoId) ?? null
-    );
+    const row = db
+      .query<RepoDbRow, [string]>(
+        `SELECT ${SELECT_REPO_COLUMNS} FROM repos WHERE repo_id = ?`,
+      )
+      .get(repoId);
+    return row === undefined || row === null ? null : fromRepoDbRow(row);
   }
 
   function add(rawInput: unknown): RepoRow {
@@ -108,6 +134,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
                agent_worker = ?, agent_reviewer = ?,
                model_worker = ?, model_reviewer = ?,
                preamble_worker = ?, preamble_reviewer = ?,
+               ci_ignore_mode = ?, ci_ignored_check_names = ?, ci_ignored_workflow_names = ?,
                archived_at = NULL
          WHERE repo_id = ?`,
       ).run(
@@ -124,6 +151,9 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         parsed.model_reviewer ?? null,
         parsed.preamble_worker ?? null,
         parsed.preamble_reviewer ?? null,
+        parsed.ci_ignore_mode ?? "inherit",
+        JSON.stringify(parsed.ignored_check_names ?? []),
+        JSON.stringify(parsed.ignored_workflow_names ?? []),
         parsed.repo_id,
       );
     } else {
@@ -132,8 +162,10 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
            repo_id, repo_url, base_branch, package_manager, install_cmd,
            test_cmd, ci_workflow_name, contribution_guide_path,
            agent_worker, agent_reviewer, model_worker, model_reviewer,
-           preamble_worker, preamble_reviewer, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           preamble_worker, preamble_reviewer,
+           ci_ignore_mode, ci_ignored_check_names, ci_ignored_workflow_names,
+           created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         parsed.repo_id,
         parsed.repo_url,
@@ -149,6 +181,9 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         parsed.model_reviewer ?? null,
         parsed.preamble_worker ?? null,
         parsed.preamble_reviewer ?? null,
+        parsed.ci_ignore_mode ?? "inherit",
+        JSON.stringify(parsed.ignored_check_names ?? []),
+        JSON.stringify(parsed.ignored_workflow_names ?? []),
         clock.nowISO(),
       );
     }
@@ -167,6 +202,16 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
     const sets: string[] = [];
     const values: unknown[] = [];
     for (const [key, value] of Object.entries(patch)) {
+      if (key === "ignored_check_names") {
+        sets.push("ci_ignored_check_names = ?");
+        values.push(JSON.stringify(value));
+        continue;
+      }
+      if (key === "ignored_workflow_names") {
+        sets.push("ci_ignored_workflow_names = ?");
+        values.push(JSON.stringify(value));
+        continue;
+      }
       sets.push(`${key} = ?`);
       values.push(value);
     }
@@ -212,18 +257,20 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
   function list(opts?: { activeOnly?: boolean }): RepoRow[] {
     if (opts?.activeOnly) {
       return db
-        .query<RepoRow, []>(
+        .query<RepoDbRow, []>(
           `SELECT ${SELECT_REPO_COLUMNS} FROM repos
             WHERE archived_at IS NULL
             ORDER BY repo_id ASC`,
         )
-        .all();
+        .all()
+        .map(fromRepoDbRow);
     }
     return db
-      .query<RepoRow, []>(
+      .query<RepoDbRow, []>(
         `SELECT ${SELECT_REPO_COLUMNS} FROM repos ORDER BY repo_id ASC`,
       )
-      .all();
+      .all()
+      .map(fromRepoDbRow);
   }
 
   function upsert(rawInput: unknown): RepoRow {
@@ -265,6 +312,18 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
       parsed.preamble_reviewer !== undefined
         ? parsed.preamble_reviewer
         : (existing?.preamble_reviewer ?? null);
+    const ciIgnoreMode =
+      parsed.ci_ignore_mode !== undefined
+        ? parsed.ci_ignore_mode
+        : (existing?.ci_ignore_mode ?? "inherit");
+    const ignoredCheckNames =
+      parsed.ignored_check_names !== undefined
+        ? parsed.ignored_check_names
+        : (existing?.ignored_check_names ?? []);
+    const ignoredWorkflowNames =
+      parsed.ignored_workflow_names !== undefined
+        ? parsed.ignored_workflow_names
+        : (existing?.ignored_workflow_names ?? []);
     validatePreambleOverrides({
       preamble_worker: preambleWorker,
       preamble_reviewer: preambleReviewer,
@@ -277,6 +336,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
                agent_worker = ?, agent_reviewer = ?,
                model_worker = ?, model_reviewer = ?,
                preamble_worker = ?, preamble_reviewer = ?,
+               ci_ignore_mode = ?, ci_ignored_check_names = ?, ci_ignored_workflow_names = ?,
                archived_at = ?, created_at = ?
          WHERE repo_id = ?`,
       ).run(
@@ -293,6 +353,9 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         modelReviewer,
         preambleWorker,
         preambleReviewer,
+        ciIgnoreMode,
+        JSON.stringify(ignoredCheckNames),
+        JSON.stringify(ignoredWorkflowNames),
         archivedAt,
         createdAt,
         parsed.repo_id,
@@ -303,8 +366,10 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
            repo_id, repo_url, base_branch, package_manager, install_cmd,
            test_cmd, ci_workflow_name, contribution_guide_path,
            agent_worker, agent_reviewer, model_worker, model_reviewer,
-           preamble_worker, preamble_reviewer, archived_at, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           preamble_worker, preamble_reviewer,
+           ci_ignore_mode, ci_ignored_check_names, ci_ignored_workflow_names,
+           archived_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         parsed.repo_id,
         parsed.repo_url,
@@ -320,6 +385,9 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         modelReviewer,
         preambleWorker,
         preambleReviewer,
+        ciIgnoreMode,
+        JSON.stringify(ignoredCheckNames),
+        JSON.stringify(ignoredWorkflowNames),
         archivedAt,
         createdAt,
       );

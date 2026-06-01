@@ -23,12 +23,14 @@ interface TaskRow {
   pr_title: string | null;
   head_sha: string | null;
   base_sha: string | null;
+  base_branch: string | null;
 }
 
 function readTaskMetadata(taskId: string): TaskRow {
   return h!.db
     .query<TaskRow, [string]>(
-      `SELECT pr_number, pr_url, pr_title, head_sha, base_sha FROM tasks WHERE task_id = ?`,
+      `SELECT pr_number, pr_url, pr_title, head_sha, base_sha, base_branch
+         FROM tasks WHERE task_id = ?`,
     )
     .get(taskId)!;
 }
@@ -78,6 +80,50 @@ test("pr-open snapshot populates PR metadata on the task row", async () => {
   expect(row.pr_title).toBe("Fix checkout flow");
   expect(row.head_sha).toBe("head-aabbccdd");
   expect(row.base_sha).toBe("base-eeff0011");
+  expect(row.base_branch).toBe("main");
+});
+
+test("pr-open snapshot records a human-updated GitHub PR base branch on the task row", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-11T10:02:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-pr-base-override");
+  const taskId = insertTask(h.db, {
+    taskId: "task-pr-base-override",
+    repoId,
+    state: "pr-open",
+  });
+  h.db.query(`UPDATE tasks SET base_branch = 'main' WHERE task_id = ?`).run(taskId);
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-05-11T09:00:00.000Z",
+  });
+
+  const built = buildTickDeps(h);
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+    state: "open",
+    headSha: "head-retargeted",
+    baseSha: "base-dev",
+    prNumber: 43,
+    prUrl: "https://github.com/example/repo/pull/43",
+    baseRef: "dev",
+    mergeable: "mergeable",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: {
+      checkSha: "head-retargeted",
+      items: [
+        { name: "build", workflow: null, bucket: "pending", required: true },
+      ],
+    },
+  });
+
+  await tick_once(built.deps);
+
+  const row = readTaskMetadata(taskId);
+  expect(row.pr_number).toBe(43);
+  expect(row.base_sha).toBe("base-dev");
+  expect(row.base_branch).toBe("dev");
 });
 
 test("a snapshot with missing prNumber/prUrl does not nullify previously captured values", async () => {

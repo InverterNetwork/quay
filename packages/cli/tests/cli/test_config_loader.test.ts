@@ -71,6 +71,10 @@ reference_repos_root = "/home/hermes/.hermes/code"
 [reviewer]
 enabled = true
 gate_quay_owned_done = false
+
+[ci]
+ignored_check_names = [" FE PR Review "]
+ignored_workflow_names = ["Quay review"]
 `,
   );
   const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
@@ -90,6 +94,10 @@ gate_quay_owned_done = false
   expect(result.config.context?.reference_repos_root).toBe(
     "/home/hermes/.hermes/code",
   );
+  expect(result.config.ci).toEqual({
+    ignored_check_names: ["FE PR Review"],
+    ignored_workflow_names: ["Quay review"],
+  });
 });
 
 test("rejects a non-positive integer for retry_budget", () => {
@@ -296,6 +304,42 @@ test("tickOptionsFromConfig only forwards keys that are present", () => {
   });
 });
 
+test("loads optional [ci] ignored check policy", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[ci]
+ignored_check_names = ["FE PR Review"]
+ignored_workflow_names = ["Quay review"]
+`,
+  );
+  const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
+  expect(result.config.ci).toEqual({
+    ignored_check_names: ["FE PR Review"],
+    ignored_workflow_names: ["Quay review"],
+  });
+  expect(tickOptionsFromConfig(result.config).ciIgnorePolicy).toEqual({
+    ignoredCheckNames: ["FE PR Review"],
+    ignoredWorkflowNames: ["Quay review"],
+  });
+});
+
+test("[ci] rejects invalid ignored check policy values", () => {
+  const dir = tempDir();
+  const nonList = join(dir, "non-list.toml");
+  writeFileSync(nonList, `[ci]\nignored_check_names = "FE PR Review"\n`);
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: nonList } })).toThrow(
+    /ignored_check_names/i,
+  );
+
+  const empty = join(dir, "empty.toml");
+  writeFileSync(empty, `[ci]\nignored_workflow_names = ["   "]\n`);
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: empty } })).toThrow(
+    /ignored_workflow_names|non-empty/i,
+  );
+});
+
 test("loads [adapters.linear] and [adapters.slack] sections", () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");
@@ -334,6 +378,7 @@ test("loads [admin] bearer auth configuration", () => {
 require_auth = true
 token_env = "CUSTOM_QUAY_ADMIN_TOKEN"
 forwarded_identity_header = "X-Quay-User"
+forwarded_display_name_header = "X-Quay-User-Display-Name"
 `,
   );
   const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
@@ -341,6 +386,7 @@ forwarded_identity_header = "X-Quay-User"
     require_auth: true,
     token_env: "CUSTOM_QUAY_ADMIN_TOKEN",
     forwarded_identity_header: "X-Quay-User",
+    forwarded_display_name_header: "X-Quay-User-Display-Name",
   });
 });
 
@@ -369,6 +415,20 @@ forwarded_identity_header = "Authorization"
   );
   expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
     /forwarded_identity_header|secret-bearing/i,
+  );
+});
+
+test("[admin].forwarded_display_name_header rejects secret-bearing header names", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[admin]
+forwarded_display_name_header = "Authorization"
+`,
+  );
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /forwarded_display_name_header|secret-bearing/i,
   );
 });
 
@@ -412,6 +472,9 @@ test("tickOptionsFromConfig maps every supported key", () => {
       gate_quay_owned_done: true,
       gh_token_file: "/run/hermes/reviewer-gh-token",
     },
+    worker: {
+      gh_token_file: "/run/hermes/worker-gh-token",
+    },
     context: {
       reference_repos_root: "/home/hermes/.hermes/code",
     },
@@ -428,9 +491,34 @@ test("tickOptionsFromConfig maps every supported key", () => {
     maxNonBudgetRespawns: 7,
     reviewerEnabled: true,
     gateQuayOwnedDone: true,
+    workerGhTokenFile: "/run/hermes/worker-gh-token",
     reviewerGhTokenFile: "/run/hermes/reviewer-gh-token",
     referenceReposRoot: "/home/hermes/.hermes/code",
   });
+});
+
+test("[worker].gh_token_file round-trips through loadConfig", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[worker]
+gh_token_file = "/run/hermes/worker-gh-token"
+`,
+  );
+  const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
+  expect(result.config.worker?.gh_token_file).toBe(
+    "/run/hermes/worker-gh-token",
+  );
+});
+
+test("[worker].gh_token_file rejects an empty string", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(path, `[worker]\ngh_token_file = ""\n`);
+  expect(() => loadConfig({ env: { QUAY_CONFIG_FILE: path } })).toThrow(
+    /gh_token_file/,
+  );
 });
 
 test("[reviewer].gh_token_file round-trips through loadConfig", () => {

@@ -71,6 +71,7 @@ const AdminConfigSchema = z
     require_auth: z.boolean().optional(),
     token_env: z.string().min(1).optional(),
     forwarded_identity_header: HttpHeaderNameSchema.optional(),
+    forwarded_display_name_header: HttpHeaderNameSchema.optional(),
   })
   .strict();
 
@@ -88,6 +89,28 @@ const ReviewerConfigSchema = z
     // refuses self-review, so reviewers must authenticate as a different
     // identity than the worker that opened the PR.
     gh_token_file: z.string().min(1).optional(),
+  })
+  .strict();
+
+const WorkerConfigSchema = z
+  .object({
+    // Fallback path whose contents are exported as `GH_TOKEN` in the worker
+    // tmux pane when QUAY_WORKER_GH_TOKEN is unset.
+    gh_token_file: z.string().min(1).optional(),
+  })
+  .strict();
+
+const CiIgnoredNameSchema = z
+  .string()
+  .refine((value) => value.trim().length > 0, {
+    message: "ignored CI names must be non-empty strings",
+  })
+  .transform((value) => value.trim());
+
+const CiConfigSchema = z
+  .object({
+    ignored_check_names: z.array(CiIgnoredNameSchema).optional().default([]),
+    ignored_workflow_names: z.array(CiIgnoredNameSchema).optional().default([]),
   })
   .strict();
 
@@ -151,6 +174,8 @@ export const ConfigSchema = z
     admin: AdminConfigSchema.optional(),
     context: ContextConfigSchema.optional(),
     reviewer: ReviewerConfigSchema.optional(),
+    worker: WorkerConfigSchema.optional(),
+    ci: CiConfigSchema.optional(),
   })
   .strict();
 
@@ -211,6 +236,9 @@ export function tickOptionsFromConfig(config: QuayConfig): TickOptions {
   if (config.reviewer?.login !== undefined) {
     opts.reviewerLogin = config.reviewer.login;
   }
+  if (config.worker?.gh_token_file !== undefined) {
+    opts.workerGhTokenFile = config.worker.gh_token_file;
+  }
   if (config.reviewer?.gh_token_file !== undefined) {
     opts.reviewerGhTokenFile = config.reviewer.gh_token_file;
   }
@@ -237,6 +265,12 @@ export function tickOptionsFromConfig(config: QuayConfig): TickOptions {
   }
   if (config.context?.reference_repos_root !== undefined) {
     opts.referenceReposRoot = config.context.reference_repos_root;
+  }
+  if (config.ci !== undefined) {
+    opts.ciIgnorePolicy = {
+      ignoredCheckNames: config.ci.ignored_check_names,
+      ignoredWorkflowNames: config.ci.ignored_workflow_names,
+    };
   }
   return opts;
 }

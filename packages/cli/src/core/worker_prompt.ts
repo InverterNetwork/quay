@@ -191,7 +191,7 @@ function renderAttemptGuidance(g: AttemptGuidance): string {
 }
 
 function renderPrTarget(baseBranch: string): string {
-  return `<quay-pr-target base-branch="${escapeAttr(baseBranch)}">\nOpen or update the pull request against base branch ${escapeXmlText(baseBranch)}.\n</quay-pr-target>`;
+  return `<quay-pr-target base-branch="${escapeAttr(baseBranch)}">\nOpen or update the pull request against base branch ${escapeXmlText(baseBranch)}.\nThe effective PR base branch is ${escapeXmlText(baseBranch)}; if the PR already exists, treat the current GitHub PR base as authoritative unless a new human instruction says otherwise.\n</quay-pr-target>`;
 }
 
 function renderPrScreenshotRequest(): string {

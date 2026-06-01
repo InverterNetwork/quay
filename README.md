@@ -230,10 +230,12 @@ The first concrete delivery kind is `pr_ready_approved`. Quay emits it after a
 Quay-owned task reaches `done` with the current PR head reviewed and approved,
 including both orders: reviewer approval before CI pass and CI pass before
 reviewer approval. Its payload contains `task_id`, `external_ref`, `repo_id`,
-`pr_number`, `pr_url`, `head_sha`, `review_id`, `review_attempt_id`, and
-`branch_name`. The route hint contains `slack_thread_ref` plus fallback
-`deployment_default_slack_channel`; Hermes should post to the recorded thread
-when present and otherwise use the deployment default Slack channel.
+`pr_number`, `pr_url`, `pr_title` when available, `head_sha`, `review_id`,
+`review_attempt_id`, `branch_name`, and `approval_status` (`approved` for the
+first notification, `reapproved` when a prior ready-approved delivery exists
+for an earlier head SHA). The route hint contains `slack_thread_ref` plus
+fallback `deployment_default_slack_channel`; Hermes should post to the recorded
+thread when present and otherwise use the deployment default Slack channel.
 
 `quay handoff list` is the compatibility pull surface for workflow handoffs. It defaults
 to `--status pending` and hides pending rows whose `next_eligible_at` is still
@@ -309,6 +311,17 @@ tag/author shape stays consistent across validation and enqueue.
 | `QUAY_CONFIG_DIR` | Override config + schema lookup directory |
 | `QUAY_CONFIG_FILE` | Direct path to a config TOML; bypasses dir resolution |
 | `QUAY_INTEGRATION_TESTS=1` | Opt in to network-backed adapter tests |
+
+### Quay review workflow secrets
+
+`.github/workflows/quay-review.yml` calls Hermes `POST /quay/review-pr` after
+successful pull request CI runs so Quay can enroll or refresh synthetic PR
+reviews. Configure these repository secrets in GitHub Actions:
+
+| Secret | Purpose |
+|---|---|
+| `QUAY_REVIEW_URL` | Base Hermes URL, or the full `/quay/review-pr` endpoint |
+| `QUAY_REVIEW_PR_TOKEN` | Bearer token accepted by Hermes for Quay review requests |
 
 ## Layout
 

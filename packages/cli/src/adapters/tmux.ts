@@ -75,6 +75,7 @@ export class TmuxAdapter implements TmuxPort {
     const tmuxEnv = buildSpawnEnv(input.env);
     prepareCodexHome(tmuxEnv);
     installGhWrapperIfTokened(input, tmuxEnv);
+    const paneEnvPrefix = buildPaneEnvPrefix(input, tmuxEnv);
 
     const promptFile = join(input.worktreePath, PROMPT_FILE);
     writeFileSync(promptFile, input.promptContent);
@@ -102,7 +103,7 @@ export class TmuxAdapter implements TmuxPort {
     // nested ones — matching the prior session-exit semantics that
     // `has-session` liveness depends on.
     const exitCodeFile = join(input.worktreePath, EXIT_CODE_FILE);
-    const wrapped = `${envFilePrefix}${expanded}\nstatus=$?\nprintf '%d' "$status" > ${shellQuote(exitCodeFile)}\nexit "$status"`;
+    const wrapped = `${paneEnvPrefix}${envFilePrefix}${expanded}\nstatus=$?\nprintf '%d' "$status" > ${shellQuote(exitCodeFile)}\nexit "$status"`;
     const tmuxCommand = `exec sh -c ${shellQuote(wrapped)}`;
 
     // Step 1: create session with a placeholder command that keeps the
@@ -374,6 +375,49 @@ function buildSpawnEnv(
     }
   }
   return env;
+}
+
+function buildPaneEnvPrefix(
+  input: TmuxSpawnInput,
+  env: NodeJS.ProcessEnv,
+): string {
+  const adminDir = spawnAdminDir(input);
+  mkdirSync(adminDir, { recursive: true, mode: 0o700 });
+  chmodSync(adminDir, 0o700);
+  const envPath = join(adminDir, "pane-env.sh");
+  const lines = [
+    "# sourced by Quay's tmux pane wrapper",
+    "unset GH_TOKEN GITHUB_TOKEN QUAY_WORKER_GH_TOKEN QUAY_REVIEWER_GH_TOKEN",
+  ];
+  for (const [name, value] of Object.entries(env).sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) continue;
+    if (
+      name === "GH_TOKEN" ||
+      name === "GITHUB_TOKEN" ||
+      name === "QUAY_WORKER_GH_TOKEN" ||
+      name === "QUAY_REVIEWER_GH_TOKEN"
+    ) {
+      continue;
+    }
+    if (value === undefined) continue;
+    lines.push(`export ${name}=${shellQuote(value)}`);
+  }
+  const tokenFile = resolveGhTokenFile(input, env);
+  const hasGhTokenEnvFile =
+    input.envFiles?.some((entry) => entry.name === "GH_TOKEN") === true;
+  if (tokenFile !== null && !hasGhTokenEnvFile) {
+    lines.push(`token="$(cat ${shellQuote(tokenFile)})"`);
+    lines.push(
+      'if [ -z "$token" ]; then echo "quay: gh token file is missing or empty" >&2; exit 75; fi',
+    );
+    lines.push('export GH_TOKEN="$token"');
+    lines.push("unset token");
+  }
+  writeFileSync(envPath, `${lines.join("\n")}\n`, { mode: 0o600 });
+  chmodSync(envPath, 0o600);
+  return `. ${shellQuote(envPath)}\n`;
 }
 
 function installGhWrapperIfTokened(

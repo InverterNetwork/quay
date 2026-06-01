@@ -1,5 +1,7 @@
 import { QuayError } from "../../../src/core/errors.ts";
 import type {
+  LinearBlockedByRelation,
+  LinearIssueHierarchy,
   LinearIssue,
   LinearPort,
 } from "../../../src/ports/linear.ts";
@@ -17,12 +19,16 @@ export interface FakeLinearStateChange {
 
 export class FakeLinearAdapter implements LinearPort {
   getIssueCalls: string[] = [];
+  getBlockedByRelationsCalls: string[] = [];
+  getIssueHierarchyCalls: string[] = [];
   // Every accepted, non-idempotent setIssueState call lands here in arrival
   // order so tests can assert on the writeback shape AND the absence of
   // duplicate writes when idempotency should have suppressed the call.
   setIssueStateCalls: FakeLinearStateChange[] = [];
 
   private states = new Map<string, FakeLinearState>();
+  private blockedByRelations = new Map<string, LinearBlockedByRelation[]>();
+  private issueHierarchies = new Map<string, LinearIssueHierarchy>();
   // Tracks the "current Linear state" the fake reports for an identifier.
   // Drives idempotency: a `setIssueState` call whose stateName matches the
   // current value records nothing on `setIssueStateCalls` (skip), mirroring
@@ -40,6 +46,17 @@ export class FakeLinearAdapter implements LinearPort {
   setIssue(issue: LinearIssue, identifier?: string): void {
     const key = identifier ?? issue.identifier;
     this.states.set(key, { kind: "issue", issue });
+  }
+
+  setBlockedByRelations(
+    identifier: string,
+    relations: LinearBlockedByRelation[],
+  ): void {
+    this.blockedByRelations.set(identifier, relations);
+  }
+
+  setIssueHierarchy(identifier: string, hierarchy: LinearIssueHierarchy): void {
+    this.issueHierarchies.set(identifier, hierarchy);
   }
 
   // Identifiers without an explicit state default to "not found" → null.
@@ -115,6 +132,21 @@ export class FakeLinearAdapter implements LinearPort {
           },
         );
     }
+  }
+
+  async getBlockedByRelations(
+    identifier: string,
+  ): Promise<LinearBlockedByRelation[]> {
+    this.getBlockedByRelationsCalls.push(identifier);
+    return this.blockedByRelations.get(identifier) ?? [];
+  }
+
+  async getIssueHierarchy(identifier: string): Promise<LinearIssueHierarchy> {
+    this.getIssueHierarchyCalls.push(identifier);
+    return this.issueHierarchies.get(identifier) ?? {
+      parent: null,
+      children: [],
+    };
   }
 
   async setIssueState(identifier: string, stateName: string): Promise<void> {

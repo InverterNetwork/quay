@@ -34,6 +34,7 @@
 //   - Closing the PR:     `gh pr close <branch>`  (idempotent: tolerates "already closed"
 //                                                  and "no PR" by inspecting stderr)
 import { join, resolve } from "node:path";
+import { GitHubMergeError } from "../ports/github.ts";
 import type {
   GitHubPort,
   GitHubGraphqlRateLimit,
@@ -45,6 +46,7 @@ import type {
   PrLatestReview,
   PrMergeableState,
   PostedReview,
+  PostedReviewAuthor,
   PrReviewDecision,
   PrSnapshot,
   PrTerminalState,
@@ -64,6 +66,21 @@ export class GitHubCliAdapter implements GitHubPort {
 
   prExistsForBranch(repoId: string, branch: string): boolean {
     const list = this.listPrs(repoId, branch, "all");
+    return list.length > 0;
+  }
+
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean {
+    const list = this.listPrs(
+      repoId,
+      branch,
+      "all",
+      undefined,
+      githubActorCommandEnv(token),
+    );
     return list.length > 0;
   }
 
@@ -94,6 +111,60 @@ export class GitHubCliAdapter implements GitHubPort {
         baseRef: view.baseRef ?? null,
       };
     });
+  }
+
+  createPullRequest(input: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }): OpenBranchPr {
+    const result = this.run(input.repoId, [
+      "gh",
+      "pr",
+      "create",
+      "--head",
+      input.headBranch,
+      "--base",
+      input.baseBranch,
+      "--title",
+      input.title,
+      "--body",
+      input.body,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh pr create ${input.headBranch} -> ${input.baseBranch} failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    const listed = this.openPrsForBranchBase(
+      input.repoId,
+      input.headBranch,
+      input.baseBranch,
+    );
+    if (listed.length !== 1) {
+      throw new Error(
+        `gh pr create ${input.headBranch} -> ${input.baseBranch} did not reconcile to exactly one open PR (found ${listed.length})`,
+      );
+    }
+    return listed[0]!;
+  }
+
+  updatePullRequestBody(repoId: string, prNumber: number, body: string): void {
+    const result = this.run(repoId, [
+      "gh",
+      "pr",
+      "edit",
+      String(prNumber),
+      "--body",
+      body,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh pr edit ${prNumber} --body failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
   }
 
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {
@@ -157,6 +228,47 @@ export class GitHubCliAdapter implements GitHubPort {
     prNumber: number,
   ): PrSnapshot | null {
     return this.prLightweightSnapshotBySelector(repoId, String(prNumber));
+  }
+
+  freshPrSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null {
+    return this.prSnapshotBySelector(repoId, String(prNumber));
+  }
+
+  freshPrView(repoId: string, prNumber: number): PullRequestView | null {
+    return this.prView(repoId, prNumber);
+  }
+
+  mergePullRequest(
+    repoId: string,
+    prNumber: number,
+    expectedHeadSha: string,
+  ): void {
+    const result = this.run(repoId, [
+      "gh",
+      "pr",
+      "merge",
+      String(prNumber),
+      "--merge",
+      "--match-head-commit",
+      expectedHeadSha,
+    ]);
+    if (result.exitCode === 0) return;
+    const msg = `${result.stdout}\n${result.stderr}`;
+    const lower = msg.toLowerCase();
+    const kind =
+      lower.includes("head branch was modified") ||
+      lower.includes("head sha") ||
+      lower.includes("head commit")
+        ? "head_mismatch"
+        : lower.includes("not mergeable") ||
+            lower.includes("merge conflict") ||
+            lower.includes("cannot be merged")
+          ? "not_mergeable"
+          : "unknown";
+    throw new GitHubMergeError(
+      `gh pr merge ${prNumber} failed: ${msg.trim()}`,
+      kind,
+    );
   }
 
   getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null {
@@ -364,27 +476,7 @@ export class GitHubCliAdapter implements GitHubPort {
     // far beyond any real reviewer-bot workload, but the failure mode is
     // a transient "no posted review yet" (a retry, not a wrong accept),
     // so we don't paginate at the cost of a multi-call code path.
-    const path = `repos/{owner}/{repo}/pulls/${prNumber}/reviews?per_page=100`;
-    const result = this.run(repoId, ["gh", "api", path]);
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `gh api ${path} failed: ${result.stderr.trim() || result.stdout.trim()}`,
-      );
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(result.stdout);
-    } catch (err) {
-      throw new Error(
-        `gh api returned unparseable review JSON for PR #${prNumber}: ${(err as Error).message}`,
-      );
-    }
-    if (!Array.isArray(parsed)) {
-      throw new Error(
-        `gh api returned non-array review JSON for PR #${prNumber}: ${result.stdout.trim().slice(0, 200)}`,
-      );
-    }
-    const reviews = parsed as Array<Record<string, unknown>>;
+    const reviews = this.fetchPullRequestReviews(repoId, prNumber);
     // A Bot's `user.login` carries the `[bot]` suffix in the REST API
     // (e.g. `didier-reviewer[bot]`). Strip only for Bot rows so a
     // collision with a real user named `didier-reviewer[bot]`-literal
@@ -417,13 +509,68 @@ export class GitHubCliAdapter implements GitHubPort {
     return null;
   }
 
+  fetchPostedReviewAuthorsAtHead(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+  ): PostedReviewAuthor[] {
+    const reviews = this.fetchPullRequestReviews(repoId, prNumber);
+    const authors = new Map<string, PostedReviewAuthor>();
+    for (let i = reviews.length - 1; i >= 0; i -= 1) {
+      const r = reviews[i] ?? {};
+      const commitId = String(r.commit_id ?? "");
+      if (commitId !== headSha) continue;
+      const decision = mapPostedReviewDecision(r.state);
+      if (decision === null) continue;
+      const reviewId = String(r.node_id ?? "");
+      if (reviewId === "") continue;
+      const user = (r.user ?? {}) as Record<string, unknown>;
+      const login = String(user.login ?? "");
+      const type = String(user.type ?? "");
+      if (login === "" && type === "") continue;
+      const key = `${type}\0${login}`;
+      if (!authors.has(key)) {
+        authors.set(key, { login, type, reviewId, decision });
+      }
+    }
+    return [...authors.values()];
+  }
+
   // -- helpers ------------------------------------------------------------
+
+  private fetchPullRequestReviews(
+    repoId: string,
+    prNumber: number,
+  ): Array<Record<string, unknown>> {
+    const path = `repos/{owner}/{repo}/pulls/${prNumber}/reviews?per_page=100`;
+    const result = this.run(repoId, ["gh", "api", path]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh api ${path} failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch (err) {
+      throw new Error(
+        `gh api returned unparseable review JSON for PR #${prNumber}: ${(err as Error).message}`,
+      );
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error(
+        `gh api returned non-array review JSON for PR #${prNumber}: ${result.stdout.trim().slice(0, 200)}`,
+      );
+    }
+    return parsed as Array<Record<string, unknown>>;
+  }
 
   private listPrs(
     repoId: string,
     branch: string,
     state: "open" | "closed" | "all",
     baseBranch?: string,
+    env?: Record<string, string | undefined>,
   ): Array<{ number: number }> {
     const args = [
       "gh",
@@ -438,7 +585,7 @@ export class GitHubCliAdapter implements GitHubPort {
       args.push("--base", baseBranch);
     }
     args.push("--json", "number");
-    const result = this.run(repoId, args);
+    const result = this.run(repoId, args, env);
     if (result.exitCode !== 0) {
       throw new Error(
         `gh pr list --head ${branch}${baseBranch !== undefined ? ` --base ${baseBranch}` : ""} --state ${state} failed: ${result.stderr.trim()}`,
@@ -1009,20 +1156,76 @@ export class GitHubCliAdapter implements GitHubPort {
     return login;
   }
 
-  probeTokenAccess(repoId: string, token: string): void {
+  probeTokenAccess(
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ): void {
     const path = "repos/{owner}/{repo}";
     const result = this.run(
       repoId,
       ["gh", "api", path, "--jq", ".full_name"],
-      { ...process.env, GH_TOKEN: token },
+      {
+        ...process.env,
+        GH_TOKEN: token,
+        GITHUB_TOKEN: undefined,
+        QUAY_WORKER_GH_TOKEN: undefined,
+        QUAY_REVIEWER_GH_TOKEN: undefined,
+      },
     );
     if (result.exitCode !== 0) {
       throw new Error(
         `gh api ${path} failed: ${result.stderr.trim() || result.stdout.trim()}`,
       );
     }
-    if (result.stdout.trim() === "") {
+    const fullName = result.stdout.trim();
+    if (fullName === "") {
       throw new Error(`gh api ${path} returned an empty repository name`);
+    }
+    if (actor === "worker") {
+      this.probeWorkerPullRequestWrite(repoId, token, fullName);
+    }
+  }
+
+  private probeWorkerPullRequestWrite(
+    repoId: string,
+    token: string,
+    fullName: string,
+  ): void {
+    const [owner, name, ...extra] = fullName.split("/");
+    if (!owner || !name || extra.length > 0) {
+      throw new Error(
+        `gh api repos/{owner}/{repo} returned invalid repository name ${fullName}`,
+      );
+    }
+    const probeRef = `refs/heads/quay/token-write-probe-${process.pid}-${Date.now()}`;
+    const result = this.run(
+      repoId,
+      [
+        "git",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "credential.helper=!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f",
+        "push",
+        "--dry-run",
+        `https://github.com/${fullName}.git`,
+        `HEAD:${probeRef}`,
+      ],
+      {
+        ...process.env,
+        GH_TOKEN: token,
+        GITHUB_TOKEN: undefined,
+        QUAY_WORKER_GH_TOKEN: undefined,
+        QUAY_REVIEWER_GH_TOKEN: undefined,
+        GIT_ASKPASS: "",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `worker token does not have write access to ${fullName}; git push --dry-run failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
     }
   }
 
@@ -1199,6 +1402,16 @@ export function markRequired(items: PrCheck[], requiredKeys: Set<string>): PrChe
       requiredKeys.has(requiredKeyOf(c)) ||
       requiredKeys.has(requiredNameKeyOf(c.name)),
   }));
+}
+
+function githubActorCommandEnv(token: string): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    GH_TOKEN: token,
+    GITHUB_TOKEN: undefined,
+    QUAY_WORKER_GH_TOKEN: undefined,
+    QUAY_REVIEWER_GH_TOKEN: undefined,
+  };
 }
 
 function mapCheckRow(row: unknown): PrCheck {
@@ -1398,45 +1611,86 @@ function extractLatestReview(parsed: Record<string, unknown>): PrLatestReview {
       comments = pick.body !== undefined ? String(pick.body) : "";
     }
   }
-  const latestReviewId = resolveReviewNodeId(pick, parsed);
-  return { decision, latestReviewId, comments };
+  const fallbackReview = resolveReviewFallbackRow(pick, parsed);
+  const latestReviewId = resolveReviewNodeId(pick, fallbackReview);
+  return {
+    decision,
+    latestReviewId,
+    submittedHeadSha:
+      extractReviewSubmittedHeadSha(pick) ??
+      extractReviewSubmittedHeadSha(fallbackReview),
+    comments,
+  };
 }
 
-// Recover the review node id for the picked `latestReviews` entry. Some
-// `gh` versions return `latestReviews[].id` as the empty string while the
-// same review surfaces under `--json reviews` with the real GraphQL node
-// id (`PRR_…`). Trust `latestReviews[].id` when populated; otherwise walk
-// `reviews` newest-first and match by state (preferring an exact
-// `submittedAt` match when both sides expose one). Return null when no
-// usable id can be resolved — the enrichment guard skips the graphql
-// fetch on null so tick doesn't loop on empty-id errors.
-function resolveReviewNodeId(
+function extractReviewSubmittedHeadSha(
   picked: Record<string, unknown> | null,
-  parsed: Record<string, unknown>,
 ): string | null {
   if (picked === null) return null;
-  const pickedId = picked.id !== undefined ? String(picked.id) : "";
-  if (pickedId !== "") return pickedId;
+  const commit = picked.commit;
+  if (commit && typeof commit === "object") {
+    const oid = (commit as Record<string, unknown>).oid;
+    if (typeof oid === "string" && oid.trim() !== "") return oid;
+  }
+  const commitOid = picked.commitOid ?? picked.commitOID;
+  if (typeof commitOid === "string" && commitOid.trim() !== "") {
+    return commitOid;
+  }
+  return null;
+}
+
+// Recover the `reviews` row for the picked `latestReviews` entry. Some `gh`
+// versions return lossy `latestReviews` rows (empty id and/or missing
+// commit.oid) while the same review under `--json reviews` carries the
+// authoritative node id and commit OID. Match by id first when present, then
+// by state/submittedAt, then fall back to the newest same-state row.
+function resolveReviewFallbackRow(
+  picked: Record<string, unknown> | null,
+  parsed: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (picked === null) return null;
   const reviews = Array.isArray(parsed.reviews)
     ? (parsed.reviews as Array<Record<string, unknown>>)
     : [];
   if (reviews.length === 0) return null;
+  const pickedId = picked.id !== undefined ? String(picked.id) : "";
+  if (pickedId !== "") {
+    for (let i = reviews.length - 1; i >= 0; i -= 1) {
+      const r = reviews[i] ?? {};
+      if (String(r.id ?? "") === pickedId) return r;
+    }
+  }
   const pickedState = String(picked.state ?? "").toUpperCase();
   const pickedSubmittedAt = String(picked.submittedAt ?? "");
-  let stateMatch: string | null = null;
+  let stateMatch: Record<string, unknown> | null = null;
   for (let i = reviews.length - 1; i >= 0; i -= 1) {
     const r = reviews[i] ?? {};
-    const id = String(r.id ?? "");
-    if (id === "") continue;
     const state = String(r.state ?? "").toUpperCase();
     if (state !== pickedState) continue;
     const submittedAt = String(r.submittedAt ?? "");
     if (pickedSubmittedAt !== "" && submittedAt === pickedSubmittedAt) {
-      return id;
+      return r;
     }
-    if (stateMatch === null) stateMatch = id;
+    if (stateMatch === null) stateMatch = r;
   }
   return stateMatch;
+}
+
+// Trust `latestReviews[].id` when populated; otherwise use the matched
+// `reviews` row. Return null when no usable id can be resolved — the
+// enrichment guard skips the graphql fetch on null so tick doesn't loop on
+// empty-id errors.
+function resolveReviewNodeId(
+  picked: Record<string, unknown> | null,
+  fallbackReview: Record<string, unknown> | null,
+): string | null {
+  if (picked === null) return null;
+  const pickedId = picked.id !== undefined ? String(picked.id) : "";
+  if (pickedId !== "") return pickedId;
+  if (fallbackReview === null) return null;
+  const fallbackId =
+    fallbackReview.id !== undefined ? String(fallbackReview.id) : "";
+  return fallbackId !== "" ? fallbackId : null;
 }
 
 function mapReviewDecision(raw: unknown): PrReviewDecision {

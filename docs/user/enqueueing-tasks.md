@@ -63,8 +63,9 @@ quay enqueue \
 
 This path requires `[adapters.linear].enabled = true` and a configured Linear
 token. It fetches the Linear ticket, parses the `quay-config` block, optionally
-fetches Slack thread context, validates the assembled ticket payload, and then
-enters the same enqueue path as manual briefs.
+fetches Slack thread context, validates the assembled ticket payload, reads
+Linear blocked-by relations, and then enters the same enqueue path as manual
+briefs.
 
 `--linear-issue` is mutually exclusive with:
 
@@ -80,6 +81,31 @@ briefs.
 
 Calling the same Linear issue twice for the same repo returns the existing task
 instead of creating a duplicate.
+
+Linear blocked-by relations are resolved only at enqueue time. Complete Linear
+blockers do not block enqueue. Incomplete tracked blockers create dependency
+rows and place the dependent task in `waiting_dependencies` until the blocker
+reaches `merged`. Incomplete untracked blockers fail enqueue with
+`dependency_not_tracked` before any task, worktree, or artifact is created.
+
+Umbrella workflows are driven by native Linear hierarchy. Enqueue the parent
+issue first; Quay records the expected child set and creates the shared feature
+branch. Incomplete children are materialized as Quay tasks during the parent
+enqueue and target the umbrella feature branch; children already complete in
+Linear are recorded as `complete_without_quay`.
+
+Do not enqueue child issues afterwards for the umbrella flow. Direct child
+enqueue fails with `umbrella_child_direct_enqueue`, including after the parent
+has already materialized the child task. Use `--as-normal-task` on a child
+issue only to intentionally ignore the Linear parent umbrella membership for
+one enqueue. Parent issues with children still create umbrella coordination
+state. The flag still processes Linear blocked-by relations as normal
+dependencies.
+
+Inside an umbrella, Linear blocked-by relations create umbrella-scoped
+dependency rows. Same-umbrella blockers wait for
+`merged_to_feature_branch`; non-umbrella blockers keep normal `merged`
+semantics.
 
 ## Goal Worker Mode
 
@@ -174,6 +200,10 @@ remain lifetime accounting and are not reset.
 6. Runs the repo `install_cmd` in the worktree.
 7. Inserts the task and attempt rows.
 8. Writes artifacts.
+
+When dependencies are present and unsatisfied, the inserted task starts in
+`waiting_dependencies`; it is prepared and queryable, but tick will not spawn a
+worker until all dependency rows are satisfied.
 
 If any step fails, Quay rolls back worktree, branch, SQL, and artifact side
 effects as far as possible.

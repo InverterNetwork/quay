@@ -12,6 +12,14 @@
 // plain-text `gh pr checks ...` output.
 export interface GitHubPort {
   prExistsForBranch(repoId: string, branch: string): boolean;
+  // Same spawn-time read as `prExistsForBranch`, but forced through an explicit
+  // actor token so worker/reviewer launch paths never depend on ambient gh auth
+  // after resolving role-specific credentials.
+  prExistsForBranchWithToken(
+    repoId: string,
+    branch: string,
+    token: string,
+  ): boolean;
   // Exact reconciliation read for a dead worker that reports an already-open
   // PR before Quay has attached PR metadata to the task row. The adapter must
   // filter by both head branch and base branch, and return only currently open
@@ -22,6 +30,14 @@ export interface GitHubPort {
     branch: string,
     baseBranch: string,
   ): OpenBranchPr[];
+  createPullRequest(input: {
+    repoId: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body: string;
+  }): OpenBranchPr;
+  updatePullRequestBody(repoId: string, prNumber: number, body: string): void;
   prCheckStatus(repoId: string, branch: string): PrCheckStatus;
   // Returns true iff a PR for the branch is currently open. Used by the cancel
   // finalizer to decide whether to retain the remote branch in the default
@@ -48,6 +64,17 @@ export interface GitHubPort {
     repoId: string,
     prNumber: number,
   ): PrSnapshot | null;
+  // Uncached reads used immediately before authority-sensitive write calls.
+  // Tick's normal GitHub wrapper memoizes PR reads for efficiency; guarded
+  // merges must re-read live state and verify all guards against that fresh
+  // state in the same call path.
+  freshPrSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null;
+  freshPrView(repoId: string, prNumber: number): PullRequestView | null;
+  mergePullRequest(
+    repoId: string,
+    prNumber: number,
+    expectedHeadSha: string,
+  ): void;
   // Best-effort observability for GraphQL quota burn. Returning null means
   // telemetry was unavailable and must not block the caller.
   getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null;
@@ -61,11 +88,23 @@ export interface GitHubPort {
     headSha: string,
     expectedLogin?: string,
   ): PostedReview | null;
-  // Validate an explicit reviewer GH_TOKEN before handing it to a reviewer
-  // pane. Throws when the token is invalid, expired, or cannot access the
+  // Diagnostic read used only after `fetchPostedReview` misses. It reports
+  // review authors that did post a recognizable review at the same head SHA,
+  // so tick can distinguish "no review posted" from "reviewer.login drifted".
+  fetchPostedReviewAuthorsAtHead(
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+  ): PostedReviewAuthor[];
+  // Validate an explicit actor GH_TOKEN before handing it to a worker or
+  // reviewer pane. Throws when the token is invalid, expired, or cannot access the
   // target repository. Kept repo-scoped so GitHub App installation tokens are
   // supported; installation tokens cannot use the authenticated-user endpoint.
-  probeTokenAccess(repoId: string, token: string): void;
+  probeTokenAccess(
+    repoId: string,
+    token: string,
+    actor: "worker" | "reviewer",
+  ): void;
 }
 
 export interface GitHubGraphqlRateLimit {
@@ -109,6 +148,7 @@ export interface PrCheck {
 export interface PrLatestReview {
   decision: PrReviewDecision;
   latestReviewId: string | null;
+  submittedHeadSha?: string | null;
   comments: string;
 }
 
@@ -178,4 +218,21 @@ export interface PostedReview {
   decision: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED";
   body: string;
   comments: string;
+}
+
+export interface PostedReviewAuthor {
+  login: string;
+  type: string;
+  reviewId: string;
+  decision: PostedReview["decision"];
+}
+
+export class GitHubMergeError extends Error {
+  constructor(
+    message: string,
+    readonly kind: "not_mergeable" | "head_mismatch" | "unknown",
+  ) {
+    super(message);
+    this.name = "GitHubMergeError";
+  }
 }

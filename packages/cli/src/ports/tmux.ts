@@ -25,9 +25,8 @@ export interface TmuxSpawnInput {
   // not from argv. The pane wrapper does `export <name>="$(cat <path>)"`,
   // so the file path is the only thing that ends up in any process's
   // command line — the secret value never appears in `ps` output. Used
-  // today by the reviewer spawn path to hand `GH_TOKEN` from a distinct
-  // gh identity (GitHub refuses self-review, so reviewer and worker must
-  // authenticate as different identities). The wrapper fails loudly
+  // by actor spawn paths to hand `GH_TOKEN` from a role-specific GitHub
+  // App token file into the pane. The wrapper fails loudly
   // (exit 75 = EX_TEMPFAIL) if the file is missing or empty when the
   // pane actually starts, so a token-refresher race produces a clear
   // pane log entry instead of a silent `gh: not authenticated`.

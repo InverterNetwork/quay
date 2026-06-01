@@ -284,11 +284,182 @@ paths:
           $ref: "#/components/responses/CorsPreflight"
         "403":
           $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/agent/sessions:
+    post:
+      summary: Create a temporary Quay Agent session.
+      operationId: createAgentSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentCreateSessionRequest"
+      responses:
+        "200":
+          description: Agent session created for the current browser-tab thread.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSessionResponse"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/AgentGatewayFailed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for agent session creation.
+      operationId: optionsAgentSessions
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/agent/sessions/{session_id}/messages:
+    post:
+      summary: Send a user message and stream normalized Quay Agent events.
+      operationId: sendAgentMessage
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentMessageRequest"
+      responses:
+        "200":
+          description: Stream of normalized `AgentEvent` objects as NDJSON or SSE.
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/AgentNdjsonStream"
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/AgentSseStream"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/AgentSessionNotFound"
+        "500":
+          $ref: "#/components/responses/AgentGatewayFailed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for agent messages.
+      operationId: optionsAgentMessages
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/agent/sessions/{session_id}/approvals/{approval_id}:
+    post:
+      summary: Approve or reject a proposed Quay Agent action.
+      operationId: decideAgentApproval
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - $ref: "#/components/parameters/AgentApprovalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentApprovalDecisionRequest"
+      responses:
+        "200":
+          description: Stream of normalized `AgentEvent` objects for the approval decision lifecycle.
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/AgentNdjsonStream"
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/AgentSseStream"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/AgentSessionNotFound"
+        "409":
+          description: Approval has already been decided.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/AgentGatewayFailed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for agent approval decisions.
+      operationId: optionsAgentApprovals
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - $ref: "#/components/parameters/AgentApprovalId"
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+  /v1/agent/sessions/{session_id}/stop:
+    post:
+      summary: Stop the active agent turn for a temporary session.
+      operationId: stopAgentSession
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+      responses:
+        "200":
+          description: Active agent turn was interrupted where possible.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentStopResponse"
+        "401":
+          $ref: "#/components/responses/AdminAuthRequired"
+        "404":
+          $ref: "#/components/responses/AgentSessionNotFound"
+        "500":
+          $ref: "#/components/responses/AgentGatewayFailed"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
+    options:
+      summary: CORS preflight for agent stop.
+      operationId: optionsAgentStop
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+      responses:
+        "204":
+          $ref: "#/components/responses/CorsPreflight"
+        "403":
+          $ref: "#/components/responses/CorsOriginNotAllowed"
 components:
   securitySchemes:
     AdminBearer:
       type: http
       scheme: bearer
+  parameters:
+    AgentSessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Quay-owned temporary browser-tab agent session ID.
+    AgentApprovalId:
+      name: approval_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Proposed action approval ID from an `approval_required` event.
   responses:
     CorsPreflight:
       description: Allowed local UI origin preflight response.
@@ -362,6 +533,18 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    AgentSessionNotFound:
+      description: Agent session or approval is unknown.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    AgentGatewayFailed:
+      description: Agent Gateway request failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
   schemas:
     Meta:
       type: object
@@ -370,6 +553,7 @@ components:
         - service
         - api_version
         - quay_version
+        - viewer
       properties:
         service:
           type: string
@@ -379,6 +563,29 @@ components:
           const: v1
         quay_version:
           type: string
+        viewer:
+          $ref: "#/components/schemas/MetaViewer"
+    MetaViewer:
+      type: object
+      additionalProperties: false
+      required:
+        - label
+        - display_name
+        - slack_user_id
+      properties:
+        label:
+          type: string
+          description: Display label for the current Admin UI operator.
+        display_name:
+          type:
+            - string
+            - "null"
+          description: Trusted upstream display name, when forwarded.
+        slack_user_id:
+          type:
+            - string
+            - "null"
+          description: Trusted upstream Slack user id, when forwarded.
     MissionControlReadModel:
       type: object
       additionalProperties: false
@@ -961,6 +1168,400 @@ components:
         used_by_tasks:
           type: integer
           minimum: 0
+    AgentCreateSessionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - context
+      properties:
+        agent:
+          type: string
+          default: hermes
+        context:
+          $ref: "#/components/schemas/AgentUiContext"
+    AgentSessionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - session_id
+        - agent
+        - provider
+        - created_at
+      properties:
+        session_id:
+          type: string
+        agent:
+          type: string
+        provider:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    AgentMessageRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - message
+        - context
+      properties:
+        message:
+          type: string
+          minLength: 1
+        context:
+          $ref: "#/components/schemas/AgentUiContext"
+    AgentApprovalDecisionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - decision
+      properties:
+        decision:
+          type: string
+          enum:
+            - approved
+            - rejected
+    AgentStopResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - session_id
+        - stopped
+      properties:
+        session_id:
+          type: string
+        stopped:
+          type: boolean
+          const: true
+    AgentUiContext:
+      type: object
+      additionalProperties: false
+      required:
+        - view
+        - scope
+        - urlPath
+        - capturedAt
+        - summary
+        - payload
+      properties:
+        view:
+          type: string
+          enum:
+            - mission-control
+            - configuration
+        scope:
+          type: string
+        urlPath:
+          type: string
+        capturedAt:
+          type: string
+          format: date-time
+        summary:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+          description: Page-owned bounded semantic context snapshot.
+    AgentEvent:
+      oneOf:
+        - $ref: "#/components/schemas/AgentMessageStartEvent"
+        - $ref: "#/components/schemas/AgentTextDeltaEvent"
+        - $ref: "#/components/schemas/AgentToolCallEvent"
+        - $ref: "#/components/schemas/AgentReferenceEvent"
+        - $ref: "#/components/schemas/AgentApprovalRequiredEvent"
+        - $ref: "#/components/schemas/AgentCommandOutputEvent"
+        - $ref: "#/components/schemas/AgentApprovalResultEvent"
+        - $ref: "#/components/schemas/AgentErrorEvent"
+        - $ref: "#/components/schemas/AgentMessageDoneEvent"
+      discriminator:
+        propertyName: type
+        mapping:
+          message_start: "#/components/schemas/AgentMessageStartEvent"
+          text_delta: "#/components/schemas/AgentTextDeltaEvent"
+          tool_call: "#/components/schemas/AgentToolCallEvent"
+          reference: "#/components/schemas/AgentReferenceEvent"
+          approval_required: "#/components/schemas/AgentApprovalRequiredEvent"
+          command_output: "#/components/schemas/AgentCommandOutputEvent"
+          approval_result: "#/components/schemas/AgentApprovalResultEvent"
+          error: "#/components/schemas/AgentErrorEvent"
+          message_done: "#/components/schemas/AgentMessageDoneEvent"
+    AgentNdjsonStream:
+      type: string
+      format: binary
+      description: Newline-delimited JSON stream. Each non-empty line is one `AgentEvent`.
+      examples:
+        - |
+          {"type":"message_start","messageId":"agent_123","role":"agent","model":"hermes-agent"}
+          {"type":"text_delta","messageId":"agent_123","text":"Checking tasks..."}
+          {"type":"message_done","messageId":"agent_123"}
+      x-event-schema:
+        $ref: "#/components/schemas/AgentEvent"
+    AgentSseStream:
+      type: string
+      format: binary
+      description: Server-Sent Events stream. Each `agent_event` data payload is one `AgentEvent`; `[DONE]` terminates the stream.
+      examples:
+        - |
+          event: agent_event
+          data: {"type":"message_start","messageId":"agent_123","role":"agent","model":"hermes-agent"}
+
+          event: agent_event
+          data: {"type":"message_done","messageId":"agent_123"}
+
+          data: [DONE]
+      x-event-schema:
+        $ref: "#/components/schemas/AgentEvent"
+    AgentMessageStartEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - messageId
+        - role
+      properties:
+        type:
+          type: string
+          const: message_start
+        messageId:
+          type: string
+        role:
+          type: string
+          const: agent
+        model:
+          type: string
+    AgentTextDeltaEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - messageId
+        - text
+      properties:
+        type:
+          type: string
+          const: text_delta
+        messageId:
+          type: string
+        text:
+          type: string
+    AgentToolCallEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - messageId
+        - toolCallId
+        - label
+        - status
+      properties:
+        type:
+          type: string
+          const: tool_call
+        messageId:
+          type: string
+        toolCallId:
+          type: string
+        label:
+          type: string
+        detail:
+          type: string
+        status:
+          type: string
+          enum:
+            - running
+            - done
+            - failed
+    AgentReferenceEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - messageId
+        - kind
+        - id
+        - label
+      properties:
+        type:
+          type: string
+          const: reference
+        messageId:
+          type: string
+        kind:
+          type: string
+          enum:
+            - task
+            - pr
+            - log
+            - file
+            - ci
+            - config
+        id:
+          type: string
+        label:
+          type: string
+        url:
+          type: string
+        tone:
+          type: string
+          enum:
+            - neutral
+            - good
+            - warn
+            - danger
+    AgentApprovalRequiredEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - messageId
+        - approvalId
+        - command
+        - description
+        - affects
+      properties:
+        type:
+          type: string
+          const: approval_required
+        messageId:
+          type: string
+        approvalId:
+          type: string
+        title:
+          type: string
+        previewKind:
+          type: string
+          enum:
+            - command
+            - intent
+        command:
+          type: string
+        description:
+          type: string
+        affects:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentAffectedResource"
+        note:
+          type: string
+        action:
+          $ref: "#/components/schemas/AgentApprovalAction"
+    AgentApprovalAction:
+      oneOf:
+        - $ref: "#/components/schemas/AgentResumeTaskAction"
+      discriminator:
+        propertyName: type
+        mapping:
+          quay.resume_task: "#/components/schemas/AgentResumeTaskAction"
+    AgentResumeTaskAction:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - taskId
+        - brief
+      properties:
+        type:
+          type: string
+          const: quay.resume_task
+        taskId:
+          type: string
+        reason:
+          type: string
+        brief:
+          type: string
+        expectedOutcome:
+          type: string
+        scope:
+          type: string
+        externalRef:
+          type: string
+    AgentCommandOutputEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - messageId
+        - approvalId
+        - line
+      properties:
+        type:
+          type: string
+          const: command_output
+        messageId:
+          type: string
+        approvalId:
+          type: string
+        line:
+          type: string
+    AgentApprovalResultEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - messageId
+        - approvalId
+        - status
+      properties:
+        type:
+          type: string
+          const: approval_result
+        messageId:
+          type: string
+        approvalId:
+          type: string
+        status:
+          type: string
+          enum:
+            - running
+            - rejected
+            - succeeded
+            - failed
+        exitCode:
+          type: integer
+    AgentErrorEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - code
+        - message
+        - recoverable
+      properties:
+        type:
+          type: string
+          const: error
+        messageId:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+        recoverable:
+          type: boolean
+        details:
+          description: Adapter-specific bounded diagnostic details.
+    AgentMessageDoneEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - messageId
+      properties:
+        type:
+          type: string
+          const: message_done
+        messageId:
+          type: string
+    AgentAffectedResource:
+      type: object
+      additionalProperties: false
+      required:
+        - label
+        - value
+      properties:
+        label:
+          type: string
+        value:
+          type: string
     PreambleSummary:
       type: object
       additionalProperties: false
