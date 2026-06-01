@@ -1986,6 +1986,7 @@ function transitionExistingPrAttached(
         pr: {
           number: pr.number,
           url: pr.url,
+          title: pr.title ?? null,
           headSha,
           baseSha: pr.baseSha,
           coalesce: "input",

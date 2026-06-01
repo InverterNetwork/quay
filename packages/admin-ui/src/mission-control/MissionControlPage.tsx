@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Avatar } from '../components/Avatar';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
@@ -307,8 +307,19 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
       </div>
 
       <HStack gap={5} wrap>
-        <Chip leading={<Icon.Repo size={11} />}>{task.repo}</Chip>
-        {task.pr !== null && <Chip leading={<Icon.GitPR size={11} />}>#{task.pr}</Chip>}
+        {task.repoUrl !== null ? (
+          <LinkChip href={task.repoUrl} leading={<Icon.Repo size={11} />} title={`Open ${task.repo} repository`}>
+            {task.repo}
+          </LinkChip>
+        ) : (
+          <Chip leading={<Icon.Repo size={11} />}>{task.repo}</Chip>
+        )}
+        {task.pr !== null && task.prUrl !== null && (
+          <LinkChip href={task.prUrl} leading={<Icon.GitPR size={11} />} title={`Open PR #${task.pr}`}>
+            #{task.pr}
+          </LinkChip>
+        )}
+        {task.pr !== null && task.prUrl === null && <Chip leading={<Icon.GitPR size={11} />}>#{task.pr}</Chip>}
         {agent !== null && <Chip leading={<Icon.Bot size={11} />}>{agent}</Chip>}
       </HStack>
 
@@ -335,6 +346,46 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
         </T>
       </HStack>
     </article>
+  );
+}
+
+function LinkChip({
+  href,
+  leading,
+  children,
+  title,
+}: {
+  href: string;
+  leading?: ReactNode;
+  children: ReactNode;
+  title: string;
+}) {
+  return (
+    <a
+      className="mc-link-chip"
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      title={title}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        height: 22,
+        padding: '0 8px',
+        fontFamily: 'var(--sans)',
+        fontSize: 12,
+        fontWeight: 500,
+        color: 'var(--ink-2)',
+        background: 'var(--surface)',
+        border: '1px solid var(--line-2)',
+        borderRadius: 'var(--r-sm)',
+        cursor: 'pointer',
+      }}
+    >
+      {leading}
+      {children}
+    </a>
   );
 }
 

@@ -87,6 +87,7 @@ export class GitHubCliAdapter implements GitHubPort {
       }
       return {
         number: view.prNumber ?? number,
+        title: view.prTitle ?? null,
         url: view.prUrl ?? null,
         headSha: view.headSha,
         baseSha: view.baseSha,
@@ -234,6 +235,9 @@ export class GitHubCliAdapter implements GitHubPort {
     if (view.prUrl !== null && view.prUrl !== undefined) {
       snapshot.prUrl = view.prUrl;
     }
+    if (view.prTitle !== null && view.prTitle !== undefined) {
+      snapshot.prTitle = view.prTitle;
+    }
     return snapshot;
   }
 
@@ -263,6 +267,9 @@ export class GitHubCliAdapter implements GitHubPort {
     }
     if (view.prUrl !== null && view.prUrl !== undefined) {
       snapshot.prUrl = view.prUrl;
+    }
+    if (view.prTitle !== null && view.prTitle !== undefined) {
+      snapshot.prTitle = view.prTitle;
     }
     return snapshot;
   }
@@ -471,6 +478,7 @@ export class GitHubCliAdapter implements GitHubPort {
     // a stop-the-scrape regression for operators on the old CLI.
     const fields = [
       "number",
+      "title",
       "url",
       "state",
       "isDraft",
@@ -545,6 +553,10 @@ export class GitHubCliAdapter implements GitHubPort {
         ? this.computeRefTipSha(repoId, `origin/${baseRef}`)
         : null;
     const prNumber = toFiniteIntegerOrNull(parsed.number);
+    const prTitle =
+      typeof parsed.title === "string" && parsed.title.trim().length > 0
+        ? parsed.title
+        : null;
     const prUrl =
       typeof parsed.url === "string" && parsed.url.length > 0
         ? parsed.url
@@ -560,6 +572,7 @@ export class GitHubCliAdapter implements GitHubPort {
     if (baseRef !== null) view.baseRef = baseRef;
     if (baseTipSha !== null) view.baseTipSha = baseTipSha;
     if (prNumber !== null) view.prNumber = prNumber;
+    if (prTitle !== null) view.prTitle = prTitle;
     if (prUrl !== null) view.prUrl = prUrl;
     return view;
   }
@@ -570,11 +583,12 @@ export class GitHubCliAdapter implements GitHubPort {
   ):
     | (Pick<
         PrSnapshot,
-        "state" | "headSha" | "baseSha" | "prNumber" | "prUrl" | "baseRef" | "baseTipSha"
+        "state" | "headSha" | "baseSha" | "prNumber" | "prUrl" | "prTitle" | "baseRef" | "baseTipSha"
       >)
     | null {
     const fields = [
       "number",
+      "title",
       "url",
       "state",
       "headRefOid",
@@ -622,13 +636,17 @@ export class GitHubCliAdapter implements GitHubPort {
         ? this.computeRefTipSha(repoId, `origin/${baseRef}`)
         : null;
     const prNumber = toFiniteIntegerOrNull(parsed.number);
+    const prTitle =
+      typeof parsed.title === "string" && parsed.title.trim().length > 0
+        ? parsed.title
+        : null;
     const prUrl =
       typeof parsed.url === "string" && parsed.url.length > 0
         ? parsed.url
         : null;
     const view: Pick<
       PrSnapshot,
-      "state" | "headSha" | "baseSha" | "prNumber" | "prUrl" | "baseRef" | "baseTipSha"
+      "state" | "headSha" | "baseSha" | "prNumber" | "prUrl" | "prTitle" | "baseRef" | "baseTipSha"
     > = {
       state: mapPrState(parsed.state),
       headSha,
@@ -637,6 +655,7 @@ export class GitHubCliAdapter implements GitHubPort {
     if (baseRef !== null) view.baseRef = baseRef;
     if (baseTipSha !== null) view.baseTipSha = baseTipSha;
     if (prNumber !== null) view.prNumber = prNumber;
+    if (prTitle !== null) view.prTitle = prTitle;
     if (prUrl !== null) view.prUrl = prUrl;
     return view;
   }

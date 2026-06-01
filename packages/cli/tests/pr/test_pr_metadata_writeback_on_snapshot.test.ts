@@ -1,5 +1,5 @@
 // A successful PR snapshot during pr-open / done polling must persist
-// `pr_number`, `pr_url`, `head_sha`, and `base_sha` onto the task row so the
+// `pr_number`, `pr_url`, `pr_title`, `head_sha`, and `base_sha` onto the task row so the
 // operator-visible task carries the PR linkage. Previously the adapter scrape
 // errored out (Unknown JSON field "baseRefOid" on gh 2.45.0) before any field
 // could be written; this test pins the fixed behavior — even though it
@@ -20,6 +20,7 @@ afterEach(() => {
 interface TaskRow {
   pr_number: number | null;
   pr_url: string | null;
+  pr_title: string | null;
   head_sha: string | null;
   base_sha: string | null;
 }
@@ -27,12 +28,12 @@ interface TaskRow {
 function readTaskMetadata(taskId: string): TaskRow {
   return h!.db
     .query<TaskRow, [string]>(
-      `SELECT pr_number, pr_url, head_sha, base_sha FROM tasks WHERE task_id = ?`,
+      `SELECT pr_number, pr_url, pr_title, head_sha, base_sha FROM tasks WHERE task_id = ?`,
     )
     .get(taskId)!;
 }
 
-test("pr-open snapshot populates pr_number, pr_url, head_sha, base_sha on the task row", async () => {
+test("pr-open snapshot populates PR metadata on the task row", async () => {
   h = createHarness();
   h.clock.set("2026-05-11T10:00:00.000Z");
 
@@ -57,6 +58,7 @@ test("pr-open snapshot populates pr_number, pr_url, head_sha, base_sha on the ta
     baseSha: "base-eeff0011",
     prNumber: 42,
     prUrl: "https://github.com/example/repo/pull/42",
+    prTitle: "Fix checkout flow",
     baseRef: "main",
     mergeable: "mergeable",
     latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
@@ -73,6 +75,7 @@ test("pr-open snapshot populates pr_number, pr_url, head_sha, base_sha on the ta
   const row = readTaskMetadata(taskId);
   expect(row.pr_number).toBe(42);
   expect(row.pr_url).toBe("https://github.com/example/repo/pull/42");
+  expect(row.pr_title).toBe("Fix checkout flow");
   expect(row.head_sha).toBe("head-aabbccdd");
   expect(row.base_sha).toBe("base-eeff0011");
 });

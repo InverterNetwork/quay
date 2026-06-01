@@ -78,10 +78,13 @@ interface MissionControlResponse {
     id: string;
     ext: string;
     repo: string;
+    repoUrl: string | null;
     title: string;
     branch: string;
     state: string;
     pr: number | null;
+    prUrl: string | null;
+    isReviewOnly: boolean;
     budget: number;
     total: number;
     latest: string;
@@ -134,6 +137,7 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
           SET external_ref = 'ITRY-1001',
               branch_name = 'quay/itry-1001-checkout',
               pr_number = 42,
+              pr_url = 'https://github.example/repo-a/pull/42',
               attempts_consumed = 3,
               retry_budget = 5,
               worker_model = 'gpt-5.3',
@@ -160,10 +164,13 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
     id: "task-ci",
     ext: "ITRY-1001",
     repo: "repo-a",
+    repoUrl: "https://example/r",
     title: "Fix checkout flow after retry regression.",
     branch: "quay/itry-1001-checkout",
     state: "pr-open",
     pr: 42,
+    prUrl: "https://github.example/repo-a/pull/42",
+    isReviewOnly: false,
     budget: 3,
     total: 5,
     latest: "CI failed",
@@ -174,6 +181,90 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
     attnTone: "danger",
   });
   expect(task.age).toEqual(expect.any(String));
+});
+
+test("GET /v1/tasks exposes sanitized browser repo URLs", async () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-ssh");
+  const sshTaskId = insertTask(h.db, {
+    taskId: "task-ssh",
+    repoId: "repo-ssh",
+    state: "pr-open",
+  });
+  h.db
+    .query(`UPDATE repos SET repo_url = 'git@github.com:owner/repo-ssh.git' WHERE repo_id = 'repo-ssh'`)
+    .run();
+
+  insertRepo(h.db, "repo-token");
+  const tokenTaskId = insertTask(h.db, {
+    taskId: "task-token",
+    repoId: "repo-token",
+    state: "pr-open",
+  });
+  h.db
+    .query(`UPDATE repos SET repo_url = 'https://secret-token@github.com/owner/repo-token.git' WHERE repo_id = 'repo-token'`)
+    .run();
+
+  const handler = createHandler();
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+  const byId = new Map(body.tasks.map((task) => [task.id, task]));
+
+  expect(response.status).toBe(200);
+  expect(byId.get(sshTaskId)?.repoUrl).toBe("https://github.com/owner/repo-ssh");
+  expect(byId.get(tokenTaskId)?.repoUrl).toBe("https://github.com/owner/repo-token");
+  expect(JSON.stringify(body.tasks)).not.toContain("secret-token");
+});
+
+test("GET /v1/tasks exposes review-only PR title and link targets", async () => {
+  h = createHarness();
+  insertRepo(h.db, "test-factory-code");
+  const taskId = insertTask(h.db, {
+    taskId: "pr-review-test-factory-code-8",
+    repoId: "test-factory-code",
+    state: "pr-review",
+  });
+  h.db
+    .query(
+      `UPDATE repos
+          SET repo_url = 'https://github.com/acme/test-factory-code'
+        WHERE repo_id = 'test-factory-code'`,
+    )
+    .run();
+  h.db
+    .query(
+      `UPDATE tasks
+          SET authoring_mode = 'synthetic_review',
+              branch_name = 'quay-review/8',
+              pr_number = 8,
+              pr_url = 'https://github.com/acme/test-factory-code/pull/8',
+              pr_title = 'Add NavHolidayGapChecker service + Lambda handler',
+              retry_budget = 1
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+  insertTaskEvent(taskId, "review_spawned");
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+
+  expect(response.status).toBe(200);
+  expect(body.tasks).toHaveLength(1);
+  expect(body.tasks[0]).toMatchObject({
+    id: "pr-review-test-factory-code-8",
+    ext: "—",
+    repo: "test-factory-code",
+    repoUrl: "https://github.com/acme/test-factory-code",
+    title: "Add NavHolidayGapChecker service + Lambda handler",
+    branch: "quay-review/8",
+    state: "pr-review",
+    pr: 8,
+    prUrl: "https://github.com/acme/test-factory-code/pull/8",
+    isReviewOnly: true,
+    total: 1,
+    latest: "review spawned",
+  });
 });
 
 test("GET /v1/tasks derives attention from stuck and human states", async () => {
