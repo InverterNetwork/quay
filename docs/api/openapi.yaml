@@ -613,6 +613,7 @@ components:
       required:
         - id
         - ext
+        - extUrl
         - repo
         - repoUrl
         - title
@@ -624,6 +625,7 @@ components:
         - role
         - reviewStatus
         - umbrellaRef
+        - umbrellaUrl
         - umbrellaChildren
         - blockedBy
         - budget
@@ -638,6 +640,11 @@ components:
           type: string
         ext:
           type: string
+        extUrl:
+          type:
+            - string
+            - "null"
+          format: uri
         repo:
           type: string
         repoUrl:
@@ -682,6 +689,11 @@ components:
           type:
             - string
             - "null"
+        umbrellaUrl:
+          type:
+            - string
+            - "null"
+          format: uri
         umbrellaChildren:
           anyOf:
             - type: object

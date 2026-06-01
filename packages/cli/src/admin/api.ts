@@ -201,6 +201,7 @@ interface AdminMissionControlUmbrellaChildren {
 interface AdminMissionControlTask {
   id: string;
   ext: string;
+  extUrl: string | null;
   repo: string;
   repoUrl: string | null;
   title: string;
@@ -212,6 +213,7 @@ interface AdminMissionControlTask {
   role: AdminMissionControlTaskRole;
   reviewStatus: string | null;
   umbrellaRef: string | null;
+  umbrellaUrl: string | null;
   umbrellaChildren: AdminMissionControlUmbrellaChildren | null;
   blockedBy: string | null;
   budget: number;
@@ -643,8 +645,10 @@ interface MissionControlTaskRow {
   reviewer_model: string | null;
   goal_objective: string | null;
   objective_file_path: string | null;
+  ticket_snapshot_file_path: string | null;
   umbrella_kind: string | null;
   umbrella_ref: string | null;
+  umbrella_url: string | null;
   umbrella_title: string | null;
   umbrella_children_done: number | null;
   umbrella_children_total: number | null;
@@ -723,12 +727,22 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                    ORDER BY ar.artifact_id ASC
                    LIMIT 1
                 ) AS objective_file_path,
+                (
+                  SELECT ar.file_path
+                    FROM artifacts ar
+                   WHERE ar.task_id = t.task_id
+                     AND ar.kind = 'ticket_snapshot'
+                     AND ar.attempt_id IS NULL
+                   ORDER BY ar.artifact_id ASC
+                   LIMIT 1
+                ) AS ticket_snapshot_file_path,
                 CASE
                   WHEN parent_uw.umbrella_workflow_id IS NOT NULL THEN 'parent'
                   WHEN child_uw.umbrella_workflow_id IS NOT NULL THEN 'child'
                   ELSE NULL
                 END AS umbrella_kind,
                 COALESCE(parent_uw.external_ref, child_uw.external_ref) AS umbrella_ref,
+                parent_uw.linear_issue_url AS umbrella_url,
                 parent_uw.linear_issue_title AS umbrella_title,
                 (
                   SELECT COUNT(*)
@@ -786,9 +800,9 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
        SELECT task_id, repo_id, repo_url, external_ref, state, authoring_mode, branch_name,
               pr_number, pr_url, pr_title, attempts_consumed, retry_budget, authors_json,
               worker_agent, worker_model, reviewer_agent, reviewer_model,
-              goal_objective, objective_file_path, umbrella_kind, umbrella_ref,
-              umbrella_title, umbrella_children_done, umbrella_children_total,
-              blocked_by, updated_at,
+              goal_objective, objective_file_path, ticket_snapshot_file_path,
+              umbrella_kind, umbrella_ref, umbrella_url, umbrella_title,
+              umbrella_children_done, umbrella_children_total, blocked_by, updated_at,
               created_at
          FROM ranked_tasks
         WHERE (terminal_bucket = 0 AND bucket_rank <= ?)
@@ -829,6 +843,7 @@ async function missionControlTaskFromRow(
   const task: AdminMissionControlTask = {
     id: row.task_id,
     ext: row.external_ref ?? "—",
+    extUrl: await linearIssueUrlForMissionControl(row),
     repo: row.repo_id,
     repoUrl: repoBrowserUrl(row.repo_url),
     title: await titleForMissionControl(row),
@@ -840,6 +855,7 @@ async function missionControlTaskFromRow(
     role,
     reviewStatus: isReviewOnly ? missionControlReviewStatus(state, recentEvents) : null,
     umbrellaRef: row.umbrella_ref,
+    umbrellaUrl: validateHttpUrl(row.umbrella_url),
     umbrellaChildren: row.umbrella_kind !== "parent"
       ? null
       : {
@@ -937,6 +953,29 @@ async function titleForMissionControl(row: MissionControlTaskRow): Promise<strin
   return row.external_ref ?? row.task_id;
 }
 
+async function linearIssueUrlForMissionControl(row: MissionControlTaskRow): Promise<string | null> {
+  if (isReviewOnlyMissionControlTask(row)) return null;
+  if (row.external_ref === null) return null;
+  const snapshot = await readOptionalTextFile(row.ticket_snapshot_file_path);
+  if (snapshot === null) return null;
+
+  try {
+    const parsed = JSON.parse(snapshot) as unknown;
+    if (!isRecord(parsed)) return null;
+    const issue = parsed.linear_issue;
+    if (!isRecord(issue)) return null;
+    const identifier = typeof issue.identifier === "string" ? issue.identifier.trim() : "";
+    if (identifier.toUpperCase() !== row.external_ref.toUpperCase()) return null;
+    return validateHttpUrl(typeof issue.url === "string" ? issue.url : null);
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isReviewOnlyMissionControlTask(row: MissionControlTaskRow): boolean {
   return row.authoring_mode === "synthetic_review" || row.authoring_mode === "adopted_external_pr";
 }
@@ -1004,6 +1043,17 @@ function repoBrowserUrl(repoUrl: string): string | null {
   }
 
   return null;
+}
+
+function validateHttpUrl(value: string | null): string | null {
+  const trimmed = value?.trim();
+  if (trimmed === undefined || trimmed === "") return null;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 function stripGitSuffix(path: string): string {
