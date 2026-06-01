@@ -196,10 +196,13 @@ interface AdminMissionControlTask {
   id: string;
   ext: string;
   repo: string;
+  repoUrl: string | null;
   title: string;
   branch: string;
   state: TaskState;
   pr: number | null;
+  prUrl: string | null;
+  isReviewOnly: boolean;
   budget: number;
   total: number;
   latest: string;
@@ -612,10 +615,14 @@ function isWriteRoute(
 interface MissionControlTaskRow {
   task_id: string;
   repo_id: string;
+  repo_url: string;
   external_ref: string | null;
   state: string;
+  authoring_mode: string;
   branch_name: string;
   pr_number: number | null;
+  pr_url: string | null;
+  pr_title: string | null;
   attempts_consumed: number;
   retry_budget: number;
   authors_json: string | null;
@@ -684,8 +691,8 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
   return db
     .query<MissionControlTaskRow, SQLQueryBindings[]>(
       `WITH candidate_tasks AS (
-         SELECT t.task_id, t.repo_id, t.external_ref, t.state, t.branch_name,
-                t.pr_number, t.attempts_consumed, t.retry_budget, t.authors_json,
+         SELECT t.task_id, t.repo_id, r.repo_url, t.external_ref, t.state, t.authoring_mode, t.branch_name,
+                t.pr_number, t.pr_url, t.pr_title, t.attempts_consumed, t.retry_budget, t.authors_json,
                 t.worker_agent, t.worker_model, t.reviewer_agent, t.reviewer_model,
                 tg.objective AS goal_objective,
                 (
@@ -717,8 +724,8 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                 ) AS bucket_rank
            FROM candidate_tasks
        )
-       SELECT task_id, repo_id, external_ref, state, branch_name,
-              pr_number, attempts_consumed, retry_budget, authors_json,
+       SELECT task_id, repo_id, repo_url, external_ref, state, authoring_mode, branch_name,
+              pr_number, pr_url, pr_title, attempts_consumed, retry_budget, authors_json,
               worker_agent, worker_model, reviewer_agent, reviewer_model,
               goal_objective, objective_file_path, updated_at, created_at
          FROM ranked_tasks
@@ -759,10 +766,13 @@ async function missionControlTaskFromRow(
     id: row.task_id,
     ext: row.external_ref ?? "—",
     repo: row.repo_id,
+    repoUrl: repoBrowserUrl(row.repo_url),
     title: await titleForMissionControl(row),
     branch: row.branch_name.trim() === "" ? "—" : row.branch_name,
     state,
     pr: row.pr_number,
+    prUrl: row.pr_url,
+    isReviewOnly: isReviewOnlyMissionControlTask(row),
     budget: row.attempts_consumed,
     total: row.retry_budget,
     latest: formatLatestMissionControlEvent(recentEvents[0]),
@@ -837,11 +847,53 @@ function deriveMissionControlAttention(
 }
 
 async function titleForMissionControl(row: MissionControlTaskRow): Promise<string> {
+  if (isReviewOnlyMissionControlTask(row) && row.pr_title !== null && row.pr_title.trim() !== "") {
+    return row.pr_title.trim();
+  }
   const fromGoal = summarizeTaskObjective(row.goal_objective);
   if (fromGoal !== null) return fromGoal;
   const fromArtifact = summarizeTaskObjective(await readOptionalTextFile(row.objective_file_path));
   if (fromArtifact !== null) return fromArtifact;
   return row.external_ref ?? row.task_id;
+}
+
+function isReviewOnlyMissionControlTask(row: MissionControlTaskRow): boolean {
+  return row.authoring_mode === "synthetic_review" || row.authoring_mode === "adopted_external_pr";
+}
+
+function repoBrowserUrl(repoUrl: string): string | null {
+  const trimmed = repoUrl.trim();
+  if (trimmed === "") return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      parsed.username = "";
+      parsed.password = "";
+      parsed.pathname = `/${stripGitSuffix(parsed.pathname.replace(/^\/+/, ""))}`;
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString().replace(/\/$/, "");
+    }
+    if (parsed.protocol === "ssh:" && parsed.hostname !== "" && parsed.pathname !== "") {
+      return `https://${parsed.hostname}/${stripGitSuffix(parsed.pathname.replace(/^\/+/, ""))}`;
+    }
+  } catch {
+    const scpLike = /^(?:[^@\s/:]+@)?([^:\s]+):(.+)$/.exec(trimmed);
+    if (scpLike !== null) {
+      const host = scpLike[1];
+      const path = scpLike[2];
+      if (host === undefined || path === undefined || host === "" || path === "") return null;
+      return `https://${host}/${stripGitSuffix(path.replace(/^\/+/, ""))}`;
+    }
+    return null;
+  }
+
+  return null;
+}
+
+function stripGitSuffix(path: string): string {
+  return path.endsWith(".git") ? path.slice(0, -4) : path;
 }
 
 function summarizeTaskObjective(value: string | null): string | null {

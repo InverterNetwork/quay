@@ -584,6 +584,7 @@ function acceptGoalCompletion(
             SET state = 'pr-open',
                 pr_number = COALESCE(?, pr_number),
                 pr_url = COALESCE(?, pr_url),
+                pr_title = COALESCE(?, pr_title),
                 head_sha = COALESCE(?, head_sha),
                 base_sha = COALESCE(?, base_sha),
                 tick_error = NULL,
@@ -595,6 +596,7 @@ function acceptGoalCompletion(
       .run(
         input.snapshot.prNumber ?? null,
         input.snapshot.prUrl ?? null,
+        input.snapshot.prTitle ?? null,
         input.snapshot.headSha === "" ? null : input.snapshot.headSha,
         input.snapshot.baseSha,
         now,

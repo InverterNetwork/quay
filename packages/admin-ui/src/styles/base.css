@@ -46,6 +46,16 @@ a {
   text-decoration: none;
 }
 
+.mc-link-chip {
+  transition: border-color 80ms, color 80ms, background 80ms;
+}
+
+.mc-link-chip:hover {
+  color: var(--accent-ink);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

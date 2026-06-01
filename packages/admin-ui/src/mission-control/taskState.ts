@@ -27,10 +27,13 @@ export interface MissionControlTask {
   id: string;
   ext: string;
   repo: string;
+  repoUrl: string | null;
   title: string;
   branch: string;
   state: TaskState;
   pr: number | null;
+  prUrl: string | null;
+  isReviewOnly: boolean;
   budget: number;
   total: number;
   latest: string;
