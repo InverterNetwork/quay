@@ -614,10 +614,15 @@ components:
         - id
         - ext
         - repo
+        - repoUrl
         - title
         - branch
         - state
         - pr
+        - prUrl
+        - isReviewOnly
+        - role
+        - reviewStatus
         - budget
         - total
         - latest
@@ -632,6 +637,11 @@ components:
           type: string
         repo:
           type: string
+        repoUrl:
+          type:
+            - string
+            - "null"
+          format: uri
         title:
           type: string
         branch:
@@ -642,6 +652,28 @@ components:
           type:
             - integer
             - "null"
+        prUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+        isReviewOnly:
+          type: boolean
+        role:
+          type: string
+          enum:
+            - worker
+            - review
+        reviewStatus:
+          type:
+            - string
+            - "null"
+          enum:
+            - reviewing
+            - changes requested
+            - approved
+            - review
+            - null
         budget:
           type: integer
           minimum: 0
@@ -672,6 +704,7 @@ components:
       type: string
       enum:
         - queued
+        - waiting_dependencies
         - running
         - goal-completion-pending
         - pr-open
@@ -694,6 +727,7 @@ components:
         - ci
         - slack
         - brief
+        - dependency
         - budget
         - loop
         - worktree
