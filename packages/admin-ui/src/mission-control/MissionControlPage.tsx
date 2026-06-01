@@ -17,6 +17,7 @@ import {
   type AttnReason,
   type LaneDefinition,
   type MissionControlTask,
+  type MissionControlTaskRole,
 } from './taskState';
 
 interface MissionControlPageProps {
@@ -233,6 +234,7 @@ function Lane({ lane }: { lane: LaneWithTasks }) {
 function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: boolean }) {
   const attnTone = task.attnTone ?? (needsAttention(task) ? 'danger' : undefined);
   const agent = formatAgent(task.agent);
+  const isReview = task.role === 'review';
   return (
     <article
       aria-label={`${task.id} · ${task.title}`}
@@ -266,16 +268,26 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
       )}
 
       <HStack gap={6}>
+        <RoleTag role={task.role} />
         <T kind="mono-sm" color="var(--ink-3)">
           {task.id}
         </T>
-        <T kind="mono-sm" color="var(--ink-4)">
-          ·
-        </T>
-        <T kind="mono-sm" color="var(--ink-3)">
-          {task.ext}
-        </T>
+        {task.ext !== '—' && (
+          <>
+            <T kind="mono-sm" color="var(--ink-4)">
+              ·
+            </T>
+            <T kind="mono-sm" color="var(--ink-3)">
+              {task.ext}
+            </T>
+          </>
+        )}
         <span style={{ flex: 1 }} />
+        {isReview && task.reviewStatus !== null && (
+          <Badge tone={task.reviewStatus === 'changes requested' ? 'warn' : 'neutral'} size="sm" dot>
+            {task.reviewStatus}
+          </Badge>
+        )}
         {task.attn && attnTone && (
           <Badge tone={attnTone} size="sm" dot>
             {ATTN_LABEL[task.attn as AttnReason]}
@@ -326,7 +338,13 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
       <Divider dashed />
 
       <HStack gap={8}>
-        <BudgetMeter used={task.budget} total={task.total} />
+        {isReview ? (
+          <T kind="mono-sm" color="var(--ink-4)" style={{ flexShrink: 0 }}>
+            review · non-budget
+          </T>
+        ) : (
+          <BudgetMeter used={task.budget} total={task.total} />
+        )}
         <span style={{ flex: 1 }} />
         <HStack gap={0}>
           {task.authors.slice(0, 2).map((author, index) => (
@@ -346,6 +364,34 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
         </T>
       </HStack>
     </article>
+  );
+}
+
+function RoleTag({ role }: { role: MissionControlTaskRole }) {
+  const isReview = role === 'review';
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        height: 22,
+        padding: '0 7px',
+        borderRadius: 'var(--r-sm)',
+        border: '1px solid var(--line-2)',
+        background: 'var(--surface)',
+        color: 'var(--ink-2)',
+        fontFamily: 'var(--sans)',
+        fontSize: 12,
+        fontWeight: 650,
+        lineHeight: 1,
+        flexShrink: 0,
+      }}
+      title={isReview ? 'Review task' : 'Worker task'}
+    >
+      {isReview ? <Icon.GitPR size={11} /> : <Icon.Bot size={11} />}
+      {isReview ? 'Review' : 'Worker'}
+    </span>
   );
 }
 

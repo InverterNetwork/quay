@@ -23,6 +23,8 @@ export interface MissionControlContext {
   };
   visibleTasks: Array<{
     id: string;
+    role: string;
+    reviewStatus: string | null;
     externalRef: string | null;
     repo: string;
     title: string;

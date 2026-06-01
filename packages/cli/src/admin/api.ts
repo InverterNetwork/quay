@@ -191,6 +191,7 @@ type AdminMissionControlAttnReason =
   | "budget"
   | "loop"
   | "worktree";
+type AdminMissionControlTaskRole = "worker" | "review";
 
 interface AdminMissionControlTask {
   id: string;
@@ -203,6 +204,8 @@ interface AdminMissionControlTask {
   pr: number | null;
   prUrl: string | null;
   isReviewOnly: boolean;
+  role: AdminMissionControlTaskRole;
+  reviewStatus: string | null;
   budget: number;
   total: number;
   latest: string;
@@ -762,6 +765,7 @@ async function missionControlTaskFromRow(
   const state = toTaskState(row.state);
   if (state === null) return null;
   const attention = deriveMissionControlAttention(state, recentEvents);
+  const isReviewOnly = isReviewOnlyMissionControlTask(row);
   const task: AdminMissionControlTask = {
     id: row.task_id,
     ext: row.external_ref ?? "—",
@@ -772,7 +776,9 @@ async function missionControlTaskFromRow(
     state,
     pr: row.pr_number,
     prUrl: row.pr_url,
-    isReviewOnly: isReviewOnlyMissionControlTask(row),
+    isReviewOnly,
+    role: isReviewOnly ? "review" : "worker",
+    reviewStatus: isReviewOnly ? missionControlReviewStatus(state, recentEvents) : null,
     budget: row.attempts_consumed,
     total: row.retry_budget,
     latest: formatLatestMissionControlEvent(recentEvents[0]),
@@ -861,6 +867,32 @@ function isReviewOnlyMissionControlTask(row: MissionControlTaskRow): boolean {
   return row.authoring_mode === "synthetic_review" || row.authoring_mode === "adopted_external_pr";
 }
 
+function missionControlReviewStatus(
+  state: TaskState,
+  recentEvents: readonly MissionControlEventRow[],
+): string {
+  const latestReviewEvent = recentEvents.find((event) =>
+    event.event_type === "review_approved" ||
+    event.event_type === "review_changes_requested" ||
+    event.event_type === "changes_requested" ||
+    event.event_type === "review_requested" ||
+    event.event_type === "review_spawned"
+  )?.event_type;
+
+  switch (latestReviewEvent) {
+    case "review_approved":
+      return "approved";
+    case "review_changes_requested":
+    case "changes_requested":
+      return "changes requested";
+    case "review_requested":
+    case "review_spawned":
+      return "reviewing";
+    default:
+      return state === "pr-review" ? "reviewing" : "review";
+  }
+}
+
 function repoBrowserUrl(repoUrl: string): string | null {
   const trimmed = repoUrl.trim();
   if (trimmed === "") return null;
@@ -926,8 +958,14 @@ function formatLatestMissionControlEvent(event: MissionControlEventRow | undefin
       return "budget exhausted";
     case "changes_requested":
       return "changes requested";
+    case "review_changes_requested":
+      return "review changes requested";
+    case "review_approved":
+      return "review approved";
     case "review_requested":
       return "review requested";
+    case "review_spawned":
+      return "reviewer spawned";
     case "spawned":
       return "worker spawned";
     case "pr_opened":

@@ -22,6 +22,7 @@ export const TASK_STATES = [
 
 export type TaskState = (typeof TASK_STATES)[number];
 export type AttnReason = 'changes' | 'ci' | 'slack' | 'brief' | 'dependency' | 'budget' | 'loop' | 'worktree';
+export type MissionControlTaskRole = 'worker' | 'review';
 
 export interface MissionControlTask {
   id: string;
@@ -34,6 +35,8 @@ export interface MissionControlTask {
   pr: number | null;
   prUrl: string | null;
   isReviewOnly: boolean;
+  role: MissionControlTaskRole;
+  reviewStatus: string | null;
   budget: number;
   total: number;
   latest: string;

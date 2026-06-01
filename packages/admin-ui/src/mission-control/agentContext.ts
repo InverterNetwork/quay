@@ -55,6 +55,8 @@ export function buildMissionControlAgentContext({
 function taskToContextSummary(task: MissionControlTask): MissionControlContext['visibleTasks'][number] {
   return {
     id: task.id,
+    role: task.role,
+    reviewStatus: task.reviewStatus,
     externalRef: task.ext === '—' ? null : task.ext,
     repo: task.repo,
     title: task.title,

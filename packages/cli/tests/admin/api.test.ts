@@ -169,6 +169,8 @@ interface MissionControlResponse {
     pr: number | null;
     prUrl: string | null;
     isReviewOnly: boolean;
+    role: "worker" | "review";
+    reviewStatus: string | null;
     budget: number;
     total: number;
     latest: string;
@@ -287,6 +289,8 @@ test("GET /v1/tasks returns Mission Control task cards with latest event and att
     pr: 42,
     prUrl: "https://github.example/repo-a/pull/42",
     isReviewOnly: false,
+    role: "worker",
+    reviewStatus: null,
     budget: 3,
     total: 5,
     latest: "CI failed",
@@ -378,8 +382,10 @@ test("GET /v1/tasks exposes review-only PR title and link targets", async () => 
     pr: 8,
     prUrl: "https://github.com/acme/test-factory-code/pull/8",
     isReviewOnly: true,
+    role: "review",
+    reviewStatus: "reviewing",
     total: 1,
-    latest: "review spawned",
+    latest: "reviewer spawned",
   });
 });
 
