@@ -102,14 +102,17 @@ export class GitHubCliAdapter implements GitHubPort {
           `gh pr view returned no PR for listed open PR #${number}`,
         );
       }
-      return {
+      const openPr: OpenBranchPr = {
         number: view.prNumber ?? number,
-        title: view.prTitle ?? null,
         url: view.prUrl ?? null,
         headSha: view.headSha,
         baseSha: view.baseSha,
         baseRef: view.baseRef ?? null,
       };
+      if (view.prTitle !== null && view.prTitle !== undefined) {
+        openPr.title = view.prTitle;
+      }
+      return openPr;
     });
   }
 
