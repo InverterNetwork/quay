@@ -44,6 +44,7 @@ export interface MissionControlTask {
   reviewStatus: string | null;
   umbrellaRef: string | null;
   umbrellaChildren: MissionControlUmbrellaChildren | null;
+  blockedBy: string | null;
   budget: number;
   total: number;
   latest: string;
@@ -69,7 +70,6 @@ export const ATTENTION_STATES = [
   'non_budget_loop',
   'worktree_error',
   'orchestrator_loop',
-  'waiting_dependencies',
   'waiting_human',
 ] as const satisfies readonly TaskState[];
 

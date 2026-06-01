@@ -173,6 +173,7 @@ interface MissionControlResponse {
     reviewStatus: string | null;
     umbrellaRef: string | null;
     umbrellaChildren: { done: number; total: number } | null;
+    blockedBy: string | null;
     budget: number;
     total: number;
     latest: string;
@@ -477,6 +478,105 @@ test("GET /v1/tasks exposes umbrella parent card metadata", async () => {
     latest: "final PR open · 1 of 2 children merged to feature branch",
     agent: "codex",
   });
+});
+
+test("GET /v1/tasks exposes umbrella child relationship and unsatisfied blocker", async () => {
+  h = createHarness();
+  insertRepo(h.db, "test-factory-code");
+  const blockerTaskId = insertTask(h.db, {
+    taskId: "brix-1571-base",
+    repoId: "test-factory-code",
+    state: "running",
+  });
+  const childTaskId = insertTask(h.db, {
+    taskId: "brix-1575-gap",
+    repoId: "test-factory-code",
+    state: "waiting_dependencies",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1571',
+              branch_name = 'quay/brix-1571-base-scaffold'
+        WHERE task_id = ?`,
+    )
+    .run(blockerTaskId);
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1575',
+              branch_name = 'quay/brix-1575-gap-calc',
+              retry_budget = 5
+        WHERE task_id = ?`,
+    )
+    .run(childTaskId);
+  seedTaskObjective(h, childTaskId, "Child 2 — gap calculation (needs scaffolding)");
+  const workflow = h.db
+    .query<{ id: number }, [string, string, string, string, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, linear_issue_title,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id AS id`,
+    )
+    .get(
+      "BRIX-1579",
+      "test-factory-code",
+      "main",
+      "quay/umbrella/BRIX-1579",
+      "Holiday-gap epic — split across child PRs",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:12.000Z",
+    );
+  if (workflow === null || workflow === undefined) throw new Error("expected umbrella workflow");
+  h.db
+    .query(
+      `INSERT INTO umbrella_tasks (
+         umbrella_workflow_id, task_id, external_ref, created_at
+       ) VALUES (?, ?, ?, ?)`,
+    )
+    .run(workflow.id, childTaskId, "BRIX-1575", "2026-01-01T00:00:00.000Z");
+  h.db
+    .query(
+      `INSERT INTO task_dependencies (
+         dependent_task_id, dependency_task_id, dependency_source,
+         dependency_external_ref, dependency_repo_id, umbrella_workflow_id,
+         kind, scope, required_state, created_at, updated_at
+       ) VALUES (?, ?, 'linear', ?, ?, ?, 'blocked_by', 'umbrella', 'merged_to_feature_branch', ?, ?)`,
+    )
+    .run(
+      childTaskId,
+      blockerTaskId,
+      "BRIX-1571",
+      "test-factory-code",
+      workflow.id,
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+    );
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+  const task = body.tasks.find((item) => item.id === childTaskId);
+
+  expect(response.status).toBe(200);
+  expect(body.hasAttention).toBe(false);
+  expect(task).toMatchObject({
+    id: "brix-1575-gap",
+    ext: "BRIX-1575",
+    repo: "test-factory-code",
+    title: "Child 2 — gap calculation (needs scaffolding)",
+    branch: "quay/brix-1575-gap-calc",
+    state: "waiting_dependencies",
+    isReviewOnly: false,
+    role: "worker",
+    reviewStatus: null,
+    umbrellaRef: "BRIX-1579",
+    umbrellaChildren: null,
+    blockedBy: "BRIX-1571",
+    latest: "blocked on BRIX-1571 → feature branch",
+  });
+  expect(task?.attn).toBeUndefined();
 });
 
 test("GET /v1/tasks derives attention from stuck and human states", async () => {

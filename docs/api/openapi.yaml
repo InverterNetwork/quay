@@ -625,6 +625,7 @@ components:
         - reviewStatus
         - umbrellaRef
         - umbrellaChildren
+        - blockedBy
         - budget
         - total
         - latest
@@ -696,6 +697,10 @@ components:
                   type: integer
                   minimum: 0
             - type: "null"
+        blockedBy:
+          type:
+            - string
+            - "null"
         budget:
           type: integer
           minimum: 0

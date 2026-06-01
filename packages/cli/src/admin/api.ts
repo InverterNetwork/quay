@@ -213,6 +213,7 @@ interface AdminMissionControlTask {
   reviewStatus: string | null;
   umbrellaRef: string | null;
   umbrellaChildren: AdminMissionControlUmbrellaChildren | null;
+  blockedBy: string | null;
   budget: number;
   total: number;
   latest: string;
@@ -642,10 +643,12 @@ interface MissionControlTaskRow {
   reviewer_model: string | null;
   goal_objective: string | null;
   objective_file_path: string | null;
+  umbrella_kind: string | null;
   umbrella_ref: string | null;
   umbrella_title: string | null;
   umbrella_children_done: number | null;
   umbrella_children_total: number | null;
+  blocked_by: string | null;
   updated_at: string;
   created_at: string;
 }
@@ -706,8 +709,8 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
     .query<MissionControlTaskRow, SQLQueryBindings[]>(
       `WITH candidate_tasks AS (
          SELECT t.task_id, t.repo_id, r.repo_url, t.external_ref, t.state, t.authoring_mode, t.branch_name,
-                COALESCE(t.pr_number, uw.final_pr_number) AS pr_number,
-                COALESCE(t.pr_url, uw.final_pr_url) AS pr_url,
+                COALESCE(t.pr_number, parent_uw.final_pr_number) AS pr_number,
+                COALESCE(t.pr_url, parent_uw.final_pr_url) AS pr_url,
                 t.pr_title, t.attempts_consumed, t.retry_budget, t.authors_json,
                 t.worker_agent, t.worker_model, t.reviewer_agent, t.reviewer_model,
                 tg.objective AS goal_objective,
@@ -720,8 +723,13 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                    ORDER BY ar.artifact_id ASC
                    LIMIT 1
                 ) AS objective_file_path,
-                uw.external_ref AS umbrella_ref,
-                uw.linear_issue_title AS umbrella_title,
+                CASE
+                  WHEN parent_uw.umbrella_workflow_id IS NOT NULL THEN 'parent'
+                  WHEN child_uw.umbrella_workflow_id IS NOT NULL THEN 'child'
+                  ELSE NULL
+                END AS umbrella_kind,
+                COALESCE(parent_uw.external_ref, child_uw.external_ref) AS umbrella_ref,
+                parent_uw.linear_issue_title AS umbrella_title,
                 (
                   SELECT COUNT(*)
                     FROM umbrella_expected_tasks uet
@@ -730,7 +738,7 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                      AND ut.external_ref = uet.external_ref
                     LEFT JOIN tasks child
                       ON child.task_id = ut.task_id
-                   WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+                   WHERE uet.umbrella_workflow_id = parent_uw.umbrella_workflow_id
                      AND (
                           uet.state = 'complete_without_quay'
                        OR child.state = 'merged_to_feature_branch'
@@ -739,8 +747,19 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                 (
                   SELECT COUNT(*)
                     FROM umbrella_expected_tasks uet
-                   WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+                   WHERE uet.umbrella_workflow_id = parent_uw.umbrella_workflow_id
                 ) AS umbrella_children_total,
+                (
+                  SELECT COALESCE(td.dependency_external_ref, dependency_task.external_ref, td.dependency_task_id)
+                    FROM task_dependencies td
+                    LEFT JOIN tasks dependency_task
+                      ON dependency_task.task_id = td.dependency_task_id
+                   WHERE td.dependent_task_id = t.task_id
+                     AND td.kind = 'blocked_by'
+                     AND td.satisfied_at IS NULL
+                   ORDER BY td.dependency_id ASC
+                   LIMIT 1
+                ) AS blocked_by,
                 t.updated_at, t.created_at,
                 CASE
                   WHEN t.state IN (${sqlPlaceholders(MISSION_CONTROL_TERMINAL_STATE_LIST)})
@@ -750,7 +769,9 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
            FROM tasks t
            JOIN repos r ON r.repo_id = t.repo_id
            LEFT JOIN task_goals tg ON tg.task_id = t.task_id
-           LEFT JOIN umbrella_workflows uw ON uw.final_pr_task_id = t.task_id
+           LEFT JOIN umbrella_workflows parent_uw ON parent_uw.final_pr_task_id = t.task_id
+           LEFT JOIN umbrella_tasks child_ut ON child_ut.task_id = t.task_id
+           LEFT JOIN umbrella_workflows child_uw ON child_uw.umbrella_workflow_id = child_ut.umbrella_workflow_id
           WHERE r.archived_at IS NULL
             AND t.state IN (${sqlPlaceholders(TASK_STATES)})
        ),
@@ -765,8 +786,9 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
        SELECT task_id, repo_id, repo_url, external_ref, state, authoring_mode, branch_name,
               pr_number, pr_url, pr_title, attempts_consumed, retry_budget, authors_json,
               worker_agent, worker_model, reviewer_agent, reviewer_model,
-              goal_objective, objective_file_path, umbrella_ref, umbrella_title,
-              umbrella_children_done, umbrella_children_total, updated_at,
+              goal_objective, objective_file_path, umbrella_kind, umbrella_ref,
+              umbrella_title, umbrella_children_done, umbrella_children_total,
+              blocked_by, updated_at,
               created_at
          FROM ranked_tasks
         WHERE (terminal_bucket = 0 AND bucket_rank <= ?)
@@ -818,17 +840,18 @@ async function missionControlTaskFromRow(
     role,
     reviewStatus: isReviewOnly ? missionControlReviewStatus(state, recentEvents) : null,
     umbrellaRef: row.umbrella_ref,
-    umbrellaChildren: row.umbrella_ref === null
+    umbrellaChildren: row.umbrella_kind !== "parent"
       ? null
       : {
         done: row.umbrella_children_done ?? 0,
         total: row.umbrella_children_total ?? 0,
       },
+    blockedBy: row.blocked_by,
     budget: row.attempts_consumed,
     total: row.retry_budget,
     latest: role === "umbrella"
       ? formatUmbrellaLatest(row, recentEvents[0])
-      : formatLatestMissionControlEvent(recentEvents[0]),
+      : formatMissionControlLatest(row, state, recentEvents[0]),
     agent: missionControlAgent(row, state),
     age: formatAge(row.updated_at, now),
     updatedAt: row.updated_at,
@@ -891,7 +914,6 @@ function deriveMissionControlAttention(
   const latest = recentEvents[0]?.event_type;
   if (latest === "ci_failed") return { reason: "ci", tone: "danger" };
   if (latest === "budget_exhausted") return { reason: "budget", tone: "danger" };
-  if (state === "waiting_dependencies") return { reason: "dependency", tone: "warn" };
   if (state === "waiting_human") return { reason: "slack", tone: "warn" };
   if (state === "awaiting-next-brief") return { reason: "brief", tone: "warn" };
   if (latest === "changes_requested") return { reason: "changes", tone: "warn" };
@@ -900,7 +922,7 @@ function deriveMissionControlAttention(
 }
 
 async function titleForMissionControl(row: MissionControlTaskRow): Promise<string> {
-  if (row.umbrella_ref !== null) {
+  if (row.umbrella_kind === "parent" && row.umbrella_ref !== null) {
     const title = row.umbrella_title?.trim();
     if (title !== undefined && title !== "") return title;
     return `${row.umbrella_ref} umbrella workflow`;
@@ -923,7 +945,7 @@ function missionControlTaskRole(
   row: MissionControlTaskRow,
   isReviewOnly: boolean,
 ): AdminMissionControlTaskRole {
-  if (row.umbrella_ref !== null) return "umbrella";
+  if (row.umbrella_kind === "parent") return "umbrella";
   return isReviewOnly ? "review" : "worker";
 }
 
@@ -1037,6 +1059,17 @@ function formatLatestMissionControlEvent(event: MissionControlEventRow | undefin
     default:
       return event.event_type.replace(/_/g, " ");
   }
+}
+
+function formatMissionControlLatest(
+  row: MissionControlTaskRow,
+  state: TaskState,
+  event: MissionControlEventRow | undefined,
+): string {
+  if (state === "waiting_dependencies" && row.blocked_by !== null) {
+    return `blocked on ${row.blocked_by} → feature branch`;
+  }
+  return formatLatestMissionControlEvent(event);
 }
 
 function formatUmbrellaLatest(
