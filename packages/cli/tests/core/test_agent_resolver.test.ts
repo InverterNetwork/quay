@@ -262,6 +262,61 @@ test("resolver treats existing DB null settings as authoritative clears", () => 
   expect(reviewer.model).toBeNull();
 });
 
+test("resolver reads deployment settings provider on each default resolve", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-live-deployment-settings");
+
+  const resolver = createAgentResolver({
+    db: h.db,
+    config: {
+      agents: {
+        worker: "claude",
+        worker_model: "toml-worker-model",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+    deploymentSettingsProvider: () =>
+      h!.db
+        .query<{
+          worker_agent: string | null;
+          worker_model: string | null;
+          reviewer_agent: string | null;
+          reviewer_model: string | null;
+        }, []>(
+          `SELECT worker_agent, worker_model, reviewer_agent, reviewer_model
+             FROM deployment_settings
+            WHERE singleton_id = 1`,
+        )
+        .get() ?? null,
+  });
+
+  const before = resolver.resolve("repo-live-deployment-settings", "worker");
+  expect(before.agent).toBe("claude");
+  expect(before.model).toBe("toml-worker-model");
+
+  h.db
+    .query(
+      `INSERT INTO deployment_settings (
+         singleton_id, worker_agent, worker_model, reviewer_agent,
+         reviewer_model, created_at, updated_at
+       ) VALUES (1, ?, ?, NULL, NULL, ?, ?)`,
+    )
+    .run(
+      "codex",
+      "db-worker-model",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+    );
+
+  const after = resolver.resolve("repo-live-deployment-settings", "worker");
+  expect(after.agent).toBe("codex");
+  expect(after.model).toBe("db-worker-model");
+  expect(after.invocation).toBe("codex exec --model 'db-worker-model'");
+});
+
 test("resolver uses repo model over global model when task snapshot is empty", () => {
   h = createHarness();
   insertRepo(h.db, "repo-model-default");

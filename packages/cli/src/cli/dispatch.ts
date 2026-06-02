@@ -2051,9 +2051,7 @@ function handleSettingsImport(
       error instanceof Error ? error.message : String(error),
     );
   }
-  const row = service.importFromConfig(loaded.config, {
-    onlyEmpty: argv.includes("--only-empty"),
-  });
+  const row = service.replace(next);
   io.stdout(`${JSON.stringify({
     imported: {
       worker_agent: row.worker_agent,

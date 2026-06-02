@@ -41,6 +41,7 @@ export interface AgentResolverDeps {
   db: DB;
   config: QuayConfig;
   deploymentSettings?: DeploymentSettings;
+  deploymentSettingsProvider?: () => DeploymentSettings | null;
 }
 
 // Bundles the parts of the config we care about into a plain
@@ -174,8 +175,8 @@ export function validateAgentSelection(selection: AgentSelection): void {
 }
 
 export function createAgentResolver(deps: AgentResolverDeps): AgentResolver {
-  const selection = buildAgentSelection(deps.config, deps.deploymentSettings);
-  validateAgentSelection(selection);
+  const bootstrapSelection = buildAgentSelection(deps.config);
+  validateAgentSelection(currentSelection());
 
   function lookupOverride(repoId: string): RepoOverrideRow | null {
     return (
@@ -194,6 +195,7 @@ export function createAgentResolver(deps: AgentResolverDeps): AgentResolver {
     role: AgentRole,
     snapshot?: AgentRoleSnapshot,
   ): ResolvedAgent {
+    const selection = currentSelection();
     const override = lookupOverride(repoId);
     const overrideName =
       role === "worker" ? override?.agent_worker : override?.agent_reviewer;
@@ -230,9 +232,24 @@ export function createAgentResolver(deps: AgentResolverDeps): AgentResolver {
     };
   }
 
+  function currentDeploymentSettings(): DeploymentSettings | undefined {
+    if (deps.deploymentSettingsProvider !== undefined) {
+      return deps.deploymentSettingsProvider() ?? undefined;
+    }
+    return deps.deploymentSettings;
+  }
+
+  function currentSelection(): AgentSelection {
+    const settings = currentDeploymentSettings();
+    if (settings === undefined) return bootstrapSelection;
+    const selection = buildAgentSelection(deps.config, settings);
+    validateAgentSelection(selection);
+    return selection;
+  }
+
   return {
     resolve,
-    registeredAgents: () => Object.keys(selection.invocations).sort(),
+    registeredAgents: () => Object.keys(bootstrapSelection.invocations).sort(),
   };
 }
 

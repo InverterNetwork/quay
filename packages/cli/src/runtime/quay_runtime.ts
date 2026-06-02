@@ -119,13 +119,10 @@ export function createQuayRuntime(
   const repoService = createRepoService({ db, clock });
   const tagService = createTagService({ db, clock, repoService });
   const deploymentSettingsService = createDeploymentSettingsService({ db, clock });
-  const deploymentSettingsRow = deploymentSettingsService.getRow();
   const agentResolver = createAgentResolver({
     db,
     config,
-    ...(deploymentSettingsRow !== null
-      ? { deploymentSettings: deploymentSettingsRow }
-      : {}),
+    deploymentSettingsProvider: () => deploymentSettingsService.getRow(),
   });
   const paths = { reposRoot, worktreesRoot, artifactsRoot };
   const tickOptions = tickOptionsFromConfig(config);

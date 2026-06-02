@@ -23,6 +23,7 @@ export interface DeploymentSettingsService {
   get(): DeploymentSettings;
   getRow(): DeploymentSettingsRow | null;
   update(patch: DeploymentSettingsPatch): DeploymentSettingsRow;
+  replace(settings: DeploymentSettings): DeploymentSettingsRow;
   importFromConfig(config: QuayConfig, opts?: { onlyEmpty?: boolean }): DeploymentSettingsRow;
 }
 
@@ -55,13 +56,18 @@ export function createDeploymentSettingsService(deps: {
 
   function update(patch: DeploymentSettingsPatch): DeploymentSettingsRow {
     const current = getRow();
-    const now = nowISO();
     const next: DeploymentSettings = {
       worker_agent: valueOrCurrent(patch.worker_agent, current?.worker_agent ?? null),
       worker_model: valueOrCurrent(patch.worker_model, current?.worker_model ?? null),
       reviewer_agent: valueOrCurrent(patch.reviewer_agent, current?.reviewer_agent ?? null),
       reviewer_model: valueOrCurrent(patch.reviewer_model, current?.reviewer_model ?? null),
     };
+    return replace(next);
+  }
+
+  function replace(settings: DeploymentSettings): DeploymentSettingsRow {
+    const current = getRow();
+    const now = nowISO();
     deps.db
       .query(
         `INSERT INTO deployment_settings (
@@ -76,10 +82,10 @@ export function createDeploymentSettingsService(deps: {
            updated_at = excluded.updated_at`,
       )
       .run(
-        next.worker_agent,
-        next.worker_model,
-        next.reviewer_agent,
-        next.reviewer_model,
+        settings.worker_agent,
+        settings.worker_model,
+        settings.reviewer_agent,
+        settings.reviewer_model,
         current?.created_at ?? now,
         now,
       );
@@ -103,7 +109,7 @@ export function createDeploymentSettingsService(deps: {
     if (opts.onlyEmpty !== true) return update(patch);
 
     const current = get();
-    return update({
+    return replace({
       worker_agent: current.worker_agent ?? patch.worker_agent ?? null,
       worker_model: current.worker_model ?? patch.worker_model ?? null,
       reviewer_agent: current.reviewer_agent ?? patch.reviewer_agent ?? null,
@@ -111,7 +117,7 @@ export function createDeploymentSettingsService(deps: {
     });
   }
 
-  return { get, getRow, update, importFromConfig };
+  return { get, getRow, update, replace, importFromConfig };
 }
 
 function valueOrCurrent<T>(value: T | undefined, current: T): T {
