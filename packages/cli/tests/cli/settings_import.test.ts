@@ -53,3 +53,44 @@ reviewer = "codex exec --review < {prompt_file}"
     ).get(),
   ).toEqual({ worker_agent: "codex", worker_model: "gpt-5.4" });
 });
+
+test("settings import validates imported agents against active runtime registry", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.config = {
+    agents: {
+      invocations: {
+        claude: { worker: "claude --w", reviewer: "claude --r" },
+      },
+    },
+  };
+  const configPath = join(h.dataDir, "config.toml");
+  writeFileSync(
+    configPath,
+    `[agents]
+worker = "codex"
+reviewer = "claude"
+
+[agents.invocations.codex]
+worker = "codex exec < {prompt_file}"
+reviewer = "codex exec --review < {prompt_file}"
+`,
+  );
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["settings", "import", "--from", configPath],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(JSON.parse(io.err())).toMatchObject({
+    error: "validation_error",
+    message:
+      '[agents].worker = "codex" but no [agents.invocations.codex] is registered',
+  });
+  expect(
+    h.db.query(`SELECT COUNT(*) AS count FROM deployment_settings`).get(),
+  ).toEqual({ count: 0 });
+});

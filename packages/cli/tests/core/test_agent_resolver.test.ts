@@ -209,6 +209,59 @@ test("resolver uses DB deployment settings over TOML defaults", () => {
   expect(reviewer.model).toBe("db-reviewer-model");
 });
 
+test("resolver treats existing DB null settings as authoritative clears", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-deployment-settings-cleared");
+  h.db
+    .query(
+      `INSERT INTO deployment_settings (
+         singleton_id, worker_agent, worker_model, reviewer_agent,
+         reviewer_model, created_at, updated_at
+       ) VALUES (1, NULL, NULL, NULL, NULL, ?, ?)`,
+    )
+    .run(
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+    );
+
+  const resolver = createAgentResolver({
+    db: h.db,
+    config: {
+      agents: {
+        worker: "codex",
+        worker_model: "toml-worker-model",
+        reviewer: "codex",
+        reviewer_model: "toml-reviewer-model",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+    deploymentSettings: h.db
+      .query(
+        `SELECT worker_agent, worker_model, reviewer_agent, reviewer_model
+           FROM deployment_settings
+          WHERE singleton_id = 1`,
+      )
+      .get() as {
+        worker_agent: string | null;
+        worker_model: string | null;
+        reviewer_agent: string | null;
+        reviewer_model: string | null;
+      },
+  });
+
+  const worker = resolver.resolve("repo-deployment-settings-cleared", "worker");
+  expect(worker.agent).toBe("claude");
+  expect(worker.model).toBeNull();
+  expect(worker.invocation).toBe("claude --w");
+
+  const reviewer = resolver.resolve("repo-deployment-settings-cleared", "reviewer");
+  expect(reviewer.agent).toBe("claude");
+  expect(reviewer.model).toBeNull();
+});
+
 test("resolver uses repo model over global model when task snapshot is empty", () => {
   h = createHarness();
   insertRepo(h.db, "repo-model-default");

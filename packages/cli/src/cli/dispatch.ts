@@ -13,6 +13,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
+import type { QuayConfig } from "./config.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { CommandRunner } from "../ports/command_runner.ts";
 import type { GitPort } from "../ports/git.ts";
@@ -27,7 +28,11 @@ import type { ValidatorRunner } from "../core/validator_runner.ts";
 import { loadConfigFromPath } from "./config.ts";
 import { handleEnqueueLinearIssue } from "./enqueue_linear_issue.ts";
 import type { RepoService } from "../core/repos/service.ts";
-import type { AgentResolver } from "../core/agents.ts";
+import {
+  buildAgentSelection,
+  validateAgentSelection,
+  type AgentResolver,
+} from "../core/agents.ts";
 import type { TagService, TagVocab } from "../core/tags/service.ts";
 import { mergeVocab } from "../core/tags/merge.ts";
 import { parseImportToml, planImport } from "../core/tags/import_toml.ts";
@@ -111,6 +116,7 @@ export interface CliDeps {
   artifactStore: ArtifactStore;
   supervisorLock: SupervisorLock;
   paths: CliPaths;
+  config?: QuayConfig;
   tickOptions?: TickOptions;
   // Spec §13: `retry_budget` is a deployment-level knob (default 5). When
   // the operator overrides it in `~/.quay/config.toml`, the production CLI
@@ -2021,6 +2027,30 @@ function handleSettingsImport(
     db: deps.db,
     clock: deps.clock,
   });
+  const current = service.get();
+  const imported = {
+    worker_agent: loaded.config.agents?.worker ?? null,
+    worker_model: loaded.config.agents?.worker_model ?? null,
+    reviewer_agent: loaded.config.agents?.reviewer ?? null,
+    reviewer_model: loaded.config.agents?.reviewer_model ?? null,
+  };
+  const next = argv.includes("--only-empty")
+    ? {
+        worker_agent: current.worker_agent ?? imported.worker_agent ?? null,
+        worker_model: current.worker_model ?? imported.worker_model ?? null,
+        reviewer_agent: current.reviewer_agent ?? imported.reviewer_agent ?? null,
+        reviewer_model: current.reviewer_model ?? imported.reviewer_model ?? null,
+      }
+    : imported;
+  try {
+    validateAgentSelection(buildAgentSelection(deps.config ?? loaded.config, next));
+  } catch (error) {
+    return writeError(
+      io,
+      "validation_error",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
   const row = service.importFromConfig(loaded.config, {
     onlyEmpty: argv.includes("--only-empty"),
   });

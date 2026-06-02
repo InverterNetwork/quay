@@ -129,13 +129,22 @@ export function buildAgentSelection(
     reviewer: seeded.reviewer ?? DEFAULT_CLAUDE_REVIEWER_INVOCATION,
   };
 
+  const hasDeploymentSettings = deploymentSettings !== undefined;
   const defaults: Record<AgentRole, string> = {
-    worker: deploymentSettings?.worker_agent ?? config.agents?.worker ?? DEFAULT_AGENT_NAME,
-    reviewer: deploymentSettings?.reviewer_agent ?? config.agents?.reviewer ?? DEFAULT_AGENT_NAME,
+    worker: hasDeploymentSettings
+      ? deploymentSettings.worker_agent ?? DEFAULT_AGENT_NAME
+      : config.agents?.worker ?? DEFAULT_AGENT_NAME,
+    reviewer: hasDeploymentSettings
+      ? deploymentSettings.reviewer_agent ?? DEFAULT_AGENT_NAME
+      : config.agents?.reviewer ?? DEFAULT_AGENT_NAME,
   };
   const defaultModels: Record<AgentRole, string | null> = {
-    worker: deploymentSettings?.worker_model ?? config.agents?.worker_model ?? null,
-    reviewer: deploymentSettings?.reviewer_model ?? config.agents?.reviewer_model ?? null,
+    worker: hasDeploymentSettings
+      ? deploymentSettings.worker_model
+      : config.agents?.worker_model ?? null,
+    reviewer: hasDeploymentSettings
+      ? deploymentSettings.reviewer_model
+      : config.agents?.reviewer_model ?? null,
   };
   return { defaults, defaultModels, invocations };
 }

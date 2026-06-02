@@ -1209,7 +1209,7 @@ function formatAge(timestamp: string, now: Date): string {
 }
 
 function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown> {
-  const agentSelection = buildAgentSelection(runtime.config, deploymentSettings(runtime));
+  const agentSelection = buildAgentSelection(runtime.config, deploymentSettingsRow(runtime));
   const repos = runtime.repoService.list({ activeOnly: true });
   return {
     revision: computeAdminRevision(runtime),
@@ -1345,7 +1345,7 @@ function buildRepoDetail(runtime: AdminApiRuntime, row: RepoRow): Record<string,
 
 function buildMatrixReadModel(runtime: AdminApiRuntime): Record<string, unknown> {
   const repos = runtime.repoService.list({ activeOnly: true });
-  const agentSelection = buildAgentSelection(runtime.config, deploymentSettings(runtime));
+  const agentSelection = buildAgentSelection(runtime.config, deploymentSettingsRow(runtime));
   const rows: AdminMatrixRow[] = [
     matrixRow(
       "AGENTS",
@@ -1980,7 +1980,7 @@ function validateAgentPatch(
   repoId: string,
   patch: RepoPatch,
 ): void {
-  const selection = buildAgentSelection(runtime.config, deploymentSettings(runtime));
+  const selection = buildAgentSelection(runtime.config, deploymentSettingsRow(runtime));
   const entries = [
     ["worker", patch.agent_worker],
     ["reviewer", patch.agent_reviewer],
@@ -2002,7 +2002,7 @@ function validateDeploymentSettingsPatch(
   runtime: AdminApiRuntime,
   patch: DeploymentSettingsPatch,
 ): void {
-  const selection = buildAgentSelection(runtime.config, deploymentSettings(runtime));
+  const selection = buildAgentSelection(runtime.config, deploymentSettingsRow(runtime));
   const entries = [
     ["worker", patch.worker_agent],
     ["reviewer", patch.reviewer_agent],
@@ -2108,9 +2108,12 @@ function deploymentSettings(runtime: AdminApiRuntime): DeploymentSettings {
   return createDeploymentSettingsService({ db: runtime.db }).get();
 }
 
+function deploymentSettingsRow(runtime: AdminApiRuntime): DeploymentSettings | undefined {
+  return createDeploymentSettingsService({ db: runtime.db }).getRow() ?? undefined;
+}
+
 function effectiveDeploymentSettings(runtime: AdminApiRuntime): DeploymentSettings {
-  const settings = deploymentSettings(runtime);
-  const selection = buildAgentSelection(runtime.config, settings);
+  const selection = buildAgentSelection(runtime.config, deploymentSettingsRow(runtime));
   return {
     worker_agent: selection.defaults.worker,
     worker_model: selection.defaultModels?.worker ?? null,
