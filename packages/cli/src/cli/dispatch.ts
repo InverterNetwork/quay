@@ -2027,21 +2027,15 @@ function handleSettingsImport(
     db: deps.db,
     clock: deps.clock,
   });
-  const current = service.get();
+  const current = service.getRow();
   const imported = {
     worker_agent: loaded.config.agents?.worker ?? null,
     worker_model: loaded.config.agents?.worker_model ?? null,
     reviewer_agent: loaded.config.agents?.reviewer ?? null,
     reviewer_model: loaded.config.agents?.reviewer_model ?? null,
   };
-  const next = argv.includes("--only-empty")
-    ? {
-        worker_agent: current.worker_agent ?? imported.worker_agent ?? null,
-        worker_model: current.worker_model ?? imported.worker_model ?? null,
-        reviewer_agent: current.reviewer_agent ?? imported.reviewer_agent ?? null,
-        reviewer_model: current.reviewer_model ?? imported.reviewer_model ?? null,
-      }
-    : imported;
+  const onlyEmpty = argv.includes("--only-empty");
+  const next = onlyEmpty && current !== null ? current : imported;
   try {
     validateAgentSelection(buildAgentSelection(deps.config ?? loaded.config, next));
   } catch (error) {
@@ -2051,7 +2045,7 @@ function handleSettingsImport(
       error instanceof Error ? error.message : String(error),
     );
   }
-  const row = service.replace(next);
+  const row = onlyEmpty && current !== null ? current : service.replace(next);
   io.stdout(`${JSON.stringify({
     imported: {
       worker_agent: row.worker_agent,

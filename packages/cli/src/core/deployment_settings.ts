@@ -115,12 +115,14 @@ export function createDeploymentSettingsService(deps: {
     };
     if (opts.onlyEmpty !== true) return update(patch);
 
-    const current = get();
+    const current = getRow();
+    if (current !== null) return current;
+
     return replace({
-      worker_agent: current.worker_agent ?? patch.worker_agent ?? null,
-      worker_model: current.worker_model ?? patch.worker_model ?? null,
-      reviewer_agent: current.reviewer_agent ?? patch.reviewer_agent ?? null,
-      reviewer_model: current.reviewer_model ?? patch.reviewer_model ?? null,
+      worker_agent: patch.worker_agent ?? null,
+      worker_model: patch.worker_model ?? null,
+      reviewer_agent: patch.reviewer_agent ?? null,
+      reviewer_model: patch.reviewer_model ?? null,
     });
   }
 

@@ -15,6 +15,7 @@ import {
   createDeploymentSettingsService,
   type DeploymentSettings,
   type DeploymentSettingsPatch,
+  type DeploymentSettingsRow,
 } from "../core/deployment_settings.ts";
 import { TASK_STATES, type TaskState } from "../core/task_state.ts";
 import {
@@ -2106,11 +2107,23 @@ function computeAdminRevision(runtime: AdminApiRuntime): string {
   return `sha256:${digest}`;
 }
 
-function deploymentSettings(runtime: AdminApiRuntime): DeploymentSettings {
-  return createDeploymentSettingsService({ db: runtime.db }).get();
+function deploymentSettings(runtime: AdminApiRuntime): {
+  exists: boolean;
+  values: DeploymentSettings;
+} {
+  const row = createDeploymentSettingsService({ db: runtime.db }).getRow();
+  return {
+    exists: row !== null,
+    values: {
+      worker_agent: row?.worker_agent ?? null,
+      worker_model: row?.worker_model ?? null,
+      reviewer_agent: row?.reviewer_agent ?? null,
+      reviewer_model: row?.reviewer_model ?? null,
+    },
+  };
 }
 
-function deploymentSettingsRow(runtime: AdminApiRuntime): DeploymentSettings | undefined {
+function deploymentSettingsRow(runtime: AdminApiRuntime): DeploymentSettingsRow | undefined {
   return createDeploymentSettingsService({ db: runtime.db }).getRow() ?? undefined;
 }
 
