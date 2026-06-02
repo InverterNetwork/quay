@@ -159,6 +159,56 @@ test("resolver applies task snapshot over repo and global role defaults", () => 
   expect(resolved.invocation).toBe("codex exec --model 'task-model'");
 });
 
+test("resolver uses DB deployment settings over TOML defaults", () => {
+  h = createHarness();
+  insertRepo(h.db, "repo-deployment-settings");
+  h.db
+    .query(
+      `INSERT INTO deployment_settings (
+         singleton_id, worker_agent, worker_model, reviewer_agent,
+         reviewer_model, created_at, updated_at
+       ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "codex",
+      "db-worker-model",
+      "claude",
+      "db-reviewer-model",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+    );
+
+  const resolver = createAgentResolver({
+    db: h.db,
+    config: {
+      agents: {
+        worker: "claude",
+        worker_model: "toml-worker-model",
+        reviewer_model: "toml-reviewer-model",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+    deploymentSettings: {
+      worker_agent: "codex",
+      worker_model: "db-worker-model",
+      reviewer_agent: "claude",
+      reviewer_model: "db-reviewer-model",
+    },
+  });
+
+  const worker = resolver.resolve("repo-deployment-settings", "worker");
+  expect(worker.agent).toBe("codex");
+  expect(worker.model).toBe("db-worker-model");
+  expect(worker.invocation).toBe("codex exec --model 'db-worker-model'");
+
+  const reviewer = resolver.resolve("repo-deployment-settings", "reviewer");
+  expect(reviewer.agent).toBe("claude");
+  expect(reviewer.model).toBe("db-reviewer-model");
+});
+
 test("resolver uses repo model over global model when task snapshot is empty", () => {
   h = createHarness();
   insertRepo(h.db, "repo-model-default");

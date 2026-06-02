@@ -34,6 +34,7 @@ test("test_schema_creates_required_tables", () => {
     "umbrella_workflows",
     "umbrella_expected_tasks",
     "umbrella_tasks",
+    "deployment_settings",
   ];
   const rows = h.db
     .query<{ name: string }, []>(
@@ -44,6 +45,23 @@ test("test_schema_creates_required_tables", () => {
   for (const t of required) {
     expect(names.has(t)).toBe(true);
   }
+});
+
+test("deployment_settings table stores mutable agent defaults", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(deployment_settings)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toEqual([
+    "singleton_id",
+    "worker_agent",
+    "worker_model",
+    "reviewer_agent",
+    "reviewer_model",
+    "created_at",
+    "updated_at",
+  ]);
 });
 
 test("umbrella workflow tables capture workflow and task links", () => {

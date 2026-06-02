@@ -27,6 +27,7 @@ import {
   TmuxAdapter,
 } from "../adapters/index.ts";
 import { createAgentResolver } from "../core/agents.ts";
+import { createDeploymentSettingsService } from "../core/deployment_settings.ts";
 import { FileSupervisorLock } from "../core/supervisor_lock.ts";
 import { createRepoService, type RepoService } from "../core/repos/service.ts";
 import { createTagService, type TagService } from "../core/tags/service.ts";
@@ -117,7 +118,12 @@ export function createQuayRuntime(
   });
   const repoService = createRepoService({ db, clock });
   const tagService = createTagService({ db, clock, repoService });
-  const agentResolver = createAgentResolver({ db, config });
+  const deploymentSettingsService = createDeploymentSettingsService({ db, clock });
+  const agentResolver = createAgentResolver({
+    db,
+    config,
+    deploymentSettings: deploymentSettingsService.get(),
+  });
   const paths = { reposRoot, worktreesRoot, artifactsRoot };
   const tickOptions = tickOptionsFromConfig(config);
 

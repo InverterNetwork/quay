@@ -1955,6 +1955,50 @@ test("GET /v1/global returns deployment config, agents, prompts, and tags", asyn
     });
 });
 
+test("POST /v1/changes/apply updates DB-backed deployment agent defaults", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: {
+      agents: {
+        worker: "claude",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+  });
+  const revision = await currentRevision(handler);
+
+  const response = await handler(postJson("/v1/changes/apply", {
+    base_revision: revision,
+    changes: [
+      {
+        type: "deployment_settings.update",
+        patch: {
+          worker_agent: "codex",
+          worker_model: "gpt-5.4",
+        },
+      },
+    ],
+  }));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(JSON.stringify(body)).toContain("deployment settings: set worker_agent");
+  const globalResponse = await handler(new Request("http://quay.local/v1/global"));
+  const global = await responseJson(globalResponse);
+  expect(global).toMatchObject({
+    agents: {
+      defaults: {
+        worker: "codex",
+        worker_model: "gpt-5.4",
+        reviewer: "claude",
+      },
+    },
+  });
+});
+
 test("GET /v1/tags counts repo tag extensions only for active repos", async () => {
   h = createHarness();
   const repoService = createRepoService({ db: h.db, clock: h.clock });

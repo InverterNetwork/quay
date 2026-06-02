@@ -199,6 +199,18 @@ export function loadConfig(opts: LoadConfigOptions = {}): LoadedConfig {
     return { config: {}, configPath: null };
   }
   const raw = readFileSync(path, "utf8");
+  return { config: parseConfigToml(raw, path), configPath: path };
+}
+
+export function loadConfigFromPath(path: string): LoadedConfig {
+  if (!existsSync(path)) {
+    throw new Error(`quay config at ${path} does not exist`);
+  }
+  const raw = readFileSync(path, "utf8");
+  return { config: parseConfigToml(raw, path), configPath: path };
+}
+
+function parseConfigToml(raw: string, path: string): QuayConfig {
   let parsed: unknown;
   try {
     parsed = Bun.TOML.parse(raw);
@@ -213,7 +225,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): LoadedConfig {
       .join("; ");
     throw new Error(`quay config at ${path} is invalid: ${issues}`);
   }
-  return { config: result.data, configPath: path };
+  return result.data;
 }
 
 // Map config keys to TickOptions, only forwarding fields that were actually

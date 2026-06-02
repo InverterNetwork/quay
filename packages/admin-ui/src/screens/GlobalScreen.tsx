@@ -21,7 +21,7 @@ import type {
   MatrixReadModel,
   RepoSummary,
 } from '../store/data';
-import type { ChangeEntry } from '../store/dirty';
+import type { ChangeEntry, DeploymentSettingsUpdateChange } from '../store/dirty';
 import { MatrixScreen } from './MatrixScreen';
 import { TagNamespaceEditor } from './TagNamespaceEditor';
 
@@ -154,6 +154,7 @@ interface SettingsBodyProps {
 }
 
 function SettingsBody({ global, changes, onChange, onOpenPreamble, active, setActive }: SettingsBodyProps) {
+  const deploymentSettings = deploymentSettingsFields(global, changes, onChange);
   return (
     <div
       style={{
@@ -279,12 +280,40 @@ function SettingsBody({ global, changes, onChange, onOpenPreamble, active, setAc
 
         <Section n="05" id="agents" title="Default agents" hint="what runs unless a repo overrides">
           <SubGroup title="Worker">
-            <Field label="AGENT" value={global.agents.defaults.worker} source="global-only" />
-            <Field label="MODEL" value={global.agents.defaults.workerModel ?? 'not configured'} source="global-only" />
+            <Field
+              label="AGENT"
+              value={deploymentSettings.value('worker_agent', global.agents.defaults.worker)}
+              source="global-only"
+              dirty={deploymentSettings.dirty('worker_agent')}
+              editable
+              onCommit={(next) => deploymentSettings.commit('worker_agent', next)}
+            />
+            <Field
+              label="MODEL"
+              value={deploymentSettings.value('worker_model', global.agents.defaults.workerModel)}
+              source="global-only"
+              dirty={deploymentSettings.dirty('worker_model')}
+              editable
+              onCommit={(next) => deploymentSettings.commit('worker_model', next)}
+            />
           </SubGroup>
           <SubGroup title="Reviewer">
-            <Field label="AGENT" value={global.agents.defaults.reviewer} source="global-only" />
-            <Field label="MODEL" value={global.agents.defaults.reviewerModel ?? 'not configured'} source="global-only" />
+            <Field
+              label="AGENT"
+              value={deploymentSettings.value('reviewer_agent', global.agents.defaults.reviewer)}
+              source="global-only"
+              dirty={deploymentSettings.dirty('reviewer_agent')}
+              editable
+              onCommit={(next) => deploymentSettings.commit('reviewer_agent', next)}
+            />
+            <Field
+              label="MODEL"
+              value={deploymentSettings.value('reviewer_model', global.agents.defaults.reviewerModel)}
+              source="global-only"
+              dirty={deploymentSettings.dirty('reviewer_model')}
+              editable
+              onCommit={(next) => deploymentSettings.commit('reviewer_model', next)}
+            />
           </SubGroup>
         </Section>
 
@@ -470,8 +499,67 @@ function ReadOnlyField({ field }: { field: ConfigFieldSummary }) {
   );
 }
 
+type DeploymentSettingsKey = keyof DeploymentSettingsUpdateChange['patch'];
+
+function deploymentSettingsFields(
+  global: GlobalConfigSummary,
+  changes: ChangeEntry[],
+  onChange: (entry: ChangeEntry) => void,
+) {
+  const baseline: Record<DeploymentSettingsKey, string | null> = {
+    worker_agent: global.agents.defaults.worker,
+    worker_model: global.agents.defaults.workerModel,
+    reviewer_agent: global.agents.defaults.reviewer,
+    reviewer_model: global.agents.defaults.reviewerModel,
+  };
+
+  function changeId(key: DeploymentSettingsKey): string {
+    return `deployment_settings:${key}`;
+  }
+
+  function pendingValue(key: DeploymentSettingsKey): string | null | undefined {
+    const entry = changes.find((change) => change.id === changeId(key));
+    if (entry?.change.type !== 'deployment_settings.update') return undefined;
+    return entry.change.patch[key];
+  }
+
+  function normalize(value: string): string | null {
+    const trimmed = value.trim();
+    if (trimmed === '') return null;
+    return trimmed;
+  }
+
+  return {
+    value(key: DeploymentSettingsKey, fallback: string | null): string | null {
+      const pending = pendingValue(key);
+      return pending === undefined ? fallback : pending;
+    },
+    dirty(key: DeploymentSettingsKey): boolean {
+      return changes.some((change) => change.id === changeId(key));
+    },
+    commit(key: DeploymentSettingsKey, value: string): void {
+      const after = normalize(value);
+      onChange({
+        id: changeId(key),
+        scope: 'global',
+        label: `deployment ${key}`,
+        before: formatFieldValue(baseline[key]),
+        after: formatFieldValue(after),
+        change: {
+          type: 'deployment_settings.update',
+          patch: { [key]: after },
+        },
+      });
+    },
+  };
+}
+
 function formatList(values: string[]): string {
   return values.length === 0 ? '[]' : values.join(', ');
+}
+
+function formatFieldValue(value: string | null): string {
+  return value === null || value === '' ? 'not configured' : value;
 }
 
 function AdapterCard({ adapter }: { adapter: AdapterSummary }) {

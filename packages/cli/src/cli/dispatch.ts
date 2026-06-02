@@ -22,7 +22,9 @@ import type { LinearPort } from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
 import { enqueue, type EnqueueDeps } from "../core/enqueue.ts";
+import { createDeploymentSettingsService } from "../core/deployment_settings.ts";
 import type { ValidatorRunner } from "../core/validator_runner.ts";
+import { loadConfigFromPath } from "./config.ts";
 import { handleEnqueueLinearIssue } from "./enqueue_linear_issue.ts";
 import type { RepoService } from "../core/repos/service.ts";
 import type { AgentResolver } from "../core/agents.ts";
@@ -202,6 +204,8 @@ export async function dispatch(
         return handlePreamble(rest, deps, io);
       case "tags":
         return handleTags(rest, deps, io);
+      case "settings":
+        return handleSettings(rest, deps, io);
       case "cancel":
         return await handleCancel(rest, deps, io);
       case "submit-brief":
@@ -1965,6 +1969,71 @@ function readApplyTagsInput(
     return { ok: true, value: io.stdin() };
   }
   return tryReadFile(fromPath);
+}
+
+function handleSettings(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  if (argv.length === 0) {
+    return writeErrorWithUsage(
+      io,
+      ["settings"],
+      "usage_error",
+      "settings subcommand required",
+    );
+  }
+  const [sub, ...rest] = argv;
+  if (isHelpToken(sub as string)) return printHelp(io, ["settings"]);
+  switch (sub) {
+    case "import":
+      if (wantsHelp(rest)) return printHelp(io, ["settings", "import"]);
+      return handleSettingsImport(rest, deps, io);
+    default:
+      return writeErrorWithUsage(
+        io,
+        ["settings"],
+        "usage_error",
+        `unknown settings subcommand: ${sub}`,
+      );
+  }
+}
+
+function handleSettingsImport(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {
+    valued: ["--from"],
+    boolean: ["--only-empty"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const fromPath = readFlag(argv, "--from");
+  if (!fromPath) {
+    return writeError(io, "usage_error", "settings import requires --from <path>");
+  }
+  const loaded = loadConfigFromPath(fromPath);
+  const service = createDeploymentSettingsService({
+    db: deps.db,
+    clock: deps.clock,
+  });
+  const row = service.importFromConfig(loaded.config, {
+    onlyEmpty: argv.includes("--only-empty"),
+  });
+  io.stdout(`${JSON.stringify({
+    imported: {
+      worker_agent: row.worker_agent,
+      worker_model: row.worker_model,
+      reviewer_agent: row.reviewer_agent,
+      reviewer_model: row.reviewer_model,
+    },
+    config_path: loaded.configPath,
+  })}\n`);
+  return { exitCode: 0 };
 }
 
 function handleTags(
