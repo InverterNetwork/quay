@@ -22,7 +22,10 @@ export type DeploymentSettingsPatch = {
 export interface DeploymentSettingsService {
   get(): DeploymentSettings;
   getRow(): DeploymentSettingsRow | null;
-  update(patch: DeploymentSettingsPatch): DeploymentSettingsRow;
+  update(
+    patch: DeploymentSettingsPatch,
+    opts?: { defaultsWhenEmpty?: DeploymentSettings },
+  ): DeploymentSettingsRow;
   replace(settings: DeploymentSettings): DeploymentSettingsRow;
   importFromConfig(config: QuayConfig, opts?: { onlyEmpty?: boolean }): DeploymentSettingsRow;
 }
@@ -54,13 +57,17 @@ export function createDeploymentSettingsService(deps: {
     };
   }
 
-  function update(patch: DeploymentSettingsPatch): DeploymentSettingsRow {
+  function update(
+    patch: DeploymentSettingsPatch,
+    opts: { defaultsWhenEmpty?: DeploymentSettings } = {},
+  ): DeploymentSettingsRow {
     const current = getRow();
+    const base = current ?? opts.defaultsWhenEmpty ?? null;
     const next: DeploymentSettings = {
-      worker_agent: valueOrCurrent(patch.worker_agent, current?.worker_agent ?? null),
-      worker_model: valueOrCurrent(patch.worker_model, current?.worker_model ?? null),
-      reviewer_agent: valueOrCurrent(patch.reviewer_agent, current?.reviewer_agent ?? null),
-      reviewer_model: valueOrCurrent(patch.reviewer_model, current?.reviewer_model ?? null),
+      worker_agent: valueOrCurrent(patch.worker_agent, base?.worker_agent ?? null),
+      worker_model: valueOrCurrent(patch.worker_model, base?.worker_model ?? null),
+      reviewer_agent: valueOrCurrent(patch.reviewer_agent, base?.reviewer_agent ?? null),
+      reviewer_model: valueOrCurrent(patch.reviewer_model, base?.reviewer_model ?? null),
     };
     return replace(next);
   }

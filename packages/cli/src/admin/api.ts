@@ -1927,7 +1927,9 @@ function applyOneChange(runtime: AdminApiRuntime, change: AdminChange): void {
   }
   if (change.type === "deployment_settings.update") {
     validateDeploymentSettingsPatch(runtime, change.patch);
-    createDeploymentSettingsService({ db: runtime.db }).update(change.patch);
+    createDeploymentSettingsService({ db: runtime.db }).update(change.patch, {
+      defaultsWhenEmpty: effectiveDeploymentSettings(runtime),
+    });
     return;
   }
   const repoId = change.scope === "repo" ? change.repo_id! : null;
