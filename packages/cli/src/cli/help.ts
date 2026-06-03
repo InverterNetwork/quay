@@ -415,6 +415,23 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--body <text>", desc: "Inline body text. Mutually exclusive with --body-file." },
     ],
   },
+  settings: {
+    path: "settings",
+    synopsis: "quay settings <subcommand> [options]",
+    summary: "Manage DB-backed mutable deployment settings",
+    subcommands: ["settings import"],
+  },
+  "settings import": {
+    path: "settings import",
+    synopsis: "quay settings import --from <config.toml> [--only-empty]",
+    summary: "Explicitly seed mutable deployment settings from TOML.",
+    details:
+      "Imports default worker/reviewer agent and model selections into the deployment_settings table. Startup never runs this import automatically.",
+    flags: [
+      { flag: "--from <path>", desc: "Path to a config.toml file to validate and import." },
+      { flag: "--only-empty", desc: "Keep already-populated DB values." },
+    ],
+  },
   tags: {
     path: "tags",
     synopsis: "quay tags <subcommand> [options]",
@@ -567,6 +584,7 @@ const TOP_LEVEL_ORDER: string[] = [
   "adopt-pr",
   "repo",
   "preamble",
+  "settings",
   "tags",
   "cancel",
   "submit-brief",

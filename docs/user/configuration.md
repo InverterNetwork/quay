@@ -1,6 +1,7 @@
 # Configuration
 
-Production configuration is TOML.
+Production bootstrap configuration is TOML. Mutable deployment settings are
+stored in the database.
 
 ## Config File Resolution
 
@@ -13,6 +14,33 @@ Quay looks for the deployment config in this order:
 
 A missing config file is allowed. An invalid TOML file or unknown config key is
 a hard error.
+
+## Source of Truth
+
+`config.toml` owns bootstrap and host wiring: paths, auth/env wiring, proxy
+headers, adapter env var names, token file fallbacks, and agent invocation
+templates. Quay reads those values at startup so it can open the DB and spawn
+workers on the host.
+
+Mutable deployment defaults live in DB-backed deployment settings. The first
+DB-backed settings are default worker/reviewer agent and model selection. Quay
+does not import TOML into the DB on startup. To seed or refresh these mutable
+settings from a TOML file, run:
+
+```sh
+quay settings import --from /path/to/config.toml
+```
+
+Use `--only-empty` to keep already-populated DB values. After import, Admin UI
+edits and runtime reads use the DB row as the shared source of truth.
+
+Agent/model precedence is:
+
+1. Task-level CLI override or existing task snapshot
+2. Repo-level override
+3. DB deployment settings
+4. Bootstrap TOML defaults
+5. Built-in defaults
 
 ## Example
 
@@ -87,8 +115,8 @@ capabilities = ["browser", "screenshots"]
 | `max_concurrent_reviewers` | `2` | Maximum running reviewer workers. Independent of `max_concurrent`. |
 | `retry_budget` | `5` | Copied onto new tasks at enqueue time. |
 | `agent_invocation` | unset | Legacy shorthand for `[agents.invocations.claude].worker` and `.reviewer`. Prefer `[agents]` for new deployments. |
-| `[agents].worker` / `[agents].reviewer` | `claude` | Global role defaults. Each value names an entry under `[agents.invocations]`. |
-| `[agents].worker_model` / `[agents].reviewer_model` | unset | Optional global role model defaults. Quay injects these as `--model <value>` for supported runtimes (`claude`, `codex`). For `hermes_*` runtimes the model is selected through Hermes' own YAML config; Quay records the value on the attempt row but does not append `--model`. |
+| `[agents].worker` / `[agents].reviewer` | `claude` | Bootstrap/import defaults for role selection. Runtime/Admin use DB deployment settings when populated. Each value names an entry under `[agents.invocations]`. |
+| `[agents].worker_model` / `[agents].reviewer_model` | unset | Bootstrap/import defaults for role model selection. Runtime/Admin use DB deployment settings when populated. Quay injects these as `--model <value>` for supported runtimes (`claude`, `codex`). For `hermes_*` runtimes the model is selected through Hermes' own YAML config; Quay records the value on the attempt row but does not append `--model`. |
 | `[agents.invocations.<name>].capabilities` | `[]` | Declarative metadata for capabilities common to both roles. Use `screenshots` to allow `quay enqueue --require-pr-screenshots` for that worker. |
 | `[agents.invocations.<name>].worker_capabilities` / `.reviewer_capabilities` | `[]` | Role-specific capability additions. Use these when one invocation exposes different tools by role. |
 | `max_attempt_duration_seconds` | `3600` | Live worker wall-clock kill threshold. |

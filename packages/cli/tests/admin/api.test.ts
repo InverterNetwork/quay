@@ -1955,6 +1955,146 @@ test("GET /v1/global returns deployment config, agents, prompts, and tags", asyn
     });
 });
 
+test("POST /v1/changes/apply updates DB-backed deployment agent defaults", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: {
+      agents: {
+        worker: "claude",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+  });
+  const revision = await currentRevision(handler);
+
+  const response = await handler(postJson("/v1/changes/apply", {
+    base_revision: revision,
+    changes: [
+      {
+        type: "deployment_settings.update",
+        patch: {
+          worker_agent: "codex",
+          worker_model: "gpt-5.4",
+        },
+      },
+    ],
+  }));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(JSON.stringify(body)).toContain("deployment settings: set worker_agent");
+  const globalResponse = await handler(new Request("http://quay.local/v1/global"));
+  const global = await responseJson(globalResponse);
+  expect(global).toMatchObject({
+    agents: {
+      defaults: {
+        worker: "codex",
+        worker_model: "gpt-5.4",
+        reviewer: "claude",
+      },
+    },
+  });
+});
+
+test("POST /v1/changes/apply preserves effective defaults on first partial deployment settings edit", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: {
+      agents: {
+        worker: "codex",
+        worker_model: "toml-worker-model",
+        reviewer: "codex",
+        reviewer_model: "toml-reviewer-model",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+  });
+  const revision = await currentRevision(handler);
+
+  const response = await handler(postJson("/v1/changes/apply", {
+    base_revision: revision,
+    changes: [
+      {
+        type: "deployment_settings.update",
+        patch: {
+          worker_model: "gpt-5.4",
+        },
+      },
+    ],
+  }));
+
+  expect(response.status).toBe(200);
+  expect(
+    h.db
+      .query<{
+        worker_agent: string | null;
+        worker_model: string | null;
+        reviewer_agent: string | null;
+        reviewer_model: string | null;
+      }, []>(
+        `SELECT worker_agent, worker_model, reviewer_agent, reviewer_model
+           FROM deployment_settings
+          WHERE singleton_id = 1`,
+      )
+      .get(),
+  ).toEqual({
+    worker_agent: "codex",
+    worker_model: "gpt-5.4",
+    reviewer_agent: "codex",
+    reviewer_model: "toml-reviewer-model",
+  });
+});
+
+test("Admin revision distinguishes missing deployment settings from explicit null row", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: {
+      agents: {
+        worker: "codex",
+        reviewer: "codex",
+        worker_model: "toml-worker-model",
+        reviewer_model: "toml-reviewer-model",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+  });
+  const before = await currentRevision(handler);
+
+  h.db
+    .query(
+      `INSERT INTO deployment_settings (
+         singleton_id, worker_agent, worker_model, reviewer_agent,
+         reviewer_model, created_at, updated_at
+       ) VALUES (1, NULL, NULL, NULL, NULL, ?, ?)`,
+    )
+    .run("2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+
+  const after = await currentRevision(handler);
+  expect(after).not.toBe(before);
+
+  const globalResponse = await handler(new Request("http://quay.local/v1/global"));
+  const global = await responseJson(globalResponse);
+  expect(global).toMatchObject({
+    agents: {
+      defaults: {
+        worker: "claude",
+        worker_model: null,
+        reviewer: "claude",
+        reviewer_model: null,
+      },
+    },
+  });
+});
+
 test("GET /v1/tags counts repo tag extensions only for active repos", async () => {
   h = createHarness();
   const repoService = createRepoService({ db: h.db, clock: h.clock });

@@ -17,6 +17,7 @@
 
 import type { DB } from "../db/connection.ts";
 import type { QuayConfig } from "../cli/config.ts";
+import type { DeploymentSettings } from "./deployment_settings.ts";
 
 export const DEFAULT_AGENT_NAME = "claude";
 export const DEFAULT_CLAUDE_WORKER_INVOCATION =
@@ -39,6 +40,8 @@ export interface ResolvedAgent {
 export interface AgentResolverDeps {
   db: DB;
   config: QuayConfig;
+  deploymentSettings?: DeploymentSettings;
+  deploymentSettingsProvider?: () => DeploymentSettings | null;
 }
 
 // Bundles the parts of the config we care about into a plain
@@ -81,7 +84,10 @@ export interface AgentRoleSnapshot {
   model: string | null;
 }
 
-export function buildAgentSelection(config: QuayConfig): AgentSelection {
+export function buildAgentSelection(
+  config: QuayConfig,
+  deploymentSettings?: DeploymentSettings,
+): AgentSelection {
   const invocations: AgentSelection["invocations"] = {};
   for (const [name, body] of Object.entries(config.agents?.invocations ?? {})) {
     const entry: AgentSelection["invocations"][string] = {};
@@ -124,13 +130,22 @@ export function buildAgentSelection(config: QuayConfig): AgentSelection {
     reviewer: seeded.reviewer ?? DEFAULT_CLAUDE_REVIEWER_INVOCATION,
   };
 
+  const hasDeploymentSettings = deploymentSettings !== undefined;
   const defaults: Record<AgentRole, string> = {
-    worker: config.agents?.worker ?? DEFAULT_AGENT_NAME,
-    reviewer: config.agents?.reviewer ?? DEFAULT_AGENT_NAME,
+    worker: hasDeploymentSettings
+      ? deploymentSettings.worker_agent ?? DEFAULT_AGENT_NAME
+      : config.agents?.worker ?? DEFAULT_AGENT_NAME,
+    reviewer: hasDeploymentSettings
+      ? deploymentSettings.reviewer_agent ?? DEFAULT_AGENT_NAME
+      : config.agents?.reviewer ?? DEFAULT_AGENT_NAME,
   };
   const defaultModels: Record<AgentRole, string | null> = {
-    worker: config.agents?.worker_model ?? null,
-    reviewer: config.agents?.reviewer_model ?? null,
+    worker: hasDeploymentSettings
+      ? deploymentSettings.worker_model
+      : config.agents?.worker_model ?? null,
+    reviewer: hasDeploymentSettings
+      ? deploymentSettings.reviewer_model
+      : config.agents?.reviewer_model ?? null,
   };
   return { defaults, defaultModels, invocations };
 }
@@ -160,8 +175,8 @@ export function validateAgentSelection(selection: AgentSelection): void {
 }
 
 export function createAgentResolver(deps: AgentResolverDeps): AgentResolver {
-  const selection = buildAgentSelection(deps.config);
-  validateAgentSelection(selection);
+  const bootstrapSelection = buildAgentSelection(deps.config);
+  validateAgentSelection(currentSelection());
 
   function lookupOverride(repoId: string): RepoOverrideRow | null {
     return (
@@ -180,6 +195,7 @@ export function createAgentResolver(deps: AgentResolverDeps): AgentResolver {
     role: AgentRole,
     snapshot?: AgentRoleSnapshot,
   ): ResolvedAgent {
+    const selection = currentSelection();
     const override = lookupOverride(repoId);
     const overrideName =
       role === "worker" ? override?.agent_worker : override?.agent_reviewer;
@@ -216,9 +232,24 @@ export function createAgentResolver(deps: AgentResolverDeps): AgentResolver {
     };
   }
 
+  function currentDeploymentSettings(): DeploymentSettings | undefined {
+    if (deps.deploymentSettingsProvider !== undefined) {
+      return deps.deploymentSettingsProvider() ?? undefined;
+    }
+    return deps.deploymentSettings;
+  }
+
+  function currentSelection(): AgentSelection {
+    const settings = currentDeploymentSettings();
+    if (settings === undefined) return bootstrapSelection;
+    const selection = buildAgentSelection(deps.config, settings);
+    validateAgentSelection(selection);
+    return selection;
+  }
+
   return {
     resolve,
-    registeredAgents: () => Object.keys(selection.invocations).sort(),
+    registeredAgents: () => Object.keys(bootstrapSelection.invocations).sort(),
   };
 }
 
