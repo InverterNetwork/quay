@@ -89,6 +89,7 @@ binary and invalid UTF-8 artifacts such as `malformed_signal`.
 | `usage` | JSON usage envelope captured per attempt. `.quay-usage.json` is stored verbatim when present; otherwise Codex `--json` JSONL in `.quay-tool-trace.log` can synthesize normalized model/token totals. |
 | `tool_trace` | Raw tool-call/debug stream or Codex JSONL from `.quay-tool-trace.log`, captured per attempt with a 4 MiB tail. |
 | `blocker` | Valid `.quay-blocked.md` written by a worker. |
+| `adopted_pr_ready_for_review` | Valid `.quay-ready-for-review.json` written by an adopted PR worker to report that the PR already satisfies the requested work and should return to normal PR polling/review without a new commit. |
 | `malformed_signal` | Invalid blocker signal bytes. |
 | `goal_report` | Valid `.quay-goal-report.json` captured from a goal-mode worker. |
 | `malformed_goal_report` | Invalid goal report bytes captured for bounded protocol repair. |

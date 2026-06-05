@@ -1873,6 +1873,7 @@ function processRunningTask(
     attempt_id: attempt.attempt_id,
     attempt_number: attempt.attempt_number,
     preamble_id: attempt.preamble_id,
+    reason: attempt.reason,
     remote_sha_at_spawn: attempt.remote_sha_at_spawn,
     pr_existed_at_spawn: attempt.pr_existed_at_spawn,
     tmux_session: attempt.tmux_session,
@@ -2122,6 +2123,8 @@ function outcomeToResult(
     case "pr_opened":
       return { task_id: taskId, action: "pr_opened" };
     case "existing_pr_attached":
+      return { task_id: taskId, action: "existing_pr_attached" };
+    case "adopted_pr_ready_for_review":
       return { task_id: taskId, action: "existing_pr_attached" };
     case "no_progress":
       return { task_id: taskId, action: "no_progress" };
