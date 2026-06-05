@@ -40,7 +40,6 @@ export function installWorktreeDependencies(
         step: "install",
         repo_id: repo.repo_id,
         worktree_path: worktreePath,
-        install_cmd: repo.install_cmd,
         exit_code: installResult.exitCode,
         stderr: installResult.stderr,
       },

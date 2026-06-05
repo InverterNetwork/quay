@@ -286,7 +286,7 @@ test("adopt-pr fails before scheduling worker when dependency install fails", as
       "--package-manager",
       "bun",
       "--install-cmd",
-      "bun install",
+      "TOKEN=super-secret bun install",
     ],
     built.deps,
     bufferIO(),
@@ -326,10 +326,11 @@ test("adopt-pr fails before scheduling worker when dependency install fails", as
   expect(result.exitCode).toBe(4);
   expect(io.out()).toBe("");
   expect(io.err()).toContain("install_cmd failed");
+  expect(io.err()).not.toContain("TOKEN=super-secret");
   const worktreePath = `${built.worktreesRoot}/quay-review/quay/54`;
   expect(built.commandRunner.calls).toEqual([
     {
-      command: "bun install",
+      command: "TOKEN=super-secret bun install",
       cwd: worktreePath,
     },
   ]);
