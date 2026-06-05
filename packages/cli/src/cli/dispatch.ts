@@ -2648,6 +2648,7 @@ function pickTickDeps(deps: CliDeps): TickDeps {
     db: deps.db,
     clock: deps.clock,
     git: deps.git,
+    commandRunner: deps.commandRunner,
     github: deps.github,
     tmux: deps.tmux,
     slack: deps.slack,

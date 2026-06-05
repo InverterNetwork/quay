@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import {
@@ -158,6 +159,16 @@ test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
   const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
   const built = buildTickDeps(h);
   seedUmbrellaFeatureBranch(built, repoId);
+  built.commandRunner.setHandler((command, cwd) => {
+    expect(command).toBe("bun install");
+    expect(cwd).toBe(`${h!.dataDir}/worktrees/umbrella-final-pr-${workflowId}`);
+    expect(existsSync(cwd)).toBe(true);
+    expect(built.git.worktreeBranches.get(cwd)).toEqual({
+      repoId,
+      branch: "quay/umbrella/BRIX-1511",
+    });
+    return { exitCode: 0, stdout: "", stderr: "" };
+  });
 
   const results = await tick_once(built.deps);
 
@@ -193,6 +204,12 @@ test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
       baseRef: "origin/quay/umbrella/BRIX-1511",
     },
   });
+  expect(built.commandRunner.calls).toEqual([
+    {
+      command: "bun install",
+      cwd: `${h.dataDir}/worktrees/umbrella-final-pr-${workflowId}`,
+    },
+  ]);
 
   const workflow = h.db
     .query<
@@ -228,6 +245,40 @@ test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
     .get(`umbrella-final-pr-${workflowId}`);
   expect(finalLinkedAsSubtask?.n).toBe(0);
   expect(built.github.mergePullRequestCalls).toEqual([]);
+});
+
+test("tick surfaces final umbrella PR dependency install failure before task creation", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-29T12:01:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-final-install-fails");
+  const { workflowId } = insertIntegratedUmbrellaWorkflow(repoId);
+  const built = buildTickDeps(h);
+  seedUmbrellaFeatureBranch(built, repoId);
+  built.commandRunner.failNext("install boom");
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    {
+      task_id: `umbrella-final-pr-${workflowId}`,
+      action: "tick_error",
+      error: expect.stringContaining("install_cmd failed"),
+    },
+  ]);
+  expect(built.github.createPullRequestCalls).toHaveLength(1);
+  expect(built.commandRunner.calls).toEqual([
+    {
+      command: "bun install",
+      cwd: `${h.dataDir}/worktrees/umbrella-final-pr-${workflowId}`,
+    },
+  ]);
+  expect(built.git.worktrees.has(`${h.dataDir}/worktrees/umbrella-final-pr-${workflowId}`)).toBe(false);
+  const finalTask = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM tasks WHERE task_id = ?`,
+    )
+    .get(`umbrella-final-pr-${workflowId}`);
+  expect(finalTask?.n).toBe(0);
 });
 
 test("tick renders stored Linear umbrella metadata in final PR title and body", async () => {
