@@ -1172,6 +1172,7 @@ async function handleAdoptPr(
           clock: deps.clock,
           github: deps.github,
           git: deps.git,
+          commandRunner: deps.commandRunner,
           tmux: deps.tmux,
           artifactStore: deps.artifactStore,
           paths: deps.paths,
