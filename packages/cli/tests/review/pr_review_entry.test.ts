@@ -220,6 +220,8 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
   const prompt = readFileSync(promptRow!.file_path, "utf8");
   expect(prompt).toContain("Update the existing PR #51");
   expect(prompt).toContain("Do not create another pull request.");
+  expect(prompt).toContain(".quay-ready-for-review.json");
+  expect(prompt).toContain("rationale");
   expect(prompt).toContain("Head branch: feature/human-adopt");
 
   built.git.setRemoteHeadSha("quay", "feature/human-adopt", "head-51");

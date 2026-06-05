@@ -1242,6 +1242,7 @@ function scheduleAdoptedWorkerAttempt(
     const guidance = [
       `Adopt PR #${input.pr.number} and update the existing branch ${input.headBranch}.`,
       "Push commits to that same branch and update the existing PR.",
+      "If the PR already satisfies the requested work and no code changes are needed, write `.quay-ready-for-review.json` with a concise non-empty `rationale` string, then exit cleanly without pushing an empty commit.",
       "Do not create a duplicate pull request.",
     ].join("\n");
     const composed = composeWorkerPrompt({

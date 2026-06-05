@@ -118,7 +118,7 @@ export const TASK_TRANSITIONS = [
   transition(
     "running",
     "pr-open",
-    ["existing_pr_attached", "pr_opened"],
+    ["adopted_pr_ready_for_review", "existing_pr_attached", "pr_opened"],
     "worker produced or attached a PR",
   ),
   transition(

@@ -57,7 +57,9 @@ import {
 import { transitionTaskState } from "./task_state.ts";
 
 const BLOCKER_FILENAME = ".quay-blocked.md";
+const READY_FOR_REVIEW_FILENAME = ".quay-ready-for-review.json";
 const BLOCKER_MAX_BYTES = 64 * 1024;
+const READY_FOR_REVIEW_MAX_BYTES = 64 * 1024;
 const MAX_GOAL_PROTOCOL_REPAIR_ATTEMPTS = 2;
 
 export type ClassifyOutcome =
@@ -69,6 +71,7 @@ export type ClassifyOutcome =
   | "malformed_signal"
   | "pr_opened"
   | "existing_pr_attached"
+  | "adopted_pr_ready_for_review"
   | "no_progress"
   | "crashed"
   | "spawn_window_no_evidence";
@@ -89,6 +92,7 @@ export interface ClassifyContextAttempt {
   attempt_id: number;
   attempt_number: number;
   preamble_id: number;
+  reason: string;
   remote_sha_at_spawn: string | null;
   pr_existed_at_spawn: number;
   tmux_session: string | null;
@@ -286,6 +290,15 @@ export function classifyAndApply(
       );
       if (attached !== null) return attached;
     }
+    const adoptedReady = ingestAdoptedReadyForReviewSignal(
+      deps,
+      task,
+      attempt,
+      remoteShaAtExit,
+      exitInfo,
+      predicate,
+    );
+    if (adoptedReady !== null) return adoptedReady;
     return scheduleNoProgressRetry(
       deps,
       task,
@@ -330,6 +343,24 @@ interface BlockerAbsent {
 }
 type BlockerProbe = BlockerValid | BlockerMalformed | BlockerAbsent;
 
+interface ReadyForReviewValid {
+  kind: "valid";
+  content: string;
+  rationale: string;
+}
+interface ReadyForReviewMalformed {
+  kind: "malformed";
+  bytes: Uint8Array;
+  diagnostics: string;
+}
+interface ReadyForReviewAbsent {
+  kind: "absent";
+}
+type ReadyForReviewProbe =
+  | ReadyForReviewValid
+  | ReadyForReviewMalformed
+  | ReadyForReviewAbsent;
+
 function probeBlockerFile(path: string): BlockerProbe {
   let stats;
   try {
@@ -362,6 +393,58 @@ function probeBlockerFile(path: string): BlockerProbe {
   }
 
   return { kind: "valid", content: decoded };
+}
+
+function probeReadyForReviewFile(path: string): ReadyForReviewProbe {
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    return { kind: "absent" };
+  }
+  if (!stats.isFile()) return { kind: "absent" };
+
+  let raw: Uint8Array;
+  try {
+    raw = readFileSync(path);
+  } catch {
+    return { kind: "absent" };
+  }
+
+  if (raw.byteLength > READY_FOR_REVIEW_MAX_BYTES) {
+    return {
+      kind: "malformed",
+      bytes: raw.subarray(0, READY_FOR_REVIEW_MAX_BYTES),
+      diagnostics: "signal exceeds maximum size",
+    };
+  }
+
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+  } catch {
+    return { kind: "malformed", bytes: raw, diagnostics: "signal is not UTF-8" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch {
+    return { kind: "malformed", bytes: raw, diagnostics: "signal is not JSON" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { kind: "malformed", bytes: raw, diagnostics: "signal must be an object" };
+  }
+  const rationale = (parsed as { rationale?: unknown }).rationale;
+  if (typeof rationale !== "string" || rationale.trim().length === 0) {
+    return {
+      kind: "malformed",
+      bytes: raw,
+      diagnostics: "signal must include a non-empty rationale string",
+    };
+  }
+
+  return { kind: "valid", content: decoded, rationale: rationale.trim() };
 }
 
 function collectSessionLog(
@@ -1898,6 +1981,104 @@ function ingestMalformed(
     rmSync(blockerPath, { force: true });
   } catch {}
   return { outcome: "malformed_signal" };
+}
+
+function ingestAdoptedReadyForReviewSignal(
+  deps: ClassifierDeps,
+  task: ClassifyContextTask,
+  attempt: ClassifyContextAttempt,
+  remoteShaAtExit: string | null,
+  exitInfo: PaneExitInfo,
+  predicate: PredicateState,
+): ClassifyResult | null {
+  if (attempt.reason !== "adopt_pr") return null;
+  const readyPath = join(task.worktree_path, READY_FOR_REVIEW_FILENAME);
+  const probe = probeReadyForReviewFile(readyPath);
+  if (probe.kind === "absent") return null;
+  if (probe.kind === "malformed") {
+    return ingestMalformed(deps, task, attempt, readyPath, probe.bytes, exitInfo);
+  }
+
+  const contentHash = sha256(probe.content);
+  const artifactId = upsertRecoveryArtifact(deps, {
+    taskId: task.task_id,
+    attemptId: attempt.attempt_id,
+    kind: "adopted_pr_ready_for_review",
+    contentHash,
+    content: probe.content,
+    extension: "json",
+  });
+
+  const transitioned = transitionAlreadyApplied(
+    deps.db,
+    task.task_id,
+    attempt.attempt_id,
+    artifactId,
+    "adopted_pr_ready_for_review",
+  );
+  if (!transitioned) {
+    const now = deps.clock.nowISO();
+    deps.db.exec("BEGIN");
+    try {
+      const transition = transitionTaskState(deps, {
+        taskId: task.task_id,
+        from: "running",
+        to: "pr-open",
+        eventType: "adopted_pr_ready_for_review",
+        attemptId: attempt.attempt_id,
+        payloadArtifactId: artifactId,
+        now,
+        updates: {
+          pr: { headSha: remoteShaAtExit, headShaCoalesce: "input" },
+          resetSpawnFailures: true,
+          clearTickError: true,
+        },
+        eventData: {
+          rationale: probe.rationale,
+          ready_signal_artifact_id: artifactId,
+          remote_sha_at_spawn: attempt.remote_sha_at_spawn,
+          remote_sha_at_exit: remoteShaAtExit,
+          remote_unchanged: predicate.remoteUnchanged,
+          pr_existed_at_spawn: predicate.prExistedAtSpawn,
+          pr_exists_at_exit: predicate.prExistsAtExit,
+          exit_code: exitInfo.exitCode,
+          exit_signal: exitInfo.exitSignal,
+        },
+      });
+      if (!transition.applied) {
+        deps.db.exec("ROLLBACK");
+      } else {
+        deps.db
+          .query(
+            `UPDATE attempts
+                SET exit_kind = 'adopted_pr_ready_for_review',
+                    ended_at = ?,
+                    remote_sha_at_exit = ?,
+                    exit_code = ?,
+                    exit_signal = ?
+              WHERE attempt_id = ?`,
+          )
+          .run(
+            now,
+            remoteShaAtExit,
+            exitInfo.exitCode,
+            exitInfo.exitSignal,
+            attempt.attempt_id,
+          );
+        deps.db.exec("COMMIT");
+      }
+    } catch (err) {
+      try {
+        deps.db.exec("ROLLBACK");
+      } catch {}
+      throw err;
+    }
+  }
+
+  try {
+    rmSync(readyPath, { force: true });
+  } catch {}
+  return { outcome: "adopted_pr_ready_for_review" };
 }
 
 function reconcileExistingOpenPr(
