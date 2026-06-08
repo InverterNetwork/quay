@@ -73,6 +73,7 @@ export interface AdminApiRuntime {
   db: DB;
   env?: NodeJS.ProcessEnv;
   agentFetch?: AgentFetch;
+  agentStreamHeartbeatMs?: number;
   adminAudit?: (event: AdminAuditEvent) => void;
   paths: {
     reposRoot: string;

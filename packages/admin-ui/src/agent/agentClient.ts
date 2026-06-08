@@ -172,13 +172,19 @@ async function* parseNdjsonEvents(body: ReadableStream<Uint8Array>): AsyncGenera
     while (newlineIndex !== -1) {
       const line = buffer.slice(0, newlineIndex).trim();
       buffer = buffer.slice(newlineIndex + 1);
-      if (line) yield parseAgentEventJson(line);
+      if (line) {
+        const event = parseAgentEventJson(line);
+        if (event) yield event;
+      }
       newlineIndex = buffer.indexOf('\n');
     }
   }
 
   const finalLine = buffer.trim();
-  if (finalLine) yield parseAgentEventJson(finalLine);
+  if (finalLine) {
+    const event = parseAgentEventJson(finalLine);
+    if (event) yield event;
+  }
 }
 
 async function* parseSseEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<AgentEvent> {
@@ -233,7 +239,7 @@ function parseSseBlock(block: string): AgentEvent | null {
   return parseAgentEventJson(data);
 }
 
-function parseAgentEventJson(input: string): AgentEvent {
+function parseAgentEventJson(input: string): AgentEvent | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(input);
@@ -244,6 +250,7 @@ function parseAgentEventJson(input: string): AgentEvent {
     });
   }
 
+  if (isRecord(parsed) && parsed.type === 'heartbeat') return null;
   return toAgentEvent(parsed);
 }
 

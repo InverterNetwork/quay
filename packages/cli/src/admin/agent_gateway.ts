@@ -23,6 +23,7 @@ const AGENT_AUDIT_TTL_DAYS: Record<AgentAuditRetentionBucket, number> = {
   agent_approved_action_30d: 30,
 };
 const AUDIT_DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_AGENT_STREAM_HEARTBEAT_MS = 5_000;
 
 interface AgentGateway {
   handle: (
@@ -172,6 +173,7 @@ export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
             trackAgentEvents({ runtime, request, audit, state, events }),
             requestedStreamFormat(request),
             corsHeaders,
+            agentStreamHeartbeatMs(runtime),
           );
         }
 
@@ -232,6 +234,7 @@ export function createAgentGateway(runtime: AdminApiRuntime): AgentGateway {
             }),
             requestedStreamFormat(request),
             corsHeaders,
+            agentStreamHeartbeatMs(runtime),
           );
         }
 
@@ -758,19 +761,48 @@ function eventStreamResponse(
   events: AsyncIterable<unknown>,
   format: "ndjson" | "sse",
   extraHeaders: JsonHeaders,
+  heartbeatMs = DEFAULT_AGENT_STREAM_HEARTBEAT_MS,
 ): Response {
   const encoder = new TextEncoder();
+  const iterator = events[Symbol.asyncIterator]();
+  let cancelled = false;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  const stopHeartbeat = () => {
+    if (heartbeat === null) return;
+    clearInterval(heartbeat);
+    heartbeat = null;
+  };
   return new Response(
     new ReadableStream<Uint8Array>({
       async start(controller) {
-        for await (const event of events) {
-          const line = format === "sse"
-            ? `event: agent_event\ndata: ${JSON.stringify(event)}\n\n`
-            : `${JSON.stringify(event)}\n`;
-          controller.enqueue(encoder.encode(line));
+        heartbeat = setInterval(() => {
+          if (!cancelled) controller.enqueue(encoder.encode(streamHeartbeatChunk(format)));
+        }, heartbeatMs);
+        try {
+          while (!cancelled) {
+            const next = await iterator.next();
+            if (next.done === true) break;
+            const event = next.value;
+            const line = format === "sse"
+              ? `event: agent_event\ndata: ${JSON.stringify(event)}\n\n`
+              : `${JSON.stringify(event)}\n`;
+            controller.enqueue(encoder.encode(line));
+          }
+          if (!cancelled) {
+            if (format === "sse") controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          }
+        } catch (err) {
+          if (!cancelled) controller.error(err);
+        } finally {
+          stopHeartbeat();
+          if (cancelled) await iterator.return?.();
         }
-        if (format === "sse") controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
+      },
+      async cancel() {
+        cancelled = true;
+        stopHeartbeat();
+        await iterator.return?.();
       },
     }),
     {
@@ -784,6 +816,18 @@ function eventStreamResponse(
       },
     },
   );
+}
+
+function streamHeartbeatChunk(format: "ndjson" | "sse"): string {
+  if (format === "sse") return `: keep-alive ${new Date().toISOString()}\n\n`;
+  return `${JSON.stringify({ type: "heartbeat", timestamp: new Date().toISOString() })}\n`;
+}
+
+function agentStreamHeartbeatMs(runtime: AdminApiRuntime): number {
+  const configured = runtime.agentStreamHeartbeatMs;
+  return configured !== undefined && Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_AGENT_STREAM_HEARTBEAT_MS;
 }
 
 function agentAdapterForRuntime(runtime: AdminApiRuntime): AgentAdapter {

@@ -28,6 +28,7 @@ function createHandler(opts: {
   config?: Parameters<typeof createAdminApiHandler>[0]["config"];
   env?: NodeJS.ProcessEnv;
   agentFetch?: Parameters<typeof createAdminApiHandler>[0]["agentFetch"];
+  agentStreamHeartbeatMs?: number;
   adminAudit?: Parameters<typeof createAdminApiHandler>[0]["adminAudit"];
   repoService?: ReturnType<typeof createRepoService>;
 } = {}) {
@@ -42,6 +43,7 @@ function createHandler(opts: {
     db: h.db,
     env: opts.env ?? {},
     ...(opts.agentFetch !== undefined ? { agentFetch: opts.agentFetch } : {}),
+    ...(opts.agentStreamHeartbeatMs !== undefined ? { agentStreamHeartbeatMs: opts.agentStreamHeartbeatMs } : {}),
     ...(opts.adminAudit !== undefined ? { adminAudit: opts.adminAudit } : {}),
     paths: {
       reposRoot: `${h.dataDir}/repos`,
@@ -795,6 +797,66 @@ test("POST /v1/agent/sessions/:id/messages can stream Server-Sent Events", async
   expect(text).toContain("event: agent_event");
   expect(text).toContain("data: [DONE]");
   expect(text).toContain("\"type\":\"message_start\"");
+});
+
+test("POST /v1/agent/sessions/:id/messages emits NDJSON heartbeats during idle Hermes gaps", async () => {
+  h = createHarness();
+  const encoder = new TextEncoder();
+  const handler = createHandler({
+    env: {
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "secret-key",
+    },
+    agentStreamHeartbeatMs: 10,
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") return jsonResponse({ run_id: "idle-run" });
+      if (path === "/v1/runs/idle-run/events") {
+        expect(init.headers).toBeDefined();
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            async start(controller) {
+              await new Promise((resolve) => setTimeout(resolve, 30));
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "assistant.delta", delta: "done" })}\n\n`));
+              controller.close();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return jsonResponse({ error: "not_found" }, { status: 404 });
+    },
+  });
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "Wait through an idle model gap",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  const events = await responseNdjson(response);
+  const types = events.map((event) => event.type);
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("application/x-ndjson");
+  expect(types).toContain("heartbeat");
+  expect(types.indexOf("heartbeat")).toBeGreaterThan(types.indexOf("message_start"));
+  expect(types.indexOf("heartbeat")).toBeLessThan(types.indexOf("text_delta"));
+  expect(types).toContain("message_done");
 });
 
 test("Agent Gateway emits bounded audit records with TTL for sessions, messages, tools, approvals, and stops", async () => {
