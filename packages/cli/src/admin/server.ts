@@ -10,6 +10,8 @@ import {
 } from "./auth.ts";
 import { EMBEDDED_UI_ASSETS } from "../build/embedded.generated.ts";
 
+export const ADMIN_API_SERVER_IDLE_TIMEOUT_SECONDS = 300;
+
 export interface EmbeddedUiAsset {
   readonly path: string;
   readonly contentBase64: string;
@@ -47,6 +49,7 @@ export function startAdminApiServer(
   const server = Bun.serve({
     hostname: opts.hostname,
     port: opts.port,
+    idleTimeout: ADMIN_API_SERVER_IDLE_TIMEOUT_SECONDS,
     fetch: createAdminApiServerHandler(opts.runtime, handlerOpts),
   });
   const hostname = server.hostname ?? opts.hostname;

@@ -13,6 +13,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
+import type { QuayConfig } from "./config.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { CommandRunner } from "../ports/command_runner.ts";
 import type { GitPort } from "../ports/git.ts";
@@ -22,10 +23,16 @@ import type { LinearPort } from "../ports/linear.ts";
 import type { SlackPort } from "../ports/slack.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
 import { enqueue, type EnqueueDeps } from "../core/enqueue.ts";
+import { createDeploymentSettingsService } from "../core/deployment_settings.ts";
 import type { ValidatorRunner } from "../core/validator_runner.ts";
+import { loadConfigFromPath } from "./config.ts";
 import { handleEnqueueLinearIssue } from "./enqueue_linear_issue.ts";
 import type { RepoService } from "../core/repos/service.ts";
-import type { AgentResolver } from "../core/agents.ts";
+import {
+  buildAgentSelection,
+  validateAgentSelection,
+  type AgentResolver,
+} from "../core/agents.ts";
 import type { TagService, TagVocab } from "../core/tags/service.ts";
 import { mergeVocab } from "../core/tags/merge.ts";
 import { parseImportToml, planImport } from "../core/tags/import_toml.ts";
@@ -109,6 +116,7 @@ export interface CliDeps {
   artifactStore: ArtifactStore;
   supervisorLock: SupervisorLock;
   paths: CliPaths;
+  config?: QuayConfig;
   tickOptions?: TickOptions;
   // Spec §13: `retry_budget` is a deployment-level knob (default 5). When
   // the operator overrides it in `~/.quay/config.toml`, the production CLI
@@ -202,6 +210,8 @@ export async function dispatch(
         return handlePreamble(rest, deps, io);
       case "tags":
         return handleTags(rest, deps, io);
+      case "settings":
+        return handleSettings(rest, deps, io);
       case "cancel":
         return await handleCancel(rest, deps, io);
       case "submit-brief":
@@ -1162,6 +1172,7 @@ async function handleAdoptPr(
           clock: deps.clock,
           github: deps.github,
           git: deps.git,
+          commandRunner: deps.commandRunner,
           tmux: deps.tmux,
           artifactStore: deps.artifactStore,
           paths: deps.paths,
@@ -1967,6 +1978,87 @@ function readApplyTagsInput(
   return tryReadFile(fromPath);
 }
 
+function handleSettings(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  if (argv.length === 0) {
+    return writeErrorWithUsage(
+      io,
+      ["settings"],
+      "usage_error",
+      "settings subcommand required",
+    );
+  }
+  const [sub, ...rest] = argv;
+  if (isHelpToken(sub as string)) return printHelp(io, ["settings"]);
+  switch (sub) {
+    case "import":
+      if (wantsHelp(rest)) return printHelp(io, ["settings", "import"]);
+      return handleSettingsImport(rest, deps, io);
+    default:
+      return writeErrorWithUsage(
+        io,
+        ["settings"],
+        "usage_error",
+        `unknown settings subcommand: ${sub}`,
+      );
+  }
+}
+
+function handleSettingsImport(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {
+    valued: ["--from"],
+    boolean: ["--only-empty"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const fromPath = readFlag(argv, "--from");
+  if (!fromPath) {
+    return writeError(io, "usage_error", "settings import requires --from <path>");
+  }
+  const loaded = loadConfigFromPath(fromPath);
+  const service = createDeploymentSettingsService({
+    db: deps.db,
+    clock: deps.clock,
+  });
+  const current = service.getRow();
+  const imported = {
+    worker_agent: loaded.config.agents?.worker ?? null,
+    worker_model: loaded.config.agents?.worker_model ?? null,
+    reviewer_agent: loaded.config.agents?.reviewer ?? null,
+    reviewer_model: loaded.config.agents?.reviewer_model ?? null,
+  };
+  const onlyEmpty = argv.includes("--only-empty");
+  const next = onlyEmpty && current !== null ? current : imported;
+  try {
+    validateAgentSelection(buildAgentSelection(deps.config ?? loaded.config, next));
+  } catch (error) {
+    return writeError(
+      io,
+      "validation_error",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  const row = onlyEmpty && current !== null ? current : service.replace(next);
+  io.stdout(`${JSON.stringify({
+    imported: {
+      worker_agent: row.worker_agent,
+      worker_model: row.worker_model,
+      reviewer_agent: row.reviewer_agent,
+      reviewer_model: row.reviewer_model,
+    },
+    config_path: loaded.configPath,
+  })}\n`);
+  return { exitCode: 0 };
+}
+
 function handleTags(
   argv: string[],
   deps: CliDeps,
@@ -2557,6 +2649,7 @@ function pickTickDeps(deps: CliDeps): TickDeps {
     db: deps.db,
     clock: deps.clock,
     git: deps.git,
+    commandRunner: deps.commandRunner,
     github: deps.github,
     tmux: deps.tmux,
     slack: deps.slack,

@@ -48,6 +48,7 @@ import {
   requireUmbrellaFeatureBranchExists,
   UMBRELLA_EXPECTED_TASK_COMPLETION_SOURCES,
 } from "./umbrella_workflows.ts";
+import { installWorktreeDependencies } from "./worktree_dependencies.ts";
 
 export const DEFAULT_RETRY_BUDGET = 5;
 
@@ -372,20 +373,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     branchCreated = true;
 
     // Step 5: install_cmd.
-    const installResult = deps.commandRunner.run(repo.install_cmd, {
-      cwd: worktreePath,
-    });
-    if (installResult.exitCode !== 0) {
-      throw new QuayError(
-        "bootstrap_failed",
-        `install_cmd failed (exit ${installResult.exitCode}): ${installResult.stderr.trim()}`,
-        {
-          step: "install",
-          exit_code: installResult.exitCode,
-          stderr: installResult.stderr,
-        },
-      );
-    }
+    installWorktreeDependencies(deps.commandRunner, repo, worktreePath);
 
     // Step 6: SQL transaction + artifact writes.
     const preambleId = ensurePreambleIdForAttemptReason(

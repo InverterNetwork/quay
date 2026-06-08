@@ -8,10 +8,12 @@ import { FakeGitHub } from "./fakes/github.ts";
 import { FakeLinearAdapter } from "./fakes/linear.ts";
 import { FakeSlack } from "./fakes/slack.ts";
 import { FakeTmux } from "./fakes/tmux.ts";
+import { FakeCommandRunner } from "./fakes/command_runner.ts";
 
 export interface BuiltTickDeps {
   deps: TickDeps;
   git: FakeGit;
+  commandRunner: FakeCommandRunner;
   github: FakeGitHub;
   tmux: FakeTmux;
   slack: FakeSlack;
@@ -26,6 +28,7 @@ export interface BuiltTickDeps {
 export function buildTickDeps(h: Harness): BuiltTickDeps {
   const reposRoot = join(h.dataDir, "repos");
   const git = new FakeGit(reposRoot);
+  const commandRunner = new FakeCommandRunner();
   const github = new FakeGitHub();
   const tmux = new FakeTmux();
   const slack = new FakeSlack();
@@ -40,6 +43,7 @@ export function buildTickDeps(h: Harness): BuiltTickDeps {
       db: h.db,
       clock: h.clock,
       git,
+      commandRunner,
       github,
       tmux,
       slack,
@@ -48,6 +52,7 @@ export function buildTickDeps(h: Harness): BuiltTickDeps {
       supervisorLock: new InProcessSupervisorLock(),
     },
     git,
+    commandRunner,
     github,
     tmux,
     slack,

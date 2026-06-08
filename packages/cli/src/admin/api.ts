@@ -11,6 +11,12 @@ import {
 } from "../core/agents.ts";
 import { QuayError } from "../core/errors.ts";
 import { ciPolicyFromConfig, resolveCiIgnorePolicy } from "../core/ci_policy.ts";
+import {
+  createDeploymentSettingsService,
+  type DeploymentSettings,
+  type DeploymentSettingsPatch,
+  type DeploymentSettingsRow,
+} from "../core/deployment_settings.ts";
 import { TASK_STATES, type TaskState } from "../core/task_state.ts";
 import {
   adminAuthAllowedHeaders,
@@ -67,6 +73,7 @@ export interface AdminApiRuntime {
   db: DB;
   env?: NodeJS.ProcessEnv;
   agentFetch?: AgentFetch;
+  agentStreamHeartbeatMs?: number;
   adminAudit?: (event: AdminAuditEvent) => void;
   paths: {
     reposRoot: string;
@@ -309,6 +316,26 @@ const repoUpdateChangeSchema = z
     path: ["patch"],
   });
 
+const deploymentSettingsPatchSchema = z
+  .object({
+    worker_agent: z.string().min(1).nullable().optional(),
+    worker_model: z.string().min(1).nullable().optional(),
+    reviewer_agent: z.string().min(1).nullable().optional(),
+    reviewer_model: z.string().min(1).nullable().optional(),
+  })
+  .strict();
+
+const deploymentSettingsUpdateChangeSchema = z
+  .object({
+    type: z.literal("deployment_settings.update"),
+    patch: deploymentSettingsPatchSchema,
+  })
+  .strict()
+  .refine((change) => Object.keys(change.patch).length > 0, {
+    message: "deployment_settings.update patch must include at least one field",
+    path: ["patch"],
+  });
+
 const tagReplaceChangeSchema = z
   .object({
     type: z.literal("tags.replace"),
@@ -347,6 +374,7 @@ const tagReplaceChangeSchema = z
 
 const changeSchema = z.union([
   repoUpdateChangeSchema,
+  deploymentSettingsUpdateChangeSchema,
   tagReplaceChangeSchema,
 ]);
 
@@ -1183,7 +1211,7 @@ function formatAge(timestamp: string, now: Date): string {
 }
 
 function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown> {
-  const agentSelection = buildAgentSelection(runtime.config);
+  const agentSelection = buildAgentSelection(runtime.config, deploymentSettingsRow(runtime));
   const repos = runtime.repoService.list({ activeOnly: true });
   return {
     revision: computeAdminRevision(runtime),
@@ -1319,7 +1347,7 @@ function buildRepoDetail(runtime: AdminApiRuntime, row: RepoRow): Record<string,
 
 function buildMatrixReadModel(runtime: AdminApiRuntime): Record<string, unknown> {
   const repos = runtime.repoService.list({ activeOnly: true });
-  const agentSelection = buildAgentSelection(runtime.config);
+  const agentSelection = buildAgentSelection(runtime.config, deploymentSettingsRow(runtime));
   const rows: AdminMatrixRow[] = [
     matrixRow(
       "AGENTS",
@@ -1593,6 +1621,11 @@ function auditChangeSummaries(change: AdminChange): string[] {
       .filter((field) => field in change.patch)
       .map((field) => `repo ${change.repo_id}: update ${field}`);
   }
+  if (change.type === "deployment_settings.update") {
+    return DEPLOYMENT_SETTINGS_PATCH_FIELDS
+      .filter((field) => field in change.patch)
+      .map((field) => `deployment settings: update ${field}`);
+  }
   const prefix = change.scope === "deployment"
     ? "deployment tags"
     : `repo ${change.repo_id!} tags`;
@@ -1605,6 +1638,10 @@ function targetResourcesFromChanges(changes: AdminChange[]): string[] {
   for (const change of changes) {
     if (change.type === "repo.update") {
       targets.add(`repo:${change.repo_id}`);
+      continue;
+    }
+    if (change.type === "deployment_settings.update") {
+      targets.add("deployment");
       continue;
     }
     targets.add(change.scope === "deployment" ? "deployment" : `repo:${change.repo_id!}`);
@@ -1689,7 +1726,7 @@ async function parseChangeRequest(request: Request): Promise<{
       422,
       "unsupported_change",
       `unsupported change type "${unsupported}"`,
-      { supported_types: ["repo.update", "tags.replace"] },
+      { supported_types: ["repo.update", "deployment_settings.update", "tags.replace"] },
     );
   }
   const result = changeRequestSchema.safeParse(raw);
@@ -1738,6 +1775,7 @@ function unsupportedChangeType(raw: unknown): string | null {
     if (
       typeof type === "string" &&
       type !== "repo.update" &&
+      type !== "deployment_settings.update" &&
       type !== "tags.replace"
     ) {
       return type;
@@ -1770,6 +1808,10 @@ function buildChangePreview(
   for (const [index, change] of changes.entries()) {
     if (change.type === "repo.update") {
       operations.push(...repoUpdateOperations(runtime, change, index));
+      continue;
+    }
+    if (change.type === "deployment_settings.update") {
+      operations.push(...deploymentSettingsUpdateOperations(runtime, change, index));
       continue;
     }
     operations.push(...tagReplaceOperations(runtime, change, index));
@@ -1809,6 +1851,34 @@ function repoUpdateOperations(
       after,
       summary:
         `repo ${change.repo_id}: set ${field} from ${formatPreviewValue(before)} to ${formatPreviewValue(after)}`,
+    });
+  }
+  return operations;
+}
+
+function deploymentSettingsUpdateOperations(
+  runtime: AdminApiRuntime,
+  change: Extract<AdminChange, { type: "deployment_settings.update" }>,
+  changeIndex: number,
+): AdminChangeOperation[] {
+  validateDeploymentSettingsPatch(runtime, change.patch);
+  const current = effectiveDeploymentSettings(runtime);
+  const operations: AdminChangeOperation[] = [];
+  for (const field of DEPLOYMENT_SETTINGS_PATCH_FIELDS) {
+    if (!(field in change.patch)) continue;
+    const after = change.patch[field];
+    const before = current[field];
+    if (before === after) continue;
+    operations.push({
+      op_id: `change-${changeIndex + 1}:deployment_settings:${field}`,
+      type: "deployment_settings.update",
+      scope: "deployment",
+      target: "deployment",
+      field,
+      before,
+      after,
+      summary:
+        `deployment settings: set ${field} from ${formatPreviewValue(before)} to ${formatPreviewValue(after)}`,
     });
   }
   return operations;
@@ -1857,9 +1927,23 @@ function applyOneChange(runtime: AdminApiRuntime, change: AdminChange): void {
     runtime.repoService.update(change.repo_id, change.patch);
     return;
   }
+  if (change.type === "deployment_settings.update") {
+    validateDeploymentSettingsPatch(runtime, change.patch);
+    createDeploymentSettingsService({ db: runtime.db }).update(change.patch, {
+      defaultsWhenEmpty: effectiveDeploymentSettings(runtime),
+    });
+    return;
+  }
   const repoId = change.scope === "repo" ? change.repo_id! : null;
   runtime.tagService.apply(change.scope, repoId, tagVocabFromChange(runtime, change));
 }
+
+const DEPLOYMENT_SETTINGS_PATCH_FIELDS = [
+  "worker_agent",
+  "worker_model",
+  "reviewer_agent",
+  "reviewer_model",
+] as const satisfies readonly (keyof DeploymentSettingsPatch)[];
 
 const REPO_PATCH_FIELDS = [
   "repo_url",
@@ -1900,7 +1984,7 @@ function validateAgentPatch(
   repoId: string,
   patch: RepoPatch,
 ): void {
-  const selection = buildAgentSelection(runtime.config);
+  const selection = buildAgentSelection(runtime.config, deploymentSettingsRow(runtime));
   const entries = [
     ["worker", patch.agent_worker],
     ["reviewer", patch.agent_reviewer],
@@ -1913,6 +1997,28 @@ function validateAgentPatch(
         "validation_error",
         `agent "${agentName}" is not registered for ${role} role`,
         { repo_id: repoId, role, agent: agentName },
+      );
+    }
+  }
+}
+
+function validateDeploymentSettingsPatch(
+  runtime: AdminApiRuntime,
+  patch: DeploymentSettingsPatch,
+): void {
+  const selection = buildAgentSelection(runtime.config, deploymentSettingsRow(runtime));
+  const entries = [
+    ["worker", patch.worker_agent],
+    ["reviewer", patch.reviewer_agent],
+  ] as const;
+  for (const [role, agentName] of entries) {
+    if (agentName === undefined || agentName === null) continue;
+    const invocation = selection.invocations[agentName];
+    if (invocation === undefined || invocation[role] === undefined) {
+      throw new QuayError(
+        "validation_error",
+        `agent "${agentName}" is not registered for ${role} role`,
+        { role, agent: agentName },
       );
     }
   }
@@ -1986,6 +2092,7 @@ function computeAdminRevision(runtime: AdminApiRuntime): string {
   const state = {
     version: 1,
     ci_policy: ciPolicyFromConfig(runtime.config),
+    deployment_settings: deploymentSettings(runtime),
     repos: runtime.repoService.list({ activeOnly: true }),
     deployment_tags: runtime.tagService.getVocab("deployment"),
     repo_tags: Object.fromEntries(
@@ -1999,6 +2106,36 @@ function computeAdminRevision(runtime: AdminApiRuntime): string {
   };
   const digest = createHash("sha256").update(stableJson(state)).digest("hex");
   return `sha256:${digest}`;
+}
+
+function deploymentSettings(runtime: AdminApiRuntime): {
+  exists: boolean;
+  values: DeploymentSettings;
+} {
+  const row = createDeploymentSettingsService({ db: runtime.db }).getRow();
+  return {
+    exists: row !== null,
+    values: {
+      worker_agent: row?.worker_agent ?? null,
+      worker_model: row?.worker_model ?? null,
+      reviewer_agent: row?.reviewer_agent ?? null,
+      reviewer_model: row?.reviewer_model ?? null,
+    },
+  };
+}
+
+function deploymentSettingsRow(runtime: AdminApiRuntime): DeploymentSettingsRow | undefined {
+  return createDeploymentSettingsService({ db: runtime.db }).getRow() ?? undefined;
+}
+
+function effectiveDeploymentSettings(runtime: AdminApiRuntime): DeploymentSettings {
+  const selection = buildAgentSelection(runtime.config, deploymentSettingsRow(runtime));
+  return {
+    worker_agent: selection.defaults.worker,
+    worker_model: selection.defaultModels?.worker ?? null,
+    reviewer_agent: selection.defaults.reviewer,
+    reviewer_model: selection.defaultModels?.reviewer ?? null,
+  };
 }
 
 function stableJson(value: unknown): string {

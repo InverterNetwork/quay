@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
+import type { CommandRunner } from "../ports/command_runner.ts";
 import type { GitPort } from "../ports/git.ts";
 import { GitHubMergeError } from "../ports/github.ts";
 import type {
@@ -87,6 +88,10 @@ import {
 import { accountGoalFailureAndMaybeLimit } from "./goals.ts";
 import { requireUmbrellaFeatureBranchExists } from "./umbrella_workflows.ts";
 import type { SupervisorLock } from "./supervisor_lock.ts";
+import {
+  installWorktreeDependencies,
+  loadWorktreeDependencyRepo,
+} from "./worktree_dependencies.ts";
 
 export const DEFAULT_MAX_CONCURRENT = 2;
 export const DEFAULT_MAX_CONCURRENT_REVIEWERS = 2;
@@ -131,6 +136,7 @@ export interface TickDeps {
   db: DB;
   clock: Clock;
   git: GitPort;
+  commandRunner: CommandRunner;
   github: GitHubPort;
   tmux: TmuxPort;
   slack: SlackPort;
@@ -1873,6 +1879,7 @@ function processRunningTask(
     attempt_id: attempt.attempt_id,
     attempt_number: attempt.attempt_number,
     preamble_id: attempt.preamble_id,
+    reason: attempt.reason,
     remote_sha_at_spawn: attempt.remote_sha_at_spawn,
     pr_existed_at_spawn: attempt.pr_existed_at_spawn,
     tmux_session: attempt.tmux_session,
@@ -2122,6 +2129,8 @@ function outcomeToResult(
     case "pr_opened":
       return { task_id: taskId, action: "pr_opened" };
     case "existing_pr_attached":
+      return { task_id: taskId, action: "existing_pr_attached" };
+    case "adopted_pr_ready_for_review":
       return { task_id: taskId, action: "existing_pr_attached" };
     case "no_progress":
       return { task_id: taskId, action: "no_progress" };
@@ -3455,9 +3464,13 @@ function ensureUmbrellaFinalPrWorktree(
   workflow: ReadyUmbrellaFinalPrWorkflowRow,
   worktreePath: string,
 ): boolean {
+  const repo = loadWorktreeDependencyRepo(deps.db, workflow.repo_id);
   if (existsSync(worktreePath)) {
     const currentBranch = deps.git.worktreeCurrentBranch(worktreePath);
-    if (currentBranch === workflow.feature_branch) return false;
+    if (currentBranch === workflow.feature_branch) {
+      installWorktreeDependencies(deps.commandRunner, repo, worktreePath);
+      return false;
+    }
     deps.git.worktreeRemove(worktreePath);
   }
   try {
@@ -3468,6 +3481,7 @@ function ensureUmbrellaFinalPrWorktree(
       workflow.feature_branch,
       `origin/${workflow.feature_branch}`,
     );
+    installWorktreeDependencies(deps.commandRunner, repo, worktreePath);
     return true;
   } catch (err) {
     if (existsSync(worktreePath)) {
@@ -5687,6 +5701,7 @@ function refreshDependencyReleasedWorktreeIfNeeded(
   if (!wasReleasedFromDependencies(deps.db, task.task_id)) return null;
 
   try {
+    const repo = loadWorktreeDependencyRepo(deps.db, task.repo_id);
     deps.git.fetch(task.repo_id, task.base_branch);
     deps.git.worktreeRemove(task.worktree_path);
     deps.git.worktreeAddExistingBranch(
@@ -5695,6 +5710,7 @@ function refreshDependencyReleasedWorktreeIfNeeded(
       task.branch_name,
       `origin/${task.base_branch}`,
     );
+    installWorktreeDependencies(deps.commandRunner, repo, task.worktree_path);
   } catch (err) {
     return {
       task_id: task.task_id,

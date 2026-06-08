@@ -28,6 +28,7 @@ function createHandler(opts: {
   config?: Parameters<typeof createAdminApiHandler>[0]["config"];
   env?: NodeJS.ProcessEnv;
   agentFetch?: Parameters<typeof createAdminApiHandler>[0]["agentFetch"];
+  agentStreamHeartbeatMs?: number;
   adminAudit?: Parameters<typeof createAdminApiHandler>[0]["adminAudit"];
   repoService?: ReturnType<typeof createRepoService>;
 } = {}) {
@@ -42,6 +43,7 @@ function createHandler(opts: {
     db: h.db,
     env: opts.env ?? {},
     ...(opts.agentFetch !== undefined ? { agentFetch: opts.agentFetch } : {}),
+    ...(opts.agentStreamHeartbeatMs !== undefined ? { agentStreamHeartbeatMs: opts.agentStreamHeartbeatMs } : {}),
     ...(opts.adminAudit !== undefined ? { adminAudit: opts.adminAudit } : {}),
     paths: {
       reposRoot: `${h.dataDir}/repos`,
@@ -795,6 +797,66 @@ test("POST /v1/agent/sessions/:id/messages can stream Server-Sent Events", async
   expect(text).toContain("event: agent_event");
   expect(text).toContain("data: [DONE]");
   expect(text).toContain("\"type\":\"message_start\"");
+});
+
+test("POST /v1/agent/sessions/:id/messages emits NDJSON heartbeats during idle Hermes gaps", async () => {
+  h = createHarness();
+  const encoder = new TextEncoder();
+  const handler = createHandler({
+    env: {
+      QUAY_AGENT_PROVIDER: "hermes",
+      QUAY_HERMES_API_BASE_URL: "http://hermes.local",
+      QUAY_HERMES_API_KEY: "secret-key",
+    },
+    agentStreamHeartbeatMs: 10,
+    agentFetch: async (input, init = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      if (path === "/v1/capabilities") return jsonResponse({ features: ["run_submission", "run_events_sse", "run_stop"] });
+      if (path === "/v1/runs") return jsonResponse({ run_id: "idle-run" });
+      if (path === "/v1/runs/idle-run/events") {
+        expect(init.headers).toBeDefined();
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            async start(controller) {
+              await new Promise((resolve) => setTimeout(resolve, 30));
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "assistant.delta", delta: "done" })}\n\n`));
+              controller.close();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return jsonResponse({ error: "not_found" }, { status: 404 });
+    },
+  });
+  const session = await responseJson(await handler(postJson("/v1/agent/sessions", {
+    context: agentContextFixture,
+  })));
+  const sessionId = session.session_id as string;
+
+  const response = await handler(
+    new Request(`http://quay.local/v1/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "Wait through an idle model gap",
+        context: agentContextFixture,
+      }),
+    }),
+  );
+  const events = await responseNdjson(response);
+  const types = events.map((event) => event.type);
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("application/x-ndjson");
+  expect(types).toContain("heartbeat");
+  expect(types.indexOf("heartbeat")).toBeGreaterThan(types.indexOf("message_start"));
+  expect(types.indexOf("heartbeat")).toBeLessThan(types.indexOf("text_delta"));
+  expect(types).toContain("message_done");
 });
 
 test("Agent Gateway emits bounded audit records with TTL for sessions, messages, tools, approvals, and stops", async () => {
@@ -1953,6 +2015,146 @@ test("GET /v1/global returns deployment config, agents, prompts, and tags", asyn
       roles: ["worker"],
       commands: { worker: "codex exec < {prompt_file}" },
     });
+});
+
+test("POST /v1/changes/apply updates DB-backed deployment agent defaults", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: {
+      agents: {
+        worker: "claude",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+  });
+  const revision = await currentRevision(handler);
+
+  const response = await handler(postJson("/v1/changes/apply", {
+    base_revision: revision,
+    changes: [
+      {
+        type: "deployment_settings.update",
+        patch: {
+          worker_agent: "codex",
+          worker_model: "gpt-5.4",
+        },
+      },
+    ],
+  }));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(JSON.stringify(body)).toContain("deployment settings: set worker_agent");
+  const globalResponse = await handler(new Request("http://quay.local/v1/global"));
+  const global = await responseJson(globalResponse);
+  expect(global).toMatchObject({
+    agents: {
+      defaults: {
+        worker: "codex",
+        worker_model: "gpt-5.4",
+        reviewer: "claude",
+      },
+    },
+  });
+});
+
+test("POST /v1/changes/apply preserves effective defaults on first partial deployment settings edit", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: {
+      agents: {
+        worker: "codex",
+        worker_model: "toml-worker-model",
+        reviewer: "codex",
+        reviewer_model: "toml-reviewer-model",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+  });
+  const revision = await currentRevision(handler);
+
+  const response = await handler(postJson("/v1/changes/apply", {
+    base_revision: revision,
+    changes: [
+      {
+        type: "deployment_settings.update",
+        patch: {
+          worker_model: "gpt-5.4",
+        },
+      },
+    ],
+  }));
+
+  expect(response.status).toBe(200);
+  expect(
+    h.db
+      .query<{
+        worker_agent: string | null;
+        worker_model: string | null;
+        reviewer_agent: string | null;
+        reviewer_model: string | null;
+      }, []>(
+        `SELECT worker_agent, worker_model, reviewer_agent, reviewer_model
+           FROM deployment_settings
+          WHERE singleton_id = 1`,
+      )
+      .get(),
+  ).toEqual({
+    worker_agent: "codex",
+    worker_model: "gpt-5.4",
+    reviewer_agent: "codex",
+    reviewer_model: "toml-reviewer-model",
+  });
+});
+
+test("Admin revision distinguishes missing deployment settings from explicit null row", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: {
+      agents: {
+        worker: "codex",
+        reviewer: "codex",
+        worker_model: "toml-worker-model",
+        reviewer_model: "toml-reviewer-model",
+        invocations: {
+          claude: { worker: "claude --w", reviewer: "claude --r" },
+          codex: { worker: "codex exec", reviewer: "codex exec --review" },
+        },
+      },
+    },
+  });
+  const before = await currentRevision(handler);
+
+  h.db
+    .query(
+      `INSERT INTO deployment_settings (
+         singleton_id, worker_agent, worker_model, reviewer_agent,
+         reviewer_model, created_at, updated_at
+       ) VALUES (1, NULL, NULL, NULL, NULL, ?, ?)`,
+    )
+    .run("2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+
+  const after = await currentRevision(handler);
+  expect(after).not.toBe(before);
+
+  const globalResponse = await handler(new Request("http://quay.local/v1/global"));
+  const global = await responseJson(globalResponse);
+  expect(global).toMatchObject({
+    agents: {
+      defaults: {
+        worker: "claude",
+        worker_model: null,
+        reviewer: "claude",
+        reviewer_model: null,
+      },
+    },
+  });
 });
 
 test("GET /v1/tags counts repo tag extensions only for active repos", async () => {

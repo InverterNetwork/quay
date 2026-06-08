@@ -270,6 +270,12 @@ test("tick refreshes dependency-released first-spawn worktree from latest base",
       baseRef: "origin/main",
     },
   });
+  expect(built.commandRunner.calls).toEqual([
+    {
+      command: "bun install",
+      cwd: `/tmp/${dependentTaskId}`,
+    },
+  ]);
   const refreshEvent = h.db
     .query<{ event_type: string; event_data: string | null }, [string]>(
       `SELECT event_type, event_data
@@ -284,6 +290,66 @@ test("tick refreshes dependency-released first-spawn worktree from latest base",
     base_ref: "origin/main",
     worktree_path: `/tmp/${dependentTaskId}`,
   });
+});
+
+test("tick does not spawn dependency-released task when refreshed worktree install fails", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-26T10:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-tick-deps-refresh-install-fails");
+  const blockerTaskId = insertTask(h.db, {
+    taskId: "task-blocker-refresh-install-fails",
+    repoId,
+    state: "merged",
+  });
+  const dependentTaskId = insertTask(h.db, {
+    taskId: "task-dependent-refresh-install-fails",
+    repoId,
+    state: "waiting_dependencies",
+  });
+  createTaskDependency(h.db, {
+    dependentTaskId,
+    dependencyTaskId: blockerTaskId,
+    dependencySource: "manual",
+    dependencyExternalRef: "BRIX-1563",
+    dependencyRepoId: repoId,
+    requiredState: "merged",
+    now: "2026-04-26T09:00:00.000Z",
+  });
+  const attemptId = insertAttempt(h.db, {
+    taskId: dependentTaskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+  });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, dependentTaskId, attemptId);
+
+  const built = buildTickDeps(h);
+  built.github.setPrExists(repoId, `quay/${dependentTaskId}`, false);
+  built.commandRunner.failNext("install boom");
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    {
+      task_id: dependentTaskId,
+      action: "spawn_substrate_failed",
+      error: expect.stringContaining("install_cmd failed"),
+    },
+  ]);
+  expect(built.tmux.spawnCalls).toHaveLength(0);
+  expect(built.commandRunner.calls).toEqual([
+    {
+      command: "bun install",
+      cwd: `/tmp/${dependentTaskId}`,
+    },
+  ]);
+  const task = h.db
+    .query<{ state: string; attempts_consumed: number }, [string]>(
+      `SELECT state, attempts_consumed FROM tasks WHERE task_id = ?`,
+    )
+    .get(dependentTaskId);
+  expect(task).toEqual({ state: "queued", attempts_consumed: 0 });
 });
 
 test("tick keeps dependent waiting and surfaces failed blockers through delivery outbox", async () => {

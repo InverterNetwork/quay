@@ -208,7 +208,12 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
         c.args.baseRef === "origin/feature/human-adopt",
     ),
   ).toBe(true);
-  expect(built.commandRunner.calls).toEqual([]);
+  expect(built.commandRunner.calls).toEqual([
+    {
+      command: "bun install",
+      cwd: `${built.worktreesRoot}/quay-review/quay/51`,
+    },
+  ]);
 
   const promptRow = h.db
     .query<{ file_path: string }, [number]>(
@@ -220,6 +225,8 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
   const prompt = readFileSync(promptRow!.file_path, "utf8");
   expect(prompt).toContain("Update the existing PR #51");
   expect(prompt).toContain("Do not create another pull request.");
+  expect(prompt).toContain(".quay-ready-for-review.json");
+  expect(prompt).toContain("rationale");
   expect(prompt).toContain("Head branch: feature/human-adopt");
 
   built.git.setRemoteHeadSha("quay", "feature/human-adopt", "head-51");
@@ -261,6 +268,79 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
     remote_sha_at_spawn: "head-51",
     pr_existed_at_spawn: 1,
   });
+});
+
+test("adopt-pr fails before scheduling worker when dependency install fails", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "TOKEN=super-secret bun install",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.git.seedBareClone("quay");
+  built.github.setPrView("quay", 54, {
+    number: 54,
+    title: "Human PR install fails",
+    body: "Please let Quay finish this.",
+    url: "https://github.com/acc/quay/pull/54",
+    headRefName: "feature/human-install-fails",
+    headSha: "head-54",
+    baseRef: "dev",
+    isCrossRepository: false,
+  });
+  built.github.setPrSnapshotByNumber("quay", 54, {
+    prNumber: 54,
+    prUrl: "https://github.com/acc/quay/pull/54",
+    state: "open",
+    headSha: "head-54",
+    baseSha: "base-54",
+    baseRef: "dev",
+    mergeable: "mergeable",
+    latestReview: {
+      decision: "CHANGES_REQUESTED",
+      latestReviewId: "R_current",
+      submittedHeadSha: "head-54",
+      comments: "Please fix the current head.",
+    },
+    checks: { checkSha: "head-54", items: [] },
+  });
+  built.commandRunner.failNext("install boom");
+
+  const io = bufferIO();
+  const result = await dispatch(["adopt-pr", "--pr", "acc/quay:54"], built.deps, io);
+
+  expect(result.exitCode).toBe(4);
+  expect(io.out()).toBe("");
+  expect(io.err()).toContain("install_cmd failed");
+  expect(io.err()).not.toContain("TOKEN=super-secret");
+  const worktreePath = `${built.worktreesRoot}/quay-review/quay/54`;
+  expect(built.commandRunner.calls).toEqual([
+    {
+      command: "TOKEN=super-secret bun install",
+      cwd: worktreePath,
+    },
+  ]);
+  expect(built.git.worktrees.has(worktreePath)).toBe(false);
+  const attempts = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM attempts WHERE task_id = ? AND reason = 'adopt_pr'`,
+    )
+    .get("pr-review-quay-54");
+  expect(attempts?.n).toBe(0);
 });
 
 test("adopt-pr does not schedule worker for stale requested changes on green current head", async () => {

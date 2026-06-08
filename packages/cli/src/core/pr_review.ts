@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
+import type { CommandRunner } from "../ports/command_runner.ts";
 import type { GitPort } from "../ports/git.ts";
 import type { GitHubPort, PrSnapshot, PullRequestView } from "../ports/github.ts";
 import type { TmuxPort } from "../ports/tmux.ts";
@@ -22,6 +23,10 @@ import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.t
 import { renderReferenceReposPrompt } from "./reference_repos.ts";
 import { assertTaskState, transitionTaskState } from "./task_state.ts";
 import { composeWorkerPrompt } from "./worker_prompt.ts";
+import {
+  installWorktreeDependencies,
+  loadWorktreeDependencyRepo,
+} from "./worktree_dependencies.ts";
 
 export const SYNTHETIC_PR_REVIEW_PREFIX = "pr-review-";
 
@@ -113,6 +118,7 @@ export interface AdoptPrDeps {
   clock: Clock;
   github: GitHubPort;
   git: GitPort;
+  commandRunner: CommandRunner;
   tmux: TmuxPort;
   artifactStore: ArtifactStore;
   paths: { reposRoot: string; worktreesRoot: string; artifactsRoot: string };
@@ -1028,6 +1034,7 @@ function prepareAdoptedWorktree(
   headBranch: string,
 ): void {
   let worktreePrepared = false;
+  const repo = loadWorktreeDependencyRepo(deps.db, repoId);
   try {
     deps.git.fetch(repoId, headBranch);
     if (existsSync(worktreePath)) {
@@ -1040,6 +1047,7 @@ function prepareAdoptedWorktree(
       `origin/${headBranch}`,
     );
     worktreePrepared = true;
+    installWorktreeDependencies(deps.commandRunner, repo, worktreePath);
   } catch (err) {
     if (worktreePrepared) {
       try {
@@ -1242,6 +1250,7 @@ function scheduleAdoptedWorkerAttempt(
     const guidance = [
       `Adopt PR #${input.pr.number} and update the existing branch ${input.headBranch}.`,
       "Push commits to that same branch and update the existing PR.",
+      "If the PR already satisfies the requested work and no code changes are needed, write `.quay-ready-for-review.json` with a concise non-empty `rationale` string, then exit cleanly without pushing an empty commit.",
       "Do not create a duplicate pull request.",
     ].join("\n");
     const composed = composeWorkerPrompt({
