@@ -45,7 +45,7 @@ function createRuntime(opts: {
 }
 
 test("admin API server keeps idle streams open across model gaps", () => {
-  expect(ADMIN_API_SERVER_IDLE_TIMEOUT_SECONDS).toBe(300);
+  expect(ADMIN_API_SERVER_IDLE_TIMEOUT_SECONDS).toBe(255);
 });
 
 test("hosted handler keeps /v1 API routes ahead of static files", async () => {
