@@ -10,7 +10,8 @@ import {
 } from "./auth.ts";
 import { EMBEDDED_UI_ASSETS } from "../build/embedded.generated.ts";
 
-export const ADMIN_API_SERVER_IDLE_TIMEOUT_SECONDS = 300;
+// Bun.serve rejects idleTimeout values above 255 seconds.
+export const ADMIN_API_SERVER_IDLE_TIMEOUT_SECONDS = 255;
 
 export interface EmbeddedUiAsset {
   readonly path: string;
