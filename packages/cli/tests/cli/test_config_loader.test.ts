@@ -369,6 +369,43 @@ max_thread_messages = 400
   });
 });
 
+test("loads Linear bearer auth configuration", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[adapters.linear]
+enabled = true
+auth_mode = "bearer"
+bearer_token_env = "QUAY_LINEAR_APP_TOKEN"
+token_command = "linear-token-helper --actor app"
+`,
+  );
+  const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
+  expect(linearAdapterOptionsFromConfig(result.config)).toEqual({
+    authMode: "bearer",
+    tokenEnvVar: "QUAY_LINEAR_APP_TOKEN",
+    tokenCommand: "linear-token-helper --actor app",
+  });
+});
+
+test("infers Linear bearer auth mode from bearer-specific token source", () => {
+  const dir = tempDir();
+  const path = join(dir, "config.toml");
+  writeFileSync(
+    path,
+    `[adapters.linear]
+enabled = true
+bearer_token_env = "QUAY_LINEAR_APP_TOKEN"
+`,
+  );
+  const result = loadConfig({ env: { QUAY_CONFIG_FILE: path } });
+  expect(linearAdapterOptionsFromConfig(result.config)).toEqual({
+    authMode: "bearer",
+    tokenEnvVar: "QUAY_LINEAR_APP_TOKEN",
+  });
+});
+
 test("loads [admin] bearer auth configuration", () => {
   const dir = tempDir();
   const path = join(dir, "config.toml");

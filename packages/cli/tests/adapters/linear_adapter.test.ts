@@ -743,6 +743,90 @@ test("test_linear_adapter_honors_token_env_var_override", async () => {
   }
 });
 
+test("linear adapter sends bearer authorization for oauth token env mode", async () => {
+  delete process.env.LINEAR_API_KEY;
+  process.env.QUAY_LINEAR_BEARER_TOKEN = "oauth-app-token";
+  try {
+    const handle = recorder(() => jsonResponse(issuePayload({})));
+    const adapter = new LinearAdapter({
+      authMode: "bearer",
+      tokenEnvVar: "QUAY_LINEAR_BEARER_TOKEN",
+      transport: handle.transport,
+    });
+    await adapter.getIssue("ENG-1234");
+    expect(handle.requests[0]!.headers.Authorization).toBe(
+      "Bearer oauth-app-token",
+    );
+  } finally {
+    delete process.env.QUAY_LINEAR_BEARER_TOKEN;
+  }
+});
+
+test("linear adapter resolves bearer token provider on each request", async () => {
+  let tokenNumber = 0;
+  const handle = recorder(() => jsonResponse(issuePayload({})));
+  const adapter = new LinearAdapter({
+    authMode: "bearer",
+    tokenProvider: () => `oauth-token-${++tokenNumber}`,
+    transport: handle.transport,
+  });
+
+  await adapter.getIssue("ENG-1234");
+  await adapter.getIssue("ENG-1234");
+
+  expect(handle.requests.map((req) => req.headers.Authorization)).toEqual([
+    "Bearer oauth-token-1",
+    "Bearer oauth-token-2",
+  ]);
+});
+
+test("linear adapter resolves bearer token command on each request", async () => {
+  const handle = recorder(() => jsonResponse(issuePayload({})));
+  const adapter = new LinearAdapter({
+    authMode: "bearer",
+    tokenCommand: "printf oauth-token-from-command",
+    transport: handle.transport,
+  });
+
+  await adapter.getIssue("ENG-1234");
+
+  expect(handle.requests[0]!.headers.Authorization).toBe(
+    "Bearer oauth-token-from-command",
+  );
+});
+
+test("linear adapter maps 401 and 403 to explicit auth failures with body", async () => {
+  for (const status of [401, 403]) {
+    const handle = recorder(() => ({
+      status,
+      headers: {},
+      body: JSON.stringify({ errors: [{ message: "Account disabled" }] }),
+    }));
+    const adapter = new LinearAdapter({
+      authMode: "bearer",
+      token: "expired-token",
+      transport: handle.transport,
+    });
+    let caught: unknown = null;
+    try {
+      await adapter.getIssue("ENG-1234");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(QuayError);
+    const err = caught as QuayError;
+    expect(err.code).toBe("adapter_error");
+    expect(err.details).toMatchObject({
+      adapter: "linear",
+      retryable: false,
+      status,
+      auth_failure: true,
+    });
+    expect(err.message).toContain("auth failed");
+    expect(err.message).toContain("Account disabled");
+  }
+});
+
 test("test_linear_adapter_throws_on_graphql_errors_even_if_issue_present", async () => {
   // Spec §12: any non-empty errors[] is a hard adapter failure. Even when
   // data.issue is populated (e.g. a deprecated-field warning), the adapter

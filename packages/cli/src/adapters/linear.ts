@@ -1,5 +1,6 @@
 // Real Linear adapter. Reads issues + comments via Linear's GraphQL API.
-// Bot token is sourced from `LINEAR_API_KEY` (adapters spec §4 / §7).
+// Auth defaults to the legacy `LINEAR_API_KEY` personal token path, and can
+// opt into OAuth/app-actor Bearer tokens via a per-request env/helper source.
 //
 // The adapter calls `fetch` in-process. An out-of-process spawn would not
 // survive `bun build --compile`: `process.execPath` is the compiled quay
@@ -18,6 +19,8 @@
 //   - HTTP 401/403 / other 4xx                 → throw `adapter_error{retryable:false}`
 //   - HTTP 5xx                                 → throw `adapter_error{retryable:false}` (response
 //                                                 body included in the message for debuggability)
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { QuayError } from "../core/errors.ts";
 import type {
   LinearBlockedByRelation,
@@ -34,6 +37,10 @@ const DEFAULT_LINEAR_TIMEOUT_MS = 30_000;
 // Linear's GraphQL caps `first` at 250; 100 keeps us well under.
 const COMMENTS_PAGE_SIZE = 100;
 const CHILDREN_PAGE_SIZE = 100;
+const execFileAsync = promisify(execFile);
+
+export type LinearAuthMode = "api_key" | "bearer";
+export type LinearTokenProvider = () => Promise<string> | string;
 
 export interface LinearTransportRequest {
   url: string;
@@ -153,6 +160,9 @@ export class LinearAdapter implements LinearPort {
   private readonly endpoint: string;
   private readonly explicitToken: string | null;
   private readonly tokenEnvVar: string;
+  private readonly authMode: LinearAuthMode;
+  private readonly tokenCommand: string | null;
+  private readonly tokenProvider: LinearTokenProvider | null;
   private readonly timeoutMs: number;
   private readonly transport: LinearTransport;
   // Per-team workflow state cache (state-name → state-id). Linear's workflow
@@ -179,6 +189,9 @@ export class LinearAdapter implements LinearPort {
   constructor(opts?: {
     token?: string;
     tokenEnvVar?: string;
+    authMode?: LinearAuthMode;
+    tokenCommand?: string;
+    tokenProvider?: LinearTokenProvider;
     endpoint?: string;
     timeoutMs?: number;
     transport?: LinearTransport;
@@ -189,6 +202,12 @@ export class LinearAdapter implements LinearPort {
       opts?.tokenEnvVar !== undefined && opts.tokenEnvVar !== ""
         ? opts.tokenEnvVar
         : "LINEAR_API_KEY";
+    this.authMode = opts?.authMode ?? "api_key";
+    this.tokenCommand =
+      opts?.tokenCommand !== undefined && opts.tokenCommand.trim() !== ""
+        ? opts.tokenCommand
+        : null;
+    this.tokenProvider = opts?.tokenProvider ?? null;
     this.endpoint = opts?.endpoint ?? DEFAULT_LINEAR_ENDPOINT;
     this.timeoutMs =
       opts?.timeoutMs !== undefined && opts.timeoutMs > 0
@@ -381,7 +400,37 @@ export class LinearAdapter implements LinearPort {
 
   // -- helpers ----------------------------------------------------------
 
-  private resolveToken(): string {
+  private async resolveAuthorizationHeader(): Promise<string> {
+    const rawToken = await this.resolveToken();
+    if (this.authMode === "bearer") {
+      return `Bearer ${rawToken.replace(/^Bearer\s+/i, "")}`;
+    }
+    return rawToken;
+  }
+
+  private async resolveToken(): Promise<string> {
+    if (this.tokenProvider !== null) {
+      const fromProvider = (await this.tokenProvider()).trim();
+      if (fromProvider === "") {
+        throw new QuayError(
+          "adapter_not_configured",
+          "LinearAdapter token provider returned an empty token",
+          { adapter: "linear", token_source: "provider" },
+        );
+      }
+      return fromProvider;
+    }
+    if (this.tokenCommand !== null) {
+      const fromCommand = await this.runTokenCommand();
+      if (fromCommand === "") {
+        throw new QuayError(
+          "adapter_not_configured",
+          "LinearAdapter token command returned an empty token",
+          { adapter: "linear", token_source: "command" },
+        );
+      }
+      return fromCommand;
+    }
     if (this.explicitToken !== null) return this.explicitToken;
     const envVar = this.tokenEnvVar;
     const fromEnv = process.env[envVar] ?? "";
@@ -393,6 +442,34 @@ export class LinearAdapter implements LinearPort {
       );
     }
     return fromEnv;
+  }
+
+  private async runTokenCommand(): Promise<string> {
+    const shell = process.env.SHELL !== undefined && process.env.SHELL !== ""
+      ? process.env.SHELL
+      : "/bin/sh";
+    try {
+      const result = await execFileAsync(shell, ["-lc", this.tokenCommand!], {
+        timeout: this.timeoutMs,
+        maxBuffer: 1024 * 1024,
+      });
+      return result.stdout.trim();
+    } catch (err) {
+      const e = err as Error & {
+        stderr?: string;
+        stdout?: string;
+        code?: unknown;
+      };
+      const stderr =
+        e.stderr !== undefined && e.stderr !== ""
+          ? ` stderr=${truncate(e.stderr)}`
+          : "";
+      throw new QuayError(
+        "adapter_not_configured",
+        `LinearAdapter token command failed: ${e.message}${stderr}`,
+        { adapter: "linear", token_source: "command", exit_code: e.code },
+      );
+    }
   }
 
   private async queryIssuePage(
@@ -627,13 +704,13 @@ export class LinearAdapter implements LinearPort {
     query: string,
     variables: Record<string, unknown>,
   ): Promise<LinearTransportResponse> {
-    const token = this.resolveToken();
+    const authorization = await this.resolveAuthorizationHeader();
     const body = JSON.stringify({ query, variables });
     return this.transport({
       url: this.endpoint,
       method: "POST",
       headers: {
-        Authorization: token,
+        Authorization: authorization,
         "Content-Type": "application/json; charset=utf-8",
       },
       body,
@@ -659,6 +736,13 @@ export class LinearAdapter implements LinearPort {
         "adapter_error",
         `Linear ${identifier}: upstream ${status} ${truncate(response.body)}`,
         { adapter: "linear", retryable: false, status },
+      );
+    }
+    if (status === 401 || status === 403) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: auth failed (HTTP ${status}) ${truncate(response.body)}`,
+        { adapter: "linear", retryable: false, status, auth_failure: true },
       );
     }
     if (status < 200 || status >= 300) {
