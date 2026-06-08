@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { SQLQueryBindings } from "bun:sqlite";
 import { z } from "zod";
-import type { QuayConfig } from "../cli/config.ts";
+import {
+  linearAdapterOptionsFromConfig,
+  type QuayConfig,
+} from "../cli/config.ts";
 import type { AgentFetch } from "./agent_types.ts";
 import { DEFAULT_RETRY_BUDGET } from "../core/enqueue.ts";
 import {
@@ -2201,7 +2204,7 @@ function derivedField(key: string, label: string, value: string): AdminField {
 function buildAdapterSummaries(runtime: AdminApiRuntime): AdminAdapterSummary[] {
   const env = runtime.env ?? process.env;
   const linearEnabled = runtime.config.adapters?.linear?.enabled === true;
-  const linearEnv = runtime.config.adapters?.linear?.api_key_env ?? "LINEAR_API_KEY";
+  const linearAuth = linearAdapterSummaryAuth(runtime.config, env);
   const slackEnabled = runtime.config.adapters?.slack?.enabled === true;
   const slackEnv = runtime.config.adapters?.slack?.bot_token_env ?? "SLACK_TOKEN";
   const reviewerEnabled = runtime.config.reviewer?.enabled === true;
@@ -2217,9 +2220,24 @@ function buildAdapterSummaries(runtime: AdminApiRuntime): AdminAdapterSummary[] 
       name: "linear",
       title: "Linear",
       enabled: linearEnabled,
-      ...adapterStatus(linearEnabled, hasEnv(env, linearEnv), `env ${linearEnv} is set`, `env ${linearEnv} not set`),
+      ...adapterStatus(
+        linearEnabled,
+        linearAuth.ready,
+        linearAuth.readyText,
+        linearAuth.missingText,
+      ),
       fields: [
-        { label: "API_KEY_ENV", value: linearEnv, dot_tone: hasEnv(env, linearEnv) ? "good" : "warn" },
+        { label: "AUTH_MODE", value: linearAuth.authMode },
+        {
+          label: linearAuth.authMode === "bearer" ? "TOKEN_ENV" : "API_KEY_ENV",
+          value: linearAuth.envVar,
+          dot_tone: hasEnv(env, linearAuth.envVar) ? "good" : "warn",
+        },
+        {
+          label: "TOKEN_COMMAND",
+          value: linearAuth.hasTokenCommand ? "configured" : "not configured",
+          dot_tone: linearAuth.hasTokenCommand ? "good" : "warn",
+        },
       ],
     },
     {
@@ -2277,6 +2295,42 @@ function buildAdapterSummaries(runtime: AdminApiRuntime): AdminAdapterSummary[] 
       ],
     },
   ];
+}
+
+function linearAdapterSummaryAuth(
+  config: QuayConfig,
+  env: NodeJS.ProcessEnv,
+): {
+  authMode: "api_key" | "bearer";
+  envVar: string;
+  hasTokenCommand: boolean;
+  ready: boolean;
+  readyText: string;
+  missingText: string;
+} {
+  const opts = linearAdapterOptionsFromConfig(config);
+  const authMode = opts.authMode ?? "api_key";
+  const envVar = opts.tokenEnvVar ?? "LINEAR_API_KEY";
+  const hasTokenCommand = opts.tokenCommand !== undefined;
+  if (hasTokenCommand) {
+    return {
+      authMode,
+      envVar,
+      hasTokenCommand,
+      ready: true,
+      readyText: "token command configured",
+      missingText: "token command not configured",
+    };
+  }
+  const envReady = hasEnv(env, envVar);
+  return {
+    authMode,
+    envVar,
+    hasTokenCommand,
+    ready: envReady,
+    readyText: `env ${envVar} is set`,
+    missingText: `env ${envVar} not set`,
+  };
 }
 
 function adapterStatus(
