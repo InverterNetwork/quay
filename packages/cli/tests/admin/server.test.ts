@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ADMIN_API_SERVER_IDLE_TIMEOUT_SECONDS,
   createAdminApiServerHandler,
   createEmbeddedAdminApiHandler,
   createHostedAdminApiHandler,
@@ -42,6 +43,10 @@ function createRuntime(opts: {
     tagService: createTagService({ db: h.db, clock: h.clock, repoService }),
   };
 }
+
+test("admin API server keeps idle streams open across model gaps", () => {
+  expect(ADMIN_API_SERVER_IDLE_TIMEOUT_SECONDS).toBe(300);
+});
 
 test("hosted handler keeps /v1 API routes ahead of static files", async () => {
   h = createHarness();

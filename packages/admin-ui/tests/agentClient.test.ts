@@ -11,7 +11,8 @@ test('parses NDJSON AgentEvents and reduces them into thread state', async () =>
   const response = streamResponse(
     [
       `${JSON.stringify({ type: 'message_start', messageId: 'agent-1', role: 'agent', model: 'hermes' })}\n{"type":"text_delta","messageId":"agent-1","text":"hello`,
-      ` world"}\n${JSON.stringify({ type: 'message_done', messageId: 'agent-1' })}\n`,
+      ` world"}\n${JSON.stringify({ type: 'heartbeat', timestamp: '2026-06-08T08:32:20.000Z' })}\n`,
+      `${JSON.stringify({ type: 'message_done', messageId: 'agent-1' })}\n`,
     ],
     'application/x-ndjson',
   );
@@ -27,6 +28,7 @@ test('parses Server-Sent Events AgentEvents', async () => {
   const response = streamResponse(
     [
       `event: agent_event\ndata: ${JSON.stringify({ type: 'message_start', messageId: 'agent-1', role: 'agent' })}\n\n`,
+      ': keep-alive 2026-06-08T08:32:20.000Z\n\n',
       `data: ${JSON.stringify({ type: 'tool_call', messageId: 'agent-1', toolCallId: 'list', label: 'List tasks', status: 'running' })}\n\n`,
       'data: [DONE]\n\n',
     ],
