@@ -456,18 +456,28 @@ export class LinearAdapter implements LinearPort {
       return result.stdout.trim();
     } catch (err) {
       const e = err as Error & {
-        stderr?: string;
-        stdout?: string;
         code?: unknown;
+        killed?: boolean;
+        signal?: string | null;
       };
-      const stderr =
-        e.stderr !== undefined && e.stderr !== ""
-          ? ` stderr=${truncate(e.stderr)}`
-          : "";
+      const reason =
+        e.killed === true
+          ? `timed out after ${this.timeoutMs}ms`
+          : e.signal !== undefined && e.signal !== null
+            ? `terminated by ${e.signal}`
+            : e.code !== undefined
+              ? `exited with code ${String(e.code)}`
+              : "failed";
       throw new QuayError(
         "adapter_not_configured",
-        `LinearAdapter token command failed: ${e.message}${stderr}`,
-        { adapter: "linear", token_source: "command", exit_code: e.code },
+        `LinearAdapter token command ${reason}`,
+        {
+          adapter: "linear",
+          token_source: "command",
+          exit_code: e.code,
+          signal: e.signal,
+          timed_out: e.killed === true,
+        },
       );
     }
   }

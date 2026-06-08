@@ -795,6 +795,28 @@ test("linear adapter resolves bearer token command on each request", async () =>
   );
 });
 
+test("linear adapter token command failure does not expose command output", async () => {
+  const adapter = new LinearAdapter({
+    authMode: "bearer",
+    tokenCommand: "printf 'access-token-secret' >&2; exit 7",
+    transport: recorder(() => jsonResponse(issuePayload({}))).transport,
+  });
+
+  let caught: unknown = null;
+  try {
+    await adapter.getIssue("ENG-1234");
+  } catch (e) {
+    caught = e;
+  }
+
+  expect(caught).toBeInstanceOf(QuayError);
+  const err = caught as QuayError;
+  expect(err.code).toBe("adapter_not_configured");
+  expect(err.message).toContain("LinearAdapter token command exited with code 7");
+  expect(err.message).not.toContain("access-token-secret");
+  expect(JSON.stringify(err.details)).not.toContain("access-token-secret");
+});
+
 test("linear adapter maps 401 and 403 to explicit auth failures with body", async () => {
   for (const status of [401, 403]) {
     const handle = recorder(() => ({
