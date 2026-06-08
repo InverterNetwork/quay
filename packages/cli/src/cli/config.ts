@@ -31,7 +31,10 @@ const positiveInt = z.number().int().positive();
 const LinearAdapterConfigSchema = z
   .object({
     enabled: z.boolean(),
+    auth_mode: z.enum(["api_key", "bearer"]).optional(),
     api_key_env: z.string().min(1).optional(),
+    bearer_token_env: z.string().min(1).optional(),
+    token_command: z.string().min(1).optional(),
   })
   .strict();
 
@@ -301,10 +304,32 @@ export function adaptersConfigFromConfig(
 
 export function linearAdapterOptionsFromConfig(
   config: QuayConfig,
-): { tokenEnvVar?: string } {
-  const opts: { tokenEnvVar?: string } = {};
-  const envVar = config.adapters?.linear?.api_key_env;
+): {
+  tokenEnvVar?: string;
+  authMode?: "api_key" | "bearer";
+  tokenCommand?: string;
+} {
+  const opts: {
+    tokenEnvVar?: string;
+    authMode?: "api_key" | "bearer";
+    tokenCommand?: string;
+  } = {};
+  const linear = config.adapters?.linear;
+  const authMode =
+    linear?.auth_mode ??
+    (linear?.bearer_token_env !== undefined ||
+    linear?.token_command !== undefined
+      ? "bearer"
+      : undefined);
+  if (authMode !== undefined) opts.authMode = authMode;
+  const envVar =
+    authMode === "bearer"
+      ? linear?.bearer_token_env ?? linear?.api_key_env
+      : linear?.api_key_env;
   if (envVar !== undefined) opts.tokenEnvVar = envVar;
+  if (linear?.token_command !== undefined) {
+    opts.tokenCommand = linear.token_command;
+  }
   return opts;
 }
 

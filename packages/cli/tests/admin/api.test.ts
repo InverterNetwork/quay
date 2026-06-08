@@ -2017,6 +2017,75 @@ test("GET /v1/global returns deployment config, agents, prompts, and tags", asyn
     });
 });
 
+test("GET /v1/global reports Linear bearer env readiness", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: {
+      adapters: {
+        linear: {
+          enabled: true,
+          auth_mode: "bearer",
+          bearer_token_env: "QUAY_LINEAR_APP_TOKEN",
+        },
+      },
+    },
+    env: { QUAY_LINEAR_APP_TOKEN: "oauth-token" },
+  });
+
+  const response = await handler(new Request("http://quay.local/v1/global"));
+  const body = await responseJson(response);
+  const linear = (body.adapters as Array<Record<string, unknown>>).find(
+    (adapter) => adapter.name === "linear",
+  );
+
+  expect(linear).toMatchObject({
+    status: "ready",
+    status_text: "env QUAY_LINEAR_APP_TOKEN is set",
+    fields: expect.arrayContaining([
+      { label: "AUTH_MODE", value: "bearer" },
+      {
+        label: "TOKEN_ENV",
+        value: "QUAY_LINEAR_APP_TOKEN",
+        dot_tone: "good",
+      },
+    ]),
+  });
+});
+
+test("GET /v1/global reports Linear token command as ready without env", async () => {
+  h = createHarness();
+  const handler = createHandler({
+    config: {
+      adapters: {
+        linear: {
+          enabled: true,
+          token_command: "hermes-agent linear-token --actor app",
+        },
+      },
+    },
+    env: {},
+  });
+
+  const response = await handler(new Request("http://quay.local/v1/global"));
+  const body = await responseJson(response);
+  const linear = (body.adapters as Array<Record<string, unknown>>).find(
+    (adapter) => adapter.name === "linear",
+  );
+
+  expect(linear).toMatchObject({
+    status: "ready",
+    status_text: "token command configured",
+    fields: expect.arrayContaining([
+      { label: "AUTH_MODE", value: "bearer" },
+      {
+        label: "TOKEN_COMMAND",
+        value: "configured",
+        dot_tone: "good",
+      },
+    ]),
+  });
+});
+
 test("POST /v1/changes/apply updates DB-backed deployment agent defaults", async () => {
   h = createHarness();
   const handler = createHandler({

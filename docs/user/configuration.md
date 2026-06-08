@@ -63,6 +63,11 @@ supervisor_lock_stale_seconds = 30
 [adapters.linear]
 enabled = true
 api_key_env = "LINEAR_API_KEY"
+# For OAuth/app-actor tokens, use Bearer mode. The token is resolved for each
+# Linear request, so a Hermes-owned helper can mint/cache/refresh it.
+# auth_mode = "bearer"
+# bearer_token_env = "QUAY_LINEAR_APP_TOKEN"
+# token_command = "hermes-agent linear-token --actor app"
 
 [adapters.slack]
 enabled = true

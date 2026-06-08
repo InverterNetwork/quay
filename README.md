@@ -281,6 +281,9 @@ gate_quay_owned_done = false
 [adapters.linear]
 enabled = true
 api_key_env = "LINEAR_API_KEY"          # name of the env var holding the bot token
+# auth_mode = "bearer"                  # OAuth/app-actor tokens use Authorization: Bearer <token>
+# bearer_token_env = "QUAY_LINEAR_APP_TOKEN"
+# token_command = "hermes-agent linear-token --actor app"
 
 [adapters.slack]
 enabled = true
@@ -291,6 +294,11 @@ bot_token_env = "SLACK_TOKEN"
 `[adapters.linear].enabled` gates `quay enqueue --linear-issue`. Without it
 the dispatcher returns `adapter_not_enabled`. A configured-but-missing
 token (e.g. `LINEAR_API_KEY` unset) surfaces as `adapter_not_configured`.
+The default Linear auth mode keeps the legacy personal API-key behavior. Set
+`auth_mode = "bearer"` to send OAuth/app-actor tokens as
+`Authorization: Bearer <token>`; `bearer_token_env` reads a current token from
+the environment and `token_command` runs a non-interactive helper for each
+request.
 
 ### Validator schema — `ticket_schema.toml`
 
