@@ -308,6 +308,19 @@ human-created head ref; explicit close/delete options still apply where the
 command supports them. Adoption does not run the repo `install_cmd` from the
 adopted PR head before the worker is scheduled.
 
+```bash
+quay unadopt --pr <repo>:<num>
+quay unadopt <task_id>
+```
+
+`unadopt` is the operator-friendly escape hatch for adopted PRs. It accepts a
+PR reference, such as `owner/repo:47`, or the underlying adopted task id when
+the operator already has it. The command verifies that the target is an adopted
+external PR task, cancels Quay's task so worker/reviewer automation stops, and
+prints explicit JSON showing the final `cancelled` state and `unadopted`
+outcome. The human-owned remote branch is preserved by default so the PR can
+continue outside Quay ownership.
+
 ## Tick
 
 ```bash

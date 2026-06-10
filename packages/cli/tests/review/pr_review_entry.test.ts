@@ -9,7 +9,7 @@ import type { SupervisorLock } from "../../src/core/supervisor_lock.ts";
 import { WORKER_GH_TOKEN_ENV, tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
-import { insertRepo, insertTask } from "../support/fixtures.ts";
+import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -267,6 +267,110 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
   expect(spawnedAttempt).toMatchObject({
     remote_sha_at_spawn: "head-51",
     pr_existed_at_spawn: 1,
+  });
+});
+
+test("unadopt resolves adopted PR by repo PR reference and cancels without deleting remote branch", async () => {
+  h = createHarness();
+  h.clock.set("2026-06-10T15:00:00.000Z");
+  const built = buildCliDeps(h);
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+
+  const taskId = "pr-review-quay-51";
+  const branchName = "feature/human-adopt";
+  const worktreePath = join(built.worktreesRoot, taskId);
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id,
+         worktree_path, attempts_consumed, retry_budget, pr_number, head_sha,
+         created_at, updated_at
+       ) VALUES (?, 'quay', 'waiting_human', 'adopted_external_pr', ?, ?, ?, 2, 5, 51, 'head-51', ?, ?)`,
+    )
+    .run(
+      taskId,
+      branchName,
+      "tmux-unadopt",
+      worktreePath,
+      "2026-06-10T14:00:00.000Z",
+      "2026-06-10T14:30:00.000Z",
+    );
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "adopt_pr",
+    spawnedAt: "2026-06-10T14:05:00.000Z",
+  });
+  built.git.setLocalBranches("quay", [branchName]);
+  built.git.setWorktreeBranch("quay", worktreePath, branchName);
+  built.git.setRemoteBranches("quay", [branchName]);
+
+  const io = bufferIO();
+  const result = await dispatch(["unadopt", "--pr", "acc/quay:51"], built.deps, io);
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const out = JSON.parse(io.out());
+  expect(out).toMatchObject({
+    ok: true,
+    task_id: taskId,
+    state: "cancelled",
+    outcome: "unadopted",
+    unadopted: true,
+    pr: "quay:51",
+    branch_name: branchName,
+  });
+  expect(out.message).toContain("stood down");
+
+  const task = h.db
+    .query<{ state: string; cancel_requested_at: string | null }, [string]>(
+      `SELECT state, cancel_requested_at FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task?.state).toBe("cancelled");
+  expect(task?.cancel_requested_at).toBe("2026-06-10T15:00:00.000Z");
+  expect(built.git.localBranches.get("quay")?.has(branchName) ?? false).toBe(false);
+  expect(built.git.remoteBranches.get("quay")?.has(branchName) ?? false).toBe(true);
+  expect(built.git.calls.filter((c) => c.op === "deleteRemoteBranch")).toHaveLength(0);
+});
+
+test("unadopt rejects non-adopted task ids", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const repoId = insertRepo(h.db, "repo-unadopt-reject");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-not-adopted",
+    state: "queued",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(["unadopt", taskId], built.deps, io);
+
+  expect(result.exitCode).toBe(4);
+  expect(io.out()).toBe("");
+  expect(JSON.parse(io.err())).toMatchObject({
+    error: "not_adopted",
+    task_id: taskId,
+    authoring_mode: "quay_owned",
   });
 });
 
