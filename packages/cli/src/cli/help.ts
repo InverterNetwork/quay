@@ -235,6 +235,17 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--pr <repo>:<num>", desc: "Pull request identifier, e.g. owner/repo:47." },
     ],
   },
+  unadopt: {
+    path: "unadopt",
+    synopsis: "quay unadopt (--pr <repo>:<num> | <task_id>)",
+    summary:
+      "Stop Quay worker/reviewer automation for an adopted PR.",
+    details:
+      "Resolves the adopted PR task, validates that Quay adopted it, then cancels the task while preserving the human-owned remote branch.",
+    flags: [
+      { flag: "--pr <repo>:<num>", desc: "Pull request identifier, e.g. owner/repo:47." },
+    ],
+  },
   repo: {
     path: "repo",
     synopsis: "quay repo <subcommand> [options]",
@@ -582,6 +593,7 @@ const TOP_LEVEL_ORDER: string[] = [
   "enqueue",
   "review-pr",
   "adopt-pr",
+  "unadopt",
   "repo",
   "preamble",
   "settings",

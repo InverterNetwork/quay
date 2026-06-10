@@ -204,6 +204,8 @@ export async function dispatch(
         return handleReviewPr(rest, deps, io);
       case "adopt-pr":
         return await handleAdoptPr(rest, deps, io);
+      case "unadopt":
+        return await handleUnadopt(rest, deps, io);
       case "repo":
         return handleRepo(rest, deps, io);
       case "preamble":
@@ -1195,6 +1197,103 @@ async function handleAdoptPr(
     return writeErrorWithExit(io, 4, "quay_error", message);
   }
   io.stdout(`${JSON.stringify(result)}\n`);
+  return { exitCode: 0 };
+}
+
+async function handleUnadopt(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  if (wantsHelp(argv)) return printHelp(io, ["unadopt"]);
+  const validation = validateFlags(argv, { valued: ["--pr"] });
+  if (!validation.ok) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      validation.message,
+      validation.details,
+    );
+  }
+
+  const prArg = readFlag(argv, "--pr");
+  const taskArg = positional(argv);
+  if (prArg !== null && taskArg !== null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      "unadopt accepts either --pr <repo>:<num> or <task_id>, not both",
+    );
+  }
+  if (prArg === null && taskArg === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      "unadopt requires --pr <repo>:<num> or <task_id>",
+    );
+  }
+
+  const target = prArg !== null
+    ? resolveUnadoptTargetByPr(deps.db, prArg)
+    : resolveUnadoptTargetByTask(deps.db, taskArg as string);
+  if (!target.ok) {
+    return writeErrorWithExit(
+      io,
+      target.exitCode,
+      target.error,
+      target.message,
+      target.details,
+    );
+  }
+  if (target.value.authoring_mode !== "adopted_external_pr") {
+    return writeErrorWithExit(
+      io,
+      4,
+      "not_adopted",
+      `task ${target.value.task_id} is not an adopted PR task`,
+      {
+        task_id: target.value.task_id,
+        authoring_mode: target.value.authoring_mode,
+      },
+    );
+  }
+
+  const cancelDeps: CancelDeps = {
+    db: deps.db,
+    clock: deps.clock,
+    git: deps.git,
+    github: deps.github,
+    tmux: deps.tmux,
+    artifactStore: deps.artifactStore,
+    supervisorLock: deps.supervisorLock,
+  };
+  const cancelLinear = pickLinearAdapter(deps);
+  if (cancelLinear !== undefined) cancelDeps.linear = cancelLinear;
+  const result: CancelResult = await cancel_task(cancelDeps, {
+    taskId: target.value.task_id,
+  });
+  if (!result.ok) return emitServiceResult(result, io);
+
+  io.stdout(
+    `${JSON.stringify({
+      ok: true,
+      task_id: result.value.task_id,
+      state: result.value.state,
+      outcome: result.value.outcome === "already_cancelled"
+        ? "already_unadopted"
+        : "unadopted",
+      unadopted: true,
+      pr: target.value.pr_number === null
+        ? null
+        : `${target.value.repo_id}:${target.value.pr_number}`,
+      branch_name: target.value.branch_name,
+      message:
+        "Quay has stood down from this adopted PR; the human-owned remote branch was preserved.",
+    })}\n`,
+  );
   return { exitCode: 0 };
 }
 
@@ -2831,6 +2930,97 @@ function parsePrIdentifier(
   const n = Number.parseInt(raw.slice(idx + 1), 10);
   if (!Number.isInteger(n) || n <= 0) return null;
   return { repo, prNumber: n };
+}
+
+interface UnadoptTargetRow {
+  task_id: string;
+  repo_id: string;
+  authoring_mode: string;
+  state: string;
+  branch_name: string;
+  pr_number: number | null;
+}
+
+type UnadoptTargetResolution =
+  | { ok: true; value: UnadoptTargetRow }
+  | {
+      ok: false;
+      exitCode: number;
+      error: string;
+      message: string;
+      details?: Record<string, unknown>;
+    };
+
+function resolveUnadoptTargetByTask(
+  db: DB,
+  taskId: string,
+): UnadoptTargetResolution {
+  const row = db
+    .query<UnadoptTargetRow, [string]>(
+      `SELECT task_id, repo_id, authoring_mode, state, branch_name, pr_number
+         FROM tasks
+        WHERE task_id = ?`,
+    )
+    .get(taskId) ?? null;
+  if (row === null) {
+    return {
+      ok: false,
+      exitCode: 3,
+      error: "unknown_task",
+      message: `task ${taskId} not found`,
+      details: { task_id: taskId },
+    };
+  }
+  return { ok: true, value: row };
+}
+
+function resolveUnadoptTargetByPr(
+  db: DB,
+  prArg: string,
+): UnadoptTargetResolution {
+  const parsedPr = parsePrIdentifier(prArg);
+  if (parsedPr === null) {
+    return {
+      ok: false,
+      exitCode: 2,
+      error: "usage_error",
+      message: `--pr must be <repo>:<num> (got ${prArg})`,
+      details: { pr: prArg },
+    };
+  }
+  const repoId = resolveRepoIdForPr(db, parsedPr.repo);
+  if (repoId === null) {
+    return {
+      ok: false,
+      exitCode: 2,
+      error: "repo_not_configured",
+      message: `repo "${parsedPr.repo}" is not configured`,
+      details: { repo: parsedPr.repo },
+    };
+  }
+  const row = db
+    .query<UnadoptTargetRow, [string, number]>(
+      `SELECT task_id, repo_id, authoring_mode, state, branch_name, pr_number
+         FROM tasks
+        WHERE repo_id = ?
+          AND pr_number = ?
+        ORDER BY
+          CASE WHEN authoring_mode = 'adopted_external_pr' THEN 0 ELSE 1 END,
+          created_at DESC,
+          task_id DESC
+        LIMIT 1`,
+    )
+    .get(repoId, parsedPr.prNumber) ?? null;
+  if (row === null) {
+    return {
+      ok: false,
+      exitCode: 3,
+      error: "unknown_pr_task",
+      message: `no Quay task found for PR ${repoId}:${parsedPr.prNumber}`,
+      details: { repo_id: repoId, pr_number: parsedPr.prNumber },
+    };
+  }
+  return { ok: true, value: row };
 }
 
 function resolveRepoIdForPr(db: DB, repoArg: string): string | null {
