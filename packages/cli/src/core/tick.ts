@@ -2082,30 +2082,38 @@ function processRunningReviewAttempt(
     );
   }
 
-  const token = resolveGithubActorToken("reviewer", deps, task.repo_id, options);
-  if (!token.ok) {
-    return markReviewInfraFailure(deps, task, token.error, exitInfo, options);
-  }
-
   let posted: PostedReview;
+  const expectedDecision =
+    resultRead.result.verdict === "approved" ? "APPROVED" : "CHANGES_REQUESTED";
   try {
-    posted = deps.github.submitPullRequestReview({
-      repoId: task.repo_id,
-      prNumber: task.pr_number,
-      headSha: task.head_sha,
-      verdict:
-        resultRead.result.verdict === "approved"
-          ? "APPROVED"
-          : "CHANGES_REQUESTED",
-      body: resultRead.result.body,
-      token: token.token,
-    });
+    const reconciled = reconcileAlreadyPostedReview(
+      deps,
+      task,
+      options,
+      resultRead.result,
+    );
+    if (reconciled !== null) {
+      posted = reconciled;
+    } else {
+      const token = resolveGithubActorToken("reviewer", deps, task.repo_id, options);
+      if (!token.ok) {
+        return markReviewInfraFailure(deps, task, token.error, exitInfo, options);
+      }
+      posted = deps.github.submitPullRequestReview({
+        repoId: task.repo_id,
+        prNumber: task.pr_number,
+        headSha: task.head_sha,
+        verdict: expectedDecision,
+        body: resultRead.result.body,
+        token: token.token,
+      });
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return markReviewInfraFailure(
       deps,
       task,
-      `failed to post GitHub review: ${message}`,
+      `failed to reconcile or post GitHub review: ${message}`,
       exitInfo,
       options,
       resultRead.result.raw,
@@ -2144,6 +2152,27 @@ function processRunningReviewAttempt(
     options,
     resultRead.result.raw,
   );
+}
+
+function reconcileAlreadyPostedReview(
+  deps: Pick<TickDeps, "github">,
+  task: ReviewAttemptTaskRow,
+  options: TickOptions,
+  result: ParsedReviewResult,
+): PostedReview | null {
+  if (task.pr_number === null) return null;
+  const posted = deps.github.fetchPostedReview(
+    task.repo_id,
+    task.pr_number,
+    task.head_sha,
+    options.reviewerLogin,
+  );
+  if (posted === null) return null;
+  const expectedDecision =
+    result.verdict === "approved" ? "APPROVED" : "CHANGES_REQUESTED";
+  if (posted.decision !== expectedDecision) return null;
+  if (posted.body !== result.body) return null;
+  return posted;
 }
 
 function reviewKillIntentDiagnostic(intent: "wall_clock" | "stale"): string {

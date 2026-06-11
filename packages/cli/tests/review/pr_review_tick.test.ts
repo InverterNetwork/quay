@@ -356,12 +356,6 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
         WHERE attempt_id = ?`,
     )
     .run(attemptId);
-  built.github.setPostedReview(repoId, 7, "sha-7", {
-    reviewId: "R_approved",
-    decision: "APPROVED",
-    body: "Looks good.",
-    comments: "Looks good.",
-  });
   writeReviewResult(worktreePath, { verdict: "approved", body: "Looks good." });
 
   const results = await tick_once(built.deps, reviewerTickOptions());
@@ -387,7 +381,7 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     .get(attemptId);
   expect(attempt).toEqual({
     review_verdict: "approved",
-    review_id: "R_approved",
+    review_id: "R_submitted_1",
   });
   const artifact = h.db
     .query<{ n: number }, [string]>(
@@ -464,12 +458,6 @@ test("posted review keeps result file when durable finalization fails", async ()
         WHERE attempt_id = ?`,
     )
     .run(attemptId);
-  built.github.setPostedReview(repoId, 7, "sha-finalize-fails", {
-    reviewId: "R_finalize_fails",
-    decision: "APPROVED",
-    body: "Looks good.",
-    comments: "Looks good.",
-  });
   writeReviewResult(worktreePath, { verdict: "approved", body: "Looks good." });
 
   const originalArtifactStore = built.deps.artifactStore;
@@ -497,6 +485,22 @@ test("posted review keeps result file when durable finalization fails", async ()
     )
     .get(attemptId);
   expect(attempt?.review_id).toBeNull();
+
+  built.deps.artifactStore = originalArtifactStore;
+  const retryResults = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(retryResults).toContainEqual({
+    task_id: taskId,
+    action: "review_approved",
+  });
+  expect(built.github.submitPullRequestReviewCalls).toHaveLength(1);
+  expect(existsSync(join(worktreePath, ".quay-review-result.json"))).toBe(false);
+  const retriedAttempt = h.db
+    .query<{ review_id: string | null }, [number]>(
+      `SELECT review_id FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(retriedAttempt?.review_id).toBe("R_submitted_1");
 });
 
 test("dead synthetic reviewer persists structured findings and locations", async () => {
