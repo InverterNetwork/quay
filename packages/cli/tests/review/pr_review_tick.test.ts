@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import {
+  persistStructuredReviewFindingsInOpenTxn,
   REVIEWER_GH_TOKEN_ENV,
   tick_once,
   type TickOptions,
@@ -98,12 +99,16 @@ function seedRunningReviewAttempt(
 
 function writeReviewResult(
   worktreePath: string,
-  input: { verdict: "approved" | "changes_requested"; body: string },
+  input: {
+    verdict: "approved" | "changes_requested";
+    body: string;
+    findings?: unknown[];
+  },
 ): void {
   mkdirSync(worktreePath, { recursive: true });
   writeFileSync(
     join(worktreePath, ".quay-review-result.json"),
-    JSON.stringify({ ...input, findings: [] }),
+    JSON.stringify({ ...input, findings: input.findings ?? [] }),
   );
 }
 
@@ -425,6 +430,230 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     reasoning_tokens: 5,
     total_tokens: 34,
   });
+});
+
+test("dead synthetic reviewer persists structured findings and locations", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-findings");
+  const taskId = "pr-review-repo-review-findings-17";
+  const worktreePath = `${h.dataDir}/worktrees/review-17`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'synthetic_review', 'quay-review/17', 'quay-review-repo-review-findings-17',
+                 ?, 17, 'sha-17', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-17', tmux_session = 'quay-review-session-17'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  built.github.setPostedReview(repoId, 17, "sha-17", {
+    reviewId: "R_findings",
+    decision: "CHANGES_REQUESTED",
+    body: "Please fix these.",
+    comments: "Please fix these.",
+  });
+  writeReviewResult(worktreePath, {
+    verdict: "changes_requested",
+    body: "Please fix these.",
+    findings: [
+      {
+        severity: "blocking",
+        title: "Validate the request body",
+        body: "The route trusts unchecked input.",
+        principle_text: "Handlers must validate external input before use.",
+        locations: [
+          {
+            path: "packages/app/src/routes.ts",
+            start_line: 42,
+            end_line: 45,
+            url: "https://github.com/acme/repo/blob/sha-17/packages/app/src/routes.ts#L42-L45",
+          },
+          { path: "packages/app/src/schema.ts", line: 9 },
+        ],
+      },
+      {
+        severity: "non_blocking",
+        title: "Tighten copy",
+        body: "The label is ambiguous.",
+        locations: [],
+      },
+    ],
+  });
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "review_changes_requested",
+  });
+  const findings = h.db
+    .query<
+      {
+        ordinal: number;
+        severity: string;
+        title: string;
+        body_markdown: string;
+        principle_text: string | null;
+        review_id: string;
+        head_sha: string;
+        fingerprint: string;
+      },
+      [number]
+    >(
+      `SELECT ordinal, severity, title, body_markdown, principle_text,
+              review_id, head_sha, fingerprint
+         FROM review_findings
+        WHERE attempt_id = ?
+        ORDER BY ordinal`,
+    )
+    .all(attemptId);
+  expect(findings).toHaveLength(2);
+  expect(findings[0]).toMatchObject({
+    ordinal: 1,
+    severity: "blocking",
+    title: "Validate the request body",
+    body_markdown: "The route trusts unchecked input.",
+    principle_text: "Handlers must validate external input before use.",
+    review_id: "R_findings",
+    head_sha: "sha-17",
+  });
+  expect(findings[0]?.fingerprint).toHaveLength(64);
+  expect(findings[1]).toMatchObject({
+    ordinal: 2,
+    severity: "non_blocking",
+    title: "Tighten copy",
+    principle_text: null,
+  });
+  const locations = h.db
+    .query<
+      {
+        finding_ordinal: number;
+        ordinal: number;
+        path: string | null;
+        start_line: number | null;
+        end_line: number | null;
+        url: string | null;
+      },
+      [number]
+    >(
+      `SELECT rf.ordinal AS finding_ordinal, rfl.ordinal, rfl.path,
+              rfl.start_line, rfl.end_line, rfl.url
+         FROM review_finding_locations rfl
+         JOIN review_findings rf ON rf.finding_id = rfl.finding_id
+        WHERE rf.attempt_id = ?
+        ORDER BY rf.ordinal, rfl.ordinal`,
+    )
+    .all(attemptId);
+  expect(locations).toEqual([
+    {
+      finding_ordinal: 1,
+      ordinal: 1,
+      path: "packages/app/src/routes.ts",
+      start_line: 42,
+      end_line: 45,
+      url: "https://github.com/acme/repo/blob/sha-17/packages/app/src/routes.ts#L42-L45",
+    },
+    {
+      finding_ordinal: 1,
+      ordinal: 2,
+      path: "packages/app/src/schema.ts",
+      start_line: 9,
+      end_line: 9,
+      url: null,
+    },
+  ]);
+});
+
+test("structured review finding ingestion handles zero findings and re-ingest idempotently", () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-review-findings-idempotent");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-review-findings-idempotent",
+    state: "pr-review",
+  });
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  const raw = JSON.stringify({
+    verdict: "changes_requested",
+    body: "Please fix this.",
+    findings: [
+      {
+        severity: "blocking",
+        title: "Use the stable key",
+        body: "The dedupe key changes between retries.",
+        "quay-principle": "Dedupe keys must be stable across repeated ingestion.",
+      },
+    ],
+  });
+
+  h.db.exec("BEGIN IMMEDIATE");
+  persistStructuredReviewFindingsInOpenTxn(h, {
+    taskId,
+    attemptId,
+    reviewId: "R_idempotent",
+    headSha: "sha-idempotent",
+    now: h.clock.nowISO(),
+    rawReviewResult: raw,
+  });
+  persistStructuredReviewFindingsInOpenTxn(h, {
+    taskId,
+    attemptId,
+    reviewId: "R_idempotent",
+    headSha: "sha-idempotent",
+    now: h.clock.nowISO(),
+    rawReviewResult: raw,
+  });
+  h.db.exec("COMMIT");
+
+  const count = h.db
+    .query<{ n: number }, [number]>(
+      `SELECT COUNT(*) AS n FROM review_findings WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(count?.n).toBe(1);
+
+  h.db.exec("BEGIN IMMEDIATE");
+  persistStructuredReviewFindingsInOpenTxn(h, {
+    taskId,
+    attemptId,
+    reviewId: "R_idempotent",
+    headSha: "sha-idempotent",
+    now: h.clock.nowISO(),
+    rawReviewResult: JSON.stringify({
+      verdict: "approved",
+      body: "lgtm!",
+      findings: [],
+    }),
+  });
+  h.db.exec("COMMIT");
+
+  const afterZero = h.db
+    .query<{ n: number }, [number]>(
+      `SELECT COUNT(*) AS n FROM review_findings WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(afterZero?.n).toBe(0);
 });
 
 test("dead synthetic reviewer changes_requested waits for external changes", async () => {

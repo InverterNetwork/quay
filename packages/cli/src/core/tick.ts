@@ -196,6 +196,24 @@ interface ParsedReviewResult {
   raw: string;
 }
 
+interface NormalizedReviewFinding {
+  ordinal: number;
+  severity: "blocking" | "non_blocking";
+  title: string;
+  bodyMarkdown: string;
+  principleText: string | null;
+  fingerprint: string;
+  locations: NormalizedReviewFindingLocation[];
+}
+
+interface NormalizedReviewFindingLocation {
+  ordinal: number;
+  path: string | null;
+  startLine: number | null;
+  endLine: number | null;
+  url: string | null;
+}
+
 type ReviewResultRead =
   | { ok: true; result: ParsedReviewResult }
   | { ok: false; diagnostic: string; raw?: string };
@@ -2131,6 +2149,238 @@ function reviewKillIntentDiagnostic(intent: "wall_clock" | "stale"): string {
   return intent === "wall_clock"
     ? "The live reviewer exceeded max_attempt_duration_seconds and was killed."
     : "The live reviewer stopped producing fresh logs past staleness_threshold_seconds and was killed.";
+}
+
+function persistReviewFindingsInOpenTxn(
+  deps: Pick<TickDeps, "db">,
+  task: ReviewAttemptTaskRow,
+  reviewId: string,
+  now: string,
+  rawReviewResult: string,
+): void {
+  persistStructuredReviewFindingsInOpenTxn(deps, {
+    taskId: task.task_id,
+    attemptId: task.attempt_id,
+    reviewId,
+    headSha: task.head_sha,
+    now,
+    rawReviewResult,
+  });
+}
+
+export function persistStructuredReviewFindingsInOpenTxn(
+  deps: { db: DB },
+  input: {
+    taskId: string;
+    attemptId: number;
+    reviewId: string;
+    headSha: string;
+    now: string;
+    rawReviewResult: string;
+  },
+): void {
+  const findings = parseFindingsForPersistence(input.rawReviewResult);
+  deleteExistingReviewFindingsInOpenTxn(deps.db, input.attemptId, input.reviewId);
+
+  for (const finding of findings) {
+    const row = deps.db
+      .query<
+        { finding_id: number },
+        [
+          string,
+          number,
+          string,
+          string,
+          number,
+          string,
+          string,
+          string,
+          string | null,
+          string,
+          string,
+        ]
+      >(
+        `INSERT INTO review_findings (
+           task_id, attempt_id, review_id, head_sha, ordinal, severity,
+           title, body_markdown, principle_text, fingerprint, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING finding_id`,
+      )
+      .get(
+        input.taskId,
+        input.attemptId,
+        input.reviewId,
+        input.headSha,
+        finding.ordinal,
+        finding.severity,
+        finding.title,
+        finding.bodyMarkdown,
+        finding.principleText,
+        finding.fingerprint,
+        input.now,
+      );
+    if (!row) throw new Error("review finding insert returned no row");
+
+    for (const location of finding.locations) {
+      deps.db
+        .query(
+          `INSERT INTO review_finding_locations (
+             finding_id, ordinal, path, start_line, end_line, url, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          row.finding_id,
+          location.ordinal,
+          location.path,
+          location.startLine,
+          location.endLine,
+          location.url,
+          input.now,
+        );
+    }
+  }
+}
+
+function deleteExistingReviewFindingsInOpenTxn(
+  db: DB,
+  attemptId: number,
+  reviewId: string,
+): void {
+  db.query(`DELETE FROM review_findings WHERE attempt_id = ? AND review_id = ?`).run(
+    attemptId,
+    reviewId,
+  );
+}
+
+function parseFindingsForPersistence(rawReviewResult: string): NormalizedReviewFinding[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawReviewResult);
+  } catch {
+    return [];
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return [];
+  }
+  const findings = (parsed as Record<string, unknown>).findings;
+  if (!Array.isArray(findings)) return [];
+
+  const normalized: NormalizedReviewFinding[] = [];
+  findings.forEach((finding, index) => {
+    const row = normalizeReviewFinding(finding, index + 1);
+    if (row !== null) normalized.push(row);
+  });
+  return normalized;
+}
+
+function normalizeReviewFinding(
+  finding: unknown,
+  ordinal: number,
+): NormalizedReviewFinding | null {
+  if (finding === null || typeof finding !== "object" || Array.isArray(finding)) {
+    return null;
+  }
+  const obj = finding as Record<string, unknown>;
+  const severity = obj.severity;
+  const title = stringField(obj.title);
+  const bodyMarkdown = stringField(obj.body) ?? stringField(obj.body_markdown);
+  if (
+    (severity !== "blocking" && severity !== "non_blocking") ||
+    title === null ||
+    bodyMarkdown === null
+  ) {
+    return null;
+  }
+  const principleText =
+    stringField(obj.principle_text) ??
+    stringField(obj.principleText) ??
+    stringField(obj["quay-principle"]);
+  const locations = normalizeReviewFindingLocations(obj.locations);
+  const fingerprint = reviewFindingFingerprint({
+    severity,
+    title,
+    bodyMarkdown,
+    principleText,
+    locations,
+  });
+  return {
+    ordinal,
+    severity,
+    title,
+    bodyMarkdown,
+    principleText,
+    fingerprint,
+    locations,
+  };
+}
+
+function normalizeReviewFindingLocations(
+  locations: unknown,
+): NormalizedReviewFindingLocation[] {
+  if (!Array.isArray(locations)) return [];
+  const normalized: NormalizedReviewFindingLocation[] = [];
+  locations.forEach((location, index) => {
+    if (location === null || typeof location !== "object" || Array.isArray(location)) {
+      return;
+    }
+    const obj = location as Record<string, unknown>;
+    const startLine =
+      positiveIntegerField(obj.start_line) ??
+      positiveIntegerField(obj.startLine) ??
+      positiveIntegerField(obj.line);
+    const endLine =
+      positiveIntegerField(obj.end_line) ??
+      positiveIntegerField(obj.endLine) ??
+      positiveIntegerField(obj.line);
+    const path = stringField(obj.path) ?? stringField(obj.file);
+    const url = stringField(obj.url);
+    if (path === null && url === null && startLine === null && endLine === null) {
+      return;
+    }
+    normalized.push({
+      ordinal: index + 1,
+      path,
+      startLine,
+      endLine,
+      url,
+    });
+  });
+  return normalized;
+}
+
+function reviewFindingFingerprint(input: {
+  severity: "blocking" | "non_blocking";
+  title: string;
+  bodyMarkdown: string;
+  principleText: string | null;
+  locations: NormalizedReviewFindingLocation[];
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        severity: input.severity,
+        title: input.title,
+        body_markdown: input.bodyMarkdown,
+        principle_text: input.principleText,
+        locations: input.locations.map((location) => ({
+          path: location.path,
+          start_line: location.startLine,
+          end_line: location.endLine,
+          url: location.url,
+        })),
+      }),
+    )
+    .digest("hex");
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+function positiveIntegerField(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : null;
 }
 
 function readReviewResultFile(worktreePath: string): ReviewResultRead {
@@ -4374,6 +4624,7 @@ function finalizeApprovedReviewBlockedByCi(
       content: rawReviewResult,
       extension: "json",
     });
+    persistReviewFindingsInOpenTxn(deps, task, posted.reviewId, now, rawReviewResult);
     deps.artifactStore.writeArtifact({
       taskId: task.task_id,
       attemptId: task.attempt_id,
@@ -4536,6 +4787,7 @@ function markReviewAttemptEndedInOpenTxn(
     content: rawReviewResult,
     extension: "json",
   });
+  persistReviewFindingsInOpenTxn(deps, task, posted.reviewId, now, rawReviewResult);
   const artifact = deps.artifactStore.writeArtifact({
     taskId: task.task_id,
     attemptId: task.attempt_id,
@@ -4622,6 +4874,7 @@ function finalizePostedReview(
       content: rawReviewResult,
       extension: "json",
     });
+    persistReviewFindingsInOpenTxn(deps, task, posted.reviewId, now, rawReviewResult);
 
     if (!handOffToRespawn) {
       // Artifact write joins this transaction (the INSERT into `artifacts`
