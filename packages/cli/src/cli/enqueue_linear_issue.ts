@@ -17,6 +17,7 @@ import {
 import { QuayError } from "../core/errors.ts";
 import { parseQuayConfigBlock } from "../core/quay_config_block.ts";
 import { mergeNormalizedTags } from "../core/tag_normalize.ts";
+import { TASK_TERMINAL_STATES } from "../core/task_state.ts";
 import { fetchTicketContextWithIssue } from "../core/ticket_context.ts";
 import {
   createOrVerifyUmbrellaWorkflow,
@@ -948,17 +949,24 @@ interface ExistingTaskWithBase extends EnqueueResult {
   base_branch: string;
 }
 
+const ACTIVE_TASK_SQL = `cancel_requested_at IS NULL AND state NOT IN (${TASK_TERMINAL_STATES.map(() => "?").join(", ")})`;
+
 function lookupExistingTaskWithBase(
   db: DB,
   repoId: string,
   externalRef: string,
 ): ExistingTaskWithBase | null {
   const row = db
-    .query<ExistingTaskRow & { base_branch: string }, [string, string]>(
+    .query<ExistingTaskRow & { base_branch: string }, [string, string, ...string[]]>(
       `SELECT task_id, state, branch_name, base_branch, tmux_id, worktree_path
-         FROM tasks WHERE repo_id = ? AND external_ref = ?`,
+         FROM tasks
+        WHERE repo_id = ?
+          AND external_ref = ?
+          AND ${ACTIVE_TASK_SQL}
+        ORDER BY run_number DESC, created_at DESC, task_id DESC
+        LIMIT 1`,
     )
-    .get(repoId, externalRef);
+    .get(repoId, externalRef, ...TASK_TERMINAL_STATES);
   if (!row) return null;
   const attempt = db
     .query<{ attempt_id: number }, [string]>(
@@ -1286,7 +1294,11 @@ function lookupDependencyTask(
   return (
     db
       .query<DependencyTaskRow, [string, string]>(
-        `SELECT task_id, state FROM tasks WHERE repo_id = ? AND external_ref = ?`,
+        `SELECT task_id, state
+           FROM tasks
+          WHERE repo_id = ? AND external_ref = ?
+          ORDER BY run_number DESC, created_at DESC, task_id DESC
+          LIMIT 1`,
       )
       .get(repoId, externalRef) ?? null
   );
@@ -1404,11 +1416,16 @@ function lookupExistingTask(
   externalRef: string,
 ): EnqueueResult | null {
   const row = db
-    .query<ExistingTaskRow, [string, string]>(
+    .query<ExistingTaskRow, [string, string, ...string[]]>(
       `SELECT task_id, state, branch_name, tmux_id, worktree_path
-         FROM tasks WHERE repo_id = ? AND external_ref = ?`,
+         FROM tasks
+        WHERE repo_id = ?
+          AND external_ref = ?
+          AND ${ACTIVE_TASK_SQL}
+        ORDER BY run_number DESC, created_at DESC, task_id DESC
+        LIMIT 1`,
     )
-    .get(repoId, externalRef);
+    .get(repoId, externalRef, ...TASK_TERMINAL_STATES);
   if (!row) return null;
   const attempt = db
     .query<{ attempt_id: number }, [string]>(
@@ -1443,7 +1460,7 @@ function lookupRepoIdsForExternalRef(
 ): string[] {
   return db
     .query<{ repo_id: string }, [string]>(
-      `SELECT repo_id FROM tasks WHERE external_ref = ?`,
+      `SELECT DISTINCT repo_id FROM tasks WHERE external_ref = ?`,
     )
     .all(externalRef)
     .map((r) => r.repo_id);
