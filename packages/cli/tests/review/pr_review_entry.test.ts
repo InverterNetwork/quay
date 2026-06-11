@@ -68,6 +68,22 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
     )
     .get(out.attempt_id);
   expect(attempt).toEqual({ reason: "review_only", head_sha: "abc123" });
+  const briefRow = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'brief'`,
+    )
+    .get(out.attempt_id);
+  expect(briefRow).toBeDefined();
+  const brief = readFileSync(briefRow!.file_path, "utf8");
+  expect(brief).toContain("## Verdict policy");
+  expect(brief).toContain("This is not a Quay-owned task.");
+  expect(brief).toContain(
+    "Non-blocking-only findings -> `--approve` with the findings listed under `### Non-blocking`.",
+  );
+  expect(brief).not.toContain(
+    "Non-blocking-only findings -> `--request-changes`",
+  );
   const tags = h.db
     .query<{ tag: string }, [string]>(
       `SELECT tag FROM task_tags WHERE task_id = ? ORDER BY tag`,
@@ -1080,4 +1096,118 @@ test("review-pr no-ops for Quay-owned PRs while done gate is disabled", async ()
     )
     .get(taskId);
   expect(count?.n).toBe(0);
+});
+
+test("review-pr gives Quay-owned tasks a request-changes verdict policy for any finding", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true, gateQuayOwnedDone: true };
+  const repoId = insertRepo(h.db, "repo-owned-policy");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-owned-policy",
+    state: "pr-open",
+  });
+  h.db.query(`UPDATE tasks SET pr_number = 21 WHERE task_id = ?`).run(taskId);
+  built.github.setPrView(repoId, 21, {
+    number: 21,
+    title: "Quay PR",
+    body: "",
+    url: "https://example.test/pr/21",
+    headRefName: `quay/${taskId}`,
+    headSha: "sha-owned-policy",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", `${repoId}:21`],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  expect(out).toMatchObject({
+    task_id: taskId,
+    scheduled: true,
+    skipped_reason: null,
+  });
+  const briefRow = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'brief'`,
+    )
+    .get(out.attempt_id);
+  expect(briefRow).toBeDefined();
+  const brief = readFileSync(briefRow!.file_path, "utf8");
+  expect(brief).toContain("## Verdict policy");
+  expect(brief).toContain("This is a Quay-owned task.");
+  expect(brief).toContain(
+    "Non-blocking-only findings -> `--request-changes` with the findings listed under `### Non-blocking`.",
+  );
+  expect(brief).not.toContain(
+    "Non-blocking-only findings -> `--approve`",
+  );
+  expect(brief).toContain("Choose the verdict according to the Verdict policy below.");
+});
+
+test("review-pr gives adopted external PRs the non-Quay-owned verdict policy", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true, gateQuayOwnedDone: true };
+  const repoId = insertRepo(h.db, "repo-adopted-policy");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-adopted-policy",
+    state: "pr-open",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET authoring_mode = 'adopted_external_pr',
+              pr_number = 22,
+              branch_name = 'feature/adopted-policy'
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+  built.github.setPrView(repoId, 22, {
+    number: 22,
+    title: "Adopted PR",
+    body: "",
+    url: "https://example.test/pr/22",
+    headRefName: "feature/adopted-policy",
+    headSha: "sha-adopted-policy",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", `${repoId}:22`],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  expect(out).toMatchObject({
+    task_id: taskId,
+    scheduled: true,
+    skipped_reason: null,
+  });
+  const briefRow = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'brief'`,
+    )
+    .get(out.attempt_id);
+  expect(briefRow).toBeDefined();
+  const brief = readFileSync(briefRow!.file_path, "utf8");
+  expect(brief).toContain("## Verdict policy");
+  expect(brief).toContain("This is not a Quay-owned task.");
+  expect(brief).toContain(
+    "Non-blocking-only findings -> `--approve` with the findings listed under `### Non-blocking`.",
+  );
+  expect(brief).not.toContain(
+    "Non-blocking-only findings -> `--request-changes`",
+  );
+  expect(brief).toContain("Choose the verdict according to the Verdict policy below.");
 });

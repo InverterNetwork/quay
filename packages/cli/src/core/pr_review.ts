@@ -263,7 +263,6 @@ export function enterReview(
       reviewerAgent: input.reviewerAgent ?? null,
       reviewerModel: input.reviewerModel ?? null,
     });
-  const synthetic = task.authoring_mode === "synthetic_review";
   const tags = dedupeTags(input.tags ?? []);
   const preambleId = ensurePreambleIdForAttemptReason(
     deps.db,
@@ -272,9 +271,9 @@ export function enterReview(
     { repoId: input.repoId },
   );
   const preamble = loadPreambleBody(deps.db, preambleId);
-  const brief = synthetic
+  const brief = task.authoring_mode === "synthetic_review"
     ? composeSyntheticBrief(pr, input.referenceReposRoot)
-    : composeQuayOwnedReviewBrief(
+    : composeTaskReviewBrief(
         deps.db,
         task,
         pr,
@@ -1424,7 +1423,7 @@ function loadLatestReviewCommentsForAdoption(
   }
 }
 
-function composeQuayOwnedReviewBrief(
+function composeTaskReviewBrief(
   db: DB,
   task: TaskLookupRow,
   pr: PullRequestView,
@@ -1459,7 +1458,11 @@ function composeQuayOwnedReviewBrief(
     "",
     "## Required action",
     "",
-    `Post exactly one review with \`gh pr review ${pr.number}\`. If the prior feedback is fully addressed, use \`--approve\`; if blocking issues remain, use \`--request-changes\`. Do not modify files, commit, or push.`,
+    `Post exactly one review with \`gh pr review ${pr.number}\`. Choose the verdict according to the Verdict policy below. Do not modify files, commit, or push.`,
+    "",
+    renderVerdictPolicy(
+      task.authoring_mode === "quay_owned" ? "quay_owned" : "non_quay_owned",
+    ),
   );
 
   const referenceRepos = renderReferenceReposPrompt(
@@ -1734,6 +1737,8 @@ function composeSyntheticBrief(
     bodyOpen,
     body,
     bodyClose,
+    "",
+    renderVerdictPolicy("non_quay_owned"),
   ];
   const referenceRepos = renderReferenceReposPrompt(
     referenceReposRoot,
@@ -1743,6 +1748,31 @@ function composeSyntheticBrief(
     lines.push("", referenceRepos);
   }
   return lines.join("\n");
+}
+
+function renderVerdictPolicy(
+  ownership: "quay_owned" | "non_quay_owned",
+): string {
+  if (ownership === "quay_owned") {
+    return [
+      "## Verdict policy",
+      "",
+      "This is a Quay-owned task. Use `--request-changes` for any finding, including Non-blocking findings, so Quay can respawn the worker to address it.",
+      "",
+      "- Any Blocking finding -> `--request-changes`.",
+      "- Non-blocking-only findings -> `--request-changes` with the findings listed under `### Non-blocking`.",
+      "- No findings -> `--approve` with a body of `lgtm!`.",
+    ].join("\n");
+  }
+  return [
+    "## Verdict policy",
+    "",
+    "This is not a Quay-owned task. Use `--request-changes` only for Blocking findings. Non-blocking-only findings should be approved with notes.",
+    "",
+    "- Any Blocking finding -> `--request-changes`.",
+    "- Non-blocking-only findings -> `--approve` with the findings listed under `### Non-blocking`.",
+    "- No findings -> `--approve` with a body of `lgtm!`.",
+  ].join("\n");
 }
 
 function dedupeTags(tags: string[]): string[] {
