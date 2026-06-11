@@ -33,3 +33,15 @@ test("reviewer preamble does not instruct title rewrites on human-authored PRs",
   expect(DEFAULT_REVIEWER_PREAMBLE_BODY).not.toContain("conventional-commit");
   expect(DEFAULT_REVIEWER_PREAMBLE_BODY).toContain("Do not modify code");
 });
+
+test("reviewer preamble permits only review result and blocker signal writes", () => {
+  expect(DEFAULT_REVIEWER_PREAMBLE_BODY).toContain(
+    "You may write exactly one reviewer signal file",
+  );
+  expect(DEFAULT_REVIEWER_PREAMBLE_BODY).toContain(
+    "Modify any file other than `.quay-review-result.json` or `.quay-blocked.md`",
+  );
+  expect(DEFAULT_REVIEWER_PREAMBLE_BODY).toContain(
+    "modify any file outside `.quay-review-result.json` or `.quay-blocked.md`",
+  );
+});
