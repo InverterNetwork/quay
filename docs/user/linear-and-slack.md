@@ -59,13 +59,20 @@ does not use future Linear state changes as the scheduler source of truth.
 Complete Linear blockers are recorded in the ticket snapshot but do not block
 enqueue. Incomplete blockers must already be tracked by Quay. If an incomplete
 blocker has a Quay task, the new task is created in `waiting_dependencies` and
-waits until that blocker reaches `merged`. If an incomplete blocker is not
-tracked, enqueue fails with `dependency_not_tracked` and does not create the
-dependent task.
+waits until that blocker work item reaches `merged` through its latest run. If
+an incomplete blocker is not tracked, enqueue fails with
+`dependency_not_tracked` and does not create the dependent task. If a blocker
+rerun fails after a dependency was already satisfied, Quay keeps the dependent
+satisfied; satisfaction is not retroactively revoked.
 
 The ticket snapshot artifact includes `linear_blocked_by_relations`, including
 whether each relation was complete in Linear, whether Quay persisted a
 dependency row, and the tracked blocker task id when available.
+
+Slack thread refs belong to the work item conversation. Rerun notifications
+should continue in the same human thread by default and identify the concrete
+run number, for example `run 2`, when discussing a branch, PR, or terminal run
+state.
 
 ## Umbrella Tickets
 

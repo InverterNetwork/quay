@@ -65,6 +65,8 @@ export interface WaitingDependencyTaskRow {
 interface WaitingDependencyEvaluationRow extends TaskDependencyRow {
   blocker_task_id: string | null;
   blocker_state: string | null;
+  blocker_run_number: number | null;
+  blocker_supersedes_task_id: string | null;
 }
 
 export function createTaskDependency(
@@ -281,10 +283,14 @@ function resolveDependencyTaskIdByExternalRef(
   return (
     db
       .query<{ task_id: string }, [string, string | null, string | null]>(
-        `SELECT task_id
-           FROM tasks
-          WHERE external_ref = ?
-            AND (? IS NULL OR repo_id = ?)
+        `SELECT t.task_id
+           FROM tasks t
+          WHERE t.external_ref = ?
+            AND (? IS NULL OR t.repo_id = ?)
+          ORDER BY
+            COALESCE(t.run_number, 0) DESC,
+            t.created_at DESC,
+            t.task_id DESC
           LIMIT 1`,
       )
       .get(externalRef, repoId, repoId)?.task_id ?? null
@@ -357,19 +363,29 @@ export function satisfyDependenciesForMergedTask(
   now: string,
 ): TaskDependencyRow[] {
   return db
-    .query<TaskDependencyRow, [string, string, string]>(
+    .query<TaskDependencyRow, [string, string, string, string]>(
       `UPDATE task_dependencies
           SET satisfied_at = ?,
               updated_at = ?
-        WHERE dependency_task_id = ?
+        WHERE satisfied_at IS NULL
           AND required_state = 'merged'
-          AND satisfied_at IS NULL
+          AND (
+                dependency_task_id = ?
+             OR dependency_task_id IN (
+                  SELECT older.task_id
+                    FROM tasks merged
+                    JOIN tasks older
+                      ON older.work_item_id = merged.work_item_id
+                   WHERE merged.task_id = ?
+                     AND merged.work_item_id IS NOT NULL
+                )
+          )
         RETURNING dependency_id, dependent_task_id, dependency_task_id,
                   dependency_source, dependency_external_ref, dependency_repo_id,
                   umbrella_workflow_id, kind, scope, required_state,
                   satisfied_at, created_at, updated_at`,
     )
-    .all(now, now, dependencyTaskId);
+    .all(now, now, dependencyTaskId, dependencyTaskId);
 }
 
 export function satisfyDependenciesForMergedToFeatureBranchTask(
@@ -378,19 +394,29 @@ export function satisfyDependenciesForMergedToFeatureBranchTask(
   now: string,
 ): TaskDependencyRow[] {
   return db
-    .query<TaskDependencyRow, [string, string, string]>(
+    .query<TaskDependencyRow, [string, string, string, string]>(
       `UPDATE task_dependencies
           SET satisfied_at = ?,
               updated_at = ?
-        WHERE dependency_task_id = ?
+        WHERE satisfied_at IS NULL
           AND required_state = 'merged_to_feature_branch'
-          AND satisfied_at IS NULL
+          AND (
+                dependency_task_id = ?
+             OR dependency_task_id IN (
+                  SELECT older.task_id
+                    FROM tasks merged
+                    JOIN tasks older
+                      ON older.work_item_id = merged.work_item_id
+                   WHERE merged.task_id = ?
+                     AND merged.work_item_id IS NOT NULL
+                )
+          )
         RETURNING dependency_id, dependent_task_id, dependency_task_id,
                   dependency_source, dependency_external_ref, dependency_repo_id,
                   umbrella_workflow_id, kind, scope, required_state,
                   satisfied_at, created_at, updated_at`,
     )
-    .all(now, now, dependencyTaskId);
+    .all(now, now, dependencyTaskId, dependencyTaskId);
 }
 
 export function releaseTaskIfDependenciesSatisfied(
@@ -486,11 +512,22 @@ function loadWaitingDependencyEvaluations(
               d.dependency_source, d.dependency_external_ref, d.dependency_repo_id,
               d.umbrella_workflow_id, d.kind, d.scope, d.required_state, d.satisfied_at,
               d.created_at, d.updated_at,
-              COALESCE(blocker.task_id, external_blocker.task_id) AS blocker_task_id,
-              COALESCE(blocker.state, external_blocker.state) AS blocker_state
+              COALESCE(latest_direct_blocker.task_id, latest_external_blocker.task_id, blocker.task_id, external_blocker.task_id) AS blocker_task_id,
+              COALESCE(latest_direct_blocker.state, latest_external_blocker.state, blocker.state, external_blocker.state) AS blocker_state,
+              COALESCE(latest_direct_blocker.run_number, latest_external_blocker.run_number, blocker.run_number, external_blocker.run_number) AS blocker_run_number,
+              COALESCE(latest_direct_blocker.supersedes_task_id, latest_external_blocker.supersedes_task_id, blocker.supersedes_task_id, external_blocker.supersedes_task_id) AS blocker_supersedes_task_id
          FROM task_dependencies d
          LEFT JOIN tasks blocker
            ON blocker.task_id = d.dependency_task_id
+         LEFT JOIN tasks latest_direct_blocker
+           ON blocker.work_item_id IS NOT NULL
+          AND latest_direct_blocker.task_id = (
+                SELECT latest.task_id
+                  FROM tasks latest
+                 WHERE latest.work_item_id = blocker.work_item_id
+                 ORDER BY latest.run_number DESC, latest.created_at DESC, latest.task_id DESC
+                 LIMIT 1
+              )
          LEFT JOIN tasks external_blocker
            ON d.dependency_task_id IS NULL
           AND d.dependency_external_ref IS NOT NULL
@@ -499,6 +536,28 @@ function loadWaitingDependencyEvaluations(
                 d.dependency_repo_id IS NULL
              OR external_blocker.repo_id = d.dependency_repo_id
           )
+          AND external_blocker.task_id = (
+                SELECT candidate.task_id
+                  FROM tasks candidate
+                 WHERE candidate.external_ref = d.dependency_external_ref
+                   AND (
+                         d.dependency_repo_id IS NULL
+                      OR candidate.repo_id = d.dependency_repo_id
+                   )
+                 ORDER BY COALESCE(candidate.run_number, 0) DESC,
+                          candidate.created_at DESC,
+                          candidate.task_id DESC
+                 LIMIT 1
+              )
+         LEFT JOIN tasks latest_external_blocker
+           ON external_blocker.work_item_id IS NOT NULL
+          AND latest_external_blocker.task_id = (
+                SELECT latest.task_id
+                  FROM tasks latest
+                 WHERE latest.work_item_id = external_blocker.work_item_id
+                 ORDER BY latest.run_number DESC, latest.created_at DESC, latest.task_id DESC
+                 LIMIT 1
+              )
         WHERE d.dependent_task_id = ?
         ORDER BY d.dependency_id`,
     )
@@ -545,6 +604,14 @@ function enqueueDependencyFailedOutboxItem(
       umbrella_workflow_id: dep.umbrella_workflow_id,
       dependency_source: dep.dependency_source,
       blocker_state: dep.blocker_state,
+      blocker_run_number: dep.blocker_run_number,
+      blocker_supersedes_task_id: dep.blocker_supersedes_task_id,
+      rerun_available:
+        dep.blocker_state === "cancelled" || dep.blocker_state === "closed_unmerged",
+      rerun_command:
+        dep.dependency_external_ref !== null
+          ? `quay rerun --linear-issue ${dep.dependency_external_ref}`
+          : null,
     },
     routeHint: { attention: "high" },
   });

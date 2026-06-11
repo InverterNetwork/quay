@@ -251,7 +251,9 @@ and `--slack-thread-ref`.
 Linear-backed enqueue reads native Linear blocked-by relations once, during
 enqueue. Complete blockers do not block. Incomplete tracked blockers persist
 dependency rows and create the dependent task in `waiting_dependencies`;
-incomplete untracked blockers fail with `dependency_not_tracked`.
+incomplete untracked blockers fail with `dependency_not_tracked`. Dependency
+rows refer to the blocker work item: reruns are checked through the latest run,
+and a previously set `satisfied_at` is not revoked by later failed reruns.
 
 Linear-backed umbrella workflows use native Linear parent/child hierarchy. If
 the issue has Linear children, enqueue creates the umbrella workflow, derives
@@ -292,7 +294,8 @@ new run gets a fresh task/worktree lineage, sets `supersedes_task_id` to the
 previous run, and uses run-number branch naming such as
 `quay/BRIX-123-r2`. The success payload includes the normal enqueue fields plus
 `created_new_run`, `run_number`, and `supersedes_task_id`; when enqueue reuses
-an active run, `created_new_run` is `false`.
+an active run, `created_new_run` is `false`. A newly-created rerun also writes
+the Linear issue back to `In Progress` on a best-effort basis.
 
 ## PR Review
 
