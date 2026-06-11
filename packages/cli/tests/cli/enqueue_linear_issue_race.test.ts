@@ -1,4 +1,4 @@
-// Tests for the race-condition fix: the unique index on (repo_id, external_ref)
+// Tests for the race-condition fix: the unique active-run index on work_item_id
 // closes the read-before-write window in `quay enqueue --linear-issue`.
 
 import { afterEach, expect, test } from "bun:test";
@@ -79,7 +79,7 @@ async function addRepo(built: ReturnType<typeof buildCliDeps>): Promise<void> {
 // Test 1: SQL-level unique constraint blocks a duplicate insert
 // ---------------------------------------------------------------------------
 
-test("test_enqueue_linear_issue_unique_constraint_blocks_duplicate", () => {
+test("test_enqueue_linear_issue_active_run_constraint_blocks_duplicate", () => {
   h = createHarness();
 
   // Insert one repo and one task with external_ref set.
@@ -94,21 +94,28 @@ test("test_enqueue_linear_issue_unique_constraint_blocks_duplicate", () => {
   const now = "2024-01-01T00:00:00.000Z";
   h.db
     .query(
+      `INSERT INTO work_items (
+         work_item_id, source, external_ref, created_at, updated_at
+       ) VALUES ('wi-eng-1234', 'linear', 'ENG-1234', ?, ?)`,
+    )
+    .run(now, now);
+  h.db
+    .query(
       `INSERT INTO tasks (
-         task_id, repo_id, external_ref, state, branch_name, tmux_id,
+         task_id, repo_id, external_ref, work_item_id, run_number, state, branch_name, tmux_id,
          worktree_path, retry_budget, created_at, updated_at
-       ) VALUES (?, ?, ?, 'queued', ?, ?, ?, 5, ?, ?)`,
+       ) VALUES (?, ?, ?, 'wi-eng-1234', 1, 'queued', ?, ?, ?, 5, ?, ?)`,
     )
     .run("task-aaa", REPO_ID, "ENG-1234", "quay/ENG-1234", "tmux-aaa", "/wt/aaa", now, now);
 
-  // A second insert with the same (repo_id, external_ref) must violate the unique index.
+  // A second active run for the same work item must violate the unique index.
   expect(() => {
     h!.db
       .query(
         `INSERT INTO tasks (
-           task_id, repo_id, external_ref, state, branch_name, tmux_id,
+           task_id, repo_id, external_ref, work_item_id, run_number, state, branch_name, tmux_id,
            worktree_path, retry_budget, created_at, updated_at
-         ) VALUES (?, ?, ?, 'queued', ?, ?, ?, 5, ?, ?)`,
+         ) VALUES (?, ?, ?, 'wi-eng-1234', 2, 'queued', ?, ?, ?, 5, ?, ?)`,
       )
       .run("task-bbb", REPO_ID, "ENG-1234", "quay/ENG-1234-bbb", "tmux-bbb", "/wt/bbb", now, now);
   }).toThrow(/UNIQUE constraint failed|constraint failed/i);
@@ -121,10 +128,10 @@ test("test_enqueue_linear_issue_unique_constraint_blocks_duplicate", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 2: null external_ref rows are NOT blocked by the unique constraint
+// Test 2: terminal historical runs and null-ref synthetic runs are not blocked
 // ---------------------------------------------------------------------------
 
-test("test_enqueue_unique_constraint_does_not_block_null_external_ref_rows", () => {
+test("test_enqueue_active_run_constraint_allows_terminal_and_synthetic_runs", () => {
   h = createHarness();
 
   h.db
@@ -136,14 +143,55 @@ test("test_enqueue_unique_constraint_does_not_block_null_external_ref_rows", () 
     .run(REPO_ID, REPO_INPUT.repo_url, "main", "bun", "true", "2024-01-01T00:00:00.000Z");
 
   const now = "2024-01-01T00:00:00.000Z";
-
-  // Two tasks with NULL external_ref must coexist without violating the index.
+  h.db
+    .query(
+      `INSERT INTO work_items (
+         work_item_id, source, external_ref, created_at, updated_at
+       ) VALUES ('wi-eng-1234', 'linear', 'ENG-1234', ?, ?)`,
+    )
+    .run(now, now);
   h.db
     .query(
       `INSERT INTO tasks (
-         task_id, repo_id, external_ref, state, branch_name, tmux_id,
+         task_id, repo_id, external_ref, work_item_id, run_number, state, branch_name, tmux_id,
          worktree_path, retry_budget, created_at, updated_at
-       ) VALUES (?, ?, NULL, 'queued', ?, ?, ?, 5, ?, ?)`,
+       ) VALUES (?, ?, ?, 'wi-eng-1234', 1, 'closed_unmerged', ?, ?, ?, 5, ?, ?)`,
+    )
+    .run("task-terminal-1", REPO_ID, "ENG-1234", "quay/ENG-1234", "tmux-terminal-1", "/wt/terminal-1", now, now);
+
+  expect(() => {
+    h!.db
+      .query(
+        `INSERT INTO tasks (
+           task_id, repo_id, external_ref, work_item_id, run_number, state, branch_name, tmux_id,
+           worktree_path, retry_budget, created_at, updated_at
+         ) VALUES (?, ?, ?, 'wi-eng-1234', 2, 'queued', ?, ?, ?, 5, ?, ?)`,
+      )
+      .run("task-active-2", REPO_ID, "ENG-1234", "quay/ENG-1234-r2", "tmux-active-2", "/wt/active-2", now, now);
+  }).not.toThrow();
+
+  h.db
+    .query(
+      `INSERT INTO work_items (
+         work_item_id, source, external_ref, created_at, updated_at
+       ) VALUES ('wi-task-null-1', 'synthetic', 'task-null-1', ?, ?)`,
+    )
+    .run(now, now);
+  h.db
+    .query(
+      `INSERT INTO work_items (
+         work_item_id, source, external_ref, created_at, updated_at
+       ) VALUES ('wi-task-null-2', 'synthetic', 'task-null-2', ?, ?)`,
+    )
+    .run(now, now);
+
+  // Two NULL external_ref tasks get distinct synthetic work items and coexist.
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, external_ref, work_item_id, run_number, state, branch_name, tmux_id,
+         worktree_path, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, NULL, 'wi-task-null-1', 1, 'queued', ?, ?, ?, 5, ?, ?)`,
     )
     .run("task-null-1", REPO_ID, "quay/t1", "tmux-null-1", "/wt/null-1", now, now);
 
@@ -151,9 +199,9 @@ test("test_enqueue_unique_constraint_does_not_block_null_external_ref_rows", () 
     h!.db
       .query(
         `INSERT INTO tasks (
-           task_id, repo_id, external_ref, state, branch_name, tmux_id,
+           task_id, repo_id, external_ref, work_item_id, run_number, state, branch_name, tmux_id,
            worktree_path, retry_budget, created_at, updated_at
-         ) VALUES (?, ?, NULL, 'queued', ?, ?, ?, 5, ?, ?)`,
+         ) VALUES (?, ?, NULL, 'wi-task-null-2', 1, 'queued', ?, ?, ?, 5, ?, ?)`,
       )
       .run("task-null-2", REPO_ID, "quay/t2", "tmux-null-2", "/wt/null-2", now, now);
   }).not.toThrow();
@@ -161,7 +209,7 @@ test("test_enqueue_unique_constraint_does_not_block_null_external_ref_rows", () 
   const count = h.db
     .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM tasks`)
     .get();
-  expect(count?.n).toBe(2);
+  expect(count?.n).toBe(4);
 });
 
 // ---------------------------------------------------------------------------
@@ -258,4 +306,69 @@ test("test_enqueue_linear_issue_concurrent_race_converges_to_one_task", async ()
     .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM tasks`)
     .get();
   expect(finalCount?.n).toBe(1);
+});
+
+test("test_enqueue_linear_issue_terminal_task_can_be_enqueued_as_new_run", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(makeIssue("ENG-9002"));
+  const ioA = bufferIO();
+  const resultA = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-9002"],
+    built.deps,
+    ioA,
+  );
+  expect(resultA.exitCode).toBe(0);
+  const firstTask = JSON.parse(ioA.out().trim());
+
+  h.db
+    .query(`UPDATE tasks SET state = 'closed_unmerged' WHERE task_id = ?`)
+    .run(firstTask.task_id);
+
+  built.linear.setIssue(makeIssue("ENG-9002"));
+  const ioB = bufferIO();
+  const resultB = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-9002"],
+    built.deps,
+    ioB,
+  );
+  expect(resultB.exitCode).toBe(0);
+  const secondTask = JSON.parse(ioB.out().trim());
+
+  expect(secondTask.task_id).not.toBe(firstTask.task_id);
+  const rows = h.db
+    .query<
+      {
+        task_id: string;
+        state: string;
+        work_item_id: string;
+        run_number: number;
+        supersedes_task_id: string | null;
+      },
+      []
+    >(
+      `SELECT task_id, state, work_item_id, run_number, supersedes_task_id
+         FROM tasks
+        WHERE external_ref = 'ENG-9002'
+        ORDER BY run_number ASC`,
+    )
+    .all();
+  expect(rows).toEqual([
+    {
+      task_id: firstTask.task_id,
+      state: "closed_unmerged",
+      work_item_id: rows[0]!.work_item_id,
+      run_number: 1,
+      supersedes_task_id: null,
+    },
+    {
+      task_id: secondTask.task_id,
+      state: "queued",
+      work_item_id: rows[0]!.work_item_id,
+      run_number: 2,
+      supersedes_task_id: firstTask.task_id,
+    },
+  ]);
 });
