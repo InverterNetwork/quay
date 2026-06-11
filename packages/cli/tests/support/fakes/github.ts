@@ -374,6 +374,8 @@ export class FakeGitHub implements GitHubPort {
       input.headSha,
       undefined,
       input.token,
+      input.verdict,
+      input.body,
     );
     if (existing !== null) return existing;
     const review: PostedReview = {

@@ -17,4 +17,3 @@ CREATE TABLE review_finding_external_links (
 
 CREATE INDEX review_finding_external_links_finding_idx
   ON review_finding_external_links(finding_id);
-

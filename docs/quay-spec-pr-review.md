@@ -595,13 +595,13 @@ The contract pieces are **enforced by preamble prose, not by tick.** Tick observ
 1. **Use the brief, then the diff.** Read the task brief (`.quay-prompt.md` or equivalent — same location as for code workers) before doing anything else. Read the diff via `gh pr diff` or by inspecting the worktree against the base branch. Don't repeat work the brief already did.
 2. **Fetch only what's missing.** If the brief contains unexpanded identifiers (synthetic-task path on adapter-less deployments — see `docs/quay-spec-deployment-adapters.md` §6.1), follow them via available tooling (Linear MCP, web fetch, etc.) before composing findings.
 3. **Write exactly one structured result with a definite verdict.** Write `.quay-review-result.json` once with `verdict` equal to `approved` or `changes_requested`, a non-empty `body`, and a `findings` array. Do not call `gh pr review`. Comment-only verdicts are forbidden because they strand the PR (Quay's gate requires `approved` to advance to `done`, and `changes_requested` is the only signal that re-engages the code worker).
-4. **Inline comments where the issue has a locus.** A finding tied to specific code lives as an inline comment with `path` + `line`. A finding about the change as a whole lives in the review body. Don't smear locus-bearing findings into the body; don't manufacture line refs for body-level findings.
+4. **Locations where the issue has a locus.** A finding tied to specific code carries `locations` entries with `path` plus `line`/`start_line`/`end_line` and should link those locations from the review body. A finding about the change as a whole can omit locations. Quay posts a single review body from `.quay-review-result.json`; it does not accept inline review comments from the result file.
 5. **No code or git mutation.** No commits, no pushes, no installs, no file writes to repo paths. The substrate's own `.quay-*` files are fine; write `.quay-review-result.json` when the review is complete or `.quay-blocked.md` if you can't proceed. (Substrate-level constraint from §6.2; restated here so the contract list is complete.)
 6. **Exit cleanly when done.** Either `.quay-review-result.json` or `.quay-blocked.md` is written; then exit. Don't loop, don't sleep waiting for input, don't poll GitHub for further state.
 
 The default preamble at `docs/quay-reviewer-preamble-default.md` enforces all six pieces in prose. Deployments overriding the preamble (via a new `kind = 'review'` row in `preambles`; §6.3) are responsible for preserving the pieces tick depends on — specifically (3), (5), and (6). Pieces (1), (2), and (4) affect review quality but not Quay's machinery.
 
-(A `quay-principle` fenced-block contract for tagging generalizable rules in review comments was specced in earlier drafts. It's deferred to the future findings/search spec — see §2 out-of-scope and the archived prior draft in `docs/archive/quay-spec-pr-review.md` §5 for the prior shape.)
+(A `quay-principle` field on structured findings tags generalizable rules for later reporting and follow-up automation. The archived prior draft in `docs/archive/quay-spec-pr-review.md` §5 keeps the older fenced-block shape for historical context.)
 
 ### 7.2 `quay review-pr` CLI
 
@@ -681,7 +681,7 @@ Nothing removed. The existing human-review respawn loop in `src/core/non_budget_
 - `docs/quay-spec.md` — substrate spec (locked v1). Source of the existing state machine, worker substrate (tmux + supervisor + worktree), `attempts` table, `tasks.head_sha`, `tasks.last_review_id_acted_on`, `non_budget_respawns_consumed` counter.
 - `docs/quay-spec-ticket-validation.md` — `quay validate-ticket` library/CLI. Independent of this spec.
 - `docs/quay-spec-deployment-adapters.md` — Linear + Slack adapters. Soft dependency for richer synthetic-task briefs (§8.1).
-- `docs/archive/quay-spec-pr-review.md` — superseded prior draft. Source for still-valid design pieces this spec carries forward (synthetic `task_id` identity, active `(task_id, head_sha)` dedup, force-push handling). Also the original home of the `review_findings` schema and `quay-principle` contract, which v1 defers.
+- `docs/archive/quay-spec-pr-review.md` — superseded prior draft. Source for still-valid design pieces this spec carries forward (synthetic `task_id` identity, active `(task_id, head_sha)` dedup, force-push handling). Also the original home of the older fenced `quay-principle` contract.
 - `docs/orchestrator-design-notes.md` §3.1, §3.2, §5, §7 — broader rationale, v2+ shape, deferred-work catalogue.
 - `docs/quay-reviewer-preamble-default.md` — human-readable source-of-truth for the default reviewer preamble. Inlined verbatim into the `DEFAULT_REVIEWER_PREAMBLE_BODY` constant at edit time (§6.3).
 
@@ -691,7 +691,7 @@ Every additive piece this spec defers is designed to land **without rewriting v1
 
 | Future feature | Cutover path |
 |---|---|
-| **Structured findings storage** (`review_findings` + FTS5 + `quay-principle` parser + `quay query-findings` CLI) | A future spec adds the table and parser; v1 backfills by re-parsing the `review_comments` artifacts stored against each `review_only` attempt. `attempts.review_id` provides the GitHub-side identity. No v1 data is dropped or renamed. |
+| **Findings search and reporting** (`review_findings` FTS5 + `quay query-findings` CLI) | A future spec can add search indexes and query surfaces over the structured `review_findings` rows. Existing rows are keyed by `attempts.review_id`, `head_sha`, and finding fingerprint, so no v1 data is dropped or renamed. |
 | **Multi-model panel review** (`review_runs`, `review_panelists`, consolidator) | New tables added. v1 `review_only` attempts stay valid; v2 backfills them as N=1 runs into the new `review_runs` table keyed `(repo_id, pr_number, head_sha)`. |
 | **`reviewer_preambles` SQL table** with named, append-only versioning | Copy `preambles WHERE kind = 'review'` rows over. v1's `preambles.kind` column can stay or be dropped. |
 | **Blocking mode** (`quay review-pr --wait --timeout`) | Two CLI flags added. v1's `(task_id, head_sha)` dedup graduates to run-level when `review_runs` lands. |
@@ -708,7 +708,7 @@ Forward-compatible naming choice in v1: this spec uses **`review_only`** for the
 - ~~**Reviewer preamble storage.**~~ Resolved: `preambles` SQL table with new `kind` column. Mirrors existing code-worker preamble pattern.
 - ~~**Rollout flags.**~~ Resolved: two flags, `[reviewer].enabled` (subsystem on/off) and `[reviewer].gate_quay_owned_done` (whether Quay reviewer approval gates Quay-owned `done`). §6.8.
 - ~~**Concurrency cap.**~~ Resolved: separate `max_concurrent_reviewers` (default 2). Code-worker `max_concurrent` and its `countRunning()` are unchanged.
-- ~~**Findings storage / search.**~~ Resolved: **deferred** to a future spec (§2 out-of-scope). v1 stores the raw review as an artifact + `attempts.review_id` / `head_sha` / `review_verdict`. Backfillable from those artifacts when a consumer needs structured findings.
+- ~~**Findings storage / search.**~~ Resolved: v1 stores structured findings from `.quay-review-result.json` in `review_findings` and keeps the raw result artifact for auditability. Search/query tooling over those rows remains deferred.
 - **Reviewer cap tuning.** The default `max_concurrent_reviewers = 2` is conservative. Deployments with many open PRs may need to raise it; the spec doesn't include a backpressure signal back to CI when the cap is saturated. Whether to add one (and what shape — exit code, message in stdout, separate poll endpoint) is deferred until measured behavior justifies it.
 - **Synthetic task access control.** v1 doesn't restrict who can call `quay review-pr`. Multi-tenant deployments may want per-repo scoping; not in v1.
 

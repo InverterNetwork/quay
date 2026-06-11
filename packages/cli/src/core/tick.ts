@@ -2101,11 +2101,17 @@ function processRunningReviewAttempt(
     return markReviewInfraFailure(deps, task, token.error, exitInfo, options);
   }
   try {
+    // The marker makes token-only reconciliation payload-specific. Without a
+    // configured reviewer.login, GitHub installation tokens do not expose a
+    // stable actor identity through `/user`, so a common human body like
+    // "lgtm!" must not be enough to finalize a Quay-owned side effect.
+    const reviewBody = composeQuayReviewBody(resultRead.result.body, task);
     const reconciled = reconcileAlreadyPostedReview(
       deps,
       task,
       options,
       resultRead.result,
+      reviewBody,
       token.token,
     );
     if (reconciled !== null) {
@@ -2116,7 +2122,7 @@ function processRunningReviewAttempt(
         prNumber: task.pr_number,
         headSha: task.head_sha,
         verdict: expectedDecision,
-        body: resultRead.result.body,
+        body: reviewBody,
         token: token.token,
       });
     }
@@ -2171,6 +2177,7 @@ function reconcileAlreadyPostedReview(
   task: ReviewAttemptTaskRow,
   options: TickOptions,
   result: ParsedReviewResult,
+  reviewBody: string,
   token: string,
 ): PostedReview | null {
   if (task.pr_number === null) return null;
@@ -2181,10 +2188,18 @@ function reconcileAlreadyPostedReview(
     options.reviewerLogin,
     token,
     result.verdict === "approved" ? "APPROVED" : "CHANGES_REQUESTED",
-    result.body,
+    reviewBody,
   );
   if (posted === null) return null;
   return posted;
+}
+
+function composeQuayReviewBody(
+  body: string,
+  task: Pick<ReviewAttemptTaskRow, "task_id" | "attempt_id" | "head_sha">,
+): string {
+  const marker = `<!-- quay-review-result task_id=${task.task_id} attempt_id=${task.attempt_id} head_sha=${task.head_sha} -->`;
+  return `${body.trimEnd()}\n\n${marker}`;
 }
 
 function reviewKillIntentDiagnostic(intent: "wall_clock" | "stale"): string {

@@ -52,6 +52,15 @@ function writeReviewResult(
   );
 }
 
+function quayReviewBody(
+  body: string,
+  taskId: string,
+  attemptId: number,
+  headSha: string,
+): string {
+  return `${body.trimEnd()}\n\n<!-- quay-review-result task_id=${taskId} attempt_id=${attemptId} head_sha=${headSha} -->`;
+}
+
 test("Quay-owned pr-review approval enqueues one pr_ready_approved outbox item", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
@@ -88,7 +97,7 @@ test("Quay-owned pr-review approval enqueues one pr_ready_approved outbox item",
   built.github.setPostedReview(repoId, 152, "head-approved", {
     reviewId: "R_ready",
     decision: "APPROVED",
-    body: "Approved.",
+    body: quayReviewBody("Approved.", taskId, attemptId, "head-approved"),
     comments: "Approved.",
   });
   writeReviewResult(`${h.dataDir}/worktrees/${taskId}`, {
@@ -150,7 +159,7 @@ test("approved before CI pass enqueues when ci_passed later reaches done", async
     slackThreadRef: null,
     externalRef: "AST-152",
   });
-  insertRunningReviewAttempt(h, taskId, "head-late-ci");
+  const attemptId = insertRunningReviewAttempt(h, taskId, "head-late-ci");
   built.github.setPrSnapshot(
     repoId,
     `quay/${taskId}`,
@@ -162,7 +171,12 @@ test("approved before CI pass enqueues when ci_passed later reaches done", async
   built.github.setPostedReview(repoId, 153, "head-late-ci", {
     reviewId: "R_before_ci",
     decision: "APPROVED",
-    body: "Approved while CI is pending.",
+    body: quayReviewBody(
+      "Approved while CI is pending.",
+      taskId,
+      attemptId,
+      "head-late-ci",
+    ),
     comments: "Approved while CI is pending.",
   });
   writeReviewResult(`${h.dataDir}/worktrees/${taskId}`, {
