@@ -423,6 +423,21 @@ It also includes `authors`, parsed from the ticket's `quay-config.authors`
 block as `{name, slack_id}` objects. Legacy or malformed rows return
 `authors: []`.
 
+`task list`, `task get`, and `task events` accept legacy `task_id` values and
+return the same task/run rows as before. JSON output now also includes
+run-aware compatibility fields:
+
+- `work_item_id`: stable Quay work-item identity, or `null` for older rows.
+- `run_number`: run ordinal under the work item, or `null` for older rows.
+- `superseded_by_run`: successor run `task_id` when this run has been rerun,
+  otherwise `null`.
+
+Deprecation note: in task-oriented commands, `task_id` remains the accepted
+argument and JSON field name, but its meaning is now "run id". Work-item
+identity is exposed separately as `work_item_id`; scripts that need stable
+ticket identity should read `external_ref` or `work_item_id` instead of
+treating `task_id` as the product work item.
+
 `task list` and `task get` include dependency and umbrella read-model context.
 A waiting task looks like:
 

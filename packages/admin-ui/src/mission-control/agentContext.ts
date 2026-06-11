@@ -55,6 +55,9 @@ export function buildMissionControlAgentContext({
 function taskToContextSummary(task: MissionControlTask): MissionControlContext['visibleTasks'][number] {
   return {
     id: task.id,
+    workItemId: task.workItemId,
+    runNumber: task.runNumber,
+    supersededByRun: task.supersededByRun,
     role: task.role,
     reviewStatus: task.reviewStatus,
     umbrellaRef: task.umbrellaRef,

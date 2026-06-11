@@ -596,6 +596,94 @@ test("task events returns the append-only log oldest-first", async () => {
   expect(events[1].event_type).toBe("spawned");
 });
 
+test("task read commands expose run-aware compatibility fields", async () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-run-read");
+  const firstRun = insertTask(h.db, {
+    taskId: "run-read-1",
+    repoId,
+    state: "closed_unmerged",
+  });
+  const secondRun = insertTask(h.db, {
+    taskId: "run-read-2",
+    repoId,
+    state: "queued",
+  });
+  h.db.query(
+    `INSERT INTO work_items (
+       work_item_id, source, repo_id, external_ref, created_at, updated_at
+     ) VALUES (?, 'linear', ?, 'BRIX-1705', ?, ?)`,
+  ).run(
+    "wi-run-read",
+    repoId,
+    "2026-01-01T00:00:00.000Z",
+    "2026-01-01T00:00:00.000Z",
+  );
+  h.db.query(
+    `UPDATE tasks
+        SET external_ref = 'BRIX-1705',
+            work_item_id = 'wi-run-read',
+            run_number = ?,
+            supersedes_task_id = ?
+      WHERE task_id = ?`,
+  ).run(1, null, firstRun);
+  h.db.query(
+    `UPDATE tasks
+        SET external_ref = 'BRIX-1705',
+            work_item_id = 'wi-run-read',
+            run_number = ?,
+            supersedes_task_id = ?
+      WHERE task_id = ?`,
+  ).run(2, firstRun, secondRun);
+  h.db.query(
+    `INSERT INTO events (task_id, event_type, from_state, to_state, occurred_at)
+     VALUES (?, 'enqueued', NULL, 'queued', ?)`,
+  ).run(firstRun, "2026-01-01T00:00:00.000Z");
+
+  const built = buildCliDeps(h);
+
+  const listIo = bufferIO();
+  await dispatch(["task", "list", "--external-ref", "BRIX-1705"], built.deps, listIo);
+  const listed = JSON.parse(listIo.out()) as Array<{
+    task_id: string;
+    work_item_id: string | null;
+    run_number: number | null;
+    superseded_by_run: string | null;
+  }>;
+  expect(listed).toEqual([
+    expect.objectContaining({
+      task_id: firstRun,
+      work_item_id: "wi-run-read",
+      run_number: 1,
+      superseded_by_run: secondRun,
+    }),
+    expect.objectContaining({
+      task_id: secondRun,
+      work_item_id: "wi-run-read",
+      run_number: 2,
+      superseded_by_run: null,
+    }),
+  ]);
+
+  const getIo = bufferIO();
+  await dispatch(["task", "get", firstRun], built.deps, getIo);
+  expect(JSON.parse(getIo.out())).toMatchObject({
+    task_id: firstRun,
+    work_item_id: "wi-run-read",
+    run_number: 1,
+    superseded_by_run: secondRun,
+  });
+
+  const eventsIo = bufferIO();
+  await dispatch(["task", "events", firstRun], built.deps, eventsIo);
+  expect(JSON.parse(eventsIo.out())[0]).toMatchObject({
+    task_id: firstRun,
+    work_item_id: "wi-run-read",
+    run_number: 1,
+    superseded_by_run: secondRun,
+  });
+});
+
 test("artifact get returns file contents for a known kind", async () => {
   h = createHarness();
   const built = buildCliDeps(h);

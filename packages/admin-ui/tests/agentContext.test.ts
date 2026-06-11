@@ -10,6 +10,9 @@ const capturedAt = '2026-05-30T09:00:00.000Z';
 test('mission control context summarizes lane counts and caps visible tasks', () => {
   const tasks = Array.from({ length: 55 }, (_, index): MissionControlTask => ({
     id: `task-${index}`,
+    workItemId: `wi-${index}`,
+    runNumber: index + 1,
+    supersededByRun: index === 0 ? 'task-1' : null,
     ext: `BRIX-${index}`,
     repo: index % 2 === 0 ? 'quay' : 'brix',
     title: `Task ${index}`,
@@ -38,6 +41,9 @@ test('mission control context summarizes lane counts and caps visible tasks', ()
   expect(context.payload.limits).toEqual({ maxTasks: 50, truncatedFields: ['visibleTasks'] });
   expect(context.payload.visibleTasks[0]).toMatchObject({
     id: 'task-0',
+    workItemId: 'wi-0',
+    runNumber: 1,
+    supersededByRun: 'task-1',
     externalRef: 'BRIX-0',
     branch: 'feature/demo',
     attentionReason: 'worktree_error',

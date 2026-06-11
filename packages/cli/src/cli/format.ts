@@ -8,6 +8,9 @@ import type { TicketAuthor } from "../ports/ticket_context.ts";
 
 export interface TaskListRow {
   task_id: string;
+  work_item_id: string | null;
+  run_number: number | null;
+  superseded_by_run: string | null;
   repo_id: string;
   base_branch: string;
   retargeted_from_task_id: string | null;
@@ -79,7 +82,15 @@ export interface TaskGetPayload extends TaskListRow {
 }
 
 const TASK_LIST_COLUMNS = `
-  t.task_id, t.repo_id, COALESCE(t.base_branch, r.base_branch) AS base_branch,
+  t.task_id, t.work_item_id, t.run_number,
+  (
+    SELECT successor.task_id
+      FROM tasks successor
+     WHERE successor.supersedes_task_id = t.task_id
+     ORDER BY successor.run_number DESC, successor.created_at DESC, successor.task_id DESC
+     LIMIT 1
+  ) AS superseded_by_run,
+  t.repo_id, COALESCE(t.base_branch, r.base_branch) AS base_branch,
   t.retargeted_from_task_id, t.state, t.external_ref, t.branch_name,
   t.attempts_consumed, t.retry_budget, t.budget_exhausted,
   t.pr_screenshots_requested, t.pr_screenshots_required,
@@ -90,6 +101,9 @@ const TASK_LIST_COLUMNS = `
 
 interface TaskListRawRow {
   task_id: string;
+  work_item_id: string | null;
+  run_number: number | null;
+  superseded_by_run: string | null;
   repo_id: string;
   base_branch: string;
   retargeted_from_task_id: string | null;
@@ -113,6 +127,9 @@ interface TaskListRawRow {
 function rowToList(db: DB, r: TaskListRawRow): TaskListRow {
   return {
     task_id: r.task_id,
+    work_item_id: r.work_item_id,
+    run_number: r.run_number,
+    superseded_by_run: r.superseded_by_run,
     repo_id: r.repo_id,
     base_branch: r.base_branch,
     retargeted_from_task_id: r.retargeted_from_task_id,
