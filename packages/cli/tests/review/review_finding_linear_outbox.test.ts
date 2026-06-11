@@ -76,6 +76,32 @@ test("outbox deliver command executes the Linear issue delivery handler", async 
   expect(linkCount()).toBe(1);
 });
 
+test("outbox deliver command rejects disabled Linear adapter before delivery", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h, { linearEnabled: false });
+  const seeded = seedReviewFindingTask("synthetic_review");
+  persistFindings(seeded, [
+    finding("non_blocking", "CLI follow-up", "Body text"),
+  ]);
+  const outbox = listFindingOutbox()[0]!;
+  const io = bufferIO();
+
+  const result = await dispatch(
+    ["outbox", "deliver", String(outbox.outbox_item_id)],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  expect(JSON.parse(io.err())).toMatchObject({
+    error: "adapter_not_enabled",
+    adapter: "linear",
+  });
+  expect(built.linear.createIssueCalls).toHaveLength(0);
+  expect(linkCount()).toBe(0);
+});
+
 test("adopted external PR findings are human-owned and blocking findings are skipped", () => {
   h = createHarness();
   const seeded = seedReviewFindingTask("adopted_external_pr");

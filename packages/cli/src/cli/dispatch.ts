@@ -540,16 +540,17 @@ async function handleOutboxDeliver(
   }
   const parsed = parsePositiveIntArg(positional(argv), "outbox deliver");
   if (!parsed.ok) return writeError(io, "usage_error", parsed.message);
-  if (deps.linear === undefined) {
+  const linear = pickLinearAdapter(deps);
+  if (linear === undefined) {
     return writeError(
       io,
-      "adapter_not_configured",
-      "outbox deliver requires the Linear adapter",
+      "adapter_not_enabled",
+      "[adapters.linear] is not configured for this deployment",
       { adapter: "linear" },
     );
   }
   const row = await processReviewFindingLinearIssueOutboxItem(
-    { db: deps.db, clock: deps.clock, linear: deps.linear },
+    { db: deps.db, clock: deps.clock, linear },
     { outboxItemId: parsed.value },
   );
   io.stdout(`${JSON.stringify(row)}\n`);
