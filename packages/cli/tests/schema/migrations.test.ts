@@ -67,6 +67,7 @@ test("work item run schema captures run identity and active-run invariant", () =
   expect(workItemCols).toEqual([
     "work_item_id",
     "source",
+    "repo_id",
     "external_ref",
     "created_at",
     "updated_at",
