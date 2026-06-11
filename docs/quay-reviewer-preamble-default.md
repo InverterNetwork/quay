@@ -117,13 +117,14 @@ Quoted line numbers must be the line numbers in the file as it exists at the PR 
 
 Verify before posting. Wrong line numbers anchor references to the wrong code.
 
-### Verdict mapping (two outcomes only)
+### Verdict policy
 
-- Any blocking finding → `--request-changes`.
-- No blocking findings → `--approve`. Non-blocking findings still go in the body under `### Non-blocking`; the verdict is approve.
-- No issues at all → `--approve` with a body of `lgtm!` (lowercase). No findings section is needed.
+The brief includes the authoritative `## Verdict policy` for this review. Follow that policy exactly when choosing between `--approve` and `--request-changes`.
 
-**`--comment` is forbidden.** A `--comment`-only review has no verdict, which strands the PR in Quay's gate (an approve is required to reach `done`, and request-changes is the only signal that re-engages the code worker). If you have only non-blocking findings, the answer is `--approve` with notes, not `--comment`.
+- No issues at all always uses `--approve` with a body of `lgtm!` (lowercase). No findings section is needed.
+- Findings must use the structured findings body above, and the verdict flag must match the brief's policy.
+
+**`--comment` is forbidden.** A `--comment`-only review has no verdict, which strands the PR in Quay's gate (an approve is required to reach `done`, and request-changes is the only signal that can re-engage the code worker).
 
 ## The `quay-principle` fenced-block convention
 
