@@ -249,6 +249,11 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
   const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
   const dependencies = input.dependencies ?? [];
+  const plannedRunNumber = lookupNextRunNumber(
+    deps.db,
+    repo.repo_id,
+    input.external_ref ?? null,
+  );
   const initialState =
     dependencies.some((dep) => dep.satisfied_at === null || dep.satisfied_at === undefined)
       ? "waiting_dependencies"
@@ -365,6 +370,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       repo.repo_id,
       input.external_ref ?? null,
       shortId,
+      plannedRunNumber,
     );
     fullBranchName = `${QUAY_BRANCH_PREFIX}${resolvedSlug}`;
 
@@ -396,6 +402,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     try {
       const runIdentity = ensureWorkItemRunIdentity(deps.db, {
         taskId,
+        repoId: repo.repo_id,
         externalRef: input.external_ref ?? null,
         now,
       });
@@ -686,6 +693,7 @@ function ensureWorkItemRunIdentity(
   db: DB,
   input: {
     taskId: string;
+    repoId: string;
     externalRef: string | null;
     now: string;
   },
@@ -696,18 +704,25 @@ function ensureWorkItemRunIdentity(
 
   db.query(
     `INSERT INTO work_items (
-       work_item_id, source, external_ref, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(source, external_ref) DO UPDATE SET updated_at = excluded.updated_at`,
-  ).run(proposedWorkItemId, source, externalRef, input.now, input.now);
+       work_item_id, source, repo_id, external_ref, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source, repo_id, external_ref) DO UPDATE SET updated_at = excluded.updated_at`,
+  ).run(
+    proposedWorkItemId,
+    source,
+    input.repoId,
+    externalRef,
+    input.now,
+    input.now,
+  );
 
   const workItem = db
-    .query<{ work_item_id: string }, [string, string]>(
+    .query<{ work_item_id: string }, [string, string, string]>(
       `SELECT work_item_id
          FROM work_items
-        WHERE source = ? AND external_ref = ?`,
+        WHERE source = ? AND repo_id = ? AND external_ref = ?`,
     )
-    .get(source, externalRef);
+    .get(source, input.repoId, externalRef);
   if (!workItem) throw new Error("work item upsert returned no row");
 
   const lineage = db
@@ -725,6 +740,25 @@ function ensureWorkItemRunIdentity(
     runNumber: (lineage?.run_number ?? 0) + 1,
     supersedesTaskId: lineage?.task_id ?? null,
   };
+}
+
+function lookupNextRunNumber(
+  db: DB,
+  repoId: string,
+  externalRef: string | null,
+): number {
+  if (externalRef === null) return 1;
+  const row = db
+    .query<{ run_number: number | null }, [string, string]>(
+      `SELECT MAX(t.run_number) AS run_number
+         FROM tasks t
+         JOIN work_items wi ON wi.work_item_id = t.work_item_id
+        WHERE wi.source = 'linear'
+          AND wi.repo_id = ?
+          AND wi.external_ref = ?`,
+    )
+    .get(repoId, externalRef);
+  return (row?.run_number ?? 0) + 1;
 }
 
 function resolveTaskAgentSnapshot(
@@ -792,12 +826,15 @@ function resolveBranchName(
   repoId: string,
   externalRef: string | null,
   shortId: string,
+  runNumber: number,
 ): string {
   // Step 1: JS-side normalization per spec §13. Already covers most cases,
   // but the spec's step 7 requires the real `git check-ref-format` gate as
   // defense-in-depth in case the rules above and git's own grammar drift.
+  const baseSlug = computeBranchSlug(externalRef, shortId);
+  const runSlug = runNumber <= 1 ? baseSlug : `${baseSlug}-r${runNumber}`;
   const preferred = git.safeBranchSlug(
-    computeBranchSlug(externalRef, shortId),
+    runSlug,
     shortId,
   );
   if (!isBranchTaken(git, repoId, preferred)) return preferred;

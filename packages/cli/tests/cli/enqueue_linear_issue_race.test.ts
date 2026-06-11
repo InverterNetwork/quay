@@ -95,10 +95,10 @@ test("test_enqueue_linear_issue_active_run_constraint_blocks_duplicate", () => {
   h.db
     .query(
       `INSERT INTO work_items (
-         work_item_id, source, external_ref, created_at, updated_at
-       ) VALUES ('wi-eng-1234', 'linear', 'ENG-1234', ?, ?)`,
+         work_item_id, source, repo_id, external_ref, created_at, updated_at
+       ) VALUES ('wi-eng-1234', 'linear', ?, 'ENG-1234', ?, ?)`,
     )
-    .run(now, now);
+    .run(REPO_ID, now, now);
   h.db
     .query(
       `INSERT INTO tasks (
@@ -146,10 +146,10 @@ test("test_enqueue_active_run_constraint_allows_terminal_and_synthetic_runs", ()
   h.db
     .query(
       `INSERT INTO work_items (
-         work_item_id, source, external_ref, created_at, updated_at
-       ) VALUES ('wi-eng-1234', 'linear', 'ENG-1234', ?, ?)`,
+         work_item_id, source, repo_id, external_ref, created_at, updated_at
+       ) VALUES ('wi-eng-1234', 'linear', ?, 'ENG-1234', ?, ?)`,
     )
-    .run(now, now);
+    .run(REPO_ID, now, now);
   h.db
     .query(
       `INSERT INTO tasks (
@@ -173,17 +173,17 @@ test("test_enqueue_active_run_constraint_allows_terminal_and_synthetic_runs", ()
   h.db
     .query(
       `INSERT INTO work_items (
-         work_item_id, source, external_ref, created_at, updated_at
-       ) VALUES ('wi-task-null-1', 'synthetic', 'task-null-1', ?, ?)`,
+         work_item_id, source, repo_id, external_ref, created_at, updated_at
+       ) VALUES ('wi-task-null-1', 'synthetic', ?, 'task-null-1', ?, ?)`,
     )
-    .run(now, now);
+    .run(REPO_ID, now, now);
   h.db
     .query(
       `INSERT INTO work_items (
-         work_item_id, source, external_ref, created_at, updated_at
-       ) VALUES ('wi-task-null-2', 'synthetic', 'task-null-2', ?, ?)`,
+         work_item_id, source, repo_id, external_ref, created_at, updated_at
+       ) VALUES ('wi-task-null-2', 'synthetic', ?, 'task-null-2', ?, ?)`,
     )
-    .run(now, now);
+    .run(REPO_ID, now, now);
 
   // Two NULL external_ref tasks get distinct synthetic work items and coexist.
   h.db
@@ -239,6 +239,12 @@ test("test_enqueue_linear_issue_concurrent_race_converges_to_one_task", async ()
   expect(ioA.err()).toBe("");
   const firstTask = JSON.parse(ioA.out().trim());
   expect(typeof firstTask.task_id).toBe("string");
+  expect(firstTask).toMatchObject({
+    reused_existing_task: false,
+    created_new_run: true,
+    run_number: 1,
+    supersedes_task_id: null,
+  });
 
   // Simulate the loser: call dispatch again. The preflight in
   // handleEnqueueLinearIssue() would normally short-circuit here, but to
@@ -300,6 +306,12 @@ test("test_enqueue_linear_issue_concurrent_race_converges_to_one_task", async ()
 
   // Must return the same task_id as the first call.
   expect(secondTask.task_id).toBe(firstTask.task_id);
+  expect(secondTask).toMatchObject({
+    reused_existing_task: true,
+    created_new_run: false,
+    run_number: 1,
+    supersedes_task_id: null,
+  });
 
   // Still only one task in the DB.
   const finalCount = h.db
@@ -308,7 +320,7 @@ test("test_enqueue_linear_issue_concurrent_race_converges_to_one_task", async ()
   expect(finalCount?.n).toBe(1);
 });
 
-test("test_enqueue_linear_issue_terminal_task_can_be_enqueued_as_new_run", async () => {
+test("test_enqueue_linear_issue_terminal_task_returns_typed_rerun_error", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   await addRepo(built);
@@ -334,10 +346,62 @@ test("test_enqueue_linear_issue_terminal_task_can_be_enqueued_as_new_run", async
     built.deps,
     ioB,
   );
+  expect(resultB.exitCode).toBe(1);
+  expect(ioB.out()).toBe("");
+  const error = JSON.parse(ioB.err().trim());
+  expect(error).toMatchObject({
+    error: "work_item_terminal",
+    repo_id: REPO_ID,
+    external_ref: "ENG-9002",
+    last_task_id: firstTask.task_id,
+    last_run_state: "closed_unmerged",
+    last_run_number: 1,
+    rerun_command: "quay rerun --linear-issue ENG-9002",
+  });
+
+  const finalCount = h.db
+    .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM tasks`)
+    .get();
+  expect(finalCount?.n).toBe(1);
+});
+
+test("test_rerun_linear_issue_creates_new_run_with_run_branch", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(makeIssue("ENG-9003"));
+  const ioA = bufferIO();
+  const resultA = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-9003"],
+    built.deps,
+    ioA,
+  );
+  expect(resultA.exitCode).toBe(0);
+  const firstTask = JSON.parse(ioA.out().trim());
+
+  h.db
+    .query(`UPDATE tasks SET state = 'closed_unmerged' WHERE task_id = ?`)
+    .run(firstTask.task_id);
+
+  built.linear.setIssue(makeIssue("ENG-9003"));
+  const ioB = bufferIO();
+  const resultB = await dispatch(
+    ["rerun", "--repo", REPO_ID, "--linear-issue", "ENG-9003"],
+    built.deps,
+    ioB,
+  );
   expect(resultB.exitCode).toBe(0);
   const secondTask = JSON.parse(ioB.out().trim());
 
   expect(secondTask.task_id).not.toBe(firstTask.task_id);
+  expect(secondTask.branch_name).toBe("quay/ENG-9003-r2");
+  expect(secondTask).toMatchObject({
+    reused_existing_task: false,
+    created_new_run: true,
+    run_number: 2,
+    supersedes_task_id: firstTask.task_id,
+  });
   const rows = h.db
     .query<
       {
@@ -351,7 +415,7 @@ test("test_enqueue_linear_issue_terminal_task_can_be_enqueued_as_new_run", async
     >(
       `SELECT task_id, state, work_item_id, run_number, supersedes_task_id
          FROM tasks
-        WHERE external_ref = 'ENG-9002'
+        WHERE external_ref = 'ENG-9003'
         ORDER BY run_number ASC`,
     )
     .all();

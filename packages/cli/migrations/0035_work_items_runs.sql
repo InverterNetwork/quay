@@ -6,10 +6,11 @@
 CREATE TABLE work_items (
   work_item_id TEXT PRIMARY KEY,
   source TEXT NOT NULL,
+  repo_id TEXT NOT NULL REFERENCES repos(repo_id),
   external_ref TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  UNIQUE (source, external_ref)
+  UNIQUE (source, repo_id, external_ref)
 );
 
 ALTER TABLE tasks ADD COLUMN work_item_id TEXT REFERENCES work_items(work_item_id);
@@ -17,24 +18,26 @@ ALTER TABLE tasks ADD COLUMN run_number INTEGER;
 ALTER TABLE tasks ADD COLUMN supersedes_task_id TEXT REFERENCES tasks(task_id);
 
 INSERT INTO work_items (
-  work_item_id, source, external_ref, created_at, updated_at
+  work_item_id, source, repo_id, external_ref, created_at, updated_at
 )
 SELECT
   'wi:' || hex(randomblob(16)),
   'linear',
+  repo_id,
   external_ref,
   MIN(created_at),
   MAX(updated_at)
 FROM tasks
 WHERE external_ref IS NOT NULL
-GROUP BY external_ref;
+GROUP BY repo_id, external_ref;
 
 INSERT INTO work_items (
-  work_item_id, source, external_ref, created_at, updated_at
+  work_item_id, source, repo_id, external_ref, created_at, updated_at
 )
 SELECT
   'wi:' || task_id,
   'synthetic',
+  repo_id,
   task_id,
   created_at,
   updated_at
@@ -44,8 +47,9 @@ WHERE external_ref IS NULL;
 UPDATE tasks
    SET work_item_id = (
          SELECT wi.work_item_id
-           FROM work_items wi
+          FROM work_items wi
           WHERE wi.source = 'linear'
+            AND wi.repo_id = tasks.repo_id
             AND wi.external_ref = tasks.external_ref
        )
  WHERE external_ref IS NOT NULL;
