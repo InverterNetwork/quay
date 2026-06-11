@@ -245,6 +245,45 @@ esac
   expect(posted!.reviewId).toBe("PRR_bot");
 });
 
+test("token-only reconciliation scans past newer non-matching reviews", () => {
+  const reviews = `[
+    {
+      "id": 1,
+      "node_id": "PRR_matching_reviewer",
+      "user": {"login": "didier-reviewer[bot]", "type": "Bot"},
+      "body": "expected body",
+      "state": "APPROVED",
+      "commit_id": "abc123"
+    },
+    {
+      "id": 2,
+      "node_id": "PRR_newer_unrelated",
+      "user": {"login": "someone-else", "type": "User"},
+      "body": "different body",
+      "state": "CHANGES_REQUESTED",
+      "commit_id": "abc123"
+    }
+  ]`;
+  installGhStub(stubReviewsRest(reviews));
+  const { reposRoot, repoId } = makeBareDir();
+  const adapter = new GitHubCliAdapter(reposRoot);
+
+  const posted = adapter.fetchPostedReview(
+    repoId,
+    42,
+    "abc123",
+    undefined,
+    "ghs_reviewer_token",
+    "APPROVED",
+    "expected body",
+  );
+
+  expect(posted).not.toBeNull();
+  expect(posted!.reviewId).toBe("PRR_matching_reviewer");
+  expect(posted!.decision).toBe("APPROVED");
+  expect(posted!.body).toBe("expected body");
+});
+
 test("review authors at head SHA are available for identity mismatch diagnostics", () => {
   installGhStub(stubReviewsRest(BOT_APPROVED));
   const { reposRoot, repoId } = makeBareDir();

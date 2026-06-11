@@ -455,6 +455,8 @@ export class GitHubCliAdapter implements GitHubPort {
     headSha: string,
     expectedLogin?: string,
     token?: string,
+    expectedDecision?: PostedReview["decision"],
+    expectedBody?: string,
   ): PostedReview | null {
     const login = expectedLogin ?? (token === undefined ? this.currentLogin(repoId) : null);
     // Match policy preserves *identity kind* (App vs. regular user). The
@@ -504,14 +506,17 @@ export class GitHubCliAdapter implements GitHubPort {
       if (commitId !== headSha) continue;
       const decision = mapPostedReviewDecision(r.state);
       if (decision === null) continue;
+      if (expectedDecision !== undefined && decision !== expectedDecision) continue;
+      const body = String(r.body ?? "");
+      if (expectedBody !== undefined && body !== expectedBody) continue;
       const reviewNodeId = String(r.node_id ?? "");
       if (reviewNodeId === "") continue;
       const inline = this.fetchReviewInlineComments(repoId, reviewNodeId, token);
       return {
         reviewId: reviewNodeId,
         decision,
-        body: String(r.body ?? ""),
-        comments: composeReviewFeedback(String(r.body ?? ""), inline),
+        body,
+        comments: composeReviewFeedback(body, inline),
       };
     }
     return null;

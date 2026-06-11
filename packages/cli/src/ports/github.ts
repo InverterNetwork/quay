@@ -88,6 +88,8 @@ export interface GitHubPort {
     headSha: string,
     expectedLogin?: string,
     token?: string,
+    expectedDecision?: PostedReview["decision"],
+    expectedBody?: string,
   ): PostedReview | null;
   // Diagnostic read used only after `fetchPostedReview` misses. It reports
   // review authors that did post a recognizable review at the same head SHA,

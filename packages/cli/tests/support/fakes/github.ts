@@ -51,6 +51,8 @@ export class FakeGitHub implements GitHubPort {
     headSha: string;
     expectedLogin?: string;
     token?: string;
+    expectedDecision?: PostedReview["decision"];
+    expectedBody?: string;
   }[] = [];
   readonly submitPullRequestReviewCalls: {
     repoId: string;
@@ -308,6 +310,8 @@ export class FakeGitHub implements GitHubPort {
     headSha: string,
     expectedLogin?: string,
     token?: string,
+    expectedDecision?: PostedReview["decision"],
+    expectedBody?: string,
   ): PostedReview | null {
     this.fetchPostedReviewCalls.push({
       repoId,
@@ -315,8 +319,14 @@ export class FakeGitHub implements GitHubPort {
       headSha,
       ...(expectedLogin !== undefined ? { expectedLogin } : {}),
       ...(token !== undefined ? { token } : {}),
+      ...(expectedDecision !== undefined ? { expectedDecision } : {}),
+      ...(expectedBody !== undefined ? { expectedBody } : {}),
     });
-    return this.postedReviews.get(`${repoId}\0${prNumber}\0${headSha}`) ?? null;
+    const posted = this.postedReviews.get(`${repoId}\0${prNumber}\0${headSha}`) ?? null;
+    if (posted === null) return null;
+    if (expectedDecision !== undefined && posted.decision !== expectedDecision) return null;
+    if (expectedBody !== undefined && posted.body !== expectedBody) return null;
+    return posted;
   }
 
   fetchPostedReviewAuthorsAtHead(

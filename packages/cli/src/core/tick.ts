@@ -645,12 +645,22 @@ class TickGithubCache implements GitHubPort {
     headSha: string,
     expectedLogin?: string,
     token?: string,
+    expectedDecision?: PostedReview["decision"],
+    expectedBody?: string,
   ): PostedReview | null {
-    const key = `${repoId}\0${prNumber}\0${headSha}\0${expectedLogin ?? ""}\0${token ?? ""}`;
+    const key = `${repoId}\0${prNumber}\0${headSha}\0${expectedLogin ?? ""}\0${token ?? ""}\0${expectedDecision ?? ""}\0${expectedBody ?? ""}`;
     if (!this.postedReviews.has(key)) {
       this.postedReviews.set(
         key,
-        this.inner.fetchPostedReview(repoId, prNumber, headSha, expectedLogin, token),
+        this.inner.fetchPostedReview(
+          repoId,
+          prNumber,
+          headSha,
+          expectedLogin,
+          token,
+          expectedDecision,
+          expectedBody,
+        ),
       );
     }
     return this.postedReviews.get(key) ?? null;
@@ -2170,12 +2180,10 @@ function reconcileAlreadyPostedReview(
     task.head_sha,
     options.reviewerLogin,
     token,
+    result.verdict === "approved" ? "APPROVED" : "CHANGES_REQUESTED",
+    result.body,
   );
   if (posted === null) return null;
-  const expectedDecision =
-    result.verdict === "approved" ? "APPROVED" : "CHANGES_REQUESTED";
-  if (posted.decision !== expectedDecision) return null;
-  if (posted.body !== result.body) return null;
   return posted;
 }
 
