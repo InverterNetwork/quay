@@ -35,6 +35,7 @@ const LinearAdapterConfigSchema = z
     api_key_env: z.string().min(1).optional(),
     bearer_token_env: z.string().min(1).optional(),
     token_command: z.string().min(1).optional(),
+    default_issue_team_key: z.string().min(1).optional(),
   })
   .strict();
 
@@ -308,11 +309,13 @@ export function linearAdapterOptionsFromConfig(
   tokenEnvVar?: string;
   authMode?: "api_key" | "bearer";
   tokenCommand?: string;
+  defaultIssueTeamKey?: string;
 } {
   const opts: {
     tokenEnvVar?: string;
     authMode?: "api_key" | "bearer";
     tokenCommand?: string;
+    defaultIssueTeamKey?: string;
   } = {};
   const linear = config.adapters?.linear;
   const authMode =
@@ -329,6 +332,9 @@ export function linearAdapterOptionsFromConfig(
   if (envVar !== undefined) opts.tokenEnvVar = envVar;
   if (linear?.token_command !== undefined) {
     opts.tokenCommand = linear.token_command;
+  }
+  if (linear?.default_issue_team_key !== undefined) {
+    opts.defaultIssueTeamKey = linear.default_issue_team_key;
   }
   return opts;
 }

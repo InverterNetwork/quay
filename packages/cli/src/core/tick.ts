@@ -67,6 +67,7 @@ import {
   type TaskAuthoringMode,
 } from "./pr_review.ts";
 import { enqueuePrReadyApprovedOutboxItem } from "./pr_ready_approved_outbox.ts";
+import { enqueueReviewFindingLinearIssuesInOpenTxn } from "./review_finding_linear_outbox.ts";
 import {
   processGoalCompletionAudit,
   type GoalCompletionPendingTask,
@@ -2152,7 +2153,7 @@ function reviewKillIntentDiagnostic(intent: "wall_clock" | "stale"): string {
 }
 
 function persistReviewFindingsInOpenTxn(
-  deps: Pick<TickDeps, "db">,
+  deps: Pick<TickDeps, "db" | "clock">,
   task: ReviewAttemptTaskRow,
   reviewId: string,
   now: string,
@@ -2165,6 +2166,11 @@ function persistReviewFindingsInOpenTxn(
     headSha: task.head_sha,
     now,
     rawReviewResult,
+  });
+  enqueueReviewFindingLinearIssuesInOpenTxn(deps, {
+    taskId: task.task_id,
+    attemptId: task.attempt_id,
+    reviewId,
   });
 }
 

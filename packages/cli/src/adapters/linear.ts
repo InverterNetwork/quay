@@ -25,6 +25,8 @@ import { QuayError } from "../core/errors.ts";
 import type {
   LinearBlockedByRelation,
   LinearComment,
+  LinearCreatedIssue,
+  LinearCreateIssueInput,
   LinearHierarchyIssue,
   LinearIssue,
   LinearIssueHierarchy,
@@ -151,6 +153,24 @@ interface RawTeamStates {
   states: { nodes: RawTeamStateNode[] };
 }
 
+interface RawTeamNode {
+  id: string;
+  key: string;
+}
+
+interface RawTeamsByKey {
+  teams: { nodes: RawTeamNode[] };
+}
+
+interface RawIssueCreatePayload {
+  success: boolean;
+  issue: {
+    id: string;
+    identifier: string;
+    url: string;
+  } | null;
+}
+
 interface GraphQLEnvelope<T> {
   data?: T | null;
   errors?: Array<{ message?: string; extensions?: Record<string, unknown> }>;
@@ -163,6 +183,7 @@ export class LinearAdapter implements LinearPort {
   private readonly authMode: LinearAuthMode;
   private readonly tokenCommand: string | null;
   private readonly tokenProvider: LinearTokenProvider | null;
+  private readonly defaultIssueTeamKey: string | null;
   private readonly timeoutMs: number;
   private readonly transport: LinearTransport;
   // Per-team workflow state cache (state-name → state-id). Linear's workflow
@@ -192,6 +213,7 @@ export class LinearAdapter implements LinearPort {
     authMode?: LinearAuthMode;
     tokenCommand?: string;
     tokenProvider?: LinearTokenProvider;
+    defaultIssueTeamKey?: string;
     endpoint?: string;
     timeoutMs?: number;
     transport?: LinearTransport;
@@ -208,6 +230,11 @@ export class LinearAdapter implements LinearPort {
         ? opts.tokenCommand
         : null;
     this.tokenProvider = opts?.tokenProvider ?? null;
+    this.defaultIssueTeamKey =
+      opts?.defaultIssueTeamKey !== undefined &&
+        opts.defaultIssueTeamKey.trim() !== ""
+        ? opts.defaultIssueTeamKey.trim()
+        : null;
     this.endpoint = opts?.endpoint ?? DEFAULT_LINEAR_ENDPOINT;
     this.timeoutMs =
       opts?.timeoutMs !== undefined && opts.timeoutMs > 0
@@ -379,6 +406,41 @@ export class LinearAdapter implements LinearPort {
     }
     await this.runIssueUpdate(identifier, targetStateId);
     this.rememberSyncedState(identifier, stateName);
+  }
+
+  async createIssue(input: LinearCreateIssueInput): Promise<LinearCreatedIssue> {
+    const teamKey = (input.teamKey ?? this.defaultIssueTeamKey)?.trim();
+    if (teamKey === undefined || teamKey === "") {
+      throw new QuayError(
+        "adapter_not_configured",
+        "LinearAdapter requires adapters.linear.default_issue_team_key to create issues",
+        { adapter: "linear", config_key: "adapters.linear.default_issue_team_key" },
+      );
+    }
+    const teamId = await this.resolveTeamIdByKey(teamKey);
+    const response = await this.postGraphQL("issueCreate", CREATE_ISSUE_MUTATION, {
+      input: {
+        teamId,
+        title: input.title,
+        description: input.body,
+      },
+    });
+    const parsed = this.parseGraphQLEnvelope<{
+      issueCreate: RawIssueCreatePayload | null;
+    }>("issueCreate", response);
+    const payload = parsed?.issueCreate ?? null;
+    if (payload === null || payload.success !== true || payload.issue === null) {
+      throw new QuayError(
+        "adapter_error",
+        "Linear issueCreate returned no created issue",
+        { adapter: "linear", retryable: false },
+      );
+    }
+    return {
+      id: payload.issue.id,
+      identifier: payload.issue.identifier,
+      url: payload.issue.url,
+    };
   }
 
   private rememberSyncedState(identifier: string, stateName: string): void {
@@ -684,6 +746,31 @@ export class LinearAdapter implements LinearPort {
     return map;
   }
 
+  private async resolveTeamIdByKey(teamKey: string): Promise<string> {
+    const response = await this.postGraphQL(teamKey, GET_TEAM_BY_KEY_QUERY, {
+      key: teamKey,
+    });
+    const parsed = this.parseGraphQLEnvelope<RawTeamsByKey>(teamKey, response);
+    const nodes = parsed?.teams.nodes ?? [];
+    if (nodes.length === 0) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear team key ${teamKey} was not found`,
+        { adapter: "linear", retryable: false, team_key: teamKey },
+      );
+    }
+    if (nodes.length > 1) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear team key ${teamKey} matched multiple teams`,
+        { adapter: "linear", retryable: false, team_key: teamKey },
+      );
+    }
+    const node = nodes[0];
+    if (node === undefined) throw new Error("Linear team lookup invariant failed");
+    return node.id;
+  }
+
   private async runIssueUpdate(
     identifier: string,
     stateId: string,
@@ -951,11 +1038,28 @@ const GET_TEAM_STATES_QUERY = `query GetTeamStates($teamId: String!, $statesFirs
   }
 }`;
 
+const GET_TEAM_BY_KEY_QUERY = `query GetTeamByKey($key: String!) {
+  teams(filter: { key: { eq: $key } }, first: 2) {
+    nodes { id key }
+  }
+}`;
+
 // `issueUpdate` with a `stateId` input is Linear's canonical state move. The
 // adapter never persists the returned issue body — only `success` matters.
 const UPDATE_ISSUE_STATE_MUTATION = `mutation UpdateIssueState($id: String!, $stateId: String!) {
   issueUpdate(id: $id, input: { stateId: $stateId }) {
     success
+  }
+}`;
+
+const CREATE_ISSUE_MUTATION = `mutation CreateIssue($input: IssueCreateInput!) {
+  issueCreate(input: $input) {
+    success
+    issue {
+      id
+      identifier
+      url
+    }
   }
 }`;
 

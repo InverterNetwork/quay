@@ -1,6 +1,8 @@
 import { QuayError } from "../../../src/core/errors.ts";
 import type {
   LinearBlockedByRelation,
+  LinearCreatedIssue,
+  LinearCreateIssueInput,
   LinearIssueHierarchy,
   LinearIssue,
   LinearPort,
@@ -17,6 +19,8 @@ export interface FakeLinearStateChange {
   stateName: string;
 }
 
+export interface FakeLinearCreatedIssueCall extends LinearCreateIssueInput {}
+
 export class FakeLinearAdapter implements LinearPort {
   getIssueCalls: string[] = [];
   getBlockedByRelationsCalls: string[] = [];
@@ -25,6 +29,7 @@ export class FakeLinearAdapter implements LinearPort {
   // order so tests can assert on the writeback shape AND the absence of
   // duplicate writes when idempotency should have suppressed the call.
   setIssueStateCalls: FakeLinearStateChange[] = [];
+  createIssueCalls: FakeLinearCreatedIssueCall[] = [];
 
   private states = new Map<string, FakeLinearState>();
   private blockedByRelations = new Map<string, LinearBlockedByRelation[]>();
@@ -34,6 +39,7 @@ export class FakeLinearAdapter implements LinearPort {
   // current value records nothing on `setIssueStateCalls` (skip), mirroring
   // the real adapter's read-before-write behaviour.
   private currentStates = new Map<string, string>();
+  private nextCreatedIssueNumber = 1;
   // Errors queued via `failNextSetIssueState` are consumed in FIFO order;
   // calls past the queued count succeed normally. A queue (vs. a single
   // field) so two failures-in-a-row stay observable rather than silently
@@ -156,5 +162,15 @@ export class FakeLinearAdapter implements LinearPort {
     if (current === stateName) return;
     this.currentStates.set(identifier, stateName);
     this.setIssueStateCalls.push({ identifier, stateName });
+  }
+
+  async createIssue(input: LinearCreateIssueInput): Promise<LinearCreatedIssue> {
+    this.createIssueCalls.push({ ...input });
+    const n = this.nextCreatedIssueNumber++;
+    return {
+      id: `linear-created-${n}`,
+      identifier: `BRIX-${9000 + n}`,
+      url: `https://linear.app/inverter/issue/BRIX-${9000 + n}`,
+    };
   }
 }
