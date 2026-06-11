@@ -11,6 +11,7 @@ see [External Services Setup](external-services.md).
 [adapters.linear]
 enabled = true
 api_key_env = "LINEAR_API_KEY"
+default_issue_team_key = "BRIX"
 
 [adapters.slack]
 enabled = true

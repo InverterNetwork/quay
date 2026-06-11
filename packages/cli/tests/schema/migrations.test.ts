@@ -262,6 +262,21 @@ test("outbox items support delivery and workflow metadata", () => {
   expect(cols).toContain("last_error");
 });
 
+test("review findings can store external provider links", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(
+      `PRAGMA table_info(review_finding_external_links)`,
+    )
+    .all()
+    .map((r) => r.name);
+  expect(cols).toContain("finding_id");
+  expect(cols).toContain("provider");
+  expect(cols).toContain("provider_external_id");
+  expect(cols).toContain("provider_url");
+  expect(cols).toContain("outbox_item_id");
+});
+
 test("0023 backfills existing handoffs into linked workflow outbox items", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "quay-migration-"));
   const db = openDatabase(join(dataDir, "quay.db"));
