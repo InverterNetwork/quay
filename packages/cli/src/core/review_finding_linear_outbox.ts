@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { LinearPort } from "../ports/linear.ts";
+import { QuayError } from "./errors.ts";
 import {
   claimOutboxItem,
   completeOutboxItem,
@@ -122,10 +123,27 @@ export async function processReviewFindingLinearIssueOutboxItem(
       outboxItemId: row.outbox_item_id,
       claimId: claimed.value.claim_id,
       lastError: err instanceof Error ? err.message : String(err),
+      nextEligibleAt: nextEligibleAtFromError(deps.clock, err),
     });
     if (!failed.ok) throw new Error(failed.error.message);
     throw err;
   }
+}
+
+function nextEligibleAtFromError(clock: Clock, err: unknown): string | null {
+  if (!(err instanceof QuayError)) return null;
+  if (err.code !== "adapter_error") return null;
+  const retryAfter = err.details?.retry_after;
+  if (
+    typeof retryAfter !== "number" ||
+    !Number.isFinite(retryAfter) ||
+    retryAfter <= 0
+  ) {
+    return null;
+  }
+  const now = Date.parse(clock.nowISO());
+  if (!Number.isFinite(now)) return null;
+  return new Date(now + retryAfter * 1000).toISOString();
 }
 
 async function deliverClaimedReviewFindingLinearIssue(

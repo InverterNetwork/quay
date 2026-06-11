@@ -41,11 +41,11 @@ The review loop is conceptually the same for both task kinds (review → approve
 - `quay review-pr --pr <repo>:<num>` as the external-callable enrollment/poke entry point. Fire-and-forget.
 - `--tag` flag on `quay enqueue` and `quay review-pr` populating the existing `task_tags` table (already in `migrations/0002_deployment_adapters.sql:12`).
 - Cron cadence config (recommended 30 s for review-running deployments).
-- Storage of the posted review as a `review_comments` artifact (already a kind today). Plus `attempts.review_id` for the GitHub review id and `attempts.head_sha` for the SHA reviewed. That's enough state to drive the state machine; richer structured storage (a `review_findings` table) is **out of v1 scope** — see below.
+- Storage of the posted review as a `review_comments` artifact (already a kind today). Plus `attempts.review_id` for the GitHub review id and `attempts.head_sha` for the SHA reviewed. Quay also parses the top-level `.quay-review-result.json` `findings` array into `review_findings` rows for durable structured findings and human follow-up automation.
 
 ### Out of v1 scope
 
-- **Structured findings storage (`review_findings` table), `quay-principle` fenced-block parser, FTS5 search, `quay query-findings` CLI.** Deferred. The v1 flow stores the raw posted review as an artifact + `review_id` / `head_sha` / `review_verdict` columns. That is enough to drive the state machine and feed the existing code-worker respawn. A future spec adds parsed/searchable findings when a consumer actually uses them; v1 artifacts are sufficient input for that future backfill.
+- **`quay-principle` fenced-block parser, FTS5 search, `quay query-findings` CLI.** Deferred. The v1 flow stores the raw posted review as an artifact + `review_id` / `head_sha` / `review_verdict` columns and parses the top-level JSON `findings` array into `review_findings`. Search and body-block backfill remain future work.
 - **Closing the loop / brief enrichment.** Findings aren't injected into future briefs in v1 (depends on the deferred storage).
 - **Multi-model panel review.** N=1 single reviewer only.
 - **Blocking mode (`--wait` / `--timeout`).** `quay review-pr` is fire-and-forget. CI sees the verdict on GitHub when the reviewer posts it.

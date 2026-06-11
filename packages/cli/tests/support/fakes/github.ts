@@ -45,6 +45,13 @@ export class FakeGitHub implements GitHubPort {
   readonly prViews = new Map<string, PullRequestView | null>();
   readonly postedReviews = new Map<string, PostedReview | null>();
   readonly postedReviewAuthorsAtHead = new Map<string, PostedReviewAuthor[]>();
+  readonly fetchPostedReviewCalls: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    expectedLogin?: string;
+    token?: string;
+  }[] = [];
   readonly submitPullRequestReviewCalls: {
     repoId: string;
     prNumber: number;
@@ -299,7 +306,16 @@ export class FakeGitHub implements GitHubPort {
     repoId: string,
     prNumber: number,
     headSha: string,
+    expectedLogin?: string,
+    token?: string,
   ): PostedReview | null {
+    this.fetchPostedReviewCalls.push({
+      repoId,
+      prNumber,
+      headSha,
+      ...(expectedLogin !== undefined ? { expectedLogin } : {}),
+      ...(token !== undefined ? { token } : {}),
+    });
     return this.postedReviews.get(`${repoId}\0${prNumber}\0${headSha}`) ?? null;
   }
 
@@ -346,6 +362,8 @@ export class FakeGitHub implements GitHubPort {
       input.repoId,
       input.prNumber,
       input.headSha,
+      undefined,
+      input.token,
     );
     if (existing !== null) return existing;
     const review: PostedReview = {

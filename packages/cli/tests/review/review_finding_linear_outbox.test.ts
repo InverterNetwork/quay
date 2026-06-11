@@ -11,6 +11,7 @@ import { createHarness, type Harness } from "../support/harness.ts";
 import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
 import { FakeLinearAdapter } from "../support/fakes/linear.ts";
+import { QuayError } from "../../src/core/errors.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -102,6 +103,37 @@ test("outbox deliver command rejects disabled Linear adapter before delivery", a
   expect(linkCount()).toBe(0);
 });
 
+test("outbox deliver normalizes Linear delivery failures through CLI errors", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const seeded = seedReviewFindingTask("synthetic_review");
+  persistFindings(seeded, [
+    finding("non_blocking", "CLI failure", "Body text"),
+  ]);
+  const outbox = listFindingOutbox()[0]!;
+  built.linear.createIssue = async () => {
+    throw new QuayError("adapter_error", "Linear failed", {
+      adapter: "linear",
+      retryable: true,
+    });
+  };
+  const io = bufferIO();
+
+  const result = await dispatch(
+    ["outbox", "deliver", String(outbox.outbox_item_id)],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  expect(JSON.parse(io.err())).toMatchObject({
+    error: "adapter_error",
+    message: "Linear failed",
+    adapter: "linear",
+  });
+});
+
 test("adopted external PR findings are human-owned and blocking findings are skipped", () => {
   h = createHarness();
   const seeded = seedReviewFindingTask("adopted_external_pr");
@@ -156,6 +188,38 @@ test("retrying a Linear issue outbox row does not create duplicate issues", asyn
 
   expect(linear.createIssueCalls).toHaveLength(1);
   expect(linkCount()).toBe(1);
+});
+
+test("Linear rate limits preserve retry-after as outbox cooldown", async () => {
+  h = createHarness();
+  h.clock.set("2026-06-11T16:00:00.000Z");
+  const seeded = seedReviewFindingTask("synthetic_review");
+  persistFindings(seeded, [
+    finding("non_blocking", "Rate limited follow-up", "Body text"),
+  ]);
+  const outbox = listFindingOutbox()[0]!;
+  const linear = new FakeLinearAdapter();
+  linear.createIssue = async () => {
+    throw new QuayError("adapter_error", "Linear rate-limited", {
+      adapter: "linear",
+      retryable: true,
+      retry_after: 90,
+    });
+  };
+
+  await expect(
+    processReviewFindingLinearIssueOutboxItem(
+      { db: h.db, clock: h.clock, linear },
+      { outboxItemId: outbox.outbox_item_id },
+    ),
+  ).rejects.toThrow("Linear rate-limited");
+
+  const row = h.db
+    .query<{ next_eligible_at: string | null }, [number]>(
+      `SELECT next_eligible_at FROM outbox_items WHERE outbox_item_id = ?`,
+    )
+    .get(outbox.outbox_item_id);
+  expect(row?.next_eligible_at).toBe("2026-06-11T16:01:30.000Z");
 });
 
 test("provider idempotency converges when link persistence fails after Linear create", async () => {

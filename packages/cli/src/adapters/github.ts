@@ -454,8 +454,9 @@ export class GitHubCliAdapter implements GitHubPort {
     prNumber: number,
     headSha: string,
     expectedLogin?: string,
+    token?: string,
   ): PostedReview | null {
-    const login = expectedLogin ?? this.currentLogin(repoId);
+    const login = expectedLogin ?? (token === undefined ? this.currentLogin(repoId) : null);
     // Match policy preserves *identity kind* (App vs. regular user). The
     // previous `gh pr view --json reviews` projection only exposes
     // `author.login`, and that field is shape-ambiguous: gh strips the
@@ -469,9 +470,11 @@ export class GitHubCliAdapter implements GitHubPort {
     // returns the discriminator we need: `user.type` is `"Bot"` for App
     // authors and `"User"` for regular accounts, and `user.login` carries
     // the `[bot]` suffix on Bot rows so the two paths cannot alias.
-    const isAppForm = login.startsWith("app/");
-    const expectedType: "Bot" | "User" = isAppForm ? "Bot" : "User";
-    const expectedBareLogin = isAppForm ? login.slice(4) : login;
+    const isAppForm = login?.startsWith("app/") ?? false;
+    const expectedType: "Bot" | "User" | null =
+      login === null ? null : isAppForm ? "Bot" : "User";
+    const expectedBareLogin =
+      login === null ? null : isAppForm ? login.slice(4) : login;
     // `?per_page=100` lifts the default page size (30) to cover practical
     // review volumes on a single PR; we still iterate newest-first so the
     // first match wins. If a PR ever exceeds 100 reviews from the same
@@ -479,7 +482,7 @@ export class GitHubCliAdapter implements GitHubPort {
     // far beyond any real reviewer-bot workload, but the failure mode is
     // a transient "no posted review yet" (a retry, not a wrong accept),
     // so we don't paginate at the cost of a multi-call code path.
-    const reviews = this.fetchPullRequestReviews(repoId, prNumber);
+    const reviews = this.fetchPullRequestReviews(repoId, prNumber, token);
     // A Bot's `user.login` carries the `[bot]` suffix in the REST API
     // (e.g. `didier-reviewer[bot]`). Strip only for Bot rows so a
     // collision with a real user named `didier-reviewer[bot]`-literal
@@ -488,20 +491,22 @@ export class GitHubCliAdapter implements GitHubPort {
       s.endsWith("[bot]") ? s.slice(0, -"[bot]".length) : s;
     for (let i = reviews.length - 1; i >= 0; i -= 1) {
       const r = reviews[i] ?? {};
-      const user = (r.user ?? {}) as Record<string, unknown>;
-      const userType = String(user.type ?? "");
-      if (userType !== expectedType) continue;
-      const userLogin = String(user.login ?? "");
-      const bareLogin =
-        expectedType === "Bot" ? stripBotSuffix(userLogin) : userLogin;
-      if (bareLogin !== expectedBareLogin) continue;
+      if (expectedType !== null && expectedBareLogin !== null) {
+        const user = (r.user ?? {}) as Record<string, unknown>;
+        const userType = String(user.type ?? "");
+        if (userType !== expectedType) continue;
+        const userLogin = String(user.login ?? "");
+        const bareLogin =
+          expectedType === "Bot" ? stripBotSuffix(userLogin) : userLogin;
+        if (bareLogin !== expectedBareLogin) continue;
+      }
       const commitId = String(r.commit_id ?? "");
       if (commitId !== headSha) continue;
       const decision = mapPostedReviewDecision(r.state);
       if (decision === null) continue;
       const reviewNodeId = String(r.node_id ?? "");
       if (reviewNodeId === "") continue;
-      const inline = this.fetchReviewInlineComments(repoId, reviewNodeId);
+      const inline = this.fetchReviewInlineComments(repoId, reviewNodeId, token);
       return {
         reviewId: reviewNodeId,
         decision,
@@ -544,9 +549,20 @@ export class GitHubCliAdapter implements GitHubPort {
   private fetchPullRequestReviews(
     repoId: string,
     prNumber: number,
+    token?: string,
   ): Array<Record<string, unknown>> {
     const path = `repos/{owner}/{repo}/pulls/${prNumber}/reviews?per_page=100`;
-    const result = this.run(repoId, ["gh", "api", path]);
+    const env =
+      token === undefined
+        ? undefined
+        : {
+            ...process.env,
+            GH_TOKEN: token,
+            GITHUB_TOKEN: undefined,
+            QUAY_WORKER_GH_TOKEN: undefined,
+            QUAY_REVIEWER_GH_TOKEN: undefined,
+          };
+    const result = this.run(repoId, ["gh", "api", path], env);
     if (result.exitCode !== 0) {
       throw new Error(
         `gh api ${path} failed: ${result.stderr.trim() || result.stdout.trim()}`,
@@ -875,6 +891,7 @@ export class GitHubCliAdapter implements GitHubPort {
   private fetchReviewInlineComments(
     repoId: string,
     reviewNodeId: string,
+    token?: string,
   ): InlineReviewComment[] {
     // GraphQL keyed on the review's node id (the form `gh pr view` returns).
     // The REST endpoint at /pulls/<n>/reviews/<numeric-id>/comments would
@@ -902,6 +919,7 @@ export class GitHubCliAdapter implements GitHubPort {
         reviewNodeId,
         PAGE_SIZE,
         cursor,
+        token,
       );
       for (const row of nodes) {
         const r = (row ?? {}) as Record<string, unknown>;
@@ -936,6 +954,7 @@ export class GitHubCliAdapter implements GitHubPort {
     reviewNodeId: string,
     pageSize: number,
     cursor: string | null,
+    token?: string,
   ): { nodes: unknown[]; hasNextPage: boolean; endCursor: string | null } {
     const query =
       "query($id: ID!, $first: Int!, $after: String) { node(id: $id) { ... on PullRequestReview { " +
@@ -955,7 +974,17 @@ export class GitHubCliAdapter implements GitHubPort {
     if (cursor !== null) {
       args.push("-f", `after=${cursor}`);
     }
-    const result = this.run(repoId, args);
+    const env =
+      token === undefined
+        ? undefined
+        : {
+            ...process.env,
+            GH_TOKEN: token,
+            GITHUB_TOKEN: undefined,
+            QUAY_WORKER_GH_TOKEN: undefined,
+            QUAY_REVIEWER_GH_TOKEN: undefined,
+          };
+    const result = this.run(repoId, args, env);
     if (result.exitCode !== 0) {
       throw new Error(
         `gh api graphql (review comments) failed for review ${reviewNodeId}: ${result.stderr.trim() || result.stdout.trim()}`,

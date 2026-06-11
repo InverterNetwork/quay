@@ -494,6 +494,12 @@ test("posted review keeps result file when durable finalization fails", async ()
     action: "review_approved",
   });
   expect(built.github.submitPullRequestReviewCalls).toHaveLength(1);
+  expect(built.github.fetchPostedReviewCalls.at(-1)).toMatchObject({
+    repoId,
+    prNumber: 7,
+    headSha: "sha-finalize-fails",
+    token: "ghs_reviewer_runtime_test",
+  });
   expect(existsSync(join(worktreePath, ".quay-review-result.json"))).toBe(false);
   const retriedAttempt = h.db
     .query<{ review_id: string | null }, [number]>(
@@ -557,6 +563,12 @@ test("dead synthetic reviewer persists structured findings and locations", async
           },
           { path: "packages/app/src/schema.ts", line: 9 },
         ],
+      },
+      {
+        severity: "non_blocking",
+        title: "Tighten copy",
+        body: "The label is ambiguous.",
+        locations: [],
       },
       {
         severity: "non_blocking",
@@ -649,6 +661,47 @@ test("dead synthetic reviewer persists structured findings and locations", async
       url: null,
     },
   ]);
+});
+
+test("spawning a fresh reviewer clears stale result files from prior attempts", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-clear-stale-result");
+  const taskId = "pr-review-repo-review-clear-stale-result-19";
+  const worktreePath = `${h.dataDir}/worktrees/review-clear-stale-result-19`;
+  mkdirSync(worktreePath, { recursive: true });
+  writeReviewResult(worktreePath, {
+    verdict: "approved",
+    body: "Stale approval.",
+  });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/19',
+                 'quay-review-clear-stale-result-19', ?, 19, 'sha-19', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: null,
+  });
+  h.db
+    .query(`UPDATE attempts SET head_sha = 'sha-19' WHERE attempt_id = ?`)
+    .run(attemptId);
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, attemptId, "review prompt");
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "spawned",
+  });
+  expect(existsSync(join(worktreePath, ".quay-review-result.json"))).toBe(false);
 });
 
 test("structured review finding ingestion handles zero findings and re-ingest idempotently", () => {

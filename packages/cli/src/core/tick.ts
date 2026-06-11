@@ -644,12 +644,13 @@ class TickGithubCache implements GitHubPort {
     prNumber: number,
     headSha: string,
     expectedLogin?: string,
+    token?: string,
   ): PostedReview | null {
-    const key = `${repoId}\0${prNumber}\0${headSha}\0${expectedLogin ?? ""}`;
+    const key = `${repoId}\0${prNumber}\0${headSha}\0${expectedLogin ?? ""}\0${token ?? ""}`;
     if (!this.postedReviews.has(key)) {
       this.postedReviews.set(
         key,
-        this.inner.fetchPostedReview(repoId, prNumber, headSha, expectedLogin),
+        this.inner.fetchPostedReview(repoId, prNumber, headSha, expectedLogin, token),
       );
     }
     return this.postedReviews.get(key) ?? null;
@@ -2085,20 +2086,21 @@ function processRunningReviewAttempt(
   let posted: PostedReview;
   const expectedDecision =
     resultRead.result.verdict === "approved" ? "APPROVED" : "CHANGES_REQUESTED";
+  const token = resolveGithubActorToken("reviewer", deps, task.repo_id, options);
+  if (!token.ok) {
+    return markReviewInfraFailure(deps, task, token.error, exitInfo, options);
+  }
   try {
     const reconciled = reconcileAlreadyPostedReview(
       deps,
       task,
       options,
       resultRead.result,
+      token.token,
     );
     if (reconciled !== null) {
       posted = reconciled;
     } else {
-      const token = resolveGithubActorToken("reviewer", deps, task.repo_id, options);
-      if (!token.ok) {
-        return markReviewInfraFailure(deps, task, token.error, exitInfo, options);
-      }
       posted = deps.github.submitPullRequestReview({
         repoId: task.repo_id,
         prNumber: task.pr_number,
@@ -2159,6 +2161,7 @@ function reconcileAlreadyPostedReview(
   task: ReviewAttemptTaskRow,
   options: TickOptions,
   result: ParsedReviewResult,
+  token: string,
 ): PostedReview | null {
   if (task.pr_number === null) return null;
   const posted = deps.github.fetchPostedReview(
@@ -2166,6 +2169,7 @@ function reconcileAlreadyPostedReview(
     task.pr_number,
     task.head_sha,
     options.reviewerLogin,
+    token,
   );
   if (posted === null) return null;
   const expectedDecision =
@@ -2301,9 +2305,13 @@ function parseFindingsForPersistence(rawReviewResult: string): NormalizedReviewF
   if (!Array.isArray(findings)) return [];
 
   const normalized: NormalizedReviewFinding[] = [];
+  const seenFingerprints = new Set<string>();
   findings.forEach((finding, index) => {
     const row = normalizeReviewFinding(finding, index + 1);
-    if (row !== null) normalized.push(row);
+    if (row !== null && !seenFingerprints.has(row.fingerprint)) {
+      seenFingerprints.add(row.fingerprint);
+      normalized.push(row);
+    }
   });
   return normalized;
 }
@@ -4770,6 +4778,7 @@ function finalizeApprovedReviewBackToPrOpen(
       updates: { clearTickError: true },
     });
     deps.db.exec("COMMIT");
+    removeReviewResultFile(task.worktree_path);
   } catch (err) {
     try {
       deps.db.exec("ROLLBACK");
@@ -6592,6 +6601,7 @@ function promoteAndSpawnReviewer(
       return markReviewInfraFailure(deps, task, message, EXIT_INFO_NONE, options);
     }
   }
+  removeReviewResultFile(task.worktree_path);
 
   const promptContent = loadFinalPrompt(deps.db, task.task_id, task.attempt_id);
   const now = deps.clock.nowISO();

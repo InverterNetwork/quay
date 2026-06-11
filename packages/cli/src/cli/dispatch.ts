@@ -200,7 +200,7 @@ export async function dispatch(
       case "handoff":
         return handleHandoff(rest, deps, io);
       case "outbox":
-        return handleOutbox(rest, deps, io);
+        return await handleOutbox(rest, deps, io);
       case "enqueue":
         return await handleEnqueue(rest, deps, io);
       case "review-pr":
