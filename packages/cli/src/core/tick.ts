@@ -2406,10 +2406,6 @@ function readReviewResultFile(worktreePath: string): ReviewResultRead {
       ok: false,
       diagnostic: `unable to read ${REVIEW_RESULT_FILENAME}: ${(err as Error).message}`,
     };
-  } finally {
-    try {
-      rmSync(resultPath, { force: true });
-    } catch {}
   }
 
   let parsed: unknown;
@@ -2461,6 +2457,12 @@ function readReviewResultFile(worktreePath: string): ReviewResultRead {
       raw,
     },
   };
+}
+
+function removeReviewResultFile(worktreePath: string): void {
+  try {
+    rmSync(join(worktreePath, REVIEW_RESULT_FILENAME), { force: true });
+  } catch {}
 }
 
 // Worker exit info is best-effort: a missing marker file (worker exec'd
@@ -4658,6 +4660,7 @@ function finalizeApprovedReviewBlockedByCi(
     throw err;
   }
 
+  removeReviewResultFile(task.worktree_path);
   return { task_id: task.task_id, action: "ci_failed" };
 }
 
@@ -4943,6 +4946,7 @@ function finalizePostedReview(
       dedupeValue: posted.reviewId,
       maxNonBudgetRespawns: cap,
     });
+    removeReviewResultFile(task.worktree_path);
     if (result.outcome === "parked") {
       return { task_id: task.task_id, action: "non_budget_loop_parked" };
     }
@@ -4952,6 +4956,7 @@ function finalizePostedReview(
     return { task_id: task.task_id, action: "skipped_predicate" };
   }
 
+  removeReviewResultFile(task.worktree_path);
   return {
     task_id: task.task_id,
     action:

@@ -403,6 +403,7 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     )
     .get(taskId);
   expect(rawResultArtifact?.n).toBe(1);
+  expect(existsSync(join(worktreePath, ".quay-review-result.json"))).toBe(false);
   const observabilityArtifacts = h.db
     .query<{ kind: string; n: number }, [string, number]>(
       `SELECT kind, COUNT(*) AS n FROM artifacts
@@ -430,6 +431,72 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     reasoning_tokens: 5,
     total_tokens: 34,
   });
+});
+
+test("posted review keeps result file when durable finalization fails", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-result-finalize-fails");
+  const taskId = "pr-review-repo-review-result-finalize-fails-7";
+  const worktreePath = `${h.dataDir}/worktrees/review-finalize-fails-7`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'synthetic_review', 'quay-review/finalize-fails',
+                 'quay-review-result-finalize-fails-7', ?, 7, 'sha-finalize-fails', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-finalize-fails',
+              tmux_session = 'quay-review-session-finalize-fails'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  built.github.setPostedReview(repoId, 7, "sha-finalize-fails", {
+    reviewId: "R_finalize_fails",
+    decision: "APPROVED",
+    body: "Looks good.",
+    comments: "Looks good.",
+  });
+  writeReviewResult(worktreePath, { verdict: "approved", body: "Looks good." });
+
+  const originalArtifactStore = built.deps.artifactStore;
+  built.deps.artifactStore = {
+    writeArtifact(input) {
+      if (input.kind === "review_result") {
+        throw new Error("simulated review result persistence failure");
+      }
+      return originalArtifactStore.writeArtifact(input);
+    },
+  };
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(built.github.submitPullRequestReviewCalls).toHaveLength(1);
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "tick_error",
+    error: "simulated review result persistence failure",
+  });
+  expect(existsSync(join(worktreePath, ".quay-review-result.json"))).toBe(true);
+  const attempt = h.db
+    .query<{ review_id: string | null }, [number]>(
+      `SELECT review_id FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(attempt?.review_id).toBeNull();
 });
 
 test("dead synthetic reviewer persists structured findings and locations", async () => {
