@@ -83,6 +83,22 @@ Artifacts are snapshots of data that crosses a boundary, such as:
 
 Artifacts are stored under the data directory and indexed in SQLite.
 
+## Work Items, Runs, And Attempts
+
+Quay separates the stable work item from execution history:
+
+- A work item is the durable business object, usually a Linear issue such as
+  `BRIX-123`.
+- A run is one Quay execution lineage for that work item. It owns the task row,
+  branch, worktree, PR, state, and `run_number`.
+- An attempt is a retry or review loop inside one run.
+
+There can be many historical terminal runs for one work item, but only one
+active run at a time. A rerun creates the next run under the same work item,
+sets `supersedes_task_id` to the previous run, and uses a run-qualified branch
+such as `quay/BRIX-123-r2`. Terminal states such as `closed_unmerged` are
+terminal for that run, not for the work item.
+
 ## States
 
 Common active states:
@@ -120,12 +136,20 @@ waiting task can run.
 Complete Linear blockers do not block enqueue. Incomplete blockers must already
 be tracked by Quay. If the blocker task is tracked, the dependent task is
 created in `waiting_dependencies` and is released to `queued` only after the
-blocker reaches `merged`. If the incomplete blocker is not tracked, enqueue
-fails with `dependency_not_tracked` before creating the dependent task.
+blocker work item reaches `merged` through its latest run. If the incomplete
+blocker is not tracked, enqueue fails with `dependency_not_tracked` before
+creating the dependent task.
+
+Dependency satisfaction is monotonic. Once a dependency row has `satisfied_at`,
+later failed reruns of the blocker do not revoke that fact or re-block the
+dependent. New dependents created after a blocker rerun are evaluated against
+the blocker's latest run.
 
 Failed blockers do not auto-unblock or auto-cancel dependents. Operators must
-inspect the blocker and decide whether to retry, cancel, retarget, or otherwise
-recover the blocked workflow.
+inspect the blocker and decide whether to rerun the blocker work item, cancel,
+retarget, or otherwise recover the blocked workflow. Dependency-failure
+delivery payloads include the failed blocker run number and rerun command when
+the blocker is a Linear work item.
 
 ## Umbrella Workflows
 

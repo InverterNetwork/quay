@@ -15,6 +15,10 @@ import {
   type EnqueueResult,
 } from "../core/enqueue.ts";
 import { QuayError } from "../core/errors.ts";
+import {
+  LINEAR_STATE_IN_PROGRESS,
+  syncLinearState,
+} from "../core/linear_state_sync.ts";
 import { parseQuayConfigBlock } from "../core/quay_config_block.ts";
 import { mergeNormalizedTags } from "../core/tag_normalize.ts";
 import { TASK_TERMINAL_STATES } from "../core/task_state.ts";
@@ -311,6 +315,9 @@ export async function handleEnqueueLinearIssue(
   io.stdout(
     `${JSON.stringify(formatLinearRunOutput(deps.enqueueDeps.db, result, false))}\n`,
   );
+  if (args.rerun) {
+    await syncLinearState(deps.linear, externalRef, LINEAR_STATE_IN_PROGRESS);
+  }
   return { exitCode: 0 };
 }
 

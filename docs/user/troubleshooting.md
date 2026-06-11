@@ -289,6 +289,15 @@ quay task get <blocker_task_id>
 Then decide whether to retry or recover the blocker, cancel the dependent, or
 create replacement work and retarget manually. Quay releases the dependent only
 when the persisted dependency row is satisfied by the required blocker state.
+For a Linear work item whose latest run is terminal, use:
+
+```bash
+quay rerun --linear-issue <identifier>
+```
+
+The new run stays under the same work item. Existing satisfied dependency rows
+stay satisfied; waiting dependents that are still unsatisfied are rechecked
+against the latest blocker run.
 
 ## Tick Shows `github_backoff_skipped`
 

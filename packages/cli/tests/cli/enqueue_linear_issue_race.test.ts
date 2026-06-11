@@ -385,6 +385,7 @@ test("test_rerun_linear_issue_creates_new_run_with_run_branch", async () => {
     .run(firstTask.task_id);
 
   built.linear.setIssue(makeIssue("ENG-9003"));
+  built.linear.resetSetIssueStateCalls();
   const ioB = bufferIO();
   const resultB = await dispatch(
     ["rerun", "--repo", REPO_ID, "--linear-issue", "ENG-9003"],
@@ -434,5 +435,8 @@ test("test_rerun_linear_issue_creates_new_run_with_run_branch", async () => {
       run_number: 2,
       supersedes_task_id: firstTask.task_id,
     },
+  ]);
+  expect(built.linear.setIssueStateCalls).toEqual([
+    { identifier: "ENG-9003", stateName: "In Progress" },
   ]);
 });
