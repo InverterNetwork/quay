@@ -32,6 +32,15 @@ function writeReviewResult(
   );
 }
 
+function markedReviewBody(input: {
+  body: string;
+  taskId: string;
+  attemptId: number;
+  headSha: string;
+}): string {
+  return `${input.body.trimEnd()}\n\n<!-- quay-review-result task_id=${input.taskId} attempt_id=${input.attemptId} head_sha=${input.headSha} -->`;
+}
+
 test("AST-120: non-required failing check blocks pr-review and schedules ci_fail", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
@@ -209,8 +218,18 @@ test("AST-120: approved Quay-owned review cannot mark done with failing checks",
   built.github.setPostedReview(repoId, 91, "head-reviewed", {
     reviewId: "R_approved_red_ci",
     decision: "APPROVED",
-    body: "Looks good.",
-    comments: "Looks good.",
+    body: markedReviewBody({
+      body: "Looks good.",
+      taskId,
+      attemptId: reviewAttemptId,
+      headSha: "head-reviewed",
+    }),
+    comments: markedReviewBody({
+      body: "Looks good.",
+      taskId,
+      attemptId: reviewAttemptId,
+      headSha: "head-reviewed",
+    }),
   });
   writeReviewResult(taskId, { verdict: "approved", body: "Looks good." });
   built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
