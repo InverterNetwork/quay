@@ -1,7 +1,8 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
-import { tick_once } from "../../src/core/tick.ts";
+import { REVIEWER_GH_TOKEN_ENV, tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertAttempt, insertRepo, insertTask, seedTaskObjective } from "../support/fixtures.ts";
 import { buildTickDeps } from "../support/tick_deps.ts";
@@ -11,6 +12,25 @@ afterEach(() => {
   h?.cleanup();
   h = null;
 });
+
+const REVIEWER_OPTIONS = {
+  reviewerEnabled: true,
+  env: {
+    [REVIEWER_GH_TOKEN_ENV]: "ghs_reviewer_runtime_test",
+  },
+};
+
+function writeReviewResult(
+  taskId: string,
+  input: { verdict: "approved" | "changes_requested"; body: string },
+): void {
+  const worktreePath = `/tmp/${taskId}`;
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(
+    join(worktreePath, ".quay-review-result.json"),
+    JSON.stringify({ ...input, findings: [] }),
+  );
+}
 
 test("AST-120: non-required failing check blocks pr-review and schedules ci_fail", async () => {
   h = createHarness();
@@ -192,6 +212,7 @@ test("AST-120: approved Quay-owned review cannot mark done with failing checks",
     body: "Looks good.",
     comments: "Looks good.",
   });
+  writeReviewResult(taskId, { verdict: "approved", body: "Looks good." });
   built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
     prNumber: 91,
     state: "open",
@@ -212,7 +233,7 @@ test("AST-120: approved Quay-owned review cannot mark done with failing checks",
     },
   });
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, REVIEWER_OPTIONS);
 
   expect(results).toContainEqual({ task_id: taskId, action: "ci_failed" });
   const task = h.db
@@ -299,6 +320,10 @@ test("AST-120: stale approved review on red new head schedules ci_fail", async (
     body: "Old head looked good.",
     comments: "Old head looked good.",
   });
+  writeReviewResult(taskId, {
+    verdict: "approved",
+    body: "Old head looked good.",
+  });
   built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
     prNumber: 92,
     state: "open",
@@ -319,7 +344,7 @@ test("AST-120: stale approved review on red new head schedules ci_fail", async (
     },
   });
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, REVIEWER_OPTIONS);
 
   expect(results).toContainEqual({ task_id: taskId, action: "ci_failed" });
   const oldReview = h.db
@@ -391,6 +416,10 @@ test("AST-120: stale approved review on green new head schedules fresh review", 
     body: "Old head looked good.",
     comments: "Old head looked good.",
   });
+  writeReviewResult(taskId, {
+    verdict: "approved",
+    body: "Old head looked good.",
+  });
   built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
     prNumber: 93,
     state: "open",
@@ -412,7 +441,7 @@ test("AST-120: stale approved review on green new head schedules fresh review", 
     headSha: "new-green-head",
   });
 
-  const results = await tick_once(built.deps, { reviewerEnabled: true });
+  const results = await tick_once(built.deps, REVIEWER_OPTIONS);
 
   expect(results).toContainEqual({ task_id: taskId, action: "review_requested" });
   const oldReview = h.db
@@ -469,6 +498,7 @@ test("AST-120: approved review waiting on pending CI frees reviewer capacity", a
     body: "Looks good.",
     comments: "Looks good.",
   });
+  writeReviewResult(taskId, { verdict: "approved", body: "Looks good." });
   built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
     prNumber: 94,
     state: "open",
@@ -490,7 +520,7 @@ test("AST-120: approved review waiting on pending CI frees reviewer capacity", a
     headSha: "head-pending",
   });
 
-  const first = await tick_once(built.deps, { reviewerEnabled: true });
+  const first = await tick_once(built.deps, REVIEWER_OPTIONS);
 
   expect(first).toContainEqual({ task_id: taskId, action: "ci_pending" });
   expect(countActiveReviewAttempts(taskId)).toBe(0);

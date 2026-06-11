@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import type { PrCheckBucket, PrSnapshot } from "../../src/ports/github.ts";
 import {
@@ -40,6 +41,17 @@ function reviewerTickOptions(extra: TickOptions = {}): TickOptions {
   };
 }
 
+function writeReviewResult(
+  worktreePath: string,
+  input: { verdict: "approved" | "changes_requested"; body: string },
+): void {
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(
+    join(worktreePath, ".quay-review-result.json"),
+    JSON.stringify({ ...input, findings: [] }),
+  );
+}
+
 test("Quay-owned pr-review approval enqueues one pr_ready_approved outbox item", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
@@ -78,6 +90,10 @@ test("Quay-owned pr-review approval enqueues one pr_ready_approved outbox item",
     decision: "APPROVED",
     body: "Approved.",
     comments: "Approved.",
+  });
+  writeReviewResult(`${h.dataDir}/worktrees/${taskId}`, {
+    verdict: "approved",
+    body: "Approved.",
   });
 
   const results = await tick_once(built.deps, reviewerTickOptions());
@@ -148,6 +164,10 @@ test("approved before CI pass enqueues when ci_passed later reaches done", async
     decision: "APPROVED",
     body: "Approved while CI is pending.",
     comments: "Approved while CI is pending.",
+  });
+  writeReviewResult(`${h.dataDir}/worktrees/${taskId}`, {
+    verdict: "approved",
+    body: "Approved while CI is pending.",
   });
 
   const pendingResults = await tick_once(built.deps, reviewerTickOptions());

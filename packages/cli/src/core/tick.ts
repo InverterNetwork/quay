@@ -108,6 +108,7 @@ export const DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS = 24;
 export const DEFAULT_RETAINED_CANCELLED_WORKTREE_GC_BATCH_SIZE = 10;
 export const WORKER_GH_TOKEN_ENV = "QUAY_WORKER_GH_TOKEN";
 export const REVIEWER_GH_TOKEN_ENV = "QUAY_REVIEWER_GH_TOKEN";
+const REVIEW_RESULT_FILENAME = ".quay-review-result.json";
 const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Canonical claude worker template, kept here as a named re-export so
 // callers that imported it from `tick.ts` before the agent-resolver
@@ -187,6 +188,17 @@ export interface TickOptions {
   referenceReposRoot?: string | undefined;
   ciIgnorePolicy?: CiIgnorePolicy;
 }
+
+interface ParsedReviewResult {
+  verdict: "approved" | "changes_requested";
+  body: string;
+  findings: unknown[];
+  raw: string;
+}
+
+type ReviewResultRead =
+  | { ok: true; result: ParsedReviewResult }
+  | { ok: false; diagnostic: string; raw?: string };
 
 export type TickAction =
   | "spawned"
@@ -630,6 +642,24 @@ class TickGithubCache implements GitHubPort {
     headSha: string,
   ): PostedReviewAuthor[] {
     return this.inner.fetchPostedReviewAuthorsAtHead(repoId, prNumber, headSha);
+  }
+
+  submitPullRequestReview(input: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    verdict: "APPROVED" | "CHANGES_REQUESTED";
+    body: string;
+    token: string;
+  }): PostedReview {
+    const posted = this.inner.submitPullRequestReview(input);
+    this.postedReviews.set(
+      `${input.repoId}\0${input.prNumber}\0${input.headSha}\0`,
+      posted,
+    );
+    this.prSnapshotByNumberCache.delete(`${input.repoId}\0${input.prNumber}`);
+    this.lightweightByNumber.delete(`${input.repoId}\0${input.prNumber}`);
+    return posted;
   }
 
   probeTokenAccess(
@@ -2021,26 +2051,48 @@ function processRunningReviewAttempt(
     );
   }
 
-  const posted = deps.github.fetchPostedReview(
-    task.repo_id,
-    task.pr_number,
-    task.head_sha,
-    options.reviewerLogin,
-  );
-  if (posted === null) {
-    const observed = deps.github.fetchPostedReviewAuthorsAtHead(
-      task.repo_id,
-      task.pr_number,
-      task.head_sha,
-    );
+  const resultRead = readReviewResultFile(task.worktree_path);
+  if (!resultRead.ok) {
     return markReviewInfraFailure(
       deps,
       task,
-      missingPostedReviewDiagnostic(task.head_sha, options.reviewerLogin, observed),
+      resultRead.diagnostic,
       exitInfo,
       options,
+      resultRead.raw,
     );
   }
+
+  const token = resolveGithubActorToken("reviewer", deps, task.repo_id, options);
+  if (!token.ok) {
+    return markReviewInfraFailure(deps, task, token.error, exitInfo, options);
+  }
+
+  let posted: PostedReview;
+  try {
+    posted = deps.github.submitPullRequestReview({
+      repoId: task.repo_id,
+      prNumber: task.pr_number,
+      headSha: task.head_sha,
+      verdict:
+        resultRead.result.verdict === "approved"
+          ? "APPROVED"
+          : "CHANGES_REQUESTED",
+      body: resultRead.result.body,
+      token: token.token,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return markReviewInfraFailure(
+      deps,
+      task,
+      `failed to post GitHub review: ${message}`,
+      exitInfo,
+      options,
+      resultRead.result.raw,
+    );
+  }
+
   if (posted.decision === "COMMENTED") {
     return markReviewInfraFailure(
       deps,
@@ -2048,38 +2100,30 @@ function processRunningReviewAttempt(
       `review ${posted.reviewId} used COMMENTED instead of an approve/request-changes verdict`,
       exitInfo,
       options,
+      resultRead.result.raw,
     );
   }
   if (
     posted.decision === "APPROVED" &&
     task.authoring_mode !== "synthetic_review"
   ) {
-    const ciGate = guardApprovedReviewCi(deps, task, posted, exitInfo, options);
+    const ciGate = guardApprovedReviewCi(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      options,
+      resultRead.result.raw,
+    );
     if (ciGate !== null) return ciGate;
   }
-  return finalizePostedReview(deps, task, posted, exitInfo, options);
-}
-
-function missingPostedReviewDiagnostic(
-  headSha: string,
-  reviewerLogin: string | undefined,
-  observed: PostedReviewAuthor[],
-): string {
-  if (observed.length === 0) {
-    return `no Quay-authored review found at head SHA ${headSha}`;
-  }
-  const expected = reviewerLogin ?? "the tick gh identity";
-  const observedText = observed
-    .slice(0, 5)
-    .map((a) => `${a.login || "<unknown login>"} (${a.type || "unknown type"}, ${a.decision}, ${a.reviewId})`)
-    .join("; ");
-  const suffix =
-    observed.length > 5 ? `; plus ${observed.length - 5} more review(s)` : "";
-  return (
-    `reviewer identity mismatch at head SHA ${headSha}: ` +
-    `configured reviewer login ${JSON.stringify(expected)} did not match observed review author(s): ` +
-    `${observedText}${suffix}. ` +
-    `Update [reviewer].login to the identity that posts reviews, using app/<slug> for GitHub App bot identities.`
+  return finalizePostedReview(
+    deps,
+    task,
+    posted,
+    exitInfo,
+    options,
+    resultRead.result.raw,
   );
 }
 
@@ -2087,6 +2131,80 @@ function reviewKillIntentDiagnostic(intent: "wall_clock" | "stale"): string {
   return intent === "wall_clock"
     ? "The live reviewer exceeded max_attempt_duration_seconds and was killed."
     : "The live reviewer stopped producing fresh logs past staleness_threshold_seconds and was killed.";
+}
+
+function readReviewResultFile(worktreePath: string): ReviewResultRead {
+  const resultPath = join(worktreePath, REVIEW_RESULT_FILENAME);
+  if (!existsSync(resultPath)) {
+    return {
+      ok: false,
+      diagnostic: `reviewer did not write ${REVIEW_RESULT_FILENAME}`,
+    };
+  }
+
+  let raw: string;
+  try {
+    raw = readFileSync(resultPath, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      diagnostic: `unable to read ${REVIEW_RESULT_FILENAME}: ${(err as Error).message}`,
+    };
+  } finally {
+    try {
+      rmSync(resultPath, { force: true });
+    } catch {}
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return {
+      ok: false,
+      diagnostic: `${REVIEW_RESULT_FILENAME} is not valid JSON: ${(err as Error).message}`,
+      raw,
+    };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      ok: false,
+      diagnostic: `${REVIEW_RESULT_FILENAME} must contain a JSON object`,
+      raw,
+    };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  const verdict = obj.verdict;
+  const body = obj.body;
+  const findings = obj.findings;
+  const errors: string[] = [];
+  if (verdict !== "approved" && verdict !== "changes_requested") {
+    errors.push("verdict must be approved or changes_requested");
+  }
+  if (typeof body !== "string" || body.trim() === "") {
+    errors.push("body must be a non-empty string");
+  }
+  if (!Array.isArray(findings)) {
+    errors.push("findings must be an array");
+  }
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      diagnostic: `${REVIEW_RESULT_FILENAME} is malformed: ${errors.join("; ")}`,
+      raw,
+    };
+  }
+
+  return {
+    ok: true,
+    result: {
+      verdict: verdict as "approved" | "changes_requested",
+      body: body as string,
+      findings: findings as unknown[],
+      raw,
+    },
+  };
 }
 
 // Worker exit info is best-effort: a missing marker file (worker exec'd
@@ -4032,6 +4150,7 @@ function guardApprovedReviewCi(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   options: TickOptions,
+  rawReviewResult: string,
 ): TickTaskResult | null {
   const snapshot = deps.github.prSnapshot(task.repo_id, task.branch_name);
   if (snapshot === null) {
@@ -4041,6 +4160,7 @@ function guardApprovedReviewCi(
       posted,
       exitInfo,
       "approved",
+      rawReviewResult,
     );
     return recordTickError(
       deps,
@@ -4052,7 +4172,15 @@ function guardApprovedReviewCi(
   }
   persistPrMetadata(deps, task.task_id, snapshot);
   if (snapshot.headSha !== task.head_sha) {
-    return handleStaleApprovedReview(deps, task, posted, exitInfo, snapshot, options);
+    return handleStaleApprovedReview(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      snapshot,
+      options,
+      rawReviewResult,
+    );
   }
 
   const repo = loadRepoForTask(deps.db, task.task_id);
@@ -4068,6 +4196,7 @@ function guardApprovedReviewCi(
       posted,
       exitInfo,
       "approved",
+      rawReviewResult,
     );
     return recordTickError(
       deps,
@@ -4084,6 +4213,7 @@ function guardApprovedReviewCi(
       posted,
       exitInfo,
       "approved",
+      rawReviewResult,
     );
     return { task_id: task.task_id, action: "ci_pending" };
   }
@@ -4094,6 +4224,7 @@ function guardApprovedReviewCi(
       posted,
       exitInfo,
       snapshot,
+      rawReviewResult,
     );
   }
   return null;
@@ -4106,6 +4237,7 @@ function handleStaleApprovedReview(
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
   options: TickOptions,
+  rawReviewResult: string,
 ): TickTaskResult {
   const repo = loadRepoForTask(deps.db, task.task_id);
   const ci = classifyCi(
@@ -4120,6 +4252,7 @@ function handleStaleApprovedReview(
       posted,
       exitInfo,
       "superseded",
+      rawReviewResult,
     );
     return recordTickError(
       deps,
@@ -4136,6 +4269,7 @@ function handleStaleApprovedReview(
       posted,
       exitInfo,
       "superseded",
+      rawReviewResult,
     );
     return { task_id: task.task_id, action: "ci_pending" };
   }
@@ -4146,6 +4280,7 @@ function handleStaleApprovedReview(
       posted,
       exitInfo,
       snapshot,
+      rawReviewResult,
     );
   }
 
@@ -4155,6 +4290,7 @@ function handleStaleApprovedReview(
     posted,
     exitInfo,
     "superseded",
+    rawReviewResult,
   );
   if (snapshot.prNumber === undefined || snapshot.prNumber === null) {
     return recordTickError(
@@ -4195,6 +4331,7 @@ function finalizeApprovedReviewBlockedByCi(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
+  rawReviewResult: string,
 ): TickTaskResult {
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
@@ -4233,6 +4370,13 @@ function finalizeApprovedReviewBlockedByCi(
     deps.artifactStore.writeArtifact({
       taskId: task.task_id,
       attemptId: task.attempt_id,
+      kind: "review_result",
+      content: rawReviewResult,
+      extension: "json",
+    });
+    deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: task.attempt_id,
       kind: "review_comments",
       content,
       extension: "json",
@@ -4266,6 +4410,7 @@ function finalizeStaleApprovedReviewBlockedByCi(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
+  rawReviewResult: string,
 ): TickTaskResult {
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
@@ -4279,6 +4424,7 @@ function finalizeStaleApprovedReviewBlockedByCi(
       exitInfo,
       "superseded",
       now,
+      rawReviewResult,
     );
     applyCiFailRetryInOpenTxn(
       deps,
@@ -4309,6 +4455,7 @@ function finalizeApprovedReviewBackToPrOpen(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   verdict: "approved" | "superseded",
+  rawReviewResult: string,
 ): void {
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
@@ -4321,6 +4468,7 @@ function finalizeApprovedReviewBackToPrOpen(
       exitInfo,
       verdict,
       now,
+      rawReviewResult,
     );
     transitionTaskState(deps, {
       taskId: task.task_id,
@@ -4348,6 +4496,7 @@ function markReviewAttemptEndedInOpenTxn(
   exitInfo: PaneExitInfo,
   verdict: "approved" | "superseded",
   now: string,
+  rawReviewResult: string,
 ): number {
   const content = reviewArtifactContent(posted, task.head_sha);
   deps.db
@@ -4380,6 +4529,13 @@ function markReviewAttemptEndedInOpenTxn(
         WHERE task_id = ?`,
     )
     .run(now, task.task_id);
+  deps.artifactStore.writeArtifact({
+    taskId: task.task_id,
+    attemptId: task.attempt_id,
+    kind: "review_result",
+    content: rawReviewResult,
+    extension: "json",
+  });
   const artifact = deps.artifactStore.writeArtifact({
     taskId: task.task_id,
     attemptId: task.attempt_id,
@@ -4396,6 +4552,7 @@ function finalizePostedReview(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   options: TickOptions,
+  rawReviewResult: string,
 ): TickTaskResult {
   collectReviewAttemptArtifacts(deps, task);
   const verdict =
@@ -4457,6 +4614,14 @@ function finalizePostedReview(
           WHERE task_id = ?`,
       )
       .run(now, task.task_id);
+
+    deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: task.attempt_id,
+      kind: "review_result",
+      content: rawReviewResult,
+      extension: "json",
+    });
 
     if (!handOffToRespawn) {
       // Artifact write joins this transaction (the INSERT into `artifacts`
@@ -4555,6 +4720,7 @@ function markReviewInfraFailure(
   diagnostic: string,
   exitInfo: PaneExitInfo,
   options: TickOptions,
+  rawReviewResult?: string,
 ): TickTaskResult {
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
@@ -4583,6 +4749,15 @@ function markReviewInfraFailure(
       content: diagnostic,
       extension: "md",
     });
+    if (rawReviewResult !== undefined) {
+      deps.artifactStore.writeArtifact({
+        taskId: task.task_id,
+        attemptId: task.attempt_id,
+        kind: "review_result",
+        content: rawReviewResult,
+        extension: "json",
+      });
+    }
     deps.db
       .query(
         `UPDATE attempts

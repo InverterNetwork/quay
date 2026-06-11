@@ -14,7 +14,7 @@
 
 ## 1. Goal
 
-Make PR review a **first-class state in Quay's task lifecycle**, entered by every PR — whether Quay opened the PR or a human did. While a task is in the new `pr-review` state, Quay spawns its own reviewer worker (same substrate as a code worker: tmux, supervisor lock; the worker doesn't modify code or git state, only the substrate's own `.quay-*` files). The reviewer posts a real GitHub PR review via `gh pr review`. Tick captures the verdict on the attempt row and stores the posted review (body + inline comments) as a `review_comments` artifact, then transitions the task based on the verdict.
+Make PR review a **first-class state in Quay's task lifecycle**, entered by every PR — whether Quay opened the PR or a human did. While a task is in the new `pr-review` state, Quay spawns its own reviewer worker (same substrate as a code worker: tmux, supervisor lock; the worker doesn't modify code or git state, only the substrate's own `.quay-*` files). The reviewer writes `.quay-review-result.json`; tick validates and stores that raw result, posts a real GitHub PR review through Quay's GitHub adapter and reviewer token path, captures the verdict on the attempt row, stores the posted review body as a `review_comments` artifact, and transitions the task based on the verdict.
 
 An **approved review is required** for a task to reach `done`. Until the reviewer approves, the task stays in the review loop: changes-requested keeps the task waiting for a new SHA, and every new SHA triggers a fresh review attempt.
 
@@ -50,7 +50,7 @@ The review loop is conceptually the same for both task kinds (review → approve
 - **Multi-model panel review.** N=1 single reviewer only.
 - **Blocking mode (`--wait` / `--timeout`).** `quay review-pr` is fire-and-forget. CI sees the verdict on GitHub when the reviewer posts it.
 - **Auto-comment-back to GitHub on review failure.** Worker either posts a review or writes a blocker file; no GitHub-comment loop.
-- **PR conversation-tab comments and review-comment replies.** Quay observes only `gh pr review` payloads (review body + inline comments). General PR comments and reply threads are not ingested.
+- **PR conversation-tab comments and review-comment replies.** Quay stores only the review body it posts from `.quay-review-result.json` in this path. General PR comments and reply threads are not ingested.
 - **Consultation of GitHub's review-request state.** Quay does not look at whether a review has been "re-requested" on GitHub. The SHA is the only trigger.
 - **Reviewer self-improvement loop.** No agent-vs-human review divergence capture.
 
@@ -75,11 +75,11 @@ sequenceDiagram
 
     Note over Tick: next tick promotes the attempt and spawns the reviewer
     Tick->>Worker: spawn with reviewer preamble. Worker doesn't modify code or git
-    Worker->>GH: gh pr review approve or request-changes
+    Worker->>Tick: .quay-review-result.json
     Worker-->>Tick: exit
-    Tick->>GH: gh pr view to fetch posted review
+    Tick->>GH: create PR review via GitHub adapter
     GH-->>Tick: review payload
-    Note over Tick: set attempts.review_verdict and review_id. Write review_comments artifact
+    Note over Tick: set attempts.review_verdict and review_id. Write review_result and review_comments artifacts
 
     alt approved
         Note over Tick: state moves to done
@@ -166,14 +166,14 @@ A single idempotent function (`enterReview(task_id, head_sha)`) is the only way 
 
 ### Exit from `pr-review`
 
-When the reviewer worker terminates, the reaper (§6.6) fetches the posted review and runs:
+When the reviewer worker terminates, the reaper (§6.6) reads `.quay-review-result.json`, posts the GitHub review, and runs:
 
 | Reviewer outcome | Quay-owned task transition | Synthetic task transition |
 |---|---|---|
 | `APPROVED` | `pr-review → done` (if `gate_quay_owned_done = true`; otherwise no change — task should already be in `done` via the legacy CI-green path) | `pr-review → done` |
 | `CHANGES_REQUESTED` | `pr-review → queued` via the existing `non_budget_respawn` path (writes `review_comments` artifact, sets state, counts toward `non_budget_respawns_consumed`) | `pr-review → waiting_external_changes` (writes `review_comments` artifact for forensics; nothing to respawn) |
 | `COMMENTED` | Contract violation (§7.1 piece 3). See "Reviewer infrastructure failures" below. | Same. |
-| Worker errored before posting (blocker file, no posted review, network error fetching) | See "Reviewer infrastructure failures" below. | Same. |
+| Worker errored before result/posting (blocker file, missing or malformed result, network error posting) | See "Reviewer infrastructure failures" below. | Same. |
 
 ### Reviewer infrastructure failures
 
@@ -457,7 +457,7 @@ Deployment override: a deployment customizes the reviewer preamble by inserting 
 
 No `[reviewer].preamble_path` config key. The storage mechanism is the database, identical to code workers; deployments don't manage two preamble systems.
 
-The preamble carries the entirety of the reviewer-worker contract surface: what the worker reads, how it composes the review (line comments vs. review body, severity, line-number accuracy), the verdict mapping (approve vs. request-changes only — no comment-only), and posting via `gh pr review`. The contract pieces themselves are enumerated in §7.1; the prose enforcing them lives in `docs/quay-reviewer-preamble-default.md` (the source-of-truth) and is mirrored verbatim in `DEFAULT_REVIEWER_PREAMBLE_BODY` in the source. The preamble also asks the worker to write optional `quay-principle` fenced blocks for generalizable rules; v1 stores the blocks verbatim in the `review_comments` artifact but doesn't parse them — that's deferred to the future findings/search spec.
+The preamble carries the entirety of the reviewer-worker contract surface: what the worker reads, how it composes the review body, severity, line-number accuracy, the verdict mapping (`approved` vs. `changes_requested` only — no comment-only), and writing `.quay-review-result.json` for Quay to post. The contract pieces themselves are enumerated in §7.1; the prose enforcing them lives in `docs/quay-reviewer-preamble-default.md` (the source-of-truth) and is mirrored verbatim in `DEFAULT_REVIEWER_PREAMBLE_BODY` in the source. The preamble also asks the worker to write optional `quay-principle` fenced blocks for generalizable rules; v1 stores the blocks verbatim in the `review_comments` artifact but doesn't parse them — that's deferred to the future findings/search spec.
 
 ### 6.4 Capacity cap (separate)
 
@@ -493,11 +493,11 @@ Rationale for two caps over one: separating them keeps code-worker scheduling ex
 
 By the end of its run, the worker must:
 
-1. Either post **exactly one** review via `gh pr review` with a **definite verdict** (`--approve` or `--request-changes`), OR write `.quay-blocked.md` describing the blocker. Not both, not neither. **`--comment` is not allowed** (§7.1 piece 3).
+1. Either write **exactly one** `.quay-review-result.json` with a **definite verdict** (`approved` or `changes_requested`), OR write `.quay-blocked.md` describing the blocker. Not both, not neither. Comment-only verdicts are not allowed (§7.1 piece 3).
 2. Not modify code or git state (§6.2).
 3. Exit cleanly.
 
-If the worker exits without posting a review and without writing a blocker file, the reaper records `review_verdict = 'errored'` and follows the infrastructure-failure handling in §4 ("Reviewer infrastructure failures").
+If the worker exits without writing a valid result and without writing a blocker file, the reaper records `review_verdict = 'errored'` and follows the infrastructure-failure handling in §4 ("Reviewer infrastructure failures").
 
 Contract details (use the brief, post inline comments where the issue has a locus, etc.) are enforced by preamble prose, not by tick — see §7.1.
 
@@ -594,10 +594,10 @@ The contract pieces are **enforced by preamble prose, not by tick.** Tick observ
 
 1. **Use the brief, then the diff.** Read the task brief (`.quay-prompt.md` or equivalent — same location as for code workers) before doing anything else. Read the diff via `gh pr diff` or by inspecting the worktree against the base branch. Don't repeat work the brief already did.
 2. **Fetch only what's missing.** If the brief contains unexpanded identifiers (synthetic-task path on adapter-less deployments — see `docs/quay-spec-deployment-adapters.md` §6.1), follow them via available tooling (Linear MCP, web fetch, etc.) before composing findings.
-3. **Post exactly one review with a definite verdict.** Call `gh pr review <pr> --approve` or `gh pr review <pr> --request-changes` once. Include the review body with `--body` or `-F`. Inline comments are posted as part of the same review via the file's GraphQL payload, not as separate `gh pr comment` calls. **`--comment` is forbidden** — it produces an undecided review that strands the PR (Quay's gate requires `approved` to advance to `done`, and `changes-requested` is the only signal that re-engages the code worker). If the reviewer has no clear verdict, the right answer is `--approve` (with non-blocking notes in the body or as inline comments) or `--request-changes` (if anything is blocking).
+3. **Write exactly one structured result with a definite verdict.** Write `.quay-review-result.json` once with `verdict` equal to `approved` or `changes_requested`, a non-empty `body`, and a `findings` array. Do not call `gh pr review`. Comment-only verdicts are forbidden because they strand the PR (Quay's gate requires `approved` to advance to `done`, and `changes_requested` is the only signal that re-engages the code worker).
 4. **Inline comments where the issue has a locus.** A finding tied to specific code lives as an inline comment with `path` + `line`. A finding about the change as a whole lives in the review body. Don't smear locus-bearing findings into the body; don't manufacture line refs for body-level findings.
 5. **No code or git mutation.** No commits, no pushes, no installs, no file writes to repo paths. The substrate's own `.quay-*` files are fine; if you can't proceed, write `.quay-blocked.md` and exit. (Substrate-level constraint from §6.2; restated here so the contract list is complete.)
-6. **Exit cleanly when done.** Either a review is posted or `.quay-blocked.md` is written; then exit. Don't loop, don't sleep waiting for input, don't poll GitHub for further state.
+6. **Exit cleanly when done.** Either `.quay-review-result.json` or `.quay-blocked.md` is written; then exit. Don't loop, don't sleep waiting for input, don't poll GitHub for further state.
 
 The default preamble at `docs/quay-reviewer-preamble-default.md` enforces all six pieces in prose. Deployments overriding the preamble (via a new `kind = 'review'` row in `preambles`; §6.3) are responsible for preserving the pieces tick depends on — specifically (3), (5), and (6). Pieces (1), (2), and (4) affect review quality but not Quay's machinery.
 
@@ -714,12 +714,12 @@ Forward-compatible naming choice in v1: this spec uses **`review_only`** for the
 
 ### 8.6 Implementation notes
 
-- **Make the review-ingestion port explicit.** The existing `src/adapters/github.ts` provides `fetchInlineReviewComments` with robust GraphQL pagination (`src/adapters/github.ts:323`) and a `prSnapshot` shape used by `non_budget_respawn`. The reaper's review-ingestion path (§6.6) is a distinct operation — it fetches a specific bot-authored review at a specific SHA. Don't stretch `prSnapshot` to carry the new fields; expose a focused port like `fetchPostedReview(repo, pr, head_sha, author)` returning a `PostedReview` shape with review body + inline comments + `review_id`. Keeps the adapter surface composable.
+- **Make the review-posting port explicit.** The reaper's review-posting path (§6.6) is a distinct operation — it posts one structured reviewer result to a specific PR and head SHA using the reviewer token path. Don't stretch `prSnapshot` to carry write behavior; expose a focused port like `submitPullRequestReview(...)` returning a `PostedReview` shape with review body and `review_id`. Keeps the adapter surface composable.
 - **Reviewer scheduling reuses the existing scheduler, the reaper is new.** Per §6.1: `promoteAndSpawn`'s substrate (atomic promotion, tmux spawn, agent identity, prompt loading) is shared between code-worker and reviewer spawns; what differs is the predicate, a couple of formatting / state-transition arguments, and the post-exit reaper.
 - **Code-worker scheduling is unchanged.** Separate caps mean `countRunning()` keeps its existing semantics (`state = 'running'`); reviewer attempts have their own count over `review_only` running attempts. One less risk vector during rollout.
 
 ### 8.7 External references
 
-- `https://docs.github.com/en/rest/pulls/reviews` — GitHub REST docs for `gh pr review` payload shape; consulted by the reaper (§6.6 step 2).
+- `https://docs.github.com/en/rest/pulls/reviews` — GitHub REST docs for create-review payload shape; consulted by the reaper (§6.6 step 2).
 - `https://cli.github.com/manual/gh_pr_view` — `gh pr view` CLI used by both worker (per-review fetching) and tick (verdict polling).
 - `https://cli.github.com/manual/gh_pr_checkout` — `gh pr checkout` used by the synthetic-task worktree materialization (§6.7).
