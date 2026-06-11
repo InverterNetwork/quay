@@ -420,6 +420,7 @@ export class LinearAdapter implements LinearPort {
     const teamId = await this.resolveTeamIdByKey(teamKey);
     const response = await this.postGraphQL("issueCreate", CREATE_ISSUE_MUTATION, {
       input: {
+        id: normalizeOptionalString(input.idempotencyKey),
         teamId,
         title: input.title,
         description: input.body,
@@ -1149,6 +1150,11 @@ function parseRetryAfter(headers: Record<string, string>): number | null {
 function truncate(s: string): string {
   if (s.length <= 500) return s;
   return `${s.slice(0, 500)}... (truncated, ${s.length} bytes total)`;
+}
+
+function normalizeOptionalString(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed === "" ? undefined : trimmed;
 }
 
 function resolveTimeoutFromEnv(): number {

@@ -55,6 +55,7 @@ export interface LinearCreateIssueInput {
   title: string;
   body: string;
   teamKey?: string | null;
+  idempotencyKey?: string | null;
 }
 
 export interface LinearPort {
@@ -83,8 +84,9 @@ export interface LinearPort {
   // quay-fixable condition.
   setIssueState(identifier: string, stateName: string): Promise<void>;
 
-  // Creates a follow-up issue in the configured/default Linear team. Callers
-  // own idempotency via Quay outbox + provider-link rows; the adapter only
-  // performs one Linear create mutation.
+  // Creates a follow-up issue in the configured/default Linear team. When
+  // supplied, `idempotencyKey` is forwarded as Linear's client-generated issue
+  // id so provider retries converge even if Quay crashes before persisting the
+  // local provider-link row.
   createIssue(input: LinearCreateIssueInput): Promise<LinearCreatedIssue>;
 }

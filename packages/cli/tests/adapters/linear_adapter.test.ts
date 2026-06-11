@@ -204,6 +204,7 @@ test("test_linear_adapter_create_issue_uses_default_team_key", async () => {
     expect(req.parsedBody.query).toContain("issueCreate");
     expect(req.parsedBody.variables).toEqual({
       input: {
+        id: "11111111-1111-5111-9111-111111111111",
         teamId: "team-brix",
         title: "Follow-up title",
         description: "Follow-up body",
@@ -231,6 +232,7 @@ test("test_linear_adapter_create_issue_uses_default_team_key", async () => {
   const created = await adapter.createIssue({
     title: "Follow-up title",
     body: "Follow-up body",
+    idempotencyKey: "11111111-1111-5111-9111-111111111111",
   });
 
   expect(created).toEqual({

@@ -40,6 +40,7 @@ export class FakeLinearAdapter implements LinearPort {
   // the real adapter's read-before-write behaviour.
   private currentStates = new Map<string, string>();
   private nextCreatedIssueNumber = 1;
+  private createdIssuesByIdempotencyKey = new Map<string, LinearCreatedIssue>();
   // Errors queued via `failNextSetIssueState` are consumed in FIFO order;
   // calls past the queued count succeed normally. A queue (vs. a single
   // field) so two failures-in-a-row stay observable rather than silently
@@ -166,11 +167,20 @@ export class FakeLinearAdapter implements LinearPort {
 
   async createIssue(input: LinearCreateIssueInput): Promise<LinearCreatedIssue> {
     this.createIssueCalls.push({ ...input });
+    const idempotencyKey = input.idempotencyKey?.trim();
+    if (idempotencyKey !== undefined && idempotencyKey !== "") {
+      const existing = this.createdIssuesByIdempotencyKey.get(idempotencyKey);
+      if (existing !== undefined) return existing;
+    }
     const n = this.nextCreatedIssueNumber++;
-    return {
+    const created = {
       id: `linear-created-${n}`,
       identifier: `BRIX-${9000 + n}`,
       url: `https://linear.app/inverter/issue/BRIX-${9000 + n}`,
     };
+    if (idempotencyKey !== undefined && idempotencyKey !== "") {
+      this.createdIssuesByIdempotencyKey.set(idempotencyKey, created);
+    }
+    return created;
   }
 }

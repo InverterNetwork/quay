@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { LinearPort } from "../ports/linear.ts";
@@ -6,6 +7,7 @@ import {
   completeOutboxItem,
   enqueueOutboxItem,
   failOutboxItem,
+  type CompleteOutboxItemResult,
   type OutboxItemRow,
 } from "./outbox.ts";
 
@@ -101,7 +103,7 @@ export function enqueueReviewFindingLinearIssuesInOpenTxn(
 export async function processReviewFindingLinearIssueOutboxItem(
   deps: { db: DB; clock: Clock; linear: LinearPort },
   input: { outboxItemId: number },
-): Promise<void> {
+): Promise<CompleteOutboxItemResult> {
   const claimed = claimOutboxItem(deps, { outboxItemId: input.outboxItemId });
   if (!claimed.ok) throw new Error(claimed.error.message);
   const row = loadOutboxItem(deps.db, input.outboxItemId);
@@ -114,6 +116,7 @@ export async function processReviewFindingLinearIssueOutboxItem(
       claimId: claimed.value.claim_id,
     });
     if (!completed.ok) throw new Error(completed.error.message);
+    return completed.value;
   } catch (err) {
     const failed = failOutboxItem(deps, {
       outboxItemId: row.outbox_item_id,
@@ -158,6 +161,7 @@ async function deliverClaimedReviewFindingLinearIssue(
   const created = await deps.linear.createIssue({
     title: finding.title,
     body: renderLinearIssueBody(finding, locations),
+    idempotencyKey: linearIssueProviderIdempotencyKey(finding),
   });
   const now = deps.clock.nowISO();
   deps.db
@@ -294,6 +298,29 @@ function linearIssueOutboxIdempotencyKey(finding: ReviewFindingOutboxRow): strin
     finding.review_id,
     finding.fingerprint,
   ].join(":");
+}
+
+function linearIssueProviderIdempotencyKey(finding: ReviewFindingOutboxRow): string {
+  return stableUuid([
+    REVIEW_FINDING_LINEAR_ISSUE_OUTBOX_KIND,
+    finding.task_id,
+    finding.review_id,
+    finding.fingerprint,
+  ].join(":"));
+}
+
+function stableUuid(source: string): string {
+  const bytes = createHash("sha256").update(source).digest();
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.subarray(0, 16).toString("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20, 32),
+  ].join("-");
 }
 
 function renderLinearIssueBody(
