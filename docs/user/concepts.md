@@ -31,9 +31,28 @@ original brief) plus the first attempt's `brief` and `final_prompt` artifacts,
 and creates the first pending attempt. The effective base branch is the repo
 default unless a task-level override is supplied.
 
-## Tasks And Attempts
+## Work Items, Runs, And Attempts
 
-A task is the durable unit of work. An attempt is one worker run for that task.
+A work item is the durable external unit of work, usually a Linear issue in a
+repository. A run is one execution lineage for that work item: branch,
+worktree, PR, state machine, events, artifacts, and attempts. An attempt is one
+worker process within a run.
+
+For compatibility, Quay still calls runs "tasks" in existing commands and
+database relationships. The legacy `task_id` remains a valid identifier, but it
+now identifies a run. Attempts, events, artifacts, claims, outbox rows, and
+Mission Control task cards continue to key off `task_id` so existing scripts
+can inspect the same rows as before.
+
+Run-aware read surfaces add these fields beside the existing task fields:
+
+- `work_item_id`: stable Quay identity for the external work item.
+- `run_number`: ordinal run number within that work item.
+- `superseded_by_run`: successor `task_id` when a later run supersedes this
+  run, otherwise `null`.
+
+One work item can have many historical terminal runs, but only one active run
+at a time.
 
 Every attempt has:
 

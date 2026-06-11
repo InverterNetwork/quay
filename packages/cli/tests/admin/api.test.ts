@@ -163,6 +163,9 @@ interface MissionControlResponse {
   hasAttention: boolean;
   tasks: Array<{
     id: string;
+    workItemId: string | null;
+    runNumber: number | null;
+    supersededByRun: string | null;
     ext: string;
     extUrl: string | null;
     repo: string;
@@ -692,6 +695,64 @@ test("GET /v1/tasks caps terminal cards and keeps active count accurate", async 
   expect(body.tasks.filter((task) => task.state === "merged")).toHaveLength(50);
   expect(ids).not.toContain("task-terminal-00");
   expect(ids).toContain("task-terminal-54");
+});
+
+test("GET /v1/tasks exposes run lineage fields additively", async () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-run-lineage");
+  const firstRun = insertTask(h.db, {
+    taskId: "task-run-1",
+    repoId,
+    state: "closed_unmerged",
+  });
+  const secondRun = insertTask(h.db, {
+    taskId: "task-run-2",
+    repoId,
+    state: "running",
+  });
+  h.db.query(
+    `INSERT INTO work_items (
+       work_item_id, source, repo_id, external_ref, created_at, updated_at
+     ) VALUES (?, 'linear', ?, 'BRIX-1705', ?, ?)`,
+  ).run(
+    "wi-admin-run-lineage",
+    repoId,
+    "2026-01-01T00:00:00.000Z",
+    "2026-01-01T00:00:00.000Z",
+  );
+  h.db.query(
+    `UPDATE tasks
+        SET external_ref = 'BRIX-1705',
+            work_item_id = 'wi-admin-run-lineage',
+            run_number = ?,
+            supersedes_task_id = ?
+      WHERE task_id = ?`,
+  ).run(1, null, firstRun);
+  h.db.query(
+    `UPDATE tasks
+        SET external_ref = 'BRIX-1705',
+            work_item_id = 'wi-admin-run-lineage',
+            run_number = ?,
+            supersedes_task_id = ?
+      WHERE task_id = ?`,
+  ).run(2, firstRun, secondRun);
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/tasks"));
+  const body = (await responseJson(response)) as unknown as MissionControlResponse;
+  const byId = new Map(body.tasks.map((task) => [task.id, task]));
+
+  expect(response.status).toBe(200);
+  expect(byId.get(firstRun)).toMatchObject({
+    workItemId: "wi-admin-run-lineage",
+    runNumber: 1,
+    supersededByRun: secondRun,
+  });
+  expect(byId.get(secondRun)).toMatchObject({
+    workItemId: "wi-admin-run-lineage",
+    runNumber: 2,
+    supersededByRun: null,
+  });
 });
 
 test("GET /v1/tasks skips rows with unknown task states", async () => {

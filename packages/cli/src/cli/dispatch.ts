@@ -832,6 +832,9 @@ function handleTaskGet(
 interface EventRow {
   event_id: number;
   task_id: string;
+  work_item_id: string | null;
+  run_number: number | null;
+  superseded_by_run: string | null;
   attempt_id: number | null;
   event_type: string;
   from_state: string | null;
@@ -853,11 +856,20 @@ function handleTaskEvents(
   // can stream/replay transitions without reconciling reverse-order results.
   const events = deps.db
     .query<EventRow, [string]>(
-      `SELECT event_id, task_id, attempt_id, event_type, from_state, to_state,
-              payload_artifact_id, occurred_at
-         FROM events
-        WHERE task_id = ?
-        ORDER BY occurred_at ASC, event_id ASC`,
+      `SELECT e.event_id, e.task_id, t.work_item_id, t.run_number,
+              (
+                SELECT successor.task_id
+                  FROM tasks successor
+                 WHERE successor.supersedes_task_id = e.task_id
+                 ORDER BY successor.run_number DESC, successor.created_at DESC, successor.task_id DESC
+                 LIMIT 1
+              ) AS superseded_by_run,
+              e.attempt_id, e.event_type, e.from_state, e.to_state,
+              e.payload_artifact_id, e.occurred_at
+         FROM events e
+         JOIN tasks t ON t.task_id = e.task_id
+        WHERE e.task_id = ?
+        ORDER BY e.occurred_at ASC, e.event_id ASC`,
     )
     .all(taskId);
   io.stdout(`${JSON.stringify(events)}\n`);
