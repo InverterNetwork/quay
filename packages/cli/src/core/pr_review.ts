@@ -263,7 +263,6 @@ export function enterReview(
       reviewerAgent: input.reviewerAgent ?? null,
       reviewerModel: input.reviewerModel ?? null,
     });
-  const synthetic = task.authoring_mode === "synthetic_review";
   const tags = dedupeTags(input.tags ?? []);
   const preambleId = ensurePreambleIdForAttemptReason(
     deps.db,
@@ -272,9 +271,9 @@ export function enterReview(
     { repoId: input.repoId },
   );
   const preamble = loadPreambleBody(deps.db, preambleId);
-  const brief = synthetic
+  const brief = task.authoring_mode === "synthetic_review"
     ? composeSyntheticBrief(pr, input.referenceReposRoot)
-    : composeQuayOwnedReviewBrief(
+    : composeTaskReviewBrief(
         deps.db,
         task,
         pr,
@@ -1424,7 +1423,7 @@ function loadLatestReviewCommentsForAdoption(
   }
 }
 
-function composeQuayOwnedReviewBrief(
+function composeTaskReviewBrief(
   db: DB,
   task: TaskLookupRow,
   pr: PullRequestView,
@@ -1461,7 +1460,9 @@ function composeQuayOwnedReviewBrief(
     "",
     `Post exactly one review with \`gh pr review ${pr.number}\`. Choose the verdict according to the Verdict policy below. Do not modify files, commit, or push.`,
     "",
-    renderVerdictPolicy("quay_owned"),
+    renderVerdictPolicy(
+      task.authoring_mode === "quay_owned" ? "quay_owned" : "non_quay_owned",
+    ),
   );
 
   const referenceRepos = renderReferenceReposPrompt(
