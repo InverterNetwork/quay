@@ -200,6 +200,8 @@ export async function dispatch(
         return handleOutbox(rest, deps, io);
       case "enqueue":
         return await handleEnqueue(rest, deps, io);
+      case "rerun":
+        return await handleRerun(rest, deps, io);
       case "review-pr":
         return handleReviewPr(rest, deps, io);
       case "adopt-pr":
@@ -1373,6 +1375,105 @@ async function handleEnqueueLinearIssueFlow(
       workerModel: readFlag(argv, "--worker-model"),
       reviewerAgent: readFlag(argv, "--reviewer-agent"),
       reviewerModel: readFlag(argv, "--reviewer-model"),
+      rerun: false,
+    },
+    {
+      enqueueDeps,
+      linear: deps.linear,
+      slack: deps.slack,
+      validatorRunner: deps.validatorRunner,
+      adaptersConfig: deps.adaptersConfig,
+    },
+    io,
+  );
+}
+
+async function handleRerun(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  if (wantsHelp(argv)) return printHelp(io, ["rerun"]);
+  const validation = validateFlags(argv, {
+    boolean: [
+      "--request-pr-screenshots",
+      "--require-pr-screenshots",
+      "--as-normal-task",
+    ],
+    valued: [
+      "--linear-issue",
+      "--repo",
+      "--base-branch",
+      "--worker-agent",
+      "--worker-model",
+      "--reviewer-agent",
+      "--reviewer-model",
+      "--tag",
+    ],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const flagIdentifier = readFlag(argv, "--linear-issue");
+  const identifier = flagIdentifier ?? positional(argv);
+  if (identifier === null) {
+    return writeError(
+      io,
+      "usage_error",
+      "rerun requires --linear-issue <id> or <id>",
+    );
+  }
+  if (
+    deps.linear === undefined ||
+    deps.validatorRunner === undefined ||
+    deps.adaptersConfig === undefined
+  ) {
+    return writeError(
+      io,
+      "adapter_not_enabled",
+      "[adapters.linear] is not configured for this deployment",
+      { adapter: "linear" },
+    );
+  }
+  const agentErr = validateTaskSelectionOverrides(
+    {
+      worker_agent: readFlag(argv, "--worker-agent"),
+      worker_model: readFlag(argv, "--worker-model"),
+      reviewer_agent: readFlag(argv, "--reviewer-agent"),
+      reviewer_model: readFlag(argv, "--reviewer-model"),
+    },
+    deps.agentResolver,
+    io,
+  );
+  if (agentErr !== null) return agentErr;
+  const enqueueDeps: EnqueueDeps = {
+    db: deps.db,
+    clock: deps.clock,
+    ids: deps.ids,
+    git: deps.git,
+    commandRunner: deps.commandRunner,
+    artifactStore: deps.artifactStore,
+    paths: deps.paths,
+    agentResolver: deps.agentResolver,
+    referenceReposRoot: deps.tickOptions?.referenceReposRoot,
+  };
+  if (deps.retryBudget !== undefined) {
+    enqueueDeps.retryBudget = deps.retryBudget;
+  }
+  return handleEnqueueLinearIssue(
+    {
+      repoId: readFlag(argv, "--repo"),
+      identifier,
+      cliTags: collectFlagValues(argv, "--tag"),
+      baseBranch: readFlag(argv, "--base-branch"),
+      requestPrScreenshots: argv.includes("--request-pr-screenshots"),
+      requirePrScreenshots: argv.includes("--require-pr-screenshots"),
+      asNormalTask: argv.includes("--as-normal-task"),
+      workerAgent: readFlag(argv, "--worker-agent"),
+      workerModel: readFlag(argv, "--worker-model"),
+      reviewerAgent: readFlag(argv, "--reviewer-agent"),
+      reviewerModel: readFlag(argv, "--reviewer-model"),
+      rerun: true,
     },
     {
       enqueueDeps,
