@@ -1159,6 +1159,77 @@ export class GitHubCliAdapter implements GitHubPort {
     return login;
   }
 
+  submitPullRequestReview(input: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    verdict: "APPROVED" | "CHANGES_REQUESTED";
+    body: string;
+    token: string;
+  }): PostedReview {
+    const event =
+      input.verdict === "APPROVED" ? "APPROVE" : "REQUEST_CHANGES";
+    const result = this.run(
+      input.repoId,
+      [
+        "gh",
+        "api",
+        `repos/{owner}/{repo}/pulls/${input.prNumber}/reviews`,
+        "--method",
+        "POST",
+        "-F",
+        `commit_id=${input.headSha}`,
+        "-F",
+        `event=${event}`,
+        "--raw-field",
+        `body=${input.body}`,
+      ],
+      {
+        ...process.env,
+        GH_TOKEN: input.token,
+        GITHUB_TOKEN: undefined,
+        QUAY_WORKER_GH_TOKEN: undefined,
+        QUAY_REVIEWER_GH_TOKEN: undefined,
+      },
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh api create pull request review failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+    } catch (err) {
+      throw new Error(
+        `gh api create pull request review returned invalid JSON: ${(err as Error).message}`,
+      );
+    }
+    const id =
+      parsed.node_id !== undefined && String(parsed.node_id).trim() !== ""
+        ? String(parsed.node_id)
+        : parsed.id !== undefined && String(parsed.id).trim() !== ""
+          ? String(parsed.id)
+          : "";
+    if (id === "") {
+      throw new Error("gh api create pull request review returned no review id");
+    }
+    const state = String(parsed.state ?? input.verdict).toUpperCase();
+    const decision =
+      state === "APPROVED"
+        ? "APPROVED"
+        : state === "CHANGES_REQUESTED"
+          ? "CHANGES_REQUESTED"
+          : input.verdict;
+    const body = parsed.body !== undefined ? String(parsed.body) : input.body;
+    return {
+      reviewId: id,
+      decision,
+      body,
+      comments: body,
+    };
+  }
+
   probeTokenAccess(
     repoId: string,
     token: string,

@@ -45,6 +45,14 @@ export class FakeGitHub implements GitHubPort {
   readonly prViews = new Map<string, PullRequestView | null>();
   readonly postedReviews = new Map<string, PostedReview | null>();
   readonly postedReviewAuthorsAtHead = new Map<string, PostedReviewAuthor[]>();
+  readonly submitPullRequestReviewCalls: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    verdict: "APPROVED" | "CHANGES_REQUESTED";
+    body: string;
+    token: string;
+  }[] = [];
   readonly tokenAccessCalls: {
     repoId: string;
     token: string;
@@ -323,6 +331,31 @@ export class FakeGitHub implements GitHubPort {
     this.postedReviewAuthorsAtHead.set(`${repoId}\0${prNumber}\0${headSha}`, [
       ...authors,
     ]);
+  }
+
+  submitPullRequestReview(input: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    verdict: "APPROVED" | "CHANGES_REQUESTED";
+    body: string;
+    token: string;
+  }): PostedReview {
+    this.submitPullRequestReviewCalls.push({ ...input });
+    const existing = this.fetchPostedReview(
+      input.repoId,
+      input.prNumber,
+      input.headSha,
+    );
+    if (existing !== null) return existing;
+    const review: PostedReview = {
+      reviewId: `R_submitted_${this.submitPullRequestReviewCalls.length}`,
+      decision: input.verdict,
+      body: input.body,
+      comments: input.body,
+    };
+    this.setPostedReview(input.repoId, input.prNumber, input.headSha, review);
+    return review;
   }
 
   probeTokenAccess(

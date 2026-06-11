@@ -79,10 +79,10 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
   expect(brief).toContain("## Verdict policy");
   expect(brief).toContain("This is not a Quay-owned task.");
   expect(brief).toContain(
-    "Non-blocking-only findings -> `--approve` with the findings listed under `### Non-blocking`.",
+    "Non-blocking-only findings -> `approved` with the findings listed under `### Non-blocking`.",
   );
   expect(brief).not.toContain(
-    "Non-blocking-only findings -> `--request-changes`",
+    "Non-blocking-only findings -> `changes_requested`",
   );
   const tags = h.db
     .query<{ tag: string }, [string]>(
@@ -1143,10 +1143,10 @@ test("review-pr gives Quay-owned tasks a request-changes verdict policy for any 
   expect(brief).toContain("## Verdict policy");
   expect(brief).toContain("This is a Quay-owned task.");
   expect(brief).toContain(
-    "Non-blocking-only findings -> `--request-changes` with the findings listed under `### Non-blocking`.",
+    "Non-blocking-only findings -> `changes_requested` with the findings listed under `### Non-blocking`.",
   );
   expect(brief).not.toContain(
-    "Non-blocking-only findings -> `--approve`",
+    "Non-blocking-only findings -> `approved`",
   );
   expect(brief).toContain("Choose the verdict according to the Verdict policy below.");
 });
@@ -1204,10 +1204,10 @@ test("review-pr gives adopted external PRs the non-Quay-owned verdict policy", a
   expect(brief).toContain("## Verdict policy");
   expect(brief).toContain("This is not a Quay-owned task.");
   expect(brief).toContain(
-    "Non-blocking-only findings -> `--approve` with the findings listed under `### Non-blocking`.",
+    "Non-blocking-only findings -> `approved` with the findings listed under `### Non-blocking`.",
   );
   expect(brief).not.toContain(
-    "Non-blocking-only findings -> `--request-changes`",
+    "Non-blocking-only findings -> `changes_requested`",
   );
   expect(brief).toContain("Choose the verdict according to the Verdict policy below.");
 });
