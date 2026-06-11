@@ -54,8 +54,25 @@ UPDATE tasks
    SET work_item_id = 'wi:' || task_id
  WHERE external_ref IS NULL;
 
+WITH numbered_runs AS (
+  SELECT
+    task_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY work_item_id
+      ORDER BY
+        CASE WHEN retargeted_from_task_id IS NULL THEN 0 ELSE 1 END,
+        created_at,
+        task_id
+    ) AS backfilled_run_number
+  FROM tasks
+  WHERE work_item_id IS NOT NULL
+)
 UPDATE tasks
-   SET run_number = 1
+   SET run_number = (
+         SELECT numbered_runs.backfilled_run_number
+           FROM numbered_runs
+          WHERE numbered_runs.task_id = tasks.task_id
+       )
  WHERE run_number IS NULL;
 
 DROP INDEX IF EXISTS tasks_repo_external_ref_unique;

@@ -204,6 +204,88 @@ test("work item migration backfills runs without orphaning child rows", () => {
   }
 });
 
+test("work item migration assigns unique run numbers to retarget history", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "quay-work-items-retarget-migration-"));
+  const db = openDatabase(join(dataDir, "quay.db"));
+  try {
+    const migrations = loadMigrationsFromDir(MIGRATIONS_DIR);
+    runMigrations(
+      db,
+      migrations.filter((m) => m.name < "0035_work_items_runs.sql"),
+    );
+
+    const sourceRepoId = insertRepo(db, "repo-retarget-source");
+    const targetRepoId = insertRepo(db, "repo-retarget-target");
+    const sourceTask = insertTask(db, {
+      repoId: sourceRepoId,
+      taskId: "task-retarget-source",
+      state: "cancelled",
+    });
+    const targetTask = insertTask(db, {
+      repoId: targetRepoId,
+      taskId: "task-retarget-target",
+      state: "queued",
+    });
+    db.query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1703',
+              created_at = '2026-01-01T00:00:00.000Z',
+              updated_at = '2026-01-01T00:00:00.000Z',
+              cancel_requested_at = '2026-01-01T00:01:00.000Z'
+        WHERE task_id = ?`,
+    ).run(sourceTask);
+    db.query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1703',
+              retargeted_from_task_id = ?,
+              created_at = '2026-01-01T00:02:00.000Z',
+              updated_at = '2026-01-01T00:02:00.000Z'
+        WHERE task_id = ?`,
+    ).run(sourceTask, targetTask);
+
+    runMigrations(
+      db,
+      migrations.filter((m) => m.name === "0035_work_items_runs.sql"),
+    );
+
+    const rows = db
+      .query<
+        {
+          task_id: string;
+          work_item_id: string | null;
+          run_number: number | null;
+          supersedes_task_id: string | null;
+        },
+        []
+      >(
+        `SELECT task_id, work_item_id, run_number, supersedes_task_id
+           FROM tasks
+          WHERE external_ref = 'BRIX-1703'
+          ORDER BY run_number`,
+      )
+      .all();
+    expect(rows).toEqual([
+      {
+        task_id: sourceTask,
+        work_item_id: expect.any(String),
+        run_number: 1,
+        supersedes_task_id: null,
+      },
+      {
+        task_id: targetTask,
+        work_item_id: rows[0]?.work_item_id ?? null,
+        run_number: 2,
+        supersedes_task_id: null,
+      },
+    ]);
+    expect(rows[0]?.work_item_id).toBe(rows[1]?.work_item_id);
+    expect(db.query(`PRAGMA foreign_key_check`).all()).toEqual([]);
+  } finally {
+    db.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("deployment_settings table stores mutable agent defaults", () => {
   h = createHarness();
   const cols = h.db
