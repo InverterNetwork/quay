@@ -97,6 +97,9 @@ import {
   type AdoptPrResult,
   type EnterReviewResult,
 } from "../core/pr_review.ts";
+import {
+  processReviewFindingLinearIssueOutboxItem,
+} from "../core/review_finding_linear_outbox.ts";
 
 export interface CliPaths {
   reposRoot: string;
@@ -197,7 +200,7 @@ export async function dispatch(
       case "handoff":
         return handleHandoff(rest, deps, io);
       case "outbox":
-        return handleOutbox(rest, deps, io);
+        return await handleOutbox(rest, deps, io);
       case "enqueue":
         return await handleEnqueue(rest, deps, io);
       case "review-pr":
@@ -485,11 +488,11 @@ function isHandoffStatus(s: string): s is OrchestratorHandoffStatus {
   );
 }
 
-function handleOutbox(
+async function handleOutbox(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
-): DispatchResult {
+): Promise<DispatchResult> {
   if (argv.length === 0) {
     return writeErrorWithUsage(
       io,
@@ -513,6 +516,9 @@ function handleOutbox(
     case "fail":
       if (wantsHelp(rest)) return printHelp(io, ["outbox", "fail"]);
       return handleOutboxFail(rest, deps, io);
+    case "deliver":
+      if (wantsHelp(rest)) return printHelp(io, ["outbox", "deliver"]);
+      return await handleOutboxDeliver(rest, deps, io);
     default:
       return writeErrorWithUsage(
         io,
@@ -521,6 +527,34 @@ function handleOutbox(
         `unknown outbox subcommand: ${sub}`,
       );
   }
+}
+
+async function handleOutboxDeliver(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  const validation = validateFlags(argv, { valued: [] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const parsed = parsePositiveIntArg(positional(argv), "outbox deliver");
+  if (!parsed.ok) return writeError(io, "usage_error", parsed.message);
+  const linear = pickLinearAdapter(deps);
+  if (linear === undefined) {
+    return writeError(
+      io,
+      "adapter_not_enabled",
+      "[adapters.linear] is not configured for this deployment",
+      { adapter: "linear" },
+    );
+  }
+  const row = await processReviewFindingLinearIssueOutboxItem(
+    { db: deps.db, clock: deps.clock, linear },
+    { outboxItemId: parsed.value },
+  );
+  io.stdout(`${JSON.stringify(row)}\n`);
+  return { exitCode: 0 };
 }
 
 function handleOutboxList(

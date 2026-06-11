@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import {
+  persistStructuredReviewFindingsInOpenTxn,
   REVIEWER_GH_TOKEN_ENV,
   tick_once,
   type TickOptions,
@@ -94,6 +95,30 @@ function seedRunningReviewAttempt(
     extension: "md",
   });
   return { attemptId };
+}
+
+function writeReviewResult(
+  worktreePath: string,
+  input: {
+    verdict: "approved" | "changes_requested";
+    body: string;
+    findings?: unknown[];
+  },
+): void {
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(
+    join(worktreePath, ".quay-review-result.json"),
+    JSON.stringify({ ...input, findings: input.findings ?? [] }),
+  );
+}
+
+function quayReviewBody(
+  body: string,
+  taskId: string,
+  attemptId: number,
+  headSha: string,
+): string {
+  return `${body.trimEnd()}\n\n<!-- quay-review-result task_id=${taskId} attempt_id=${attemptId} head_sha=${headSha} -->`;
 }
 
 test("CI-green pr-open task enters pr-review when reviewer gate is enabled", async () => {
@@ -340,16 +365,20 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
         WHERE attempt_id = ?`,
     )
     .run(attemptId);
-  built.github.setPostedReview(repoId, 7, "sha-7", {
-    reviewId: "R_approved",
-    decision: "APPROVED",
-    body: "Looks good.",
-    comments: "Looks good.",
-  });
+  writeReviewResult(worktreePath, { verdict: "approved", body: "Looks good." });
 
   const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toContainEqual({ task_id: taskId, action: "review_approved" });
+  expect(built.github.submitPullRequestReviewCalls).toHaveLength(1);
+  expect(built.github.submitPullRequestReviewCalls[0]).toMatchObject({
+    repoId,
+    prNumber: 7,
+    headSha: "sha-7",
+    verdict: "APPROVED",
+    body: quayReviewBody("Looks good.", taskId, attemptId, "sha-7"),
+    token: "ghs_reviewer_runtime_test",
+  });
   const task = h.db
     .query<{ state: string }, [string]>(`SELECT state FROM tasks WHERE task_id = ?`)
     .get(taskId);
@@ -361,7 +390,7 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     .get(attemptId);
   expect(attempt).toEqual({
     review_verdict: "approved",
-    review_id: "R_approved",
+    review_id: "R_submitted_1",
   });
   const artifact = h.db
     .query<{ n: number }, [string]>(
@@ -370,6 +399,14 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     )
     .get(taskId);
   expect(artifact?.n).toBe(1);
+  const rawResultArtifact = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM artifacts
+        WHERE task_id = ? AND kind = 'review_result'`,
+    )
+    .get(taskId);
+  expect(rawResultArtifact?.n).toBe(1);
+  expect(existsSync(join(worktreePath, ".quay-review-result.json"))).toBe(false);
   const observabilityArtifacts = h.db
     .query<{ kind: string; n: number }, [string, number]>(
       `SELECT kind, COUNT(*) AS n FROM artifacts
@@ -397,6 +434,429 @@ test("dead synthetic reviewer approval stores review artifact and marks task don
     reasoning_tokens: 5,
     total_tokens: 34,
   });
+});
+
+test("posted review keeps result file when durable finalization fails", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-result-finalize-fails");
+  const taskId = "pr-review-repo-review-result-finalize-fails-7";
+  const worktreePath = `${h.dataDir}/worktrees/review-finalize-fails-7`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'synthetic_review', 'quay-review/finalize-fails',
+                 'quay-review-result-finalize-fails-7', ?, 7, 'sha-finalize-fails', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-finalize-fails',
+              tmux_session = 'quay-review-session-finalize-fails'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  writeReviewResult(worktreePath, { verdict: "approved", body: "Looks good." });
+
+  const originalArtifactStore = built.deps.artifactStore;
+  built.deps.artifactStore = {
+    writeArtifact(input) {
+      if (input.kind === "review_result") {
+        throw new Error("simulated review result persistence failure");
+      }
+      return originalArtifactStore.writeArtifact(input);
+    },
+  };
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(built.github.submitPullRequestReviewCalls).toHaveLength(1);
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "tick_error",
+    error: "simulated review result persistence failure",
+  });
+  expect(existsSync(join(worktreePath, ".quay-review-result.json"))).toBe(true);
+  const attempt = h.db
+    .query<{ review_id: string | null }, [number]>(
+      `SELECT review_id FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(attempt?.review_id).toBeNull();
+
+  built.deps.artifactStore = originalArtifactStore;
+  const retryResults = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(retryResults).toContainEqual({
+    task_id: taskId,
+    action: "review_approved",
+  });
+  expect(built.github.submitPullRequestReviewCalls).toHaveLength(1);
+  expect(built.github.fetchPostedReviewCalls.at(-1)).toMatchObject({
+    repoId,
+    prNumber: 7,
+    headSha: "sha-finalize-fails",
+    token: "ghs_reviewer_runtime_test",
+  });
+  expect(existsSync(join(worktreePath, ".quay-review-result.json"))).toBe(false);
+  const retriedAttempt = h.db
+    .query<{ review_id: string | null }, [number]>(
+      `SELECT review_id FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(retriedAttempt?.review_id).toBe("R_submitted_1");
+});
+
+test("token-only retry ignores matching human review without Quay marker", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-token-only-human-collision");
+  const taskId = "pr-review-repo-review-token-only-human-collision-7";
+  const worktreePath = `${h.dataDir}/worktrees/review-token-only-human-collision-7`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'synthetic_review', 'quay-review/human-collision',
+                 'quay-review-token-only-human-collision-7', ?, 7, 'sha-human-collision', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-human-collision',
+              tmux_session = 'quay-review-session-human-collision'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  built.github.setPostedReview(repoId, 7, "sha-human-collision", {
+    reviewId: "R_human_lgtm",
+    decision: "APPROVED",
+    body: "lgtm!",
+    comments: "lgtm!",
+  });
+  writeReviewResult(worktreePath, { verdict: "approved", body: "lgtm!" });
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "review_approved",
+  });
+  const reconcileCall = built.github.fetchPostedReviewCalls.find(
+    (call) =>
+      call.expectedBody ===
+      quayReviewBody("lgtm!", taskId, attemptId, "sha-human-collision"),
+  );
+  expect(reconcileCall).toMatchObject({
+    repoId,
+    prNumber: 7,
+    headSha: "sha-human-collision",
+    token: "ghs_reviewer_runtime_test",
+    expectedDecision: "APPROVED",
+    expectedBody: quayReviewBody("lgtm!", taskId, attemptId, "sha-human-collision"),
+  });
+  expect(built.github.submitPullRequestReviewCalls).toHaveLength(1);
+  expect(built.github.submitPullRequestReviewCalls[0]).toMatchObject({
+    body: quayReviewBody("lgtm!", taskId, attemptId, "sha-human-collision"),
+  });
+  const attempt = h.db
+    .query<{ review_id: string | null }, [number]>(
+      `SELECT review_id FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(attempt?.review_id).toBe("R_submitted_1");
+});
+
+test("dead synthetic reviewer persists structured findings and locations", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-findings");
+  const taskId = "pr-review-repo-review-findings-17";
+  const worktreePath = `${h.dataDir}/worktrees/review-17`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'synthetic_review', 'quay-review/17', 'quay-review-repo-review-findings-17',
+                 ?, 17, 'sha-17', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-17', tmux_session = 'quay-review-session-17'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  built.github.setPostedReview(repoId, 17, "sha-17", {
+    reviewId: "R_findings",
+    decision: "CHANGES_REQUESTED",
+    body: quayReviewBody("Please fix these.", taskId, attemptId, "sha-17"),
+    comments: "Please fix these.",
+  });
+  writeReviewResult(worktreePath, {
+    verdict: "changes_requested",
+    body: "Please fix these.",
+    findings: [
+      {
+        severity: "blocking",
+        title: "Validate the request body",
+        body: "The route trusts unchecked input.",
+        principle_text: "Handlers must validate external input before use.",
+        locations: [
+          {
+            path: "packages/app/src/routes.ts",
+            start_line: 42,
+            end_line: 45,
+            url: "https://github.com/acme/repo/blob/sha-17/packages/app/src/routes.ts#L42-L45",
+          },
+          { path: "packages/app/src/schema.ts", line: 9 },
+        ],
+      },
+      {
+        severity: "non_blocking",
+        title: "Tighten copy",
+        body: "The label is ambiguous.",
+        locations: [],
+      },
+      {
+        severity: "non_blocking",
+        title: "Tighten copy",
+        body: "The label is ambiguous.",
+        locations: [],
+      },
+    ],
+  });
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "review_changes_requested",
+  });
+  const findings = h.db
+    .query<
+      {
+        ordinal: number;
+        severity: string;
+        title: string;
+        body_markdown: string;
+        principle_text: string | null;
+        review_id: string;
+        head_sha: string;
+        fingerprint: string;
+      },
+      [number]
+    >(
+      `SELECT ordinal, severity, title, body_markdown, principle_text,
+              review_id, head_sha, fingerprint
+         FROM review_findings
+        WHERE attempt_id = ?
+        ORDER BY ordinal`,
+    )
+    .all(attemptId);
+  expect(findings).toHaveLength(2);
+  expect(findings[0]).toMatchObject({
+    ordinal: 1,
+    severity: "blocking",
+    title: "Validate the request body",
+    body_markdown: "The route trusts unchecked input.",
+    principle_text: "Handlers must validate external input before use.",
+    review_id: "R_findings",
+    head_sha: "sha-17",
+  });
+  expect(findings[0]?.fingerprint).toHaveLength(64);
+  expect(findings[1]).toMatchObject({
+    ordinal: 2,
+    severity: "non_blocking",
+    title: "Tighten copy",
+    principle_text: null,
+  });
+  const locations = h.db
+    .query<
+      {
+        finding_ordinal: number;
+        ordinal: number;
+        path: string | null;
+        start_line: number | null;
+        end_line: number | null;
+        url: string | null;
+      },
+      [number]
+    >(
+      `SELECT rf.ordinal AS finding_ordinal, rfl.ordinal, rfl.path,
+              rfl.start_line, rfl.end_line, rfl.url
+         FROM review_finding_locations rfl
+         JOIN review_findings rf ON rf.finding_id = rfl.finding_id
+        WHERE rf.attempt_id = ?
+        ORDER BY rf.ordinal, rfl.ordinal`,
+    )
+    .all(attemptId);
+  expect(locations).toEqual([
+    {
+      finding_ordinal: 1,
+      ordinal: 1,
+      path: "packages/app/src/routes.ts",
+      start_line: 42,
+      end_line: 45,
+      url: "https://github.com/acme/repo/blob/sha-17/packages/app/src/routes.ts#L42-L45",
+    },
+    {
+      finding_ordinal: 1,
+      ordinal: 2,
+      path: "packages/app/src/schema.ts",
+      start_line: 9,
+      end_line: 9,
+      url: null,
+    },
+  ]);
+});
+
+test("spawning a fresh reviewer clears stale result files from prior attempts", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-clear-stale-result");
+  const taskId = "pr-review-repo-review-clear-stale-result-19";
+  const worktreePath = `${h.dataDir}/worktrees/review-clear-stale-result-19`;
+  mkdirSync(worktreePath, { recursive: true });
+  writeReviewResult(worktreePath, {
+    verdict: "approved",
+    body: "Stale approval.",
+  });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/19',
+                 'quay-review-clear-stale-result-19', ?, 19, 'sha-19', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: null,
+  });
+  h.db
+    .query(`UPDATE attempts SET head_sha = 'sha-19' WHERE attempt_id = ?`)
+    .run(attemptId);
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, attemptId, "review prompt");
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "spawned",
+  });
+  expect(existsSync(join(worktreePath, ".quay-review-result.json"))).toBe(false);
+});
+
+test("structured review finding ingestion handles zero findings and re-ingest idempotently", () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-review-findings-idempotent");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-review-findings-idempotent",
+    state: "pr-review",
+  });
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  const raw = JSON.stringify({
+    verdict: "changes_requested",
+    body: "Please fix this.",
+    findings: [
+      {
+        severity: "blocking",
+        title: "Use the stable key",
+        body: "The dedupe key changes between retries.",
+        "quay-principle": "Dedupe keys must be stable across repeated ingestion.",
+      },
+    ],
+  });
+
+  h.db.exec("BEGIN IMMEDIATE");
+  persistStructuredReviewFindingsInOpenTxn(h, {
+    taskId,
+    attemptId,
+    reviewId: "R_idempotent",
+    headSha: "sha-idempotent",
+    now: h.clock.nowISO(),
+    rawReviewResult: raw,
+  });
+  persistStructuredReviewFindingsInOpenTxn(h, {
+    taskId,
+    attemptId,
+    reviewId: "R_idempotent",
+    headSha: "sha-idempotent",
+    now: h.clock.nowISO(),
+    rawReviewResult: raw,
+  });
+  h.db.exec("COMMIT");
+
+  const count = h.db
+    .query<{ n: number }, [number]>(
+      `SELECT COUNT(*) AS n FROM review_findings WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(count?.n).toBe(1);
+
+  h.db.exec("BEGIN IMMEDIATE");
+  persistStructuredReviewFindingsInOpenTxn(h, {
+    taskId,
+    attemptId,
+    reviewId: "R_idempotent",
+    headSha: "sha-idempotent",
+    now: h.clock.nowISO(),
+    rawReviewResult: JSON.stringify({
+      verdict: "approved",
+      body: "lgtm!",
+      findings: [],
+    }),
+  });
+  h.db.exec("COMMIT");
+
+  const afterZero = h.db
+    .query<{ n: number }, [number]>(
+      `SELECT COUNT(*) AS n FROM review_findings WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(afterZero?.n).toBe(0);
 });
 
 test("dead synthetic reviewer changes_requested waits for external changes", async () => {
@@ -432,8 +892,12 @@ test("dead synthetic reviewer changes_requested waits for external changes", asy
   built.github.setPostedReview(repoId, 8, "sha-8", {
     reviewId: "R_changes",
     decision: "CHANGES_REQUESTED",
-    body: "Please fix this.",
+    body: quayReviewBody("Please fix this.", taskId, attemptId, "sha-8"),
     comments: "Inline review comments (1):\n- src/a.ts:1 - fix this",
+  });
+  writeReviewResult(worktreePath, {
+    verdict: "changes_requested",
+    body: "Please fix this.",
   });
 
   const results = await tick_once(built.deps, reviewerTickOptions());
@@ -501,8 +965,17 @@ test("adopted synthetic reviewer changes_requested schedules code respawn", asyn
   built.github.setPostedReview(repoId, 9, "sha-9", {
     reviewId: "R_adopted_changes",
     decision: "CHANGES_REQUESTED",
-    body: "Please address this.",
+    body: quayReviewBody(
+      "Please address this.",
+      taskId,
+      reviewAttemptId,
+      "sha-9",
+    ),
     comments: "Inline review comments (1):\n- src/a.ts:1 - fix this",
+  });
+  writeReviewResult(worktreePath, {
+    verdict: "changes_requested",
+    body: "Please address this.",
   });
   built.github.setPrSnapshot(repoId, "feature/human", {
     prNumber: 9,
@@ -592,8 +1065,12 @@ test("Quay-owned reviewer changes_requested schedules non-budget code respawn", 
   built.github.setPostedReview(repoId, 11, "sha-11", {
     reviewId: "R_quay_changes",
     decision: "CHANGES_REQUESTED",
-    body: "Blocking issue.",
+    body: quayReviewBody("Blocking issue.", taskId, reviewAttemptId, "sha-11"),
     comments: "Blocking issue.",
+  });
+  writeReviewResult(`/tmp/${taskId}`, {
+    verdict: "changes_requested",
+    body: "Blocking issue.",
   });
   built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
     prNumber: 11,
@@ -689,8 +1166,17 @@ test("review changes_requested respawn refreshes human-retargeted PR base", asyn
   built.github.setPostedReview(repoId, 12, "sha-12", {
     reviewId: "R_retargeted_changes",
     decision: "CHANGES_REQUESTED",
-    body: "Retargeted PR needs fixes.",
+    body: quayReviewBody(
+      "Retargeted PR needs fixes.",
+      taskId,
+      reviewAttemptId,
+      "sha-12",
+    ),
     comments: "Retargeted PR needs fixes.",
+  });
+  writeReviewResult(`/tmp/${taskId}`, {
+    verdict: "changes_requested",
+    body: "Retargeted PR needs fixes.",
   });
   built.github.setPrLightweightSnapshotByNumber(repoId, 12, {
     prNumber: 12,
@@ -902,7 +1388,8 @@ test("review after CHANGES_REQUESTED respawn gets reviewer-specific prompt", asy
   expect(promptRow).not.toBeNull();
   const prompt = readFileSync(promptRow!.file_path, "utf8");
   expect(prompt).toContain("# Quay reviewer respawn: review");
-  expect(prompt).toContain("gh pr review 11");
+  expect(prompt).toContain(".quay-review-result.json");
+  expect(prompt).not.toContain("gh pr review 11");
   expect(prompt).toContain("Blocking issue in src/fix.ts.");
   expect(prompt).toContain("Files changed: 1");
   expect(prompt).toContain("- M src/fix.ts (+4/-1)");
@@ -1027,7 +1514,8 @@ test("review after conflict respawn does not reuse the worker conflict brief", a
   expect(promptRow).not.toBeNull();
   const prompt = readFileSync(promptRow!.file_path, "utf8");
   expect(prompt).toContain("# Quay reviewer: review");
-  expect(prompt).toContain("gh pr review 12");
+  expect(prompt).toContain(".quay-review-result.json");
+  expect(prompt).not.toContain("gh pr review 12");
   expect(prompt).toContain("Head SHA: conflict-fixed-head");
   expect(prompt).toContain("Base SHA: base-c2");
   expect(prompt).toContain("Files changed: 1");
@@ -1037,7 +1525,6 @@ test("review after conflict respawn does not reuse the worker conflict brief", a
   const forbidden = [
     "push the branch",
     "update the existing PR",
-    "Do not post a GitHub review",
     "This is a worker fix attempt",
   ];
   for (const phrase of forbidden) {
@@ -1077,7 +1564,8 @@ test("review after conflict respawn does not reuse the worker conflict brief", a
     .get(taskId, retryAttempt!.attempt_id);
   expect(retryPromptRow).not.toBeNull();
   const retryPrompt = readFileSync(retryPromptRow!.file_path, "utf8");
-  expect(retryPrompt).toContain("gh pr review 12");
+  expect(retryPrompt).toContain(".quay-review-result.json");
+  expect(retryPrompt).not.toContain("gh pr review 12");
   for (const phrase of forbidden) {
     expect(retryPrompt).not.toContain(phrase);
   }
@@ -1159,7 +1647,7 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
     .get(taskId);
   expect(task?.state).toBe("non_budget_loop");
   expect(task?.review_infra_failures_consecutive).toBe(3);
-  expect(task?.tick_error).toContain("no Quay-authored review");
+  expect(task?.tick_error).toContain("reviewer did not write .quay-review-result.json");
   const pending = h.db
     .query<{ n: number }, [string]>(
       `SELECT COUNT(*) AS n FROM attempts
@@ -1182,20 +1670,24 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
   ]);
 });
 
-test("reviewer identity mismatch reports configured and observed identities", async () => {
+test("malformed reviewer result parks as reviewer infrastructure failure", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
-  const repoId = insertRepo(h.db, "repo-review-identity-mismatch");
-  const taskId = "pr-review-repo-review-identity-mismatch-9";
-  const worktreePath = `${h.dataDir}/worktrees/review-identity-mismatch-9`;
+  const repoId = insertRepo(h.db, "repo-review-malformed-result");
+  const taskId = "pr-review-repo-review-malformed-result-9";
+  const worktreePath = `${h.dataDir}/worktrees/review-malformed-result-9`;
   mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(
+    join(worktreePath, ".quay-review-result.json"),
+    JSON.stringify({ verdict: "commented", body: "", findings: "nope" }),
+  );
   h.db
     .query(
       `INSERT INTO tasks (
          task_id, repo_id, state, branch_name, tmux_id, worktree_path,
          pr_number, head_sha, retry_budget, review_infra_failures_consecutive,
          review_infra_failure_head_sha, created_at, updated_at
-       ) VALUES (?, ?, 'pr-review', 'quay-review/9', 'quay-review-repo-review-identity-mismatch-9',
+       ) VALUES (?, ?, 'pr-review', 'quay-review/9', 'quay-review-repo-review-malformed-result-9',
                  ?, 9, 'sha-9', 1, 2, 'sha-9', ?, ?)`,
     )
     .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
@@ -1232,19 +1724,8 @@ test("reviewer identity mismatch reports configured and observed identities", as
     content: "review prompt",
     extension: "md",
   });
-  built.github.setPostedReviewAuthorsAtHead(repoId, 9, "sha-9", [
-    {
-      login: "quay-reviewer[bot]",
-      type: "Bot",
-      reviewId: "PRR_mismatch",
-      decision: "CHANGES_REQUESTED",
-    },
-  ]);
 
-  const results = await tick_once(
-    built.deps,
-    reviewerTickOptions({ reviewerLogin: "app/didier-reviewer" }),
-  );
+  const results = await tick_once(built.deps, reviewerTickOptions());
 
   expect(results).toContainEqual({
     task_id: taskId,
@@ -1256,11 +1737,14 @@ test("reviewer identity mismatch reports configured and observed identities", as
     )
     .get(taskId);
   expect(task?.state).toBe("non_budget_loop");
-  expect(task?.tick_error).toContain("reviewer identity mismatch");
-  expect(task?.tick_error).toContain("app/didier-reviewer");
-  expect(task?.tick_error).toContain("quay-reviewer[bot] (Bot");
-  expect(task?.tick_error).toContain("Update [reviewer].login");
-  expect(task?.tick_error).not.toContain("no Quay-authored review found");
+  expect(task?.tick_error).toContain(".quay-review-result.json is malformed");
+  const rawResultArtifacts = h.db
+    .query<{ n: number }, [string, number]>(
+      `SELECT COUNT(*) AS n FROM artifacts
+        WHERE task_id = ? AND attempt_id = ? AND kind = 'review_result'`,
+    )
+    .get(taskId, attemptId);
+  expect(rawResultArtifacts?.n).toBe(1);
 });
 
 test("live stale reviewer is killed then retried on the same head", async () => {

@@ -138,7 +138,13 @@ const COMMANDS: Record<string, CommandSpec> = {
     path: "outbox",
     synopsis: "quay outbox <subcommand> [options]",
     summary: "Inspect and update durable orchestrator side-effect outbox items",
-    subcommands: ["outbox list", "outbox claim", "outbox complete", "outbox fail"],
+    subcommands: [
+      "outbox list",
+      "outbox claim",
+      "outbox complete",
+      "outbox fail",
+      "outbox deliver",
+    ],
   },
   "outbox list": {
     path: "outbox list",
@@ -183,6 +189,12 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--error <message>", desc: "Error text to store in last_error." },
       { flag: "--next-eligible-at <iso>", desc: "Optional retry cooldown timestamp." },
     ],
+  },
+  "outbox deliver": {
+    path: "outbox deliver",
+    synopsis: "quay outbox deliver <outbox_item_id>",
+    summary:
+      "Claim, execute, and complete a supported delivery outbox item with its production handler.",
   },
   enqueue: {
     path: "enqueue",

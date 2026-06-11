@@ -87,6 +87,9 @@ export interface GitHubPort {
     prNumber: number,
     headSha: string,
     expectedLogin?: string,
+    token?: string,
+    expectedDecision?: PostedReview["decision"],
+    expectedBody?: string,
   ): PostedReview | null;
   // Diagnostic read used only after `fetchPostedReview` misses. It reports
   // review authors that did post a recognizable review at the same head SHA,
@@ -96,6 +99,14 @@ export interface GitHubPort {
     prNumber: number,
     headSha: string,
   ): PostedReviewAuthor[];
+  submitPullRequestReview(input: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    verdict: "APPROVED" | "CHANGES_REQUESTED";
+    body: string;
+    token: string;
+  }): PostedReview;
   // Validate an explicit actor GH_TOKEN before handing it to a worker or
   // reviewer pane. Throws when the token is invalid, expired, or cannot access the
   // target repository. Kept repo-scoped so GitHub App installation tokens are

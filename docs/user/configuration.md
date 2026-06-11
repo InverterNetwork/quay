@@ -63,6 +63,9 @@ supervisor_lock_stale_seconds = 30
 [adapters.linear]
 enabled = true
 api_key_env = "LINEAR_API_KEY"
+# Required when reviewer-created human follow-up findings should create
+# Linear issues.
+default_issue_team_key = "BRIX"
 # For OAuth/app-actor tokens, use Bearer mode. The token is resolved for each
 # Linear request, so a Hermes-owned helper can mint/cache/refresh it.
 # auth_mode = "bearer"

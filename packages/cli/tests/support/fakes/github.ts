@@ -45,6 +45,23 @@ export class FakeGitHub implements GitHubPort {
   readonly prViews = new Map<string, PullRequestView | null>();
   readonly postedReviews = new Map<string, PostedReview | null>();
   readonly postedReviewAuthorsAtHead = new Map<string, PostedReviewAuthor[]>();
+  readonly fetchPostedReviewCalls: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    expectedLogin?: string;
+    token?: string;
+    expectedDecision?: PostedReview["decision"];
+    expectedBody?: string;
+  }[] = [];
+  readonly submitPullRequestReviewCalls: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    verdict: "APPROVED" | "CHANGES_REQUESTED";
+    body: string;
+    token: string;
+  }[] = [];
   readonly tokenAccessCalls: {
     repoId: string;
     token: string;
@@ -291,8 +308,25 @@ export class FakeGitHub implements GitHubPort {
     repoId: string,
     prNumber: number,
     headSha: string,
+    expectedLogin?: string,
+    token?: string,
+    expectedDecision?: PostedReview["decision"],
+    expectedBody?: string,
   ): PostedReview | null {
-    return this.postedReviews.get(`${repoId}\0${prNumber}\0${headSha}`) ?? null;
+    this.fetchPostedReviewCalls.push({
+      repoId,
+      prNumber,
+      headSha,
+      ...(expectedLogin !== undefined ? { expectedLogin } : {}),
+      ...(token !== undefined ? { token } : {}),
+      ...(expectedDecision !== undefined ? { expectedDecision } : {}),
+      ...(expectedBody !== undefined ? { expectedBody } : {}),
+    });
+    const posted = this.postedReviews.get(`${repoId}\0${prNumber}\0${headSha}`) ?? null;
+    if (posted === null) return null;
+    if (expectedDecision !== undefined && posted.decision !== expectedDecision) return null;
+    if (expectedBody !== undefined && posted.body !== expectedBody) return null;
+    return posted;
   }
 
   fetchPostedReviewAuthorsAtHead(
@@ -323,6 +357,35 @@ export class FakeGitHub implements GitHubPort {
     this.postedReviewAuthorsAtHead.set(`${repoId}\0${prNumber}\0${headSha}`, [
       ...authors,
     ]);
+  }
+
+  submitPullRequestReview(input: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    verdict: "APPROVED" | "CHANGES_REQUESTED";
+    body: string;
+    token: string;
+  }): PostedReview {
+    this.submitPullRequestReviewCalls.push({ ...input });
+    const existing = this.fetchPostedReview(
+      input.repoId,
+      input.prNumber,
+      input.headSha,
+      undefined,
+      input.token,
+      input.verdict,
+      input.body,
+    );
+    if (existing !== null) return existing;
+    const review: PostedReview = {
+      reviewId: `R_submitted_${this.submitPullRequestReviewCalls.length}`,
+      decision: input.verdict,
+      body: input.body,
+      comments: input.body,
+    };
+    this.setPostedReview(input.repoId, input.prNumber, input.headSha, review);
+    return review;
   }
 
   probeTokenAccess(

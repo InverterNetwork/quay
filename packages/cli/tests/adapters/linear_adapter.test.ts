@@ -189,6 +189,60 @@ test("test_linear_adapter_get_issue_returns_structured_payload", async () => {
   expect(handle.requests[0]!.headers.Authorization).toBe("test-token");
 });
 
+test("test_linear_adapter_create_issue_uses_default_team_key", async () => {
+  const handle = recorder((req) => {
+    if (req.parsedBody.query.includes("GetTeamByKey")) {
+      expect(req.parsedBody.variables).toEqual({ key: "BRIX" });
+      return jsonResponse({
+        data: {
+          teams: {
+            nodes: [{ id: "team-brix", key: "BRIX" }],
+          },
+        },
+      });
+    }
+    expect(req.parsedBody.query).toContain("issueCreate");
+    expect(req.parsedBody.variables).toEqual({
+      input: {
+        id: "11111111-1111-5111-9111-111111111111",
+        teamId: "team-brix",
+        title: "Follow-up title",
+        description: "Follow-up body",
+      },
+    });
+    return jsonResponse({
+      data: {
+        issueCreate: {
+          success: true,
+          issue: {
+            id: "issue-uuid",
+            identifier: "BRIX-9999",
+            url: "https://linear.app/inverter/issue/BRIX-9999",
+          },
+        },
+      },
+    });
+  });
+  const adapter = new LinearAdapter({
+    token: "test-token",
+    defaultIssueTeamKey: "BRIX",
+    transport: handle.transport,
+  });
+
+  const created = await adapter.createIssue({
+    title: "Follow-up title",
+    body: "Follow-up body",
+    idempotencyKey: "11111111-1111-5111-9111-111111111111",
+  });
+
+  expect(created).toEqual({
+    id: "issue-uuid",
+    identifier: "BRIX-9999",
+    url: "https://linear.app/inverter/issue/BRIX-9999",
+  });
+  expect(handle.requests).toHaveLength(2);
+});
+
 test("linear adapter returns native blocked-by relations with blocker metadata", async () => {
   const handle = recorder((req) => {
     if (req.parsedBody.query.includes("inverseRelations")) {
