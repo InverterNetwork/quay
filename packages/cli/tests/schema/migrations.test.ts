@@ -205,7 +205,7 @@ test("work item migration backfills runs without orphaning child rows", () => {
   }
 });
 
-test("work item migration assigns unique run numbers to retarget history", () => {
+test("work item migration keeps retarget work items repo scoped", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "quay-work-items-retarget-migration-"));
   const db = openDatabase(join(dataDir, "quay.db"));
   try {
@@ -253,33 +253,46 @@ test("work item migration assigns unique run numbers to retarget history", () =>
       .query<
         {
           task_id: string;
+          repo_id: string;
           work_item_id: string | null;
           run_number: number | null;
           supersedes_task_id: string | null;
+          work_item_repo_id: string | null;
         },
         []
       >(
-        `SELECT task_id, work_item_id, run_number, supersedes_task_id
-           FROM tasks
-          WHERE external_ref = 'BRIX-1703'
-          ORDER BY run_number`,
+        `SELECT
+           t.task_id,
+           t.repo_id,
+           t.work_item_id,
+           t.run_number,
+           t.supersedes_task_id,
+           wi.repo_id AS work_item_repo_id
+           FROM tasks t
+           JOIN work_items wi ON wi.work_item_id = t.work_item_id
+          WHERE t.external_ref = 'BRIX-1703'
+          ORDER BY t.repo_id`,
       )
       .all();
     expect(rows).toEqual([
       {
         task_id: sourceTask,
+        repo_id: sourceRepoId,
         work_item_id: expect.any(String),
         run_number: 1,
         supersedes_task_id: null,
+        work_item_repo_id: sourceRepoId,
       },
       {
         task_id: targetTask,
-        work_item_id: rows[0]?.work_item_id ?? null,
-        run_number: 2,
+        repo_id: targetRepoId,
+        work_item_id: expect.any(String),
+        run_number: 1,
         supersedes_task_id: null,
+        work_item_repo_id: targetRepoId,
       },
     ]);
-    expect(rows[0]?.work_item_id).toBe(rows[1]?.work_item_id);
+    expect(rows[0]?.work_item_id).not.toBe(rows[1]?.work_item_id);
     expect(db.query(`PRAGMA foreign_key_check`).all()).toEqual([]);
   } finally {
     db.close();

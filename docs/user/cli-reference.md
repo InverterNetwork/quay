@@ -271,6 +271,29 @@ native parent umbrella membership for this enqueue, but it does not turn a
 parent issue with children into a normal task. It still processes native
 Linear blocked-by relations as normal dependencies.
 
+## Rerun
+
+```bash
+quay rerun --linear-issue <identifier> \
+  [--repo <repo_id>] \
+  [--base-branch <branch>] \
+  [--tag <tag>]...
+```
+
+`rerun` is the explicit path for a Linear work item whose latest Quay run is
+terminal. Plain `enqueue --linear-issue <identifier>` reuses an active run when
+one exists; if the latest run is terminal, enqueue fails with
+`{error: "work_item_terminal"}` and includes `last_task_id`,
+`last_run_state`, `last_run_number`, and `rerun_command`.
+
+`quay rerun --linear-issue <identifier>` uses the same Linear adapter and repo
+resolution as enqueue, then creates the next run under the same work item. The
+new run gets a fresh task/worktree lineage, sets `supersedes_task_id` to the
+previous run, and uses run-number branch naming such as
+`quay/BRIX-123-r2`. The success payload includes the normal enqueue fields plus
+`created_new_run`, `run_number`, and `supersedes_task_id`; when enqueue reuses
+an active run, `created_new_run` is `false`.
+
 ## PR Review
 
 ```bash

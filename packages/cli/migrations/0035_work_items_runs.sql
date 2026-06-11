@@ -58,14 +58,6 @@ UPDATE tasks
    SET work_item_id = 'wi:' || task_id
  WHERE external_ref IS NULL;
 
-UPDATE tasks
-   SET work_item_id = (
-         SELECT source_task.work_item_id
-           FROM tasks AS source_task
-          WHERE source_task.task_id = tasks.retargeted_from_task_id
-       )
- WHERE retargeted_from_task_id IS NOT NULL;
-
 WITH numbered_runs AS (
   SELECT
     task_id,
