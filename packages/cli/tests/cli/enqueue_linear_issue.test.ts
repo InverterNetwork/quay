@@ -768,6 +768,84 @@ test("Linear parent enqueue creates idempotent umbrella workflow and expected ch
   expect(expectedCount?.count).toBe(2);
 });
 
+test("Linear parent re-enqueue relinks terminal child run", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-2307",
+      block: {
+        base_branch: "dev",
+        tags: ["umbrella"],
+      },
+    }),
+  );
+  built.linear.setIssue(makeIssue({ identifier: "ENG-2308" }));
+  built.linear.setIssueHierarchy("ENG-2307", {
+    parent: null,
+    children: [
+      {
+        identifier: "ENG-2308",
+        url: "https://linear.app/inverter/issue/ENG-2308",
+        title: "Terminal child",
+        stateType: "started",
+      },
+    ],
+  });
+
+  const firstIo = bufferIO();
+  const first = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2307"],
+    built.deps,
+    firstIo,
+  );
+  expect(first.exitCode).toBe(0);
+
+  const child = h.db
+    .query<{ task_id: string }, []>(
+      `SELECT task_id FROM tasks WHERE external_ref = 'ENG-2308'`,
+    )
+    .get();
+  expect(child).not.toBeNull();
+  h.db
+    .query(`UPDATE tasks SET state = 'closed_unmerged' WHERE task_id = ?`)
+    .run(child!.task_id);
+
+  const secondIo = bufferIO();
+  const second = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-2307"],
+    built.deps,
+    secondIo,
+  );
+
+  expect(second.exitCode).toBe(0);
+  expect(secondIo.err()).toBe("");
+  const secondResult = JSON.parse(secondIo.out().trim());
+  expect(
+    secondResult.child_tasks.find(
+      (t: { external_ref: string }) => t.external_ref === "ENG-2308",
+    ),
+  ).toMatchObject({
+    external_ref: "ENG-2308",
+    reused_existing_task: true,
+    task: {
+      task_id: child!.task_id,
+      state: "closed_unmerged",
+    },
+  });
+  expect(built.git.countCalls("worktreeAdd")).toBe(1);
+  const counts = h.db
+    .query<{ tasks: number; links: number }, []>(
+      `SELECT
+         (SELECT COUNT(*) FROM tasks WHERE external_ref = 'ENG-2308') AS tasks,
+         (SELECT COUNT(*) FROM umbrella_tasks WHERE external_ref = 'ENG-2308') AS links`,
+    )
+    .get();
+  expect(counts).toEqual({ tasks: 1, links: 1 });
+});
+
 test("Linear parent enqueue materializes sibling blocked-by ordering", async () => {
   h = createHarness();
   const built = buildCliDeps(h);

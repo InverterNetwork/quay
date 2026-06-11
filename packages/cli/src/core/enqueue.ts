@@ -191,7 +191,7 @@ interface ResolvedTaskAgentSnapshot extends TaskAgentSnapshot {
   reviewerCapabilities: string[];
 }
 
-interface WorkItemRunIdentity {
+export interface WorkItemRunIdentity {
   workItemId: string;
   runNumber: number;
   supersedesTaskId: string | null;
@@ -689,7 +689,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   }
 }
 
-function ensureWorkItemRunIdentity(
+export function ensureWorkItemRunIdentity(
   db: DB,
   input: {
     taskId: string;

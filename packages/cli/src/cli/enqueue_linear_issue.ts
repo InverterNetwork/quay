@@ -858,7 +858,7 @@ function enqueueLinearUmbrellaChildTask(
     deps.enqueueDeps.db,
     input.workflow.repo_id,
     input.child.externalRef,
-    { rerun: false },
+    { rerun: false, allowTerminalReuse: true },
   );
   if (existing !== null) {
     assertExistingUmbrellaChildBase(
@@ -943,7 +943,7 @@ function enqueueLinearUmbrellaChildTask(
         deps.enqueueDeps.db,
         input.workflow.repo_id,
         input.child.externalRef,
-        { rerun: false },
+        { rerun: false, allowTerminalReuse: true },
       );
       if (recovered !== null) {
         assertExistingUmbrellaChildBase(
@@ -979,20 +979,28 @@ function lookupReusableWorkItemRunWithBase(
   db: DB,
   repoId: string,
   externalRef: string,
-  options: { rerun: boolean },
+  options: { rerun: boolean; allowTerminalReuse?: boolean },
 ): ExistingTaskWithBase | null {
-  assertNoTerminalReuse(db, repoId, externalRef, options);
+  if (options.allowTerminalReuse !== true) {
+    assertNoTerminalReuse(db, repoId, externalRef, options);
+  }
+  const statePredicate =
+    options.allowTerminalReuse === true ? "1 = 1" : ACTIVE_TASK_SQL;
+  const params =
+    options.allowTerminalReuse === true
+      ? [repoId, externalRef] as [string, string]
+      : [repoId, externalRef, ...TASK_TERMINAL_STATES] as [string, string, ...string[]];
   const row = db
-    .query<ExistingTaskRow & { base_branch: string }, [string, string, ...string[]]>(
+    .query<ExistingTaskRow & { base_branch: string }, typeof params>(
       `SELECT task_id, state, branch_name, base_branch, tmux_id, worktree_path
          FROM tasks
         WHERE repo_id = ?
           AND external_ref = ?
-          AND ${ACTIVE_TASK_SQL}
+          AND ${statePredicate}
         ORDER BY run_number DESC, created_at DESC, task_id DESC
         LIMIT 1`,
     )
-    .get(repoId, externalRef, ...TASK_TERMINAL_STATES);
+    .get(...params);
   if (!row) return null;
   const attempt = db
     .query<{ attempt_id: number }, [string]>(
@@ -1472,9 +1480,11 @@ function lookupReusableWorkItemRun(
   db: DB,
   repoId: string,
   externalRef: string,
-  options: { rerun: boolean },
+  options: { rerun: boolean; allowTerminalReuse?: boolean },
 ): EnqueueResult | null {
-  assertNoTerminalReuse(db, repoId, externalRef, options);
+  if (options.allowTerminalReuse !== true) {
+    assertNoTerminalReuse(db, repoId, externalRef, options);
+  }
   const row = db
     .query<ExistingTaskRow, [string, string, ...string[]]>(
       `SELECT task_id, state, branch_name, tmux_id, worktree_path

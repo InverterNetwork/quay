@@ -52,7 +52,10 @@ Run-aware read surfaces add these fields beside the existing task fields:
   run, otherwise `null`.
 
 One work item can have many historical terminal runs, but only one active run
-at a time.
+at a time. A rerun creates the next run under the same work item, sets
+`supersedes_task_id` to the previous run, and uses a run-qualified branch such
+as `quay/BRIX-123-r2`. Terminal states such as `closed_unmerged` are terminal
+for that run, not for the work item.
 
 Every attempt has:
 
@@ -101,22 +104,6 @@ Artifacts are snapshots of data that crosses a boundary, such as:
 - `last_failure`
 
 Artifacts are stored under the data directory and indexed in SQLite.
-
-## Work Items, Runs, And Attempts
-
-Quay separates the stable work item from execution history:
-
-- A work item is the durable business object, usually a Linear issue such as
-  `BRIX-123`.
-- A run is one Quay execution lineage for that work item. It owns the task row,
-  branch, worktree, PR, state, and `run_number`.
-- An attempt is a retry or review loop inside one run.
-
-There can be many historical terminal runs for one work item, but only one
-active run at a time. A rerun creates the next run under the same work item,
-sets `supersedes_task_id` to the previous run, and uses a run-qualified branch
-such as `quay/BRIX-123-r2`. Terminal states such as `closed_unmerged` are
-terminal for that run, not for the work item.
 
 ## States
 

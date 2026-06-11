@@ -66,6 +66,7 @@ import {
   enterReview,
   type TaskAuthoringMode,
 } from "./pr_review.ts";
+import { ensureWorkItemRunIdentity } from "./enqueue.ts";
 import { enqueuePrReadyApprovedOutboxItem } from "./pr_ready_approved_outbox.ts";
 import {
   processGoalCompletionAudit,
@@ -3302,19 +3303,29 @@ function ensureUmbrellaFinalPrTask(
     );
     deps.db.exec("BEGIN");
     try {
+      const runIdentity = ensureWorkItemRunIdentity(deps.db, {
+        taskId,
+        repoId: workflow.repo_id,
+        externalRef: workflow.external_ref,
+        now,
+      });
       deps.db
         .query(
           `INSERT INTO tasks (
-             task_id, repo_id, external_ref, state, authoring_mode,
+             task_id, repo_id, external_ref, work_item_id, run_number,
+             supersedes_task_id, state, authoring_mode,
              branch_name, base_branch, tmux_id, worktree_path,
              pr_number, pr_url, head_sha, base_sha, retry_budget,
              created_at, updated_at
-           ) VALUES (?, ?, ?, 'pr-open', 'quay_owned', ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, 'pr-open', 'quay_owned', ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, ?)`,
         )
         .run(
           taskId,
           workflow.repo_id,
           workflow.external_ref,
+          runIdentity.workItemId,
+          runIdentity.runNumber,
+          runIdentity.supersedesTaskId,
           workflow.feature_branch,
           workflow.base_branch,
           `quay-umbrella-final-${workflow.umbrella_workflow_id}`,

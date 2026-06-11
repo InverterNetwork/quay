@@ -388,6 +388,65 @@ test("umbrella dependencies wait for merged_to_feature_branch", () => {
   }
 });
 
+test("umbrella dependency failure payload does not advertise direct child rerun", () => {
+  const h = createHarness();
+  try {
+    const repoId = insertRepo(h.db, "repo-umbrella-deps-failed");
+    const dependencyTaskId = insertTask(h.db, {
+      taskId: "task-umbrella-dependency-failed",
+      repoId,
+      state: "closed_unmerged",
+    });
+    const dependentTaskId = insertTask(h.db, {
+      taskId: "task-umbrella-dependent-failed",
+      repoId,
+      state: "waiting_dependencies",
+    });
+    const workflowId = insertUmbrellaWorkflow(h.db, repoId);
+    insertExpectedUmbrellaTask(h.db, workflowId, "BRIX-1510");
+    insertExpectedUmbrellaTask(h.db, workflowId, "BRIX-1511");
+    linkUmbrellaTask(h.db, workflowId, dependencyTaskId, "BRIX-1510");
+    linkUmbrellaTask(h.db, workflowId, dependentTaskId, "BRIX-1511");
+
+    createTaskDependency(h.db, {
+      dependentTaskId,
+      dependencyTaskId,
+      dependencySource: "quay",
+      dependencyExternalRef: "BRIX-1510",
+      dependencyRepoId: repoId,
+      umbrellaWorkflowId: workflowId,
+      scope: "umbrella",
+      requiredState: "merged_to_feature_branch",
+      now: "2026-05-29T10:00:00.000Z",
+    });
+
+    reconcileWaitingDependencyTask(
+      { db: h.db, clock: h.clock },
+      dependentTaskId,
+      "2026-05-29T10:00:01.000Z",
+    );
+
+    const outbox = h.db
+      .query<{ payload_json: string | null }, [string]>(
+        `SELECT payload_json
+           FROM outbox_items
+          WHERE task_id = ?
+            AND kind = 'delivery.dependency_failed'`,
+      )
+      .get(dependentTaskId);
+    expect(outbox?.payload_json).not.toBeNull();
+    const payload = JSON.parse(outbox!.payload_json!);
+    expect(payload).toMatchObject({
+      dependency_external_ref: "BRIX-1510",
+      umbrella_workflow_id: workflowId,
+      rerun_available: false,
+      rerun_command: null,
+    });
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("umbrella dependency on old run is rechecked against rerun latest state", () => {
   const h = createHarness();
   try {

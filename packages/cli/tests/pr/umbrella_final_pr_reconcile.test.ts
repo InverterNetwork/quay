@@ -224,20 +224,41 @@ test("tick creates final umbrella PR and pr-open Quay-owned task", async () => {
   });
   const task = h.db
     .query<
-      { state: string; authoring_mode: string; branch_name: string; base_branch: string | null; external_ref: string | null },
+      {
+        state: string;
+        authoring_mode: string;
+        branch_name: string;
+        base_branch: string | null;
+        external_ref: string | null;
+        work_item_id: string | null;
+        run_number: number | null;
+        supersedes_task_id: string | null;
+        work_item_source: string | null;
+        work_item_external_ref: string | null;
+      },
       [string]
     >(
-      `SELECT state, authoring_mode, branch_name, base_branch, external_ref
-         FROM tasks WHERE task_id = ?`,
+      `SELECT t.state, t.authoring_mode, t.branch_name, t.base_branch,
+              t.external_ref, t.work_item_id, t.run_number,
+              t.supersedes_task_id, wi.source AS work_item_source,
+              wi.external_ref AS work_item_external_ref
+         FROM tasks t
+         LEFT JOIN work_items wi ON wi.work_item_id = t.work_item_id
+        WHERE t.task_id = ?`,
     )
     .get(`umbrella-final-pr-${workflowId}`);
-  expect(task).toEqual({
+  expect(task).toMatchObject({
     state: "pr-open",
     authoring_mode: "quay_owned",
     branch_name: "quay/umbrella/BRIX-1511",
     base_branch: "dev",
     external_ref: "BRIX-1511",
+    run_number: 1,
+    supersedes_task_id: null,
+    work_item_source: "linear",
+    work_item_external_ref: "BRIX-1511",
   });
+  expect(task?.work_item_id).not.toBeNull();
   const finalLinkedAsSubtask = h.db
     .query<{ n: number }, [string]>(
       `SELECT COUNT(*) AS n FROM umbrella_tasks WHERE task_id = ?`,

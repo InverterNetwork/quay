@@ -607,9 +607,10 @@ function enqueueDependencyFailedOutboxItem(
       blocker_run_number: dep.blocker_run_number,
       blocker_supersedes_task_id: dep.blocker_supersedes_task_id,
       rerun_available:
-        dep.blocker_state === "cancelled" || dep.blocker_state === "closed_unmerged",
+        dep.scope !== "umbrella" &&
+        (dep.blocker_state === "cancelled" || dep.blocker_state === "closed_unmerged"),
       rerun_command:
-        dep.dependency_external_ref !== null
+        dep.scope !== "umbrella" && dep.dependency_external_ref !== null
           ? `quay rerun --linear-issue ${dep.dependency_external_ref}`
           : null,
     },
