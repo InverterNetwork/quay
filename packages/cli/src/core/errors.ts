@@ -8,6 +8,7 @@ export type QuayErrorCode =
   | "bare_clone_missing"
   | "bootstrap_failed"
   | "dependency_not_tracked"
+  | "work_item_terminal"
   | "dependency_cycle"
   | "umbrella_dependency_cycle"
   | "umbrella_child_direct_enqueue"

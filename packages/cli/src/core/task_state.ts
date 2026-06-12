@@ -24,6 +24,15 @@ export const TASK_STATES = [
 
 export type TaskState = (typeof TASK_STATES)[number];
 
+export const TASK_TERMINAL_STATES = [
+  "cancelled",
+  "merged_to_feature_branch",
+  "merged",
+  "closed_unmerged",
+] as const satisfies readonly TaskState[];
+
+export type TaskTerminalState = (typeof TASK_TERMINAL_STATES)[number];
+
 export interface TaskTransition {
   from: TaskState;
   to: TaskState;

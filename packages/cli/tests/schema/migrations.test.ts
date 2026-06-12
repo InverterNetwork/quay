@@ -7,6 +7,7 @@ import { openDatabase } from "../../src/db/connection.ts";
 import { loadMigrationsFromDir, runMigrations } from "../../src/db/migrate.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertRepo, insertTask } from "../support/fixtures.ts";
+import { TASK_TERMINAL_STATES } from "../../src/core/task_state.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const MIGRATIONS_DIR = join(REPO_ROOT, "migrations");
@@ -24,6 +25,7 @@ test("test_schema_creates_required_tables", () => {
     "preambles",
     "retry_templates",
     "tasks",
+    "work_items",
     "attempts",
     "artifacts",
     "events",
@@ -44,6 +46,257 @@ test("test_schema_creates_required_tables", () => {
   const names = new Set(rows.map((r) => r.name));
   for (const t of required) {
     expect(names.has(t)).toBe(true);
+  }
+});
+
+test("work item run schema captures run identity and active-run invariant", () => {
+  h = createHarness();
+
+  const taskCols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(tasks)`)
+    .all()
+    .map((r) => r.name);
+  expect(taskCols).toContain("work_item_id");
+  expect(taskCols).toContain("run_number");
+  expect(taskCols).toContain("supersedes_task_id");
+
+  const workItemCols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(work_items)`)
+    .all()
+    .map((r) => r.name);
+  expect(workItemCols).toEqual([
+    "work_item_id",
+    "source",
+    "repo_id",
+    "external_ref",
+    "created_at",
+    "updated_at",
+  ]);
+
+  const indexes = h.db
+    .query<{ name: string; sql: string }, []>(
+      `SELECT name, sql
+         FROM sqlite_master
+        WHERE type = 'index'
+          AND name IN (
+            'tasks_work_item_run_number_unique',
+            'one_active_run_per_work_item'
+          )
+        ORDER BY name`,
+    )
+    .all();
+  expect(indexes.map((r) => r.name)).toEqual([
+    "one_active_run_per_work_item",
+    "tasks_work_item_run_number_unique",
+  ]);
+  const activeRunSql = indexes.find((r) => r.name === "one_active_run_per_work_item")!.sql;
+  for (const state of TASK_TERMINAL_STATES) {
+    expect(activeRunSql).toContain(`'${state}'`);
+  }
+});
+
+test("work item migration backfills runs without orphaning child rows", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "quay-work-items-migration-"));
+  const db = openDatabase(join(dataDir, "quay.db"));
+  try {
+    const migrations = loadMigrationsFromDir(MIGRATIONS_DIR);
+    runMigrations(
+      db,
+      migrations.filter((m) => m.name < "0035_work_items_runs.sql"),
+    );
+
+    const repoId = insertRepo(db, "repo-work-item-backfill");
+    const activeTask = insertTask(db, {
+      repoId,
+      taskId: "task-active-backfill",
+      state: "queued",
+    });
+    db.query(`UPDATE tasks SET external_ref = 'BRIX-1703' WHERE task_id = ?`).run(
+      activeTask,
+    );
+    const terminalTask = insertTask(db, {
+      repoId,
+      taskId: "task-terminal-backfill",
+      state: "closed_unmerged",
+    });
+    db.query(`UPDATE tasks SET external_ref = 'BRIX-1704' WHERE task_id = ?`).run(
+      terminalTask,
+    );
+    const nullRefTask = insertTask(db, {
+      repoId,
+      taskId: "task-null-ref-backfill",
+      state: "merged",
+    });
+
+    const preamble = db
+      .query<{ preamble_id: number }, []>(
+        `INSERT INTO preambles (body, kind, created_at)
+         VALUES ('body', 'code', '2026-01-01T00:00:00.000Z')
+         RETURNING preamble_id`,
+      )
+      .get();
+    if (!preamble) throw new Error("preamble insert returned no row");
+    const attempt = db
+      .query<{ attempt_id: number }, [string, number]>(
+        `INSERT INTO attempts (
+           task_id, attempt_number, preamble_id, reason, consumed_budget
+         ) VALUES (?, 1, ?, 'initial', 1)
+         RETURNING attempt_id`,
+      )
+      .get(activeTask, preamble.preamble_id);
+    if (!attempt) throw new Error("attempt insert returned no row");
+    db.query(
+      `INSERT INTO artifacts (
+         task_id, attempt_id, kind, file_path, captured_at
+       ) VALUES (?, ?, 'brief', '/tmp/brief.md', '2026-01-01T00:00:00.000Z')`,
+    ).run(activeTask, attempt.attempt_id);
+    db.query(
+      `INSERT INTO events (
+         task_id, attempt_id, event_type, to_state, occurred_at
+       ) VALUES (?, ?, 'spawned', 'running', '2026-01-01T00:00:00.000Z')`,
+    ).run(activeTask, attempt.attempt_id);
+
+    const before = db
+      .query<{ tasks: number; attempts: number; artifacts: number; events: number }, []>(
+        `SELECT
+           (SELECT COUNT(*) FROM tasks) AS tasks,
+           (SELECT COUNT(*) FROM attempts) AS attempts,
+           (SELECT COUNT(*) FROM artifacts) AS artifacts,
+           (SELECT COUNT(*) FROM events) AS events`,
+      )
+      .get();
+
+    runMigrations(
+      db,
+      migrations.filter((m) => m.name === "0035_work_items_runs.sql"),
+    );
+
+    const after = db
+      .query<{ tasks: number; attempts: number; artifacts: number; events: number }, []>(
+        `SELECT
+           (SELECT COUNT(*) FROM tasks) AS tasks,
+           (SELECT COUNT(*) FROM attempts) AS attempts,
+           (SELECT COUNT(*) FROM artifacts) AS artifacts,
+           (SELECT COUNT(*) FROM events) AS events`,
+      )
+      .get();
+    expect(after).toEqual(before);
+
+    const rows = db
+      .query<
+        { task_id: string; work_item_id: string | null; run_number: number | null },
+        []
+      >(
+        `SELECT task_id, work_item_id, run_number
+           FROM tasks
+          ORDER BY task_id`,
+      )
+      .all();
+    expect(rows).toEqual([
+      { task_id: activeTask, work_item_id: expect.any(String), run_number: 1 },
+      { task_id: nullRefTask, work_item_id: `wi:${nullRefTask}`, run_number: 1 },
+      { task_id: terminalTask, work_item_id: expect.any(String), run_number: 1 },
+    ]);
+
+    expect(db.query(`PRAGMA foreign_key_check`).all()).toEqual([]);
+  } finally {
+    db.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("work item migration keeps retarget work items repo scoped", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "quay-work-items-retarget-migration-"));
+  const db = openDatabase(join(dataDir, "quay.db"));
+  try {
+    const migrations = loadMigrationsFromDir(MIGRATIONS_DIR);
+    runMigrations(
+      db,
+      migrations.filter((m) => m.name < "0035_work_items_runs.sql"),
+    );
+
+    const sourceRepoId = insertRepo(db, "repo-retarget-source");
+    const targetRepoId = insertRepo(db, "repo-retarget-target");
+    const sourceTask = insertTask(db, {
+      repoId: sourceRepoId,
+      taskId: "task-retarget-source",
+      state: "cancelled",
+    });
+    const targetTask = insertTask(db, {
+      repoId: targetRepoId,
+      taskId: "task-retarget-target",
+      state: "queued",
+    });
+    db.query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1703',
+              created_at = '2026-01-01T00:00:00.000Z',
+              updated_at = '2026-01-01T00:00:00.000Z',
+              cancel_requested_at = '2026-01-01T00:01:00.000Z'
+        WHERE task_id = ?`,
+    ).run(sourceTask);
+    db.query(
+      `UPDATE tasks
+          SET external_ref = 'BRIX-1703',
+              retargeted_from_task_id = ?,
+              created_at = '2026-01-01T00:02:00.000Z',
+              updated_at = '2026-01-01T00:02:00.000Z'
+        WHERE task_id = ?`,
+    ).run(sourceTask, targetTask);
+
+    runMigrations(
+      db,
+      migrations.filter((m) => m.name === "0035_work_items_runs.sql"),
+    );
+
+    const rows = db
+      .query<
+        {
+          task_id: string;
+          repo_id: string;
+          work_item_id: string | null;
+          run_number: number | null;
+          supersedes_task_id: string | null;
+          work_item_repo_id: string | null;
+        },
+        []
+      >(
+        `SELECT
+           t.task_id,
+           t.repo_id,
+           t.work_item_id,
+           t.run_number,
+           t.supersedes_task_id,
+           wi.repo_id AS work_item_repo_id
+           FROM tasks t
+           JOIN work_items wi ON wi.work_item_id = t.work_item_id
+          WHERE t.external_ref = 'BRIX-1703'
+          ORDER BY t.repo_id`,
+      )
+      .all();
+    expect(rows).toEqual([
+      {
+        task_id: sourceTask,
+        repo_id: sourceRepoId,
+        work_item_id: expect.any(String),
+        run_number: 1,
+        supersedes_task_id: null,
+        work_item_repo_id: sourceRepoId,
+      },
+      {
+        task_id: targetTask,
+        repo_id: targetRepoId,
+        work_item_id: expect.any(String),
+        run_number: 1,
+        supersedes_task_id: null,
+        work_item_repo_id: targetRepoId,
+      },
+    ]);
+    expect(rows[0]?.work_item_id).not.toBe(rows[1]?.work_item_id);
+    expect(db.query(`PRAGMA foreign_key_check`).all()).toEqual([]);
+  } finally {
+    db.close();
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 

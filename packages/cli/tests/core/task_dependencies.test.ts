@@ -66,6 +66,44 @@ function linkUmbrellaTask(
   );
 }
 
+function bindLinearWorkItemRuns(
+  db: ReturnType<typeof createHarness>["db"],
+  input: {
+    workItemId: string;
+    repoId: string;
+    externalRef: string;
+    runs: { taskId: string; runNumber: number; supersedesTaskId?: string | null }[];
+  },
+): void {
+  db.query(
+    `INSERT INTO work_items (
+       work_item_id, source, repo_id, external_ref, created_at, updated_at
+     ) VALUES (?, 'linear', ?, ?, ?, ?)`,
+  ).run(
+    input.workItemId,
+    input.repoId,
+    input.externalRef,
+    "2026-05-29T09:00:00.000Z",
+    "2026-05-29T09:00:00.000Z",
+  );
+  for (const run of input.runs) {
+    db.query(
+      `UPDATE tasks
+          SET external_ref = ?,
+              work_item_id = ?,
+              run_number = ?,
+              supersedes_task_id = ?
+        WHERE task_id = ?`,
+    ).run(
+      input.externalRef,
+      input.workItemId,
+      run.runNumber,
+      run.supersedesTaskId ?? null,
+      run.taskId,
+    );
+  }
+}
+
 test("task dependencies persist status and release waiting task when satisfied", () => {
   const h = createHarness();
   try {
@@ -161,6 +199,129 @@ test("task dependencies persist status and release waiting task when satisfied",
   }
 });
 
+test("external-ref dependencies resolve against latest work-item run", () => {
+  const h = createHarness();
+  try {
+    const repoId = insertRepo(h.db, "repo-deps-work-items");
+    const blockerRun1 = insertTask(h.db, {
+      taskId: "task-blocker-run-1",
+      repoId,
+      state: "closed_unmerged",
+    });
+    const blockerRun2 = insertTask(h.db, {
+      taskId: "task-blocker-run-2",
+      repoId,
+      state: "merged",
+    });
+    bindLinearWorkItemRuns(h.db, {
+      workItemId: "wi-brix-1900",
+      repoId,
+      externalRef: "BRIX-1900",
+      runs: [
+        { taskId: blockerRun1, runNumber: 1 },
+        { taskId: blockerRun2, runNumber: 2, supersedesTaskId: blockerRun1 },
+      ],
+    });
+    const dependentTaskId = insertTask(h.db, {
+      taskId: "task-dependent-latest-run",
+      repoId,
+      state: "waiting_dependencies",
+    });
+
+    createTaskDependency(h.db, {
+      dependentTaskId,
+      dependencySource: "linear",
+      dependencyExternalRef: "BRIX-1900",
+      dependencyRepoId: repoId,
+      requiredState: "merged",
+      now: "2026-05-29T10:00:00.000Z",
+    });
+
+    reconcileWaitingDependencyTask(
+      { db: h.db, clock: h.clock },
+      dependentTaskId,
+      "2026-05-29T10:00:01.000Z",
+    );
+
+    expect(taskDependencyStatus(h.db, dependentTaskId)).toMatchObject({
+      satisfied: 1,
+      unsatisfied: 0,
+    });
+    const row = h.db
+      .query<{ state: string }, [string]>(
+        `SELECT state FROM tasks WHERE task_id = ?`,
+      )
+      .get(dependentTaskId);
+    expect(row?.state).toBe("queued");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("satisfied dependencies are not revoked by later failed reruns", () => {
+  const h = createHarness();
+  try {
+    const repoId = insertRepo(h.db, "repo-deps-satisfied-rerun");
+    const blockerRun1 = insertTask(h.db, {
+      taskId: "task-satisfied-blocker-run-1",
+      repoId,
+      state: "merged",
+    });
+    const blockerRun2 = insertTask(h.db, {
+      taskId: "task-satisfied-blocker-run-2",
+      repoId,
+      state: "closed_unmerged",
+    });
+    bindLinearWorkItemRuns(h.db, {
+      workItemId: "wi-brix-1901",
+      repoId,
+      externalRef: "BRIX-1901",
+      runs: [
+        { taskId: blockerRun1, runNumber: 1 },
+        { taskId: blockerRun2, runNumber: 2, supersedesTaskId: blockerRun1 },
+      ],
+    });
+    const dependentTaskId = insertTask(h.db, {
+      taskId: "task-dependent-already-satisfied",
+      repoId,
+      state: "queued",
+    });
+
+    createTaskDependency(h.db, {
+      dependentTaskId,
+      dependencyTaskId: blockerRun1,
+      dependencySource: "linear",
+      dependencyExternalRef: "BRIX-1901",
+      dependencyRepoId: repoId,
+      requiredState: "merged",
+      satisfiedAt: "2026-05-29T10:00:00.000Z",
+      now: "2026-05-29T10:00:00.000Z",
+    });
+
+    reconcileWaitingDependencyTask(
+      { db: h.db, clock: h.clock },
+      dependentTaskId,
+      "2026-05-29T10:00:01.000Z",
+    );
+
+    expect(taskDependencyStatus(h.db, dependentTaskId)).toMatchObject({
+      satisfied: 1,
+      unsatisfied: 0,
+    });
+    const failedOutbox = h.db
+      .query<{ n: number }, [string]>(
+        `SELECT COUNT(*) AS n
+           FROM outbox_items
+          WHERE task_id = ?
+            AND kind = 'delivery.dependency_failed'`,
+      )
+      .get(dependentTaskId);
+    expect(failedOutbox?.n).toBe(0);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("umbrella dependencies wait for merged_to_feature_branch", () => {
   const h = createHarness();
   try {
@@ -210,6 +371,132 @@ test("umbrella dependencies wait for merged_to_feature_branch", () => {
       { db: h.db, clock: h.clock },
       dependentTaskId,
       "2026-05-29T10:00:02.000Z",
+    );
+
+    expect(taskDependencyStatus(h.db, dependentTaskId)).toMatchObject({
+      satisfied: 1,
+      unsatisfied: 0,
+    });
+    const row = h.db
+      .query<{ state: string }, [string]>(
+        `SELECT state FROM tasks WHERE task_id = ?`,
+      )
+      .get(dependentTaskId);
+    expect(row?.state).toBe("queued");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("umbrella dependency failure payload does not advertise direct child rerun", () => {
+  const h = createHarness();
+  try {
+    const repoId = insertRepo(h.db, "repo-umbrella-deps-failed");
+    const dependencyTaskId = insertTask(h.db, {
+      taskId: "task-umbrella-dependency-failed",
+      repoId,
+      state: "closed_unmerged",
+    });
+    const dependentTaskId = insertTask(h.db, {
+      taskId: "task-umbrella-dependent-failed",
+      repoId,
+      state: "waiting_dependencies",
+    });
+    const workflowId = insertUmbrellaWorkflow(h.db, repoId);
+    insertExpectedUmbrellaTask(h.db, workflowId, "BRIX-1510");
+    insertExpectedUmbrellaTask(h.db, workflowId, "BRIX-1511");
+    linkUmbrellaTask(h.db, workflowId, dependencyTaskId, "BRIX-1510");
+    linkUmbrellaTask(h.db, workflowId, dependentTaskId, "BRIX-1511");
+
+    createTaskDependency(h.db, {
+      dependentTaskId,
+      dependencyTaskId,
+      dependencySource: "quay",
+      dependencyExternalRef: "BRIX-1510",
+      dependencyRepoId: repoId,
+      umbrellaWorkflowId: workflowId,
+      scope: "umbrella",
+      requiredState: "merged_to_feature_branch",
+      now: "2026-05-29T10:00:00.000Z",
+    });
+
+    reconcileWaitingDependencyTask(
+      { db: h.db, clock: h.clock },
+      dependentTaskId,
+      "2026-05-29T10:00:01.000Z",
+    );
+
+    const outbox = h.db
+      .query<{ payload_json: string | null }, [string]>(
+        `SELECT payload_json
+           FROM outbox_items
+          WHERE task_id = ?
+            AND kind = 'delivery.dependency_failed'`,
+      )
+      .get(dependentTaskId);
+    expect(outbox?.payload_json).not.toBeNull();
+    const payload = JSON.parse(outbox!.payload_json!);
+    expect(payload).toMatchObject({
+      dependency_external_ref: "BRIX-1510",
+      umbrella_workflow_id: workflowId,
+      rerun_available: false,
+      rerun_command: null,
+    });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("umbrella dependency on old run is rechecked against rerun latest state", () => {
+  const h = createHarness();
+  try {
+    const repoId = insertRepo(h.db, "repo-umbrella-deps-rerun");
+    const dependencyRun1 = insertTask(h.db, {
+      taskId: "task-umbrella-dependency-run-1",
+      repoId,
+      state: "closed_unmerged",
+    });
+    const dependencyRun2 = insertTask(h.db, {
+      taskId: "task-umbrella-dependency-run-2",
+      repoId,
+      state: "merged_to_feature_branch",
+    });
+    bindLinearWorkItemRuns(h.db, {
+      workItemId: "wi-brix-1902",
+      repoId,
+      externalRef: "BRIX-1902",
+      runs: [
+        { taskId: dependencyRun1, runNumber: 1 },
+        { taskId: dependencyRun2, runNumber: 2, supersedesTaskId: dependencyRun1 },
+      ],
+    });
+    const dependentTaskId = insertTask(h.db, {
+      taskId: "task-umbrella-dependent-rerun",
+      repoId,
+      state: "waiting_dependencies",
+    });
+    const workflowId = insertUmbrellaWorkflow(h.db, repoId);
+    insertExpectedUmbrellaTask(h.db, workflowId, "BRIX-1902");
+    insertExpectedUmbrellaTask(h.db, workflowId, "BRIX-1903");
+    linkUmbrellaTask(h.db, workflowId, dependencyRun1, "BRIX-1902");
+    linkUmbrellaTask(h.db, workflowId, dependentTaskId, "BRIX-1903");
+
+    createTaskDependency(h.db, {
+      dependentTaskId,
+      dependencyTaskId: dependencyRun1,
+      dependencySource: "quay",
+      dependencyExternalRef: "BRIX-1902",
+      dependencyRepoId: repoId,
+      umbrellaWorkflowId: workflowId,
+      scope: "umbrella",
+      requiredState: "merged_to_feature_branch",
+      now: "2026-05-29T10:00:00.000Z",
+    });
+
+    reconcileWaitingDependencyTask(
+      { db: h.db, clock: h.clock },
+      dependentTaskId,
+      "2026-05-29T10:00:01.000Z",
     );
 
     expect(taskDependencyStatus(h.db, dependentTaskId)).toMatchObject({

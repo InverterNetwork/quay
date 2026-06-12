@@ -23,6 +23,9 @@ export interface MissionControlContext {
   };
   visibleTasks: Array<{
     id: string;
+    workItemId: string | null;
+    runNumber: number | null;
+    supersededByRun: string | null;
     role: string;
     reviewStatus: string | null;
     umbrellaRef: string | null;

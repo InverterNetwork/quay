@@ -251,7 +251,9 @@ and `--slack-thread-ref`.
 Linear-backed enqueue reads native Linear blocked-by relations once, during
 enqueue. Complete blockers do not block. Incomplete tracked blockers persist
 dependency rows and create the dependent task in `waiting_dependencies`;
-incomplete untracked blockers fail with `dependency_not_tracked`.
+incomplete untracked blockers fail with `dependency_not_tracked`. Dependency
+rows refer to the blocker work item: reruns are checked through the latest run,
+and a previously set `satisfied_at` is not revoked by later failed reruns.
 
 Linear-backed umbrella workflows use native Linear parent/child hierarchy. If
 the issue has Linear children, enqueue creates the umbrella workflow, derives
@@ -270,6 +272,30 @@ including state values such as `linked` and `complete_without_quay`; the
 native parent umbrella membership for this enqueue, but it does not turn a
 parent issue with children into a normal task. It still processes native
 Linear blocked-by relations as normal dependencies.
+
+## Rerun
+
+```bash
+quay rerun --linear-issue <identifier> \
+  [--repo <repo_id>] \
+  [--base-branch <branch>] \
+  [--tag <tag>]...
+```
+
+`rerun` is the explicit path for a Linear work item whose latest Quay run is
+terminal. Plain `enqueue --linear-issue <identifier>` reuses an active run when
+one exists; if the latest run is terminal, enqueue fails with
+`{error: "work_item_terminal"}` and includes `last_task_id`,
+`last_run_state`, `last_run_number`, and `rerun_command`.
+
+`quay rerun --linear-issue <identifier>` uses the same Linear adapter and repo
+resolution as enqueue, then creates the next run under the same work item. The
+new run gets a fresh task/worktree lineage, sets `supersedes_task_id` to the
+previous run, and uses run-number branch naming such as
+`quay/BRIX-123-r2`. The success payload includes the normal enqueue fields plus
+`created_new_run`, `run_number`, and `supersedes_task_id`; when enqueue reuses
+an active run, `created_new_run` is `false`. A newly-created rerun also writes
+the Linear issue back to `In Progress` on a best-effort basis.
 
 ## PR Review
 
@@ -396,6 +422,21 @@ quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes
 It also includes `authors`, parsed from the ticket's `quay-config.authors`
 block as `{name, slack_id}` objects. Legacy or malformed rows return
 `authors: []`.
+
+`task list`, `task get`, and `task events` accept legacy `task_id` values and
+return the same task/run rows as before. JSON output now also includes
+run-aware compatibility fields:
+
+- `work_item_id`: stable Quay work-item identity, or `null` for older rows.
+- `run_number`: run ordinal under the work item, or `null` for older rows.
+- `superseded_by_run`: successor run `task_id` when this run has been rerun,
+  otherwise `null`.
+
+Deprecation note: in task-oriented commands, `task_id` remains the accepted
+argument and JSON field name, but its meaning is now "run id". Work-item
+identity is exposed separately as `work_item_id`; scripts that need stable
+ticket identity should read `external_ref` or `work_item_id` instead of
+treating `task_id` as the product work item.
 
 `task list` and `task get` include dependency and umbrella read-model context.
 A waiting task looks like:

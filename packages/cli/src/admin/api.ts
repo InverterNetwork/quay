@@ -210,6 +210,9 @@ interface AdminMissionControlUmbrellaChildren {
 
 interface AdminMissionControlTask {
   id: string;
+  workItemId: string | null;
+  runNumber: number | null;
+  supersededByRun: string | null;
   ext: string;
   extUrl: string | null;
   repo: string;
@@ -658,6 +661,9 @@ function isWriteRoute(
 
 interface MissionControlTaskRow {
   task_id: string;
+  work_item_id: string | null;
+  run_number: number | null;
+  superseded_by_run: string | null;
   repo_id: string;
   repo_url: string;
   external_ref: string | null;
@@ -743,7 +749,15 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
   return db
     .query<MissionControlTaskRow, SQLQueryBindings[]>(
       `WITH candidate_tasks AS (
-         SELECT t.task_id, t.repo_id, r.repo_url, t.external_ref, t.state, t.authoring_mode, t.branch_name,
+         SELECT t.task_id, t.work_item_id, t.run_number,
+                (
+                  SELECT successor.task_id
+                    FROM tasks successor
+                   WHERE successor.supersedes_task_id = t.task_id
+                   ORDER BY successor.run_number DESC, successor.created_at DESC, successor.task_id DESC
+                   LIMIT 1
+                ) AS superseded_by_run,
+                t.repo_id, r.repo_url, t.external_ref, t.state, t.authoring_mode, t.branch_name,
                 COALESCE(t.pr_number, parent_uw.final_pr_number) AS pr_number,
                 COALESCE(t.pr_url, parent_uw.final_pr_url) AS pr_url,
                 t.pr_title, t.attempts_consumed, t.retry_budget, t.authors_json,
@@ -828,7 +842,8 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                 ) AS bucket_rank
            FROM candidate_tasks
        )
-       SELECT task_id, repo_id, repo_url, external_ref, state, authoring_mode, branch_name,
+       SELECT task_id, work_item_id, run_number, superseded_by_run,
+              repo_id, repo_url, external_ref, state, authoring_mode, branch_name,
               pr_number, pr_url, pr_title, attempts_consumed, retry_budget, authors_json,
               worker_agent, worker_model, reviewer_agent, reviewer_model,
               goal_objective, objective_file_path, ticket_snapshot_file_path,
@@ -873,6 +888,9 @@ async function missionControlTaskFromRow(
   const role = missionControlTaskRole(row, isReviewOnly);
   const task: AdminMissionControlTask = {
     id: row.task_id,
+    workItemId: row.work_item_id,
+    runNumber: row.run_number,
+    supersededByRun: row.superseded_by_run,
     ext: row.external_ref ?? "—",
     extUrl: await linearIssueUrlForMissionControl(row),
     repo: row.repo_id,

@@ -31,9 +31,31 @@ original brief) plus the first attempt's `brief` and `final_prompt` artifacts,
 and creates the first pending attempt. The effective base branch is the repo
 default unless a task-level override is supplied.
 
-## Tasks And Attempts
+## Work Items, Runs, And Attempts
 
-A task is the durable unit of work. An attempt is one worker run for that task.
+A work item is the durable external unit of work, usually a Linear issue in a
+repository. A run is one execution lineage for that work item: branch,
+worktree, PR, state machine, events, artifacts, and attempts. An attempt is one
+worker process within a run.
+
+For compatibility, Quay still calls runs "tasks" in existing commands and
+database relationships. The legacy `task_id` remains a valid identifier, but it
+now identifies a run. Attempts, events, artifacts, claims, outbox rows, and
+Mission Control task cards continue to key off `task_id` so existing scripts
+can inspect the same rows as before.
+
+Run-aware read surfaces add these fields beside the existing task fields:
+
+- `work_item_id`: stable Quay identity for the external work item.
+- `run_number`: ordinal run number within that work item.
+- `superseded_by_run`: successor `task_id` when a later run supersedes this
+  run, otherwise `null`.
+
+One work item can have many historical terminal runs, but only one active run
+at a time. A rerun creates the next run under the same work item, sets
+`supersedes_task_id` to the previous run, and uses a run-qualified branch such
+as `quay/BRIX-123-r2`. Terminal states such as `closed_unmerged` are terminal
+for that run, not for the work item.
 
 Every attempt has:
 
@@ -120,12 +142,20 @@ waiting task can run.
 Complete Linear blockers do not block enqueue. Incomplete blockers must already
 be tracked by Quay. If the blocker task is tracked, the dependent task is
 created in `waiting_dependencies` and is released to `queued` only after the
-blocker reaches `merged`. If the incomplete blocker is not tracked, enqueue
-fails with `dependency_not_tracked` before creating the dependent task.
+blocker work item reaches `merged` through its latest run. If the incomplete
+blocker is not tracked, enqueue fails with `dependency_not_tracked` before
+creating the dependent task.
+
+Dependency satisfaction is monotonic. Once a dependency row has `satisfied_at`,
+later failed reruns of the blocker do not revoke that fact or re-block the
+dependent. New dependents created after a blocker rerun are evaluated against
+the blocker's latest run.
 
 Failed blockers do not auto-unblock or auto-cancel dependents. Operators must
-inspect the blocker and decide whether to retry, cancel, retarget, or otherwise
-recover the blocked workflow.
+inspect the blocker and decide whether to rerun the blocker work item, cancel,
+retarget, or otherwise recover the blocked workflow. Dependency-failure
+delivery payloads include the failed blocker run number and rerun command when
+the blocker is a Linear work item.
 
 ## Umbrella Workflows
 

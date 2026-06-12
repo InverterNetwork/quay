@@ -222,6 +222,21 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--tag <name>", desc: "Repeatable. Attach a task tag." },
     ],
   },
+  rerun: {
+    path: "rerun",
+    synopsis:
+      "quay rerun --linear-issue <id> [--repo <id>] [--base-branch <b>] [--tag <name>]...",
+    summary:
+      "Create a fresh run for a Linear work item whose latest run is terminal.",
+    details:
+      "Rerun uses the same Linear adapter and validation path as enqueue, but opts into creating the next run under the existing work item. The new run gets a distinct branch lineage such as quay/BRIX-123-r2.",
+    flags: [
+      { flag: "--linear-issue <id>", desc: "Linear issue identifier to rerun." },
+      { flag: "--repo <id>", desc: "Target repo_id override." },
+      { flag: "--base-branch <b>", desc: "Task-level base branch override." },
+      { flag: "--tag <name>", desc: "Repeatable. Attach a task tag." },
+    ],
+  },
   "review-pr": {
     path: "review-pr",
     synopsis: "quay review-pr --pr <repo>:<num> [--head-sha <sha>] [--reviewer-agent <a>] [--reviewer-model <m>] [--tag <name>]...",
@@ -603,6 +618,7 @@ const TOP_LEVEL_ORDER: string[] = [
   "handoff",
   "outbox",
   "enqueue",
+  "rerun",
   "review-pr",
   "adopt-pr",
   "unadopt",

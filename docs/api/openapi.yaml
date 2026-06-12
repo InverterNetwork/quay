@@ -612,6 +612,9 @@ components:
       additionalProperties: false
       required:
         - id
+        - workItemId
+        - runNumber
+        - supersededByRun
         - ext
         - extUrl
         - repo
@@ -638,6 +641,19 @@ components:
       properties:
         id:
           type: string
+        workItemId:
+          type:
+            - string
+            - "null"
+        runNumber:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        supersededByRun:
+          type:
+            - string
+            - "null"
         ext:
           type: string
         extUrl:
