@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
@@ -366,6 +366,7 @@ test("AST-120: stale approved review on red new head schedules ci_fail", async (
   const results = await tick_once(built.deps, REVIEWER_OPTIONS);
 
   expect(results).toContainEqual({ task_id: taskId, action: "ci_failed" });
+  expect(existsSync(join("/tmp", taskId, ".quay-review-result.json"))).toBe(false);
   const oldReview = h.db
     .query<{ ended_at: string | null; review_verdict: string | null }, [number]>(
       `SELECT ended_at, review_verdict FROM attempts WHERE attempt_id = ?`,

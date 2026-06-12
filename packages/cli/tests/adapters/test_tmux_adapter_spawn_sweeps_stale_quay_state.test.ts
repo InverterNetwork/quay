@@ -172,12 +172,14 @@ t("spawn rewrites .quay-prompt.md with the new prompt even if a stale one exists
   expect(readFileSync(promptPath, "utf8")).toBe("FRESH PROMPT BODY");
 });
 
-// Fail-closed regression: if `.quay-session.log` (or `.quay-blocked.md`)
+// Fail-closed regression: if `.quay-session.log` (or another required
+// Quay attempt signal)
 // exists from a prior attempt and the sweep cannot remove it, spawn must
 // abort instead of silently proceeding — proceeding would reintroduce the
 // exact stale-state bug the sweep exists to fix (old log bytes bleeding
-// into the new attempt's log, skewed mtime freshness, etc.). Other
-// `.quay-*` files remain best-effort; only these two are gated.
+// into the new attempt's log, stale review verdict replay, skewed mtime
+// freshness, etc.). Other `.quay-*` files remain best-effort; only the
+// state files that directly drive attempt/review classification are gated.
 //
 // This test does NOT require tmux: the abort happens during the spawn
 // preflight, before tmux is ever invoked.
@@ -275,6 +277,38 @@ test("spawn aborts when a stale .quay-exit-code cannot be swept", () => {
       agentInvocation: "true",
     }),
   ).toThrow(/quay-exit-code/);
+});
+
+test("spawn aborts when a stale .quay-review-result.json cannot be swept", () => {
+  if (typeof process.geteuid === "function" && process.geteuid() === 0) {
+    return;
+  }
+  const adapter = new TmuxAdapter();
+  const worktreePath = tempWorktree();
+  const stalePath = join(worktreePath, ".quay-review-result.json");
+  writeFileSync(
+    stalePath,
+    JSON.stringify({
+      verdict: "approved",
+      body: "stale approval from a prior reviewer attempt",
+      findings: [],
+    }),
+  );
+  chmodSync(worktreePath, 0o555);
+  cleanups.unshift(() => {
+    try {
+      chmodSync(worktreePath, 0o755);
+    } catch {}
+  });
+
+  expect(() =>
+    adapter.spawn({
+      sessionName: `quay-test-sweep-fail-review-result-${Math.random().toString(36).slice(2, 10)}`,
+      worktreePath,
+      promptContent: "ignored",
+      agentInvocation: "true",
+    }),
+  ).toThrow(/quay-review-result\.json/);
 });
 
 t("spawn does not touch unrelated files in the worktree root", () => {

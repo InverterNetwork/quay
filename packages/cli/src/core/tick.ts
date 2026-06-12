@@ -4777,6 +4777,7 @@ function finalizeStaleApprovedReviewBlockedByCi(
     throw err;
   }
 
+  removeReviewResultFile(task.worktree_path);
   return { task_id: task.task_id, action: "ci_failed" };
 }
 
