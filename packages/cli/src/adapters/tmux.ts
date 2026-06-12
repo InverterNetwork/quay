@@ -51,6 +51,10 @@ const TOOL_TRACE_FILE = ".quay-tool-trace.log";
 // worker shell's `$?` as plain decimal text. Treated identically to
 // other `.quay-*` files by the spawn preflight sweep.
 const EXIT_CODE_FILE = ".quay-exit-code";
+// Per-reviewer-attempt result signal consumed by tick after the reviewer
+// exits. A stale copy can post an obsolete verdict to a later head, so its
+// removal is fail-closed like blockers, logs, and exit markers.
+const REVIEW_RESULT_FILE = ".quay-review-result.json";
 // Marker for direct children of the worktree root that belong to a previous
 // Quay attempt. Anything matching this prefix is sweep-eligible at spawn
 // time — see the spawn preflight for why.
@@ -609,23 +613,22 @@ function parseIntOrNull(value: string | undefined): number | null {
 // Files whose stale presence directly drives the bug the sweep exists to
 // fix: `.quay-blocked.md` would be ingested as the new attempt's blocker;
 // `.quay-session.log` would mix old bytes into the new attempt's log and
-// skew the mtime-based freshness signal. A leftover `.quay-exit-code`
-// would be misread as the current attempt's exit status — and in the
-// exact silent-exit case the wrapper is built to diagnose, the wrapper
-// never overwrites the file, so the previous attempt's `$?` would be
-// stamped onto this attempt's `attempts.exit_code`/`exit_signal` columns
-// and actively poison triage. Failing to remove any of these is treated as a hard
-// spawn failure so the spawn-substrate-failed path takes over (same
-// semantics as a `pipe-pane` failure) — silently proceeding would
-// reintroduce the exact bugs this sweep prevents.
+// skew the mtime-based freshness signal; `.quay-exit-code` would be
+// misread as the current attempt's exit status; `.quay-review-result.json`
+// would be consumed as the current reviewer attempt's verdict. Failing to
+// remove any of these is treated as a hard spawn failure so the
+// spawn-substrate-failed path takes over (same semantics as a `pipe-pane`
+// failure) — silently proceeding would reintroduce the exact bugs this
+// sweep prevents.
 const SWEEP_FAIL_CLOSED = new Set([
   ".quay-blocked.md",
   ".quay-session.log",
   ".quay-exit-code",
+  REVIEW_RESULT_FILE,
 ]);
 
 // Remove every direct child of `worktreePath` whose name starts with the
-// `.quay-` prefix. The two files in `SWEEP_FAIL_CLOSED` are required
+// `.quay-` prefix. The files in `SWEEP_FAIL_CLOSED` are required
 // removals (see comment above); other `.quay-*` entries are best-effort
 // — a leftover forensic dump or future marker shouldn't refuse to spawn,
 // since proceeding does not reintroduce the original bug for those.
