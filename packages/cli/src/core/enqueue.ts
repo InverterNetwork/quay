@@ -191,6 +191,12 @@ interface ResolvedTaskAgentSnapshot extends TaskAgentSnapshot {
   reviewerCapabilities: string[];
 }
 
+export interface WorkItemRunIdentity {
+  workItemId: string;
+  runNumber: number;
+  supersedesTaskId: string | null;
+}
+
 export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const input = parseInput(rawInput);
 
@@ -243,6 +249,11 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
   const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
   const dependencies = input.dependencies ?? [];
+  const plannedRunNumber = lookupNextRunNumber(
+    deps.db,
+    repo.repo_id,
+    input.external_ref ?? null,
+  );
   const initialState =
     dependencies.some((dep) => dep.satisfied_at === null || dep.satisfied_at === undefined)
       ? "waiting_dependencies"
@@ -359,6 +370,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       repo.repo_id,
       input.external_ref ?? null,
       shortId,
+      plannedRunNumber,
     );
     fullBranchName = `${QUAY_BRANCH_PREFIX}${resolvedSlug}`;
 
@@ -388,20 +400,57 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     deps.db.exec("BEGIN");
     let attemptId = -1;
     try {
+      const runIdentity = ensureWorkItemRunIdentity(deps.db, {
+        taskId,
+        repoId: repo.repo_id,
+        externalRef: input.external_ref ?? null,
+        now,
+      });
+
+      if (deps.retargetIntent !== undefined) {
+        deps.db
+          .query(
+            `UPDATE tasks
+                SET cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                    cancel_close_pr = 0,
+                    cancel_keep_worktree = 0,
+                    tick_error = NULL,
+                    updated_at = ?
+              WHERE task_id = ?`,
+          )
+          .run(
+            deps.retargetIntent.cancelRequestedAt,
+            deps.retargetIntent.cancelRequestedAt,
+            deps.retargetIntent.sourceTaskId,
+          );
+        if (deps.retargetIntent.activeAttemptId !== null) {
+          deps.db
+            .query(
+              `UPDATE attempts SET kill_intent = 'cancel'
+                WHERE attempt_id = ? AND kill_intent IS NULL`,
+            )
+            .run(deps.retargetIntent.activeAttemptId);
+        }
+      }
+
       deps.db
         .query(
           `INSERT INTO tasks (
-             task_id, repo_id, external_ref, state, branch_name, base_branch, tmux_id, worktree_path,
+             task_id, repo_id, external_ref, work_item_id, run_number,
+             supersedes_task_id, state, branch_name, base_branch, tmux_id, worktree_path,
              retry_budget, slack_thread_ref, authors_json, worker_execution,
              pr_screenshots_requested, pr_screenshots_required,
              worker_agent, worker_model, reviewer_agent, reviewer_model,
              retargeted_from_task_id, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           taskId,
           repo.repo_id,
           input.external_ref ?? null,
+          runIdentity.workItemId,
+          runIdentity.runNumber,
+          runIdentity.supersedesTaskId,
           initialState,
           fullBranchName,
           effectiveBaseBranch,
@@ -506,32 +555,6 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
             dependencies: createdDependencies,
           },
         );
-      }
-
-      if (deps.retargetIntent !== undefined) {
-        deps.db
-          .query(
-            `UPDATE tasks
-                SET cancel_requested_at = COALESCE(cancel_requested_at, ?),
-                    cancel_close_pr = 0,
-                    cancel_keep_worktree = 0,
-                    tick_error = NULL,
-                    updated_at = ?
-              WHERE task_id = ?`,
-          )
-          .run(
-            deps.retargetIntent.cancelRequestedAt,
-            deps.retargetIntent.cancelRequestedAt,
-            deps.retargetIntent.sourceTaskId,
-          );
-        if (deps.retargetIntent.activeAttemptId !== null) {
-          deps.db
-            .query(
-              `UPDATE attempts SET kill_intent = 'cancel'
-                WHERE attempt_id = ? AND kill_intent IS NULL`,
-            )
-            .run(deps.retargetIntent.activeAttemptId);
-        }
       }
 
       // Spec §8 step 5 / §12: task_tags rows land in the same transaction as
@@ -666,6 +689,78 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   }
 }
 
+export function ensureWorkItemRunIdentity(
+  db: DB,
+  input: {
+    taskId: string;
+    repoId: string;
+    externalRef: string | null;
+    now: string;
+  },
+): WorkItemRunIdentity {
+  const source = input.externalRef === null ? "synthetic" : "linear";
+  const externalRef = input.externalRef ?? input.taskId;
+  const proposedWorkItemId = `wi:${input.taskId}`;
+
+  db.query(
+    `INSERT INTO work_items (
+       work_item_id, source, repo_id, external_ref, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source, repo_id, external_ref) DO UPDATE SET updated_at = excluded.updated_at`,
+  ).run(
+    proposedWorkItemId,
+    source,
+    input.repoId,
+    externalRef,
+    input.now,
+    input.now,
+  );
+
+  const workItem = db
+    .query<{ work_item_id: string }, [string, string, string]>(
+      `SELECT work_item_id
+         FROM work_items
+        WHERE source = ? AND repo_id = ? AND external_ref = ?`,
+    )
+    .get(source, input.repoId, externalRef);
+  if (!workItem) throw new Error("work item upsert returned no row");
+
+  const lineage = db
+    .query<{ run_number: number | null; task_id: string | null }, [string]>(
+      `SELECT run_number, task_id
+         FROM tasks
+        WHERE work_item_id = ?
+        ORDER BY run_number DESC, created_at DESC, task_id DESC
+        LIMIT 1`,
+    )
+    .get(workItem.work_item_id);
+
+  return {
+    workItemId: workItem.work_item_id,
+    runNumber: (lineage?.run_number ?? 0) + 1,
+    supersedesTaskId: lineage?.task_id ?? null,
+  };
+}
+
+function lookupNextRunNumber(
+  db: DB,
+  repoId: string,
+  externalRef: string | null,
+): number {
+  if (externalRef === null) return 1;
+  const row = db
+    .query<{ run_number: number | null }, [string, string]>(
+      `SELECT MAX(t.run_number) AS run_number
+         FROM tasks t
+         JOIN work_items wi ON wi.work_item_id = t.work_item_id
+        WHERE wi.source = 'linear'
+          AND wi.repo_id = ?
+          AND wi.external_ref = ?`,
+    )
+    .get(repoId, externalRef);
+  return (row?.run_number ?? 0) + 1;
+}
+
 function resolveTaskAgentSnapshot(
   deps: EnqueueDeps,
   repoId: string,
@@ -731,12 +826,15 @@ function resolveBranchName(
   repoId: string,
   externalRef: string | null,
   shortId: string,
+  runNumber: number,
 ): string {
   // Step 1: JS-side normalization per spec §13. Already covers most cases,
   // but the spec's step 7 requires the real `git check-ref-format` gate as
   // defense-in-depth in case the rules above and git's own grammar drift.
+  const baseSlug = computeBranchSlug(externalRef, shortId);
+  const runSlug = runNumber <= 1 ? baseSlug : `${baseSlug}-r${runNumber}`;
   const preferred = git.safeBranchSlug(
-    computeBranchSlug(externalRef, shortId),
+    runSlug,
     shortId,
   );
   if (!isBranchTaken(git, repoId, preferred)) return preferred;

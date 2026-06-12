@@ -304,6 +304,26 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
             )}
           </>
         )}
+        {task.runNumber !== null && (
+          <>
+            <T kind="mono-sm" color="var(--ink-4)">
+              ·
+            </T>
+            <T kind="mono-sm" color="var(--ink-3)">
+              run {task.runNumber}
+            </T>
+          </>
+        )}
+        {task.supersededByRun !== null && (
+          <>
+            <T kind="mono-sm" color="var(--ink-4)">
+              ·
+            </T>
+            <T kind="mono-sm" color="var(--ink-4)">
+              superseded
+            </T>
+          </>
+        )}
         <span style={{ flex: 1 }} />
         {isReview && task.reviewStatus !== null && (
           <Badge tone={task.reviewStatus === 'changes requested' ? 'warn' : 'neutral'} size="sm" dot>

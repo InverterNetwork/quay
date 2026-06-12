@@ -15,8 +15,13 @@ import {
   type EnqueueResult,
 } from "../core/enqueue.ts";
 import { QuayError } from "../core/errors.ts";
+import {
+  LINEAR_STATE_IN_PROGRESS,
+  syncLinearState,
+} from "../core/linear_state_sync.ts";
 import { parseQuayConfigBlock } from "../core/quay_config_block.ts";
 import { mergeNormalizedTags } from "../core/tag_normalize.ts";
+import { TASK_TERMINAL_STATES } from "../core/task_state.ts";
 import { fetchTicketContextWithIssue } from "../core/ticket_context.ts";
 import {
   createOrVerifyUmbrellaWorkflow,
@@ -59,6 +64,7 @@ export interface EnqueueLinearIssueArgs {
   workerModel: string | null;
   reviewerAgent: string | null;
   reviewerModel: string | null;
+  rerun: boolean;
 }
 
 export interface EnqueueLinearIssueDeps {
@@ -81,13 +87,16 @@ export async function handleEnqueueLinearIssue(
   // allowing the old low-quota re-poll shortcut.
   const externalRef = args.identifier.toUpperCase();
   if (args.asNormalTask && args.repoId !== null) {
-    const existing = lookupExistingTask(
+    const existing = lookupReusableWorkItemRun(
       deps.enqueueDeps.db,
       args.repoId,
       externalRef,
+      { rerun: args.rerun },
     );
     if (existing !== null) {
-      io.stdout(`${JSON.stringify(existing)}\n`);
+      io.stdout(
+        `${JSON.stringify(formatLinearRunOutput(deps.enqueueDeps.db, existing, true))}\n`,
+      );
       return { exitCode: 0 };
     }
   } else if (args.asNormalTask) {
@@ -96,13 +105,16 @@ export async function handleEnqueueLinearIssue(
       externalRef,
     );
     if (candidates.length === 1) {
-      const existing = lookupExistingTask(
+      const existing = lookupReusableWorkItemRun(
         deps.enqueueDeps.db,
         candidates[0]!,
         externalRef,
+        { rerun: args.rerun },
       );
       if (existing !== null) {
-        io.stdout(`${JSON.stringify(existing)}\n`);
+        io.stdout(
+          `${JSON.stringify(formatLinearRunOutput(deps.enqueueDeps.db, existing, true))}\n`,
+        );
         return { exitCode: 0 };
       }
     }
@@ -215,13 +227,16 @@ export async function handleEnqueueLinearIssue(
     );
   }
 
-  const existing = lookupExistingTask(
+  const existing = lookupReusableWorkItemRun(
     deps.enqueueDeps.db,
     resolvedRepoId,
     externalRef,
+    { rerun: args.rerun },
   );
   if (existing !== null) {
-    io.stdout(`${JSON.stringify(existing)}\n`);
+    io.stdout(
+      `${JSON.stringify(formatLinearRunOutput(deps.enqueueDeps.db, existing, true))}\n`,
+    );
     return { exitCode: 0 };
   }
 
@@ -274,27 +289,35 @@ export async function handleEnqueueLinearIssue(
     });
   } catch (err) {
     // Idempotency under concurrent invocation (spec §3): if two pollers race
-    // past the preflight lookupExistingTask() and both reach the INSERT, the
-    // unique index on (repo_id, external_ref) ensures only one succeeds. The
-    // loser gets SQLITE_CONSTRAINT_UNIQUE; we re-fetch the winner's row and
-    // return it as if the preflight had found it. enqueue() already rolls back
-    // the substrate side effects (worktree, branch) before re-throwing, so no
-    // cleanup is needed here.
+    // past the preflight lookup and both reach the INSERT, the unique active-run
+    // index on work_item_id ensures only one succeeds. The loser gets
+    // SQLITE_CONSTRAINT_UNIQUE; we re-fetch the winner's row and return it as if
+    // the preflight had found it. enqueue() already rolls back the substrate
+    // side effects (worktree, branch) before re-throwing, so no cleanup is
+    // needed here.
     if (isUniqueConstraintError(err) && ctx.external_ref !== null) {
-      const recovered = lookupExistingTask(
+      const recovered = lookupReusableWorkItemRun(
         deps.enqueueDeps.db,
         resolvedRepoId,
         ctx.external_ref,
+        { rerun: args.rerun },
       );
       if (recovered !== null) {
-        io.stdout(`${JSON.stringify(recovered)}\n`);
+        io.stdout(
+          `${JSON.stringify(formatLinearRunOutput(deps.enqueueDeps.db, recovered, true))}\n`,
+        );
         return { exitCode: 0 };
       }
     }
     return emitError(io, err);
   }
 
-  io.stdout(`${JSON.stringify(result)}\n`);
+  io.stdout(
+    `${JSON.stringify(formatLinearRunOutput(deps.enqueueDeps.db, result, false))}\n`,
+  );
+  if (args.rerun) {
+    await syncLinearState(deps.linear, externalRef, LINEAR_STATE_IN_PROGRESS);
+  }
   return { exitCode: 0 };
 }
 
@@ -831,10 +854,11 @@ function enqueueLinearUmbrellaChildTask(
     );
   }
 
-  const existing = lookupExistingTaskWithBase(
+  const existing = lookupReusableWorkItemRunWithBase(
     deps.enqueueDeps.db,
     input.workflow.repo_id,
     input.child.externalRef,
+    { rerun: false, allowTerminalReuse: true },
   );
   if (existing !== null) {
     assertExistingUmbrellaChildBase(
@@ -915,10 +939,11 @@ function enqueueLinearUmbrellaChildTask(
     };
   } catch (err) {
     if (isUniqueConstraintError(err)) {
-      const recovered = lookupExistingTaskWithBase(
+      const recovered = lookupReusableWorkItemRunWithBase(
         deps.enqueueDeps.db,
         input.workflow.repo_id,
         input.child.externalRef,
+        { rerun: false, allowTerminalReuse: true },
       );
       if (recovered !== null) {
         assertExistingUmbrellaChildBase(
@@ -948,17 +973,34 @@ interface ExistingTaskWithBase extends EnqueueResult {
   base_branch: string;
 }
 
-function lookupExistingTaskWithBase(
+const ACTIVE_TASK_SQL = `cancel_requested_at IS NULL AND state NOT IN (${TASK_TERMINAL_STATES.map(() => "?").join(", ")})`;
+
+function lookupReusableWorkItemRunWithBase(
   db: DB,
   repoId: string,
   externalRef: string,
+  options: { rerun: boolean; allowTerminalReuse?: boolean },
 ): ExistingTaskWithBase | null {
+  if (options.allowTerminalReuse !== true) {
+    assertNoTerminalReuse(db, repoId, externalRef, options);
+  }
+  const statePredicate =
+    options.allowTerminalReuse === true ? "1 = 1" : ACTIVE_TASK_SQL;
+  const params =
+    options.allowTerminalReuse === true
+      ? [repoId, externalRef] as [string, string]
+      : [repoId, externalRef, ...TASK_TERMINAL_STATES] as [string, string, ...string[]];
   const row = db
-    .query<ExistingTaskRow & { base_branch: string }, [string, string]>(
+    .query<ExistingTaskRow & { base_branch: string }, typeof params>(
       `SELECT task_id, state, branch_name, base_branch, tmux_id, worktree_path
-         FROM tasks WHERE repo_id = ? AND external_ref = ?`,
+         FROM tasks
+        WHERE repo_id = ?
+          AND external_ref = ?
+          AND ${statePredicate}
+        ORDER BY run_number DESC, created_at DESC, task_id DESC
+        LIMIT 1`,
     )
-    .get(repoId, externalRef);
+    .get(...params);
   if (!row) return null;
   const attempt = db
     .query<{ attempt_id: number }, [string]>(
@@ -1286,7 +1328,11 @@ function lookupDependencyTask(
   return (
     db
       .query<DependencyTaskRow, [string, string]>(
-        `SELECT task_id, state FROM tasks WHERE repo_id = ? AND external_ref = ?`,
+        `SELECT task_id, state
+           FROM tasks
+          WHERE repo_id = ? AND external_ref = ?
+          ORDER BY run_number DESC, created_at DESC, task_id DESC
+          LIMIT 1`,
       )
       .get(repoId, externalRef) ?? null
   );
@@ -1398,17 +1444,58 @@ interface ExistingTaskRow {
   worktree_path: string;
 }
 
+function formatLinearRunOutput(
+  db: DB,
+  result: EnqueueResult,
+  reusedExistingTask: boolean,
+): Record<string, unknown> {
+  const row = db
+    .query<
+      { run_number: number | null; supersedes_task_id: string | null },
+      [string]
+    >(
+      `SELECT run_number, supersedes_task_id
+         FROM tasks
+        WHERE task_id = ?`,
+    )
+    .get(result.task_id);
+  return {
+    ...result,
+    reused_existing_task: reusedExistingTask,
+    created_new_run: !reusedExistingTask,
+    run_number: row?.run_number ?? null,
+    supersedes_task_id: row?.supersedes_task_id ?? null,
+  };
+}
+
 function lookupExistingTask(
   db: DB,
   repoId: string,
   externalRef: string,
 ): EnqueueResult | null {
+  return lookupReusableWorkItemRun(db, repoId, externalRef, { rerun: false });
+}
+
+function lookupReusableWorkItemRun(
+  db: DB,
+  repoId: string,
+  externalRef: string,
+  options: { rerun: boolean; allowTerminalReuse?: boolean },
+): EnqueueResult | null {
+  if (options.allowTerminalReuse !== true) {
+    assertNoTerminalReuse(db, repoId, externalRef, options);
+  }
   const row = db
-    .query<ExistingTaskRow, [string, string]>(
+    .query<ExistingTaskRow, [string, string, ...string[]]>(
       `SELECT task_id, state, branch_name, tmux_id, worktree_path
-         FROM tasks WHERE repo_id = ? AND external_ref = ?`,
+         FROM tasks
+        WHERE repo_id = ?
+          AND external_ref = ?
+          AND ${ACTIVE_TASK_SQL}
+        ORDER BY run_number DESC, created_at DESC, task_id DESC
+        LIMIT 1`,
     )
-    .get(repoId, externalRef);
+    .get(repoId, externalRef, ...TASK_TERMINAL_STATES);
   if (!row) return null;
   const attempt = db
     .query<{ attempt_id: number }, [string]>(
@@ -1432,18 +1519,74 @@ function lookupExistingTask(
   };
 }
 
+interface LatestWorkItemRunRow {
+  task_id: string;
+  state: string;
+  run_number: number | null;
+}
+
+function assertNoTerminalReuse(
+  db: DB,
+  repoId: string,
+  externalRef: string,
+  options: { rerun: boolean },
+): void {
+  const latest = db
+    .query<LatestWorkItemRunRow, [string, string, string]>(
+      `SELECT t.task_id, t.state, t.run_number
+         FROM tasks t
+         JOIN work_items wi ON wi.work_item_id = t.work_item_id
+        WHERE t.repo_id = ?
+          AND wi.source = 'linear'
+          AND wi.repo_id = ?
+          AND wi.external_ref = ?
+        ORDER BY t.run_number DESC, t.created_at DESC, t.task_id DESC
+        LIMIT 1`,
+    )
+    .get(repoId, repoId, externalRef);
+  if (latest == null) {
+    if (options.rerun) {
+      throw new QuayError(
+        "validation_error",
+        `cannot rerun ${externalRef}; no existing work item run was found`,
+        {
+          repo_id: repoId,
+          external_ref: externalRef,
+        },
+      );
+    }
+    return;
+  }
+  if (!TASK_TERMINAL_STATES.includes(latest.state as typeof TASK_TERMINAL_STATES[number])) {
+    return;
+  }
+  if (options.rerun) return;
+  const runNumber = latest.run_number ?? 1;
+  throw new QuayError(
+    "work_item_terminal",
+    `latest run for ${externalRef} is terminal (${latest.state}); use quay rerun --linear-issue ${externalRef}`,
+    {
+      repo_id: repoId,
+      external_ref: externalRef,
+      last_task_id: latest.task_id,
+      last_run_state: latest.state,
+      last_run_number: runNumber,
+      rerun_command: `quay rerun --linear-issue ${externalRef}`,
+    },
+  );
+}
+
 // Pre-fetch helper for the no-`--repo` path. Returns the repo_ids of every
-// task currently bearing this external_ref. The unique index is
-// (repo_id, external_ref), so 2+ rows imply a cross-source collision — rare
-// in v1 (Linear-only) but the caller defers to a post-fetch check rather
-// than guessing.
+// task currently bearing this external_ref. Multiple rows can exist after
+// work-item reruns or across repos; 2+ repo candidates means the caller defers
+// to a post-fetch check rather than guessing.
 function lookupRepoIdsForExternalRef(
   db: DB,
   externalRef: string,
 ): string[] {
   return db
     .query<{ repo_id: string }, [string]>(
-      `SELECT repo_id FROM tasks WHERE external_ref = ?`,
+      `SELECT DISTINCT repo_id FROM tasks WHERE external_ref = ?`,
     )
     .all(externalRef)
     .map((r) => r.repo_id);

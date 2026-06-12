@@ -199,6 +199,91 @@ test("review against an older head_sha is ignored", () => {
   expect(posted).toBeNull();
 });
 
+test("token-only reconciliation does not probe ambient gh identity", () => {
+  installGhStub(`
+case "$*" in
+  *"api user"*)
+    echo "ambient identity should not be probed" 1>&2
+    exit 99
+    ;;
+  *"api"*"pulls/"*"/reviews"*)
+    test "$GH_TOKEN" = "ghs_reviewer_token" || {
+      echo "missing reviewer token for reviews read" 1>&2
+      exit 98
+    }
+    cat <<'JSON'
+${BOT_APPROVED}
+JSON
+    exit 0
+    ;;
+  *"api"*"graphql"*)
+    test "$GH_TOKEN" = "ghs_reviewer_token" || {
+      echo "missing reviewer token for comments read" 1>&2
+      exit 97
+    }
+    echo '{"data":{"node":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}'
+    exit 0
+    ;;
+  *)
+    echo "unexpected gh invocation: $*" 1>&2
+    exit 96
+    ;;
+esac
+`);
+  const { reposRoot, repoId } = makeBareDir();
+  const adapter = new GitHubCliAdapter(reposRoot);
+
+  const posted = adapter.fetchPostedReview(
+    repoId,
+    42,
+    "abc123",
+    undefined,
+    "ghs_reviewer_token",
+  );
+
+  expect(posted).not.toBeNull();
+  expect(posted!.reviewId).toBe("PRR_bot");
+});
+
+test("token-only reconciliation scans past newer non-matching reviews", () => {
+  const reviews = `[
+    {
+      "id": 1,
+      "node_id": "PRR_matching_reviewer",
+      "user": {"login": "didier-reviewer[bot]", "type": "Bot"},
+      "body": "expected body",
+      "state": "APPROVED",
+      "commit_id": "abc123"
+    },
+    {
+      "id": 2,
+      "node_id": "PRR_newer_unrelated",
+      "user": {"login": "someone-else", "type": "User"},
+      "body": "different body",
+      "state": "CHANGES_REQUESTED",
+      "commit_id": "abc123"
+    }
+  ]`;
+  installGhStub(stubReviewsRest(reviews));
+  const { reposRoot, repoId } = makeBareDir();
+  const adapter = new GitHubCliAdapter(reposRoot);
+
+  const posted = adapter.fetchPostedReview(
+    repoId,
+    42,
+    "abc123",
+    undefined,
+    "ghs_reviewer_token",
+    "APPROVED",
+    "expected body",
+  );
+
+  expect(posted).not.toBeNull();
+  expect(posted!.reviewId).toBe("PRR_matching_reviewer");
+  expect(posted!.decision).toBe("APPROVED");
+  expect(posted!.body).toBe("expected body");
+});
+
 test("review authors at head SHA are available for identity mismatch diagnostics", () => {
   installGhStub(stubReviewsRest(BOT_APPROVED));
   const { reposRoot, repoId } = makeBareDir();

@@ -66,7 +66,9 @@ import {
   enterReview,
   type TaskAuthoringMode,
 } from "./pr_review.ts";
+import { ensureWorkItemRunIdentity } from "./enqueue.ts";
 import { enqueuePrReadyApprovedOutboxItem } from "./pr_ready_approved_outbox.ts";
+import { enqueueReviewFindingLinearIssuesInOpenTxn } from "./review_finding_linear_outbox.ts";
 import {
   processGoalCompletionAudit,
   type GoalCompletionPendingTask,
@@ -108,6 +110,7 @@ export const DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS = 24;
 export const DEFAULT_RETAINED_CANCELLED_WORKTREE_GC_BATCH_SIZE = 10;
 export const WORKER_GH_TOKEN_ENV = "QUAY_WORKER_GH_TOKEN";
 export const REVIEWER_GH_TOKEN_ENV = "QUAY_REVIEWER_GH_TOKEN";
+const REVIEW_RESULT_FILENAME = ".quay-review-result.json";
 const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Canonical claude worker template, kept here as a named re-export so
 // callers that imported it from `tick.ts` before the agent-resolver
@@ -187,6 +190,35 @@ export interface TickOptions {
   referenceReposRoot?: string | undefined;
   ciIgnorePolicy?: CiIgnorePolicy;
 }
+
+interface ParsedReviewResult {
+  verdict: "approved" | "changes_requested";
+  body: string;
+  findings: unknown[];
+  raw: string;
+}
+
+interface NormalizedReviewFinding {
+  ordinal: number;
+  severity: "blocking" | "non_blocking";
+  title: string;
+  bodyMarkdown: string;
+  principleText: string | null;
+  fingerprint: string;
+  locations: NormalizedReviewFindingLocation[];
+}
+
+interface NormalizedReviewFindingLocation {
+  ordinal: number;
+  path: string | null;
+  startLine: number | null;
+  endLine: number | null;
+  url: string | null;
+}
+
+type ReviewResultRead =
+  | { ok: true; result: ParsedReviewResult }
+  | { ok: false; diagnostic: string; raw?: string };
 
 export type TickAction =
   | "spawned"
@@ -613,12 +645,23 @@ class TickGithubCache implements GitHubPort {
     prNumber: number,
     headSha: string,
     expectedLogin?: string,
+    token?: string,
+    expectedDecision?: PostedReview["decision"],
+    expectedBody?: string,
   ): PostedReview | null {
-    const key = `${repoId}\0${prNumber}\0${headSha}\0${expectedLogin ?? ""}`;
+    const key = `${repoId}\0${prNumber}\0${headSha}\0${expectedLogin ?? ""}\0${token ?? ""}\0${expectedDecision ?? ""}\0${expectedBody ?? ""}`;
     if (!this.postedReviews.has(key)) {
       this.postedReviews.set(
         key,
-        this.inner.fetchPostedReview(repoId, prNumber, headSha, expectedLogin),
+        this.inner.fetchPostedReview(
+          repoId,
+          prNumber,
+          headSha,
+          expectedLogin,
+          token,
+          expectedDecision,
+          expectedBody,
+        ),
       );
     }
     return this.postedReviews.get(key) ?? null;
@@ -630,6 +673,24 @@ class TickGithubCache implements GitHubPort {
     headSha: string,
   ): PostedReviewAuthor[] {
     return this.inner.fetchPostedReviewAuthorsAtHead(repoId, prNumber, headSha);
+  }
+
+  submitPullRequestReview(input: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    verdict: "APPROVED" | "CHANGES_REQUESTED";
+    body: string;
+    token: string;
+  }): PostedReview {
+    const posted = this.inner.submitPullRequestReview(input);
+    this.postedReviews.set(
+      `${input.repoId}\0${input.prNumber}\0${input.headSha}\0`,
+      posted,
+    );
+    this.prSnapshotByNumberCache.delete(`${input.repoId}\0${input.prNumber}`);
+    this.lightweightByNumber.delete(`${input.repoId}\0${input.prNumber}`);
+    return posted;
   }
 
   probeTokenAccess(
@@ -2021,26 +2082,63 @@ function processRunningReviewAttempt(
     );
   }
 
-  const posted = deps.github.fetchPostedReview(
-    task.repo_id,
-    task.pr_number,
-    task.head_sha,
-    options.reviewerLogin,
-  );
-  if (posted === null) {
-    const observed = deps.github.fetchPostedReviewAuthorsAtHead(
-      task.repo_id,
-      task.pr_number,
-      task.head_sha,
-    );
+  const resultRead = readReviewResultFile(task.worktree_path);
+  if (!resultRead.ok) {
     return markReviewInfraFailure(
       deps,
       task,
-      missingPostedReviewDiagnostic(task.head_sha, options.reviewerLogin, observed),
+      resultRead.diagnostic,
       exitInfo,
       options,
+      resultRead.raw,
     );
   }
+
+  let posted: PostedReview;
+  const expectedDecision =
+    resultRead.result.verdict === "approved" ? "APPROVED" : "CHANGES_REQUESTED";
+  const token = resolveGithubActorToken("reviewer", deps, task.repo_id, options);
+  if (!token.ok) {
+    return markReviewInfraFailure(deps, task, token.error, exitInfo, options);
+  }
+  try {
+    // The marker makes token-only reconciliation payload-specific. Without a
+    // configured reviewer.login, GitHub installation tokens do not expose a
+    // stable actor identity through `/user`, so a common human body like
+    // "lgtm!" must not be enough to finalize a Quay-owned side effect.
+    const reviewBody = composeQuayReviewBody(resultRead.result.body, task);
+    const reconciled = reconcileAlreadyPostedReview(
+      deps,
+      task,
+      options,
+      resultRead.result,
+      reviewBody,
+      token.token,
+    );
+    if (reconciled !== null) {
+      posted = reconciled;
+    } else {
+      posted = deps.github.submitPullRequestReview({
+        repoId: task.repo_id,
+        prNumber: task.pr_number,
+        headSha: task.head_sha,
+        verdict: expectedDecision,
+        body: reviewBody,
+        token: token.token,
+      });
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return markReviewInfraFailure(
+      deps,
+      task,
+      `failed to reconcile or post GitHub review: ${message}`,
+      exitInfo,
+      options,
+      resultRead.result.raw,
+    );
+  }
+
   if (posted.decision === "COMMENTED") {
     return markReviewInfraFailure(
       deps,
@@ -2048,45 +2146,384 @@ function processRunningReviewAttempt(
       `review ${posted.reviewId} used COMMENTED instead of an approve/request-changes verdict`,
       exitInfo,
       options,
+      resultRead.result.raw,
     );
   }
   if (
     posted.decision === "APPROVED" &&
     task.authoring_mode !== "synthetic_review"
   ) {
-    const ciGate = guardApprovedReviewCi(deps, task, posted, exitInfo, options);
+    const ciGate = guardApprovedReviewCi(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      options,
+      resultRead.result.raw,
+    );
     if (ciGate !== null) return ciGate;
   }
-  return finalizePostedReview(deps, task, posted, exitInfo, options);
+  return finalizePostedReview(
+    deps,
+    task,
+    posted,
+    exitInfo,
+    options,
+    resultRead.result.raw,
+  );
 }
 
-function missingPostedReviewDiagnostic(
-  headSha: string,
-  reviewerLogin: string | undefined,
-  observed: PostedReviewAuthor[],
-): string {
-  if (observed.length === 0) {
-    return `no Quay-authored review found at head SHA ${headSha}`;
-  }
-  const expected = reviewerLogin ?? "the tick gh identity";
-  const observedText = observed
-    .slice(0, 5)
-    .map((a) => `${a.login || "<unknown login>"} (${a.type || "unknown type"}, ${a.decision}, ${a.reviewId})`)
-    .join("; ");
-  const suffix =
-    observed.length > 5 ? `; plus ${observed.length - 5} more review(s)` : "";
-  return (
-    `reviewer identity mismatch at head SHA ${headSha}: ` +
-    `configured reviewer login ${JSON.stringify(expected)} did not match observed review author(s): ` +
-    `${observedText}${suffix}. ` +
-    `Update [reviewer].login to the identity that posts reviews, using app/<slug> for GitHub App bot identities.`
+function reconcileAlreadyPostedReview(
+  deps: Pick<TickDeps, "github">,
+  task: ReviewAttemptTaskRow,
+  options: TickOptions,
+  result: ParsedReviewResult,
+  reviewBody: string,
+  token: string,
+): PostedReview | null {
+  if (task.pr_number === null) return null;
+  const posted = deps.github.fetchPostedReview(
+    task.repo_id,
+    task.pr_number,
+    task.head_sha,
+    options.reviewerLogin,
+    token,
+    result.verdict === "approved" ? "APPROVED" : "CHANGES_REQUESTED",
+    reviewBody,
   );
+  if (posted === null) return null;
+  return posted;
+}
+
+function composeQuayReviewBody(
+  body: string,
+  task: Pick<ReviewAttemptTaskRow, "task_id" | "attempt_id" | "head_sha">,
+): string {
+  const marker = `<!-- quay-review-result task_id=${task.task_id} attempt_id=${task.attempt_id} head_sha=${task.head_sha} -->`;
+  return `${body.trimEnd()}\n\n${marker}`;
 }
 
 function reviewKillIntentDiagnostic(intent: "wall_clock" | "stale"): string {
   return intent === "wall_clock"
     ? "The live reviewer exceeded max_attempt_duration_seconds and was killed."
     : "The live reviewer stopped producing fresh logs past staleness_threshold_seconds and was killed.";
+}
+
+function persistReviewFindingsInOpenTxn(
+  deps: Pick<TickDeps, "db" | "clock">,
+  task: ReviewAttemptTaskRow,
+  reviewId: string,
+  now: string,
+  rawReviewResult: string,
+): void {
+  persistStructuredReviewFindingsInOpenTxn(deps, {
+    taskId: task.task_id,
+    attemptId: task.attempt_id,
+    reviewId,
+    headSha: task.head_sha,
+    now,
+    rawReviewResult,
+  });
+  enqueueReviewFindingLinearIssuesInOpenTxn(deps, {
+    taskId: task.task_id,
+    attemptId: task.attempt_id,
+    reviewId,
+  });
+}
+
+export function persistStructuredReviewFindingsInOpenTxn(
+  deps: { db: DB },
+  input: {
+    taskId: string;
+    attemptId: number;
+    reviewId: string;
+    headSha: string;
+    now: string;
+    rawReviewResult: string;
+  },
+): void {
+  const findings = parseFindingsForPersistence(input.rawReviewResult);
+  deleteExistingReviewFindingsInOpenTxn(deps.db, input.attemptId, input.reviewId);
+
+  for (const finding of findings) {
+    const row = deps.db
+      .query<
+        { finding_id: number },
+        [
+          string,
+          number,
+          string,
+          string,
+          number,
+          string,
+          string,
+          string,
+          string | null,
+          string,
+          string,
+        ]
+      >(
+        `INSERT INTO review_findings (
+           task_id, attempt_id, review_id, head_sha, ordinal, severity,
+           title, body_markdown, principle_text, fingerprint, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING finding_id`,
+      )
+      .get(
+        input.taskId,
+        input.attemptId,
+        input.reviewId,
+        input.headSha,
+        finding.ordinal,
+        finding.severity,
+        finding.title,
+        finding.bodyMarkdown,
+        finding.principleText,
+        finding.fingerprint,
+        input.now,
+      );
+    if (!row) throw new Error("review finding insert returned no row");
+
+    for (const location of finding.locations) {
+      deps.db
+        .query(
+          `INSERT INTO review_finding_locations (
+             finding_id, ordinal, path, start_line, end_line, url, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          row.finding_id,
+          location.ordinal,
+          location.path,
+          location.startLine,
+          location.endLine,
+          location.url,
+          input.now,
+        );
+    }
+  }
+}
+
+function deleteExistingReviewFindingsInOpenTxn(
+  db: DB,
+  attemptId: number,
+  reviewId: string,
+): void {
+  db.query(`DELETE FROM review_findings WHERE attempt_id = ? AND review_id = ?`).run(
+    attemptId,
+    reviewId,
+  );
+}
+
+function parseFindingsForPersistence(rawReviewResult: string): NormalizedReviewFinding[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawReviewResult);
+  } catch {
+    return [];
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return [];
+  }
+  const findings = (parsed as Record<string, unknown>).findings;
+  if (!Array.isArray(findings)) return [];
+
+  const normalized: NormalizedReviewFinding[] = [];
+  const seenFingerprints = new Set<string>();
+  findings.forEach((finding, index) => {
+    const row = normalizeReviewFinding(finding, index + 1);
+    if (row !== null && !seenFingerprints.has(row.fingerprint)) {
+      seenFingerprints.add(row.fingerprint);
+      normalized.push(row);
+    }
+  });
+  return normalized;
+}
+
+function normalizeReviewFinding(
+  finding: unknown,
+  ordinal: number,
+): NormalizedReviewFinding | null {
+  if (finding === null || typeof finding !== "object" || Array.isArray(finding)) {
+    return null;
+  }
+  const obj = finding as Record<string, unknown>;
+  const severity = obj.severity;
+  const title = stringField(obj.title);
+  const bodyMarkdown = stringField(obj.body) ?? stringField(obj.body_markdown);
+  if (
+    (severity !== "blocking" && severity !== "non_blocking") ||
+    title === null ||
+    bodyMarkdown === null
+  ) {
+    return null;
+  }
+  const principleText =
+    stringField(obj.principle_text) ??
+    stringField(obj.principleText) ??
+    stringField(obj["quay-principle"]);
+  const locations = normalizeReviewFindingLocations(obj.locations);
+  const fingerprint = reviewFindingFingerprint({
+    severity,
+    title,
+    bodyMarkdown,
+    principleText,
+    locations,
+  });
+  return {
+    ordinal,
+    severity,
+    title,
+    bodyMarkdown,
+    principleText,
+    fingerprint,
+    locations,
+  };
+}
+
+function normalizeReviewFindingLocations(
+  locations: unknown,
+): NormalizedReviewFindingLocation[] {
+  if (!Array.isArray(locations)) return [];
+  const normalized: NormalizedReviewFindingLocation[] = [];
+  locations.forEach((location, index) => {
+    if (location === null || typeof location !== "object" || Array.isArray(location)) {
+      return;
+    }
+    const obj = location as Record<string, unknown>;
+    const startLine =
+      positiveIntegerField(obj.start_line) ??
+      positiveIntegerField(obj.startLine) ??
+      positiveIntegerField(obj.line);
+    const endLine =
+      positiveIntegerField(obj.end_line) ??
+      positiveIntegerField(obj.endLine) ??
+      positiveIntegerField(obj.line);
+    const path = stringField(obj.path) ?? stringField(obj.file);
+    const url = stringField(obj.url);
+    if (path === null && url === null && startLine === null && endLine === null) {
+      return;
+    }
+    normalized.push({
+      ordinal: index + 1,
+      path,
+      startLine,
+      endLine,
+      url,
+    });
+  });
+  return normalized;
+}
+
+function reviewFindingFingerprint(input: {
+  severity: "blocking" | "non_blocking";
+  title: string;
+  bodyMarkdown: string;
+  principleText: string | null;
+  locations: NormalizedReviewFindingLocation[];
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        severity: input.severity,
+        title: input.title,
+        body_markdown: input.bodyMarkdown,
+        principle_text: input.principleText,
+        locations: input.locations.map((location) => ({
+          path: location.path,
+          start_line: location.startLine,
+          end_line: location.endLine,
+          url: location.url,
+        })),
+      }),
+    )
+    .digest("hex");
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+function positiveIntegerField(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : null;
+}
+
+function readReviewResultFile(worktreePath: string): ReviewResultRead {
+  const resultPath = join(worktreePath, REVIEW_RESULT_FILENAME);
+  if (!existsSync(resultPath)) {
+    return {
+      ok: false,
+      diagnostic: `reviewer did not write ${REVIEW_RESULT_FILENAME}`,
+    };
+  }
+
+  let raw: string;
+  try {
+    raw = readFileSync(resultPath, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      diagnostic: `unable to read ${REVIEW_RESULT_FILENAME}: ${(err as Error).message}`,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return {
+      ok: false,
+      diagnostic: `${REVIEW_RESULT_FILENAME} is not valid JSON: ${(err as Error).message}`,
+      raw,
+    };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      ok: false,
+      diagnostic: `${REVIEW_RESULT_FILENAME} must contain a JSON object`,
+      raw,
+    };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  const verdict = obj.verdict;
+  const body = obj.body;
+  const findings = obj.findings;
+  const errors: string[] = [];
+  if (verdict !== "approved" && verdict !== "changes_requested") {
+    errors.push("verdict must be approved or changes_requested");
+  }
+  if (typeof body !== "string" || body.trim() === "") {
+    errors.push("body must be a non-empty string");
+  }
+  if (!Array.isArray(findings)) {
+    errors.push("findings must be an array");
+  }
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      diagnostic: `${REVIEW_RESULT_FILENAME} is malformed: ${errors.join("; ")}`,
+      raw,
+    };
+  }
+
+  return {
+    ok: true,
+    result: {
+      verdict: verdict as "approved" | "changes_requested",
+      body: body as string,
+      findings: findings as unknown[],
+      raw,
+    },
+  };
+}
+
+function removeReviewResultFile(worktreePath: string): void {
+  try {
+    rmSync(join(worktreePath, REVIEW_RESULT_FILENAME), { force: true });
+  } catch {}
 }
 
 // Worker exit info is best-effort: a missing marker file (worker exec'd
@@ -3302,19 +3739,29 @@ function ensureUmbrellaFinalPrTask(
     );
     deps.db.exec("BEGIN");
     try {
+      const runIdentity = ensureWorkItemRunIdentity(deps.db, {
+        taskId,
+        repoId: workflow.repo_id,
+        externalRef: workflow.external_ref,
+        now,
+      });
       deps.db
         .query(
           `INSERT INTO tasks (
-             task_id, repo_id, external_ref, state, authoring_mode,
+             task_id, repo_id, external_ref, work_item_id, run_number,
+             supersedes_task_id, state, authoring_mode,
              branch_name, base_branch, tmux_id, worktree_path,
              pr_number, pr_url, head_sha, base_sha, retry_budget,
              created_at, updated_at
-           ) VALUES (?, ?, ?, 'pr-open', 'quay_owned', ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, 'pr-open', 'quay_owned', ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, ?)`,
         )
         .run(
           taskId,
           workflow.repo_id,
           workflow.external_ref,
+          runIdentity.workItemId,
+          runIdentity.runNumber,
+          runIdentity.supersedesTaskId,
           workflow.feature_branch,
           workflow.base_branch,
           `quay-umbrella-final-${workflow.umbrella_workflow_id}`,
@@ -4032,6 +4479,7 @@ function guardApprovedReviewCi(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   options: TickOptions,
+  rawReviewResult: string,
 ): TickTaskResult | null {
   const snapshot = deps.github.prSnapshot(task.repo_id, task.branch_name);
   if (snapshot === null) {
@@ -4041,6 +4489,7 @@ function guardApprovedReviewCi(
       posted,
       exitInfo,
       "approved",
+      rawReviewResult,
     );
     return recordTickError(
       deps,
@@ -4052,7 +4501,15 @@ function guardApprovedReviewCi(
   }
   persistPrMetadata(deps, task.task_id, snapshot);
   if (snapshot.headSha !== task.head_sha) {
-    return handleStaleApprovedReview(deps, task, posted, exitInfo, snapshot, options);
+    return handleStaleApprovedReview(
+      deps,
+      task,
+      posted,
+      exitInfo,
+      snapshot,
+      options,
+      rawReviewResult,
+    );
   }
 
   const repo = loadRepoForTask(deps.db, task.task_id);
@@ -4068,6 +4525,7 @@ function guardApprovedReviewCi(
       posted,
       exitInfo,
       "approved",
+      rawReviewResult,
     );
     return recordTickError(
       deps,
@@ -4084,6 +4542,7 @@ function guardApprovedReviewCi(
       posted,
       exitInfo,
       "approved",
+      rawReviewResult,
     );
     return { task_id: task.task_id, action: "ci_pending" };
   }
@@ -4094,6 +4553,7 @@ function guardApprovedReviewCi(
       posted,
       exitInfo,
       snapshot,
+      rawReviewResult,
     );
   }
   return null;
@@ -4106,6 +4566,7 @@ function handleStaleApprovedReview(
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
   options: TickOptions,
+  rawReviewResult: string,
 ): TickTaskResult {
   const repo = loadRepoForTask(deps.db, task.task_id);
   const ci = classifyCi(
@@ -4120,6 +4581,7 @@ function handleStaleApprovedReview(
       posted,
       exitInfo,
       "superseded",
+      rawReviewResult,
     );
     return recordTickError(
       deps,
@@ -4136,6 +4598,7 @@ function handleStaleApprovedReview(
       posted,
       exitInfo,
       "superseded",
+      rawReviewResult,
     );
     return { task_id: task.task_id, action: "ci_pending" };
   }
@@ -4146,6 +4609,7 @@ function handleStaleApprovedReview(
       posted,
       exitInfo,
       snapshot,
+      rawReviewResult,
     );
   }
 
@@ -4155,6 +4619,7 @@ function handleStaleApprovedReview(
     posted,
     exitInfo,
     "superseded",
+    rawReviewResult,
   );
   if (snapshot.prNumber === undefined || snapshot.prNumber === null) {
     return recordTickError(
@@ -4195,6 +4660,7 @@ function finalizeApprovedReviewBlockedByCi(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
+  rawReviewResult: string,
 ): TickTaskResult {
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
@@ -4233,6 +4699,14 @@ function finalizeApprovedReviewBlockedByCi(
     deps.artifactStore.writeArtifact({
       taskId: task.task_id,
       attemptId: task.attempt_id,
+      kind: "review_result",
+      content: rawReviewResult,
+      extension: "json",
+    });
+    persistReviewFindingsInOpenTxn(deps, task, posted.reviewId, now, rawReviewResult);
+    deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: task.attempt_id,
       kind: "review_comments",
       content,
       extension: "json",
@@ -4257,6 +4731,7 @@ function finalizeApprovedReviewBlockedByCi(
     throw err;
   }
 
+  removeReviewResultFile(task.worktree_path);
   return { task_id: task.task_id, action: "ci_failed" };
 }
 
@@ -4266,6 +4741,7 @@ function finalizeStaleApprovedReviewBlockedByCi(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   snapshot: PrSnapshot,
+  rawReviewResult: string,
 ): TickTaskResult {
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
@@ -4279,6 +4755,7 @@ function finalizeStaleApprovedReviewBlockedByCi(
       exitInfo,
       "superseded",
       now,
+      rawReviewResult,
     );
     applyCiFailRetryInOpenTxn(
       deps,
@@ -4300,6 +4777,7 @@ function finalizeStaleApprovedReviewBlockedByCi(
     throw err;
   }
 
+  removeReviewResultFile(task.worktree_path);
   return { task_id: task.task_id, action: "ci_failed" };
 }
 
@@ -4309,6 +4787,7 @@ function finalizeApprovedReviewBackToPrOpen(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   verdict: "approved" | "superseded",
+  rawReviewResult: string,
 ): void {
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
@@ -4321,6 +4800,7 @@ function finalizeApprovedReviewBackToPrOpen(
       exitInfo,
       verdict,
       now,
+      rawReviewResult,
     );
     transitionTaskState(deps, {
       taskId: task.task_id,
@@ -4333,6 +4813,7 @@ function finalizeApprovedReviewBackToPrOpen(
       updates: { clearTickError: true },
     });
     deps.db.exec("COMMIT");
+    removeReviewResultFile(task.worktree_path);
   } catch (err) {
     try {
       deps.db.exec("ROLLBACK");
@@ -4348,6 +4829,7 @@ function markReviewAttemptEndedInOpenTxn(
   exitInfo: PaneExitInfo,
   verdict: "approved" | "superseded",
   now: string,
+  rawReviewResult: string,
 ): number {
   const content = reviewArtifactContent(posted, task.head_sha);
   deps.db
@@ -4380,6 +4862,14 @@ function markReviewAttemptEndedInOpenTxn(
         WHERE task_id = ?`,
     )
     .run(now, task.task_id);
+  deps.artifactStore.writeArtifact({
+    taskId: task.task_id,
+    attemptId: task.attempt_id,
+    kind: "review_result",
+    content: rawReviewResult,
+    extension: "json",
+  });
+  persistReviewFindingsInOpenTxn(deps, task, posted.reviewId, now, rawReviewResult);
   const artifact = deps.artifactStore.writeArtifact({
     taskId: task.task_id,
     attemptId: task.attempt_id,
@@ -4396,6 +4886,7 @@ function finalizePostedReview(
   posted: PostedReview,
   exitInfo: PaneExitInfo,
   options: TickOptions,
+  rawReviewResult: string,
 ): TickTaskResult {
   collectReviewAttemptArtifacts(deps, task);
   const verdict =
@@ -4458,6 +4949,15 @@ function finalizePostedReview(
       )
       .run(now, task.task_id);
 
+    deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: task.attempt_id,
+      kind: "review_result",
+      content: rawReviewResult,
+      extension: "json",
+    });
+    persistReviewFindingsInOpenTxn(deps, task, posted.reviewId, now, rawReviewResult);
+
     if (!handOffToRespawn) {
       // Artifact write joins this transaction (the INSERT into `artifacts`
       // participates in the open BEGIN); a ROLLBACK below also rolls back
@@ -4519,6 +5019,7 @@ function finalizePostedReview(
       dedupeValue: posted.reviewId,
       maxNonBudgetRespawns: cap,
     });
+    removeReviewResultFile(task.worktree_path);
     if (result.outcome === "parked") {
       return { task_id: task.task_id, action: "non_budget_loop_parked" };
     }
@@ -4528,6 +5029,7 @@ function finalizePostedReview(
     return { task_id: task.task_id, action: "skipped_predicate" };
   }
 
+  removeReviewResultFile(task.worktree_path);
   return {
     task_id: task.task_id,
     action:
@@ -4555,6 +5057,7 @@ function markReviewInfraFailure(
   diagnostic: string,
   exitInfo: PaneExitInfo,
   options: TickOptions,
+  rawReviewResult?: string,
 ): TickTaskResult {
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
@@ -4583,6 +5086,15 @@ function markReviewInfraFailure(
       content: diagnostic,
       extension: "md",
     });
+    if (rawReviewResult !== undefined) {
+      deps.artifactStore.writeArtifact({
+        taskId: task.task_id,
+        attemptId: task.attempt_id,
+        kind: "review_result",
+        content: rawReviewResult,
+        extension: "json",
+      });
+    }
     deps.db
       .query(
         `UPDATE attempts
@@ -6124,6 +6636,7 @@ function promoteAndSpawnReviewer(
       return markReviewInfraFailure(deps, task, message, EXIT_INFO_NONE, options);
     }
   }
+  removeReviewResultFile(task.worktree_path);
 
   const promptContent = loadFinalPrompt(deps.db, task.task_id, task.attempt_id);
   const now = deps.clock.nowISO();

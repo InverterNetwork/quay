@@ -348,6 +348,7 @@ test("loads [adapters.linear] and [adapters.slack] sections", () => {
     `[adapters.linear]
 enabled = true
 api_key_env = "MY_LINEAR_KEY"
+default_issue_team_key = "BRIX"
 
 [adapters.slack]
 enabled = true
@@ -362,6 +363,7 @@ max_thread_messages = 400
   });
   expect(linearAdapterOptionsFromConfig(result.config)).toEqual({
     tokenEnvVar: "MY_LINEAR_KEY",
+    defaultIssueTeamKey: "BRIX",
   });
   expect(slackAdapterOptionsFromConfig(result.config)).toEqual({
     tokenEnvVar: "MY_SLACK_TOKEN",

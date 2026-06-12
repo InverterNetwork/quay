@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import type { PrCheckBucket, PrSnapshot } from "../../src/ports/github.ts";
 import {
@@ -40,6 +41,26 @@ function reviewerTickOptions(extra: TickOptions = {}): TickOptions {
   };
 }
 
+function writeReviewResult(
+  worktreePath: string,
+  input: { verdict: "approved" | "changes_requested"; body: string },
+): void {
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(
+    join(worktreePath, ".quay-review-result.json"),
+    JSON.stringify({ ...input, findings: [] }),
+  );
+}
+
+function quayReviewBody(
+  body: string,
+  taskId: string,
+  attemptId: number,
+  headSha: string,
+): string {
+  return `${body.trimEnd()}\n\n<!-- quay-review-result task_id=${taskId} attempt_id=${attemptId} head_sha=${headSha} -->`;
+}
+
 test("Quay-owned pr-review approval enqueues one pr_ready_approved outbox item", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
@@ -76,8 +97,12 @@ test("Quay-owned pr-review approval enqueues one pr_ready_approved outbox item",
   built.github.setPostedReview(repoId, 152, "head-approved", {
     reviewId: "R_ready",
     decision: "APPROVED",
-    body: "Approved.",
+    body: quayReviewBody("Approved.", taskId, attemptId, "head-approved"),
     comments: "Approved.",
+  });
+  writeReviewResult(`${h.dataDir}/worktrees/${taskId}`, {
+    verdict: "approved",
+    body: "Approved.",
   });
 
   const results = await tick_once(built.deps, reviewerTickOptions());
@@ -134,7 +159,7 @@ test("approved before CI pass enqueues when ci_passed later reaches done", async
     slackThreadRef: null,
     externalRef: "AST-152",
   });
-  insertRunningReviewAttempt(h, taskId, "head-late-ci");
+  const attemptId = insertRunningReviewAttempt(h, taskId, "head-late-ci");
   built.github.setPrSnapshot(
     repoId,
     `quay/${taskId}`,
@@ -146,8 +171,17 @@ test("approved before CI pass enqueues when ci_passed later reaches done", async
   built.github.setPostedReview(repoId, 153, "head-late-ci", {
     reviewId: "R_before_ci",
     decision: "APPROVED",
-    body: "Approved while CI is pending.",
+    body: quayReviewBody(
+      "Approved while CI is pending.",
+      taskId,
+      attemptId,
+      "head-late-ci",
+    ),
     comments: "Approved while CI is pending.",
+  });
+  writeReviewResult(`${h.dataDir}/worktrees/${taskId}`, {
+    verdict: "approved",
+    body: "Approved while CI is pending.",
   });
 
   const pendingResults = await tick_once(built.deps, reviewerTickOptions());

@@ -138,7 +138,13 @@ const COMMANDS: Record<string, CommandSpec> = {
     path: "outbox",
     synopsis: "quay outbox <subcommand> [options]",
     summary: "Inspect and update durable orchestrator side-effect outbox items",
-    subcommands: ["outbox list", "outbox claim", "outbox complete", "outbox fail"],
+    subcommands: [
+      "outbox list",
+      "outbox claim",
+      "outbox complete",
+      "outbox fail",
+      "outbox deliver",
+    ],
   },
   "outbox list": {
     path: "outbox list",
@@ -184,6 +190,12 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--next-eligible-at <iso>", desc: "Optional retry cooldown timestamp." },
     ],
   },
+  "outbox deliver": {
+    path: "outbox deliver",
+    synopsis: "quay outbox deliver <outbox_item_id>",
+    summary:
+      "Claim, execute, and complete a supported delivery outbox item with its production handler.",
+  },
   enqueue: {
     path: "enqueue",
     synopsis:
@@ -210,6 +222,21 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--tag <name>", desc: "Repeatable. Attach a task tag." },
     ],
   },
+  rerun: {
+    path: "rerun",
+    synopsis:
+      "quay rerun --linear-issue <id> [--repo <id>] [--base-branch <b>] [--tag <name>]...",
+    summary:
+      "Create a fresh run for a Linear work item whose latest run is terminal.",
+    details:
+      "Rerun uses the same Linear adapter and validation path as enqueue, but opts into creating the next run under the existing work item. The new run gets a distinct branch lineage such as quay/BRIX-123-r2.",
+    flags: [
+      { flag: "--linear-issue <id>", desc: "Linear issue identifier to rerun." },
+      { flag: "--repo <id>", desc: "Target repo_id override." },
+      { flag: "--base-branch <b>", desc: "Task-level base branch override." },
+      { flag: "--tag <name>", desc: "Repeatable. Attach a task tag." },
+    ],
+  },
   "review-pr": {
     path: "review-pr",
     synopsis: "quay review-pr --pr <repo>:<num> [--head-sha <sha>] [--reviewer-agent <a>] [--reviewer-model <m>] [--tag <name>]...",
@@ -231,6 +258,17 @@ const COMMANDS: Record<string, CommandSpec> = {
       "Adopt an existing same-repo human PR and schedule a Quay code worker on its branch.",
     details:
       "The PR must be open and same-repo. Quay reuses or creates the synthetic review task, checks out the PR head branch mutably, and instructs the worker to update the existing PR instead of creating another one.",
+    flags: [
+      { flag: "--pr <repo>:<num>", desc: "Pull request identifier, e.g. owner/repo:47." },
+    ],
+  },
+  unadopt: {
+    path: "unadopt",
+    synopsis: "quay unadopt (--pr <repo>:<num> | <task_id>)",
+    summary:
+      "Stop Quay worker/reviewer automation for an adopted PR.",
+    details:
+      "Resolves the adopted PR task, validates that Quay adopted it, then cancels the task while preserving the human-owned remote branch.",
     flags: [
       { flag: "--pr <repo>:<num>", desc: "Pull request identifier, e.g. owner/repo:47." },
     ],
@@ -580,8 +618,10 @@ const TOP_LEVEL_ORDER: string[] = [
   "handoff",
   "outbox",
   "enqueue",
+  "rerun",
   "review-pr",
   "adopt-pr",
+  "unadopt",
   "repo",
   "preamble",
   "settings",

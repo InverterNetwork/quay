@@ -9,7 +9,7 @@ import type { SupervisorLock } from "../../src/core/supervisor_lock.ts";
 import { WORKER_GH_TOKEN_ENV, tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
-import { insertRepo, insertTask } from "../support/fixtures.ts";
+import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -68,6 +68,22 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
     )
     .get(out.attempt_id);
   expect(attempt).toEqual({ reason: "review_only", head_sha: "abc123" });
+  const briefRow = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'brief'`,
+    )
+    .get(out.attempt_id);
+  expect(briefRow).toBeDefined();
+  const brief = readFileSync(briefRow!.file_path, "utf8");
+  expect(brief).toContain("## Verdict policy");
+  expect(brief).toContain("This is not a Quay-owned task.");
+  expect(brief).toContain(
+    "Non-blocking-only findings -> `approved` with the findings listed under `### Non-blocking`.",
+  );
+  expect(brief).not.toContain(
+    "Non-blocking-only findings -> `changes_requested`",
+  );
   const tags = h.db
     .query<{ tag: string }, [string]>(
       `SELECT tag FROM task_tags WHERE task_id = ? ORDER BY tag`,
@@ -267,6 +283,110 @@ test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", as
   expect(spawnedAttempt).toMatchObject({
     remote_sha_at_spawn: "head-51",
     pr_existed_at_spawn: 1,
+  });
+});
+
+test("unadopt resolves adopted PR by repo PR reference and cancels without deleting remote branch", async () => {
+  h = createHarness();
+  h.clock.set("2026-06-10T15:00:00.000Z");
+  const built = buildCliDeps(h);
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+
+  const taskId = "pr-review-quay-51";
+  const branchName = "feature/human-adopt";
+  const worktreePath = join(built.worktreesRoot, taskId);
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id,
+         worktree_path, attempts_consumed, retry_budget, pr_number, head_sha,
+         created_at, updated_at
+       ) VALUES (?, 'quay', 'waiting_human', 'adopted_external_pr', ?, ?, ?, 2, 5, 51, 'head-51', ?, ?)`,
+    )
+    .run(
+      taskId,
+      branchName,
+      "tmux-unadopt",
+      worktreePath,
+      "2026-06-10T14:00:00.000Z",
+      "2026-06-10T14:30:00.000Z",
+    );
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "adopt_pr",
+    spawnedAt: "2026-06-10T14:05:00.000Z",
+  });
+  built.git.setLocalBranches("quay", [branchName]);
+  built.git.setWorktreeBranch("quay", worktreePath, branchName);
+  built.git.setRemoteBranches("quay", [branchName]);
+
+  const io = bufferIO();
+  const result = await dispatch(["unadopt", "--pr", "acc/quay:51"], built.deps, io);
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const out = JSON.parse(io.out());
+  expect(out).toMatchObject({
+    ok: true,
+    task_id: taskId,
+    state: "cancelled",
+    outcome: "unadopted",
+    unadopted: true,
+    pr: "quay:51",
+    branch_name: branchName,
+  });
+  expect(out.message).toContain("stood down");
+
+  const task = h.db
+    .query<{ state: string; cancel_requested_at: string | null }, [string]>(
+      `SELECT state, cancel_requested_at FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task?.state).toBe("cancelled");
+  expect(task?.cancel_requested_at).toBe("2026-06-10T15:00:00.000Z");
+  expect(built.git.localBranches.get("quay")?.has(branchName) ?? false).toBe(false);
+  expect(built.git.remoteBranches.get("quay")?.has(branchName) ?? false).toBe(true);
+  expect(built.git.calls.filter((c) => c.op === "deleteRemoteBranch")).toHaveLength(0);
+});
+
+test("unadopt rejects non-adopted task ids", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const repoId = insertRepo(h.db, "repo-unadopt-reject");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-not-adopted",
+    state: "queued",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(["unadopt", taskId], built.deps, io);
+
+  expect(result.exitCode).toBe(4);
+  expect(io.out()).toBe("");
+  expect(JSON.parse(io.err())).toMatchObject({
+    error: "not_adopted",
+    task_id: taskId,
+    authoring_mode: "quay_owned",
   });
 });
 
@@ -976,4 +1096,118 @@ test("review-pr no-ops for Quay-owned PRs while done gate is disabled", async ()
     )
     .get(taskId);
   expect(count?.n).toBe(0);
+});
+
+test("review-pr gives Quay-owned tasks a request-changes verdict policy for any finding", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true, gateQuayOwnedDone: true };
+  const repoId = insertRepo(h.db, "repo-owned-policy");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-owned-policy",
+    state: "pr-open",
+  });
+  h.db.query(`UPDATE tasks SET pr_number = 21 WHERE task_id = ?`).run(taskId);
+  built.github.setPrView(repoId, 21, {
+    number: 21,
+    title: "Quay PR",
+    body: "",
+    url: "https://example.test/pr/21",
+    headRefName: `quay/${taskId}`,
+    headSha: "sha-owned-policy",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", `${repoId}:21`],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  expect(out).toMatchObject({
+    task_id: taskId,
+    scheduled: true,
+    skipped_reason: null,
+  });
+  const briefRow = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'brief'`,
+    )
+    .get(out.attempt_id);
+  expect(briefRow).toBeDefined();
+  const brief = readFileSync(briefRow!.file_path, "utf8");
+  expect(brief).toContain("## Verdict policy");
+  expect(brief).toContain("This is a Quay-owned task.");
+  expect(brief).toContain(
+    "Non-blocking-only findings -> `changes_requested` with the findings listed under `### Non-blocking`.",
+  );
+  expect(brief).not.toContain(
+    "Non-blocking-only findings -> `approved`",
+  );
+  expect(brief).toContain("Choose the verdict according to the Verdict policy below.");
+});
+
+test("review-pr gives adopted external PRs the non-Quay-owned verdict policy", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true, gateQuayOwnedDone: true };
+  const repoId = insertRepo(h.db, "repo-adopted-policy");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-adopted-policy",
+    state: "pr-open",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET authoring_mode = 'adopted_external_pr',
+              pr_number = 22,
+              branch_name = 'feature/adopted-policy'
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+  built.github.setPrView(repoId, 22, {
+    number: 22,
+    title: "Adopted PR",
+    body: "",
+    url: "https://example.test/pr/22",
+    headRefName: "feature/adopted-policy",
+    headSha: "sha-adopted-policy",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", `${repoId}:22`],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  expect(out).toMatchObject({
+    task_id: taskId,
+    scheduled: true,
+    skipped_reason: null,
+  });
+  const briefRow = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'brief'`,
+    )
+    .get(out.attempt_id);
+  expect(briefRow).toBeDefined();
+  const brief = readFileSync(briefRow!.file_path, "utf8");
+  expect(brief).toContain("## Verdict policy");
+  expect(brief).toContain("This is not a Quay-owned task.");
+  expect(brief).toContain(
+    "Non-blocking-only findings -> `approved` with the findings listed under `### Non-blocking`.",
+  );
+  expect(brief).not.toContain(
+    "Non-blocking-only findings -> `changes_requested`",
+  );
+  expect(brief).toContain("Choose the verdict according to the Verdict policy below.");
 });

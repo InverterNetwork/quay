@@ -97,6 +97,9 @@ import {
   type AdoptPrResult,
   type EnterReviewResult,
 } from "../core/pr_review.ts";
+import {
+  processReviewFindingLinearIssueOutboxItem,
+} from "../core/review_finding_linear_outbox.ts";
 
 export interface CliPaths {
   reposRoot: string;
@@ -197,13 +200,17 @@ export async function dispatch(
       case "handoff":
         return handleHandoff(rest, deps, io);
       case "outbox":
-        return handleOutbox(rest, deps, io);
+        return await handleOutbox(rest, deps, io);
       case "enqueue":
         return await handleEnqueue(rest, deps, io);
+      case "rerun":
+        return await handleRerun(rest, deps, io);
       case "review-pr":
         return handleReviewPr(rest, deps, io);
       case "adopt-pr":
         return await handleAdoptPr(rest, deps, io);
+      case "unadopt":
+        return await handleUnadopt(rest, deps, io);
       case "repo":
         return handleRepo(rest, deps, io);
       case "preamble":
@@ -483,11 +490,11 @@ function isHandoffStatus(s: string): s is OrchestratorHandoffStatus {
   );
 }
 
-function handleOutbox(
+async function handleOutbox(
   argv: string[],
   deps: CliDeps,
   io: CliIO,
-): DispatchResult {
+): Promise<DispatchResult> {
   if (argv.length === 0) {
     return writeErrorWithUsage(
       io,
@@ -511,6 +518,9 @@ function handleOutbox(
     case "fail":
       if (wantsHelp(rest)) return printHelp(io, ["outbox", "fail"]);
       return handleOutboxFail(rest, deps, io);
+    case "deliver":
+      if (wantsHelp(rest)) return printHelp(io, ["outbox", "deliver"]);
+      return await handleOutboxDeliver(rest, deps, io);
     default:
       return writeErrorWithUsage(
         io,
@@ -519,6 +529,34 @@ function handleOutbox(
         `unknown outbox subcommand: ${sub}`,
       );
   }
+}
+
+async function handleOutboxDeliver(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  const validation = validateFlags(argv, { valued: [] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const parsed = parsePositiveIntArg(positional(argv), "outbox deliver");
+  if (!parsed.ok) return writeError(io, "usage_error", parsed.message);
+  const linear = pickLinearAdapter(deps);
+  if (linear === undefined) {
+    return writeError(
+      io,
+      "adapter_not_enabled",
+      "[adapters.linear] is not configured for this deployment",
+      { adapter: "linear" },
+    );
+  }
+  const row = await processReviewFindingLinearIssueOutboxItem(
+    { db: deps.db, clock: deps.clock, linear },
+    { outboxItemId: parsed.value },
+  );
+  io.stdout(`${JSON.stringify(row)}\n`);
+  return { exitCode: 0 };
 }
 
 function handleOutboxList(
@@ -828,6 +866,9 @@ function handleTaskGet(
 interface EventRow {
   event_id: number;
   task_id: string;
+  work_item_id: string | null;
+  run_number: number | null;
+  superseded_by_run: string | null;
   attempt_id: number | null;
   event_type: string;
   from_state: string | null;
@@ -849,11 +890,20 @@ function handleTaskEvents(
   // can stream/replay transitions without reconciling reverse-order results.
   const events = deps.db
     .query<EventRow, [string]>(
-      `SELECT event_id, task_id, attempt_id, event_type, from_state, to_state,
-              payload_artifact_id, occurred_at
-         FROM events
-        WHERE task_id = ?
-        ORDER BY occurred_at ASC, event_id ASC`,
+      `SELECT e.event_id, e.task_id, t.work_item_id, t.run_number,
+              (
+                SELECT successor.task_id
+                  FROM tasks successor
+                 WHERE successor.supersedes_task_id = e.task_id
+                 ORDER BY successor.run_number DESC, successor.created_at DESC, successor.task_id DESC
+                 LIMIT 1
+              ) AS superseded_by_run,
+              e.attempt_id, e.event_type, e.from_state, e.to_state,
+              e.payload_artifact_id, e.occurred_at
+         FROM events e
+         JOIN tasks t ON t.task_id = e.task_id
+        WHERE e.task_id = ?
+        ORDER BY e.occurred_at ASC, e.event_id ASC`,
     )
     .all(taskId);
   io.stdout(`${JSON.stringify(events)}\n`);
@@ -1198,6 +1248,103 @@ async function handleAdoptPr(
   return { exitCode: 0 };
 }
 
+async function handleUnadopt(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  if (wantsHelp(argv)) return printHelp(io, ["unadopt"]);
+  const validation = validateFlags(argv, { valued: ["--pr"] });
+  if (!validation.ok) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      validation.message,
+      validation.details,
+    );
+  }
+
+  const prArg = readFlag(argv, "--pr");
+  const taskArg = positional(argv);
+  if (prArg !== null && taskArg !== null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      "unadopt accepts either --pr <repo>:<num> or <task_id>, not both",
+    );
+  }
+  if (prArg === null && taskArg === null) {
+    return writeErrorWithExit(
+      io,
+      2,
+      "usage_error",
+      "unadopt requires --pr <repo>:<num> or <task_id>",
+    );
+  }
+
+  const target = prArg !== null
+    ? resolveUnadoptTargetByPr(deps.db, prArg)
+    : resolveUnadoptTargetByTask(deps.db, taskArg as string);
+  if (!target.ok) {
+    return writeErrorWithExit(
+      io,
+      target.exitCode,
+      target.error,
+      target.message,
+      target.details,
+    );
+  }
+  if (target.value.authoring_mode !== "adopted_external_pr") {
+    return writeErrorWithExit(
+      io,
+      4,
+      "not_adopted",
+      `task ${target.value.task_id} is not an adopted PR task`,
+      {
+        task_id: target.value.task_id,
+        authoring_mode: target.value.authoring_mode,
+      },
+    );
+  }
+
+  const cancelDeps: CancelDeps = {
+    db: deps.db,
+    clock: deps.clock,
+    git: deps.git,
+    github: deps.github,
+    tmux: deps.tmux,
+    artifactStore: deps.artifactStore,
+    supervisorLock: deps.supervisorLock,
+  };
+  const cancelLinear = pickLinearAdapter(deps);
+  if (cancelLinear !== undefined) cancelDeps.linear = cancelLinear;
+  const result: CancelResult = await cancel_task(cancelDeps, {
+    taskId: target.value.task_id,
+  });
+  if (!result.ok) return emitServiceResult(result, io);
+
+  io.stdout(
+    `${JSON.stringify({
+      ok: true,
+      task_id: result.value.task_id,
+      state: result.value.state,
+      outcome: result.value.outcome === "already_cancelled"
+        ? "already_unadopted"
+        : "unadopted",
+      unadopted: true,
+      pr: target.value.pr_number === null
+        ? null
+        : `${target.value.repo_id}:${target.value.pr_number}`,
+      branch_name: target.value.branch_name,
+      message:
+        "Quay has stood down from this adopted PR; the human-owned remote branch was preserved.",
+    })}\n`,
+  );
+  return { exitCode: 0 };
+}
+
 async function handleEnqueueLinearIssueFlow(
   argv: string[],
   deps: CliDeps,
@@ -1274,6 +1421,105 @@ async function handleEnqueueLinearIssueFlow(
       workerModel: readFlag(argv, "--worker-model"),
       reviewerAgent: readFlag(argv, "--reviewer-agent"),
       reviewerModel: readFlag(argv, "--reviewer-model"),
+      rerun: false,
+    },
+    {
+      enqueueDeps,
+      linear: deps.linear,
+      slack: deps.slack,
+      validatorRunner: deps.validatorRunner,
+      adaptersConfig: deps.adaptersConfig,
+    },
+    io,
+  );
+}
+
+async function handleRerun(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  if (wantsHelp(argv)) return printHelp(io, ["rerun"]);
+  const validation = validateFlags(argv, {
+    boolean: [
+      "--request-pr-screenshots",
+      "--require-pr-screenshots",
+      "--as-normal-task",
+    ],
+    valued: [
+      "--linear-issue",
+      "--repo",
+      "--base-branch",
+      "--worker-agent",
+      "--worker-model",
+      "--reviewer-agent",
+      "--reviewer-model",
+      "--tag",
+    ],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const flagIdentifier = readFlag(argv, "--linear-issue");
+  const identifier = flagIdentifier ?? positional(argv);
+  if (identifier === null) {
+    return writeError(
+      io,
+      "usage_error",
+      "rerun requires --linear-issue <id> or <id>",
+    );
+  }
+  if (
+    deps.linear === undefined ||
+    deps.validatorRunner === undefined ||
+    deps.adaptersConfig === undefined
+  ) {
+    return writeError(
+      io,
+      "adapter_not_enabled",
+      "[adapters.linear] is not configured for this deployment",
+      { adapter: "linear" },
+    );
+  }
+  const agentErr = validateTaskSelectionOverrides(
+    {
+      worker_agent: readFlag(argv, "--worker-agent"),
+      worker_model: readFlag(argv, "--worker-model"),
+      reviewer_agent: readFlag(argv, "--reviewer-agent"),
+      reviewer_model: readFlag(argv, "--reviewer-model"),
+    },
+    deps.agentResolver,
+    io,
+  );
+  if (agentErr !== null) return agentErr;
+  const enqueueDeps: EnqueueDeps = {
+    db: deps.db,
+    clock: deps.clock,
+    ids: deps.ids,
+    git: deps.git,
+    commandRunner: deps.commandRunner,
+    artifactStore: deps.artifactStore,
+    paths: deps.paths,
+    agentResolver: deps.agentResolver,
+    referenceReposRoot: deps.tickOptions?.referenceReposRoot,
+  };
+  if (deps.retryBudget !== undefined) {
+    enqueueDeps.retryBudget = deps.retryBudget;
+  }
+  return handleEnqueueLinearIssue(
+    {
+      repoId: readFlag(argv, "--repo"),
+      identifier,
+      cliTags: collectFlagValues(argv, "--tag"),
+      baseBranch: readFlag(argv, "--base-branch"),
+      requestPrScreenshots: argv.includes("--request-pr-screenshots"),
+      requirePrScreenshots: argv.includes("--require-pr-screenshots"),
+      asNormalTask: argv.includes("--as-normal-task"),
+      workerAgent: readFlag(argv, "--worker-agent"),
+      workerModel: readFlag(argv, "--worker-model"),
+      reviewerAgent: readFlag(argv, "--reviewer-agent"),
+      reviewerModel: readFlag(argv, "--reviewer-model"),
+      rerun: true,
     },
     {
       enqueueDeps,
@@ -2831,6 +3077,97 @@ function parsePrIdentifier(
   const n = Number.parseInt(raw.slice(idx + 1), 10);
   if (!Number.isInteger(n) || n <= 0) return null;
   return { repo, prNumber: n };
+}
+
+interface UnadoptTargetRow {
+  task_id: string;
+  repo_id: string;
+  authoring_mode: string;
+  state: string;
+  branch_name: string;
+  pr_number: number | null;
+}
+
+type UnadoptTargetResolution =
+  | { ok: true; value: UnadoptTargetRow }
+  | {
+      ok: false;
+      exitCode: number;
+      error: string;
+      message: string;
+      details?: Record<string, unknown>;
+    };
+
+function resolveUnadoptTargetByTask(
+  db: DB,
+  taskId: string,
+): UnadoptTargetResolution {
+  const row = db
+    .query<UnadoptTargetRow, [string]>(
+      `SELECT task_id, repo_id, authoring_mode, state, branch_name, pr_number
+         FROM tasks
+        WHERE task_id = ?`,
+    )
+    .get(taskId) ?? null;
+  if (row === null) {
+    return {
+      ok: false,
+      exitCode: 3,
+      error: "unknown_task",
+      message: `task ${taskId} not found`,
+      details: { task_id: taskId },
+    };
+  }
+  return { ok: true, value: row };
+}
+
+function resolveUnadoptTargetByPr(
+  db: DB,
+  prArg: string,
+): UnadoptTargetResolution {
+  const parsedPr = parsePrIdentifier(prArg);
+  if (parsedPr === null) {
+    return {
+      ok: false,
+      exitCode: 2,
+      error: "usage_error",
+      message: `--pr must be <repo>:<num> (got ${prArg})`,
+      details: { pr: prArg },
+    };
+  }
+  const repoId = resolveRepoIdForPr(db, parsedPr.repo);
+  if (repoId === null) {
+    return {
+      ok: false,
+      exitCode: 2,
+      error: "repo_not_configured",
+      message: `repo "${parsedPr.repo}" is not configured`,
+      details: { repo: parsedPr.repo },
+    };
+  }
+  const row = db
+    .query<UnadoptTargetRow, [string, number]>(
+      `SELECT task_id, repo_id, authoring_mode, state, branch_name, pr_number
+         FROM tasks
+        WHERE repo_id = ?
+          AND pr_number = ?
+        ORDER BY
+          CASE WHEN authoring_mode = 'adopted_external_pr' THEN 0 ELSE 1 END,
+          created_at DESC,
+          task_id DESC
+        LIMIT 1`,
+    )
+    .get(repoId, parsedPr.prNumber) ?? null;
+  if (row === null) {
+    return {
+      ok: false,
+      exitCode: 3,
+      error: "unknown_pr_task",
+      message: `no Quay task found for PR ${repoId}:${parsedPr.prNumber}`,
+      details: { repo_id: repoId, pr_number: parsedPr.prNumber },
+    };
+  }
+  return { ok: true, value: row };
 }
 
 function resolveRepoIdForPr(db: DB, repoArg: string): string | null {
