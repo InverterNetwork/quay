@@ -302,18 +302,23 @@ export function enterReview(
 
   const supersededSessions: string[] = [];
   const repoCiPolicy = loadRepoCiIgnorePolicy(deps.db, input.repoId);
-  const ci = classifyCi(
-    deps.github.prSnapshotByNumber(input.repoId, input.prNumber) ?? {
+  const prSnapshot = deps.github.prSnapshotByNumber(input.repoId, input.prNumber);
+  const ciSnapshot = prSnapshot ?? {
       state: "open",
       headSha,
       baseSha: null,
       mergeable: "unknown",
       latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
       checks: { checkSha: null, items: [] },
-    },
-    null,
-    resolveCiIgnorePolicy(input.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repoCiPolicy),
-  );
+    };
+  const ci =
+    ciSnapshot.headSha === headSha
+      ? classifyCi(
+          ciSnapshot,
+          null,
+          resolveCiIgnorePolicy(input.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repoCiPolicy),
+        )
+      : "stale";
   const shouldScheduleNow = ci === "pass";
   deps.db.exec("BEGIN IMMEDIATE");
   try {

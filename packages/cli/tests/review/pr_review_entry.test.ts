@@ -160,6 +160,82 @@ test("review-pr reconciles a stale caller head to the current PR head", async ()
   expect(attempt?.head_sha).toBe("sha-current");
 });
 
+test("review-pr does not schedule when CI evidence belongs to a newer PR head", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.github.setPrView("quay", 49, {
+    number: 49,
+    title: "Raced PR",
+    body: "Please review",
+    url: "https://github.com/acc/quay/pull/49",
+    headRefName: "feature/raced",
+    headSha: "sha-selected",
+  });
+  built.github.setPrSnapshotByNumber("quay", 49, {
+    prNumber: 49,
+    state: "open",
+    headSha: "sha-newer",
+    baseSha: "base-49",
+    mergeable: "mergeable",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: {
+      checkSha: "sha-newer",
+      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+    },
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", "acc/quay:49"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const out = JSON.parse(io.out());
+  expect(out.scheduled).toBe(false);
+  expect(out.pending_ci).toBe(true);
+  expect(out.attempt_id).toBeNull();
+  const task = h.db
+    .query<{ head_sha: string | null }, [string]>(
+      `SELECT head_sha FROM tasks WHERE task_id = ?`,
+    )
+    .get(out.task_id);
+  expect(task?.head_sha).toBe("sha-selected");
+  const requests = h.db
+    .query<{ head_sha: string; status: string }, [string]>(
+      `SELECT head_sha, status FROM review_requests WHERE task_id = ?`,
+    )
+    .all(out.task_id);
+  expect(requests).toEqual([{ head_sha: "sha-selected", status: "pending_ci" }]);
+  const attemptCount = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM attempts WHERE task_id = ?`,
+    )
+    .get(out.task_id);
+  expect(attemptCount?.n).toBe(0);
+});
+
 test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
