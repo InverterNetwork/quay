@@ -38,6 +38,12 @@ export interface TaskTransition {
   to: TaskState;
   eventTypes: readonly string[];
   description: string;
+  requiredGuards?: TaskTransitionRequiredGuards;
+}
+
+export interface TaskTransitionRequiredGuards {
+  authoringMode?: string;
+  taskIdPrefix?: string;
 }
 
 const TERMINAL_FROM_STATES = [
@@ -218,6 +224,13 @@ export const TASK_TRANSITIONS = [
     "pr-review",
     ["review_requested"],
     "external PR changes are ready for another synthetic review",
+  ),
+  transition(
+    "non_budget_loop",
+    "pr-review",
+    ["review_requested"],
+    "parked review task revived for a fresh review request",
+    { authoringMode: "synthetic_review", taskIdPrefix: "pr-review-" },
   ),
   transition(
     "waiting_external_changes",
@@ -416,6 +429,7 @@ export interface TaskTransitionUpdates {
   claimExpirationsConsecutive?: number;
   incrementAttemptsConsumedBy?: number;
   resetSpawnFailures?: boolean;
+  resetReviewInfraFailures?: boolean;
   budgetExhausted?: 0 | 1;
   baseBranch?: string | null;
   pr?: TaskTransitionPrMetadata;
@@ -424,6 +438,8 @@ export interface TaskTransitionUpdates {
 export interface TaskTransitionGuards {
   claimId?: string;
   prNumberIsNull?: boolean;
+  authoringMode?: string;
+  taskIdPrefix?: string;
 }
 
 export interface TransitionTaskStateInput {
@@ -473,7 +489,7 @@ export function transitionTaskState(
   deps: TransitionTaskStateDeps,
   input: TransitionTaskStateInput,
 ): TransitionResult {
-  assertAllowedTransition(input.from, input.to, input.eventType);
+  assertAllowedTransition(input);
 
   deps.db.exec(`SAVEPOINT ${SAVEPOINT}`);
   try {
@@ -555,6 +571,12 @@ function buildTaskUpdate(input: TransitionTaskStateInput): {
   if (updates.resetSpawnFailures) {
     setSql.push("spawn_failures_consecutive = 0");
   }
+  if (updates.resetReviewInfraFailures) {
+    setSql.push(
+      "review_infra_failures_consecutive = 0",
+      "review_infra_failure_head_sha = NULL",
+    );
+  }
   if (updates.budgetExhausted !== undefined) {
     setSql.push("budget_exhausted = ?");
     params.push(updates.budgetExhausted);
@@ -579,6 +601,14 @@ function buildTaskUpdate(input: TransitionTaskStateInput): {
   }
   if (input.guards?.prNumberIsNull) {
     whereSql.push("pr_number IS NULL");
+  }
+  if (input.guards?.authoringMode !== undefined) {
+    whereSql.push("authoring_mode = ?");
+    params.push(input.guards.authoringMode);
+  }
+  if (input.guards?.taskIdPrefix !== undefined) {
+    whereSql.push("task_id LIKE ? ESCAPE '\\'");
+    params.push(`${escapeLikePrefix(input.guards.taskIdPrefix)}%`);
   }
 
   return {
@@ -643,18 +673,17 @@ function serializeEventData(eventData: unknown): string | null {
   return JSON.stringify(eventData);
 }
 
-function assertAllowedTransition(
-  from: TaskState,
-  to: TaskState,
-  eventType: string,
-): void {
+function assertAllowedTransition(input: TransitionTaskStateInput): void {
   const allowed = TASK_TRANSITIONS.some(
     (transition) =>
-      transition.from === from &&
-      transition.to === to &&
-      transition.eventTypes.includes(eventType),
+      transition.from === input.from &&
+      transition.to === input.to &&
+      transition.eventTypes.includes(input.eventType) &&
+      transitionRequiredGuardsSatisfied(transition.requiredGuards, input.guards),
   );
-  if (!allowed) throw new InvalidTaskTransitionError(from, to, eventType);
+  if (!allowed) {
+    throw new InvalidTaskTransitionError(input.from, input.to, input.eventType);
+  }
 }
 
 function transition(
@@ -662,6 +691,40 @@ function transition(
   to: TaskState,
   eventTypes: readonly string[],
   description: string,
+  requiredGuards?: TaskTransitionRequiredGuards,
 ): TaskTransition {
-  return { from, to, eventTypes, description };
+  return {
+    from,
+    to,
+    eventTypes,
+    description,
+    ...(requiredGuards === undefined ? {} : { requiredGuards }),
+  };
+}
+
+function transitionRequiredGuardsSatisfied(
+  required: TaskTransitionRequiredGuards | undefined,
+  actual: TaskTransitionGuards | undefined,
+): boolean {
+  if (required === undefined) return true;
+  if (
+    required.authoringMode !== undefined &&
+    actual?.authoringMode !== required.authoringMode
+  ) {
+    return false;
+  }
+  if (
+    required.taskIdPrefix !== undefined &&
+    actual?.taskIdPrefix !== required.taskIdPrefix
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function escapeLikePrefix(prefix: string): string {
+  return prefix
+    .replaceAll("\\", "\\\\")
+    .replaceAll("%", "\\%")
+    .replaceAll("_", "\\_");
 }
