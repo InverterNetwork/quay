@@ -6609,6 +6609,36 @@ function promoteAndSpawnReviewer(
     );
   }
 
+  const livePr = deps.github.freshPrView(task.repo_id, task.pr_number);
+  const liveHeadSha = livePr?.headSha.trim() ?? "";
+  if (liveHeadSha !== "" && liveHeadSha !== task.head_sha) {
+    const retargeted = enterReview(
+      {
+        db: deps.db,
+        clock: deps.clock,
+        github: deps.github,
+        artifactStore: deps.artifactStore,
+        tmux: deps.tmux,
+      },
+      {
+        repoId: task.repo_id,
+        prNumber: task.pr_number,
+        headSha: liveHeadSha,
+        reviewerEnabled: true,
+        gateQuayOwnedDone: true,
+        referenceReposRoot: deps.referenceReposRoot,
+        ciIgnorePolicy: options.ciIgnorePolicy,
+      },
+    );
+    if (retargeted.scheduled) {
+      return { task_id: task.task_id, action: "review_requested" };
+    }
+    if (retargeted.pending_ci) {
+      return { task_id: task.task_id, action: "ci_pending" };
+    }
+    return { task_id: task.task_id, action: "skipped_predicate" };
+  }
+
   const tokenPreflight = resolveGithubActorToken(
     "reviewer",
     deps,
@@ -6631,6 +6661,16 @@ function promoteAndSpawnReviewer(
         task.pr_number,
         task.head_sha,
       );
+      const worktreeHeadSha = deps.git.worktreeHeadSha(task.worktree_path);
+      if (worktreeHeadSha !== task.head_sha) {
+        return markReviewInfraFailure(
+          deps,
+          task,
+          `review worktree HEAD (${worktreeHeadSha ?? "unknown"}) does not match review head SHA ${task.head_sha}`,
+          EXIT_INFO_NONE,
+          options,
+        );
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return markReviewInfraFailure(deps, task, message, EXIT_INFO_NONE, options);

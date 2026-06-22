@@ -35,6 +35,9 @@ export interface GitPort {
     prNumber: number,
     headSha: string,
   ): void;
+  // Current commit checked out in a materialized worktree, or null when the
+  // worktree is missing or git cannot resolve HEAD.
+  worktreeHeadSha(worktreePath: string): string | null;
   worktreeCurrentBranch(worktreePath: string): string | null;
   worktreeDetach(worktreePath: string): void;
   worktreeRemove(worktreePath: string): void;

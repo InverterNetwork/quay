@@ -232,7 +232,10 @@ export function enterReview(
       `PR ${input.repoId}:${input.prNumber} not found`,
     );
   }
-  const headSha = input.headSha ?? pr.headSha;
+  // `input.headSha` is a caller hint from polling or stored task context. The
+  // PR view is the live authority; using the hint here can schedule a reviewer
+  // against a commit GitHub has already moved past.
+  const headSha = pr.headSha;
   if (headSha.trim() === "") {
     throw new EnterReviewError(
       "pr_not_found",
@@ -304,6 +307,19 @@ export function enterReview(
       );
       for (const tag of tags) insertTag.run(task.task_id, tag, now);
     }
+
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET pr_number = COALESCE(pr_number, ?),
+                pr_url = COALESCE(pr_url, ?),
+                pr_title = ?,
+                head_sha = ?,
+                updated_at = ?,
+                tick_error = NULL
+          WHERE task_id = ?`,
+      )
+      .run(input.prNumber, pr.url, pr.title, headSha, now, task.task_id);
 
     const toSupersede = deps.db
       .query<SupersededAttemptRow, [string, string]>(
