@@ -317,6 +317,98 @@ test("tick spawns pending review attempts without moving task to running", async
   expect(row?.tmux_session).toContain("quay-review-");
 });
 
+test("tick retargets a stale pending reviewer to the current PR head before spawn", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-spawn-review-retarget");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-review-spawn-retarget",
+    state: "pr-review",
+  });
+  seedTaskObjective(h, taskId, "Review the moved PR.");
+  h.db
+    .query(
+      `UPDATE tasks
+          SET pr_number = 11,
+              pr_url = 'https://example.test/pr/11',
+              pr_title = 'Moved PR',
+              head_sha = 'sha-old'
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+  const oldAttemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+  });
+  h.db
+    .query(`UPDATE attempts SET head_sha = 'sha-old' WHERE attempt_id = ?`)
+    .run(oldAttemptId);
+  insertFinalPromptArtifact(
+    h.db,
+    h.artifactRoot,
+    h.clock,
+    taskId,
+    oldAttemptId,
+    "old review prompt",
+  );
+  built.github.setPrView(repoId, 11, {
+    number: 11,
+    title: "Moved PR",
+    body: "Please review",
+    url: "https://example.test/pr/11",
+    headRefName: "quay/task-review-spawn-retarget",
+    headSha: "sha-new",
+  });
+  built.github.setPrSnapshotByNumber(repoId, 11, {
+    prNumber: 11,
+    state: "open",
+    headSha: "sha-new",
+    baseSha: "base-11",
+    mergeable: "mergeable",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: {
+      checkSha: "sha-new",
+      items: [{ name: "build", workflow: null, bucket: "pass", required: true }],
+    },
+  });
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({ task_id: taskId, action: "review_requested" });
+  expect(built.tmux.spawnCalls).toHaveLength(0);
+  const attempts = h.db
+    .query<
+      { attempt_id: number; head_sha: string | null; review_verdict: string | null },
+      [string]
+    >(
+      `SELECT attempt_id, head_sha, review_verdict
+         FROM attempts
+        WHERE task_id = ?
+        ORDER BY attempt_id`,
+    )
+    .all(taskId);
+  expect(attempts).toEqual([
+    {
+      attempt_id: oldAttemptId,
+      head_sha: "sha-old",
+      review_verdict: "superseded",
+    },
+    {
+      attempt_id: oldAttemptId + 1,
+      head_sha: "sha-new",
+      review_verdict: null,
+    },
+  ]);
+  const task = h.db
+    .query<{ head_sha: string | null }, [string]>(
+      `SELECT head_sha FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task?.head_sha).toBe("sha-new");
+});
+
 test("dead synthetic reviewer approval stores review artifact and marks task done", async () => {
   h = createHarness();
   const built = buildTickDeps(h);

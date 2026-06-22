@@ -105,6 +105,61 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
   expect(out2.attempt_id).toBe(out.attempt_id);
 });
 
+test("review-pr reconciles a stale caller head to the current PR head", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  built.github.setPrView("quay", 48, {
+    number: 48,
+    title: "Moved PR",
+    body: "Please review",
+    url: "https://github.com/acc/quay/pull/48",
+    headRefName: "feature/moved",
+    headSha: "sha-current",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", "acc/quay:48", "--head-sha", "sha-stale"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  expect(out.scheduled).toBe(true);
+  const task = h.db
+    .query<{ head_sha: string | null }, [string]>(
+      `SELECT head_sha FROM tasks WHERE task_id = ?`,
+    )
+    .get(out.task_id);
+  expect(task?.head_sha).toBe("sha-current");
+  const attempt = h.db
+    .query<{ head_sha: string | null }, [number]>(
+      `SELECT head_sha FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(out.attempt_id);
+  expect(attempt?.head_sha).toBe("sha-current");
+});
+
 test("adopt-pr creates a mutable code-worker attempt for same-repo human PR", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
