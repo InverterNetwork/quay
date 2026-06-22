@@ -164,17 +164,24 @@ export class FakeGit implements GitPort {
     this.worktreeHeads.set(worktreePath, headSha);
   }
 
-  worktreeCurrentBranch(worktreePath: string): string | null {
-    this.record("worktreeCurrentBranch", { worktreePath });
-    return this.worktreeBranches.get(worktreePath)?.branch ?? null;
-  }
-
   worktreeHeadSha(worktreePath: string): string | null {
     this.record("worktreeHeadSha", { worktreePath });
     if (this.fail.worktreeHeadSha?.(worktreePath)) {
       throw new Error(`fake: worktreeHeadSha failed for ${worktreePath}`);
     }
-    return this.worktreeHeads.get(worktreePath) ?? null;
+    const explicitHead = this.worktreeHeads.get(worktreePath);
+    if (explicitHead !== undefined) return explicitHead;
+    const checkout = this.worktreeBranches.get(worktreePath);
+    if (checkout === undefined) return null;
+    const { branch, repoId } = checkout;
+    const at = branch.lastIndexOf("@");
+    if (at !== -1) return branch.slice(at + 1);
+    return this.remoteHeads.get(`${repoId}\0${branch}`) ?? null;
+  }
+
+  worktreeCurrentBranch(worktreePath: string): string | null {
+    this.record("worktreeCurrentBranch", { worktreePath });
+    return this.worktreeBranches.get(worktreePath)?.branch ?? null;
   }
 
   worktreeDetach(worktreePath: string): void {
