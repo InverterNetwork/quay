@@ -138,6 +138,57 @@ test("transitionTaskState rejects invalid lifecycle edges before writing", () =>
   }
 });
 
+test("transitionTaskState requires synthetic guards to revive non-budget review tasks", () => {
+  const h = createHarness();
+  try {
+    const repoId = insertRepo(h.db, "repo-task-state-guarded-review");
+    const taskId = insertTask(h.db, {
+      taskId: "pr-review-guarded-12",
+      repoId,
+      state: "non_budget_loop",
+    });
+    h.db
+      .query(`UPDATE tasks SET authoring_mode = 'synthetic_review' WHERE task_id = ?`)
+      .run(taskId);
+
+    expect(() =>
+      transitionTaskState(
+        { db: h.db },
+        {
+          taskId,
+          from: "non_budget_loop",
+          to: "pr-review",
+          eventType: "review_requested",
+          now: h.clock.nowISO(),
+        },
+      ),
+    ).toThrow(InvalidTaskTransitionError);
+
+    const result = transitionTaskState(
+      { db: h.db },
+      {
+        taskId,
+        from: "non_budget_loop",
+        to: "pr-review",
+        eventType: "review_requested",
+        now: h.clock.nowISO(),
+        guards: {
+          authoringMode: "synthetic_review",
+          taskIdPrefix: "pr-review-",
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      applied: true,
+      from: "non_budget_loop",
+      to: "pr-review",
+    });
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("transitionTaskState reports wrong state, cancelled guard, and idempotent target", () => {
   const h = createHarness();
   try {

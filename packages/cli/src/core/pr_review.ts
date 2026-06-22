@@ -40,7 +40,8 @@ export type ReviewVerdict = "approved" | "changes_requested" | "errored" | "supe
 export type EnterReviewSkippedReason =
   | "active_attempt_exists"
   | "terminal_verdict_exists"
-  | "quay_owned_gate_disabled";
+  | "quay_owned_gate_disabled"
+  | "parked_non_synthetic_task";
 
 export type EnterReviewErrorKind = "reviewer_disabled" | "pr_not_found";
 
@@ -254,6 +255,21 @@ export function enterReview(
       scheduled: false,
       pending_ci: false,
       skipped_reason: "quay_owned_gate_disabled",
+    };
+  }
+  if (
+    existing !== null &&
+    existing.state === "non_budget_loop" &&
+    existing.authoring_mode !== "synthetic_review"
+  ) {
+    return {
+      task_id: existing.task_id,
+      attempt_id: null,
+      state: existing.state,
+      review_verdict: null,
+      scheduled: false,
+      pending_ci: false,
+      skipped_reason: "parked_non_synthetic_task",
     };
   }
 
@@ -499,6 +515,9 @@ export function enterReview(
     });
 
     assertTaskState(task.state);
+    const revivingParkedReview =
+      task.state === "non_budget_loop" &&
+      task.authoring_mode === "synthetic_review";
     const transition = transitionTaskState(deps, {
       taskId: task.task_id,
       from: task.state,
@@ -515,7 +534,27 @@ export function enterReview(
           headSha,
         },
         clearTickError: true,
+        resetReviewInfraFailures: revivingParkedReview,
       },
+      ...(revivingParkedReview
+        ? {
+            guards: {
+              authoringMode: "synthetic_review",
+              taskIdPrefix: SYNTHETIC_PR_REVIEW_PREFIX,
+            },
+          }
+        : {}),
+      eventData: revivingParkedReview
+        ? {
+            recovery: "revived_parked_synthetic_review",
+            pr_number: input.prNumber,
+            head_sha: headSha,
+            prior_review_infra_failures:
+              task.review_infra_failures_consecutive,
+            prior_review_infra_failure_head_sha:
+              task.review_infra_failure_head_sha,
+          }
+        : undefined,
     });
     if (!transition.applied) {
       deps.db.exec("ROLLBACK");
