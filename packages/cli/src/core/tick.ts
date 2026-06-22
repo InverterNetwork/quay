@@ -2063,18 +2063,19 @@ function processRunningReviewAttempt(
     } catch (err) {
       blocker = `Unable to read reviewer blocker file: ${(err as Error).message}`;
     }
-    try {
-      rmSync(blockerPath, { force: true });
-    } catch {}
     // markReviewInfraFailure persists the blocker as a review_blocker
     // artifact inside its txn. A second write here would collide on the
     // (task_id, attempt_id, kind, content_hash) unique index and roll
     // the whole transition back, leaving the task stuck on tick_error.
     const drift = detectReviewContextDrift(deps, task);
-    if (drift !== null) {
-      return markReviewContextDrift(deps, task, blocker, drift, exitInfo);
-    }
-    return markReviewInfraFailure(deps, task, blocker, exitInfo, options);
+    const result =
+      drift !== null
+        ? markReviewContextDrift(deps, task, blocker, drift, exitInfo)
+        : markReviewInfraFailure(deps, task, blocker, exitInfo, options);
+    try {
+      rmSync(blockerPath, { force: true });
+    } catch {}
+    return result;
   }
 
   if (task.pr_number === null) {

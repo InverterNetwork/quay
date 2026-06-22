@@ -13,6 +13,7 @@ export interface FakeGitFailures {
   fetchBranchIfExists?: (repoId: string, branch: string) => boolean;
   worktreeAdd?: (worktreePath: string) => boolean;
   worktreeDetach?: (worktreePath: string) => boolean;
+  worktreeHeadSha?: (worktreePath: string) => boolean;
   branchDelete?: (branch: string) => boolean;
   worktreeRemove?: (worktreePath: string) => boolean;
 }
@@ -170,6 +171,9 @@ export class FakeGit implements GitPort {
 
   worktreeHeadSha(worktreePath: string): string | null {
     this.record("worktreeHeadSha", { worktreePath });
+    if (this.fail.worktreeHeadSha?.(worktreePath)) {
+      throw new Error(`fake: worktreeHeadSha failed for ${worktreePath}`);
+    }
     return this.worktreeHeads.get(worktreePath) ?? null;
   }
 
