@@ -35,10 +35,10 @@ export interface GitPort {
     prNumber: number,
     headSha: string,
   ): void;
-  // Current commit checked out in a materialized worktree, or null when the
-  // worktree is missing or git cannot resolve HEAD.
-  worktreeHeadSha(worktreePath: string): string | null;
   worktreeCurrentBranch(worktreePath: string): string | null;
+  // Current worktree HEAD SHA, or null when the path is not a readable git
+  // worktree. Used for diagnostics; callers decide whether null is fatal.
+  worktreeHeadSha(worktreePath: string): string | null;
   worktreeDetach(worktreePath: string): void;
   worktreeRemove(worktreePath: string): void;
   branchDelete(repoId: string, branch: string): void;

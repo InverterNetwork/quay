@@ -1762,6 +1762,272 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
   ]);
 });
 
+test("reviewer blocker with stale task PR and worktree heads records review context drift", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-context-drift");
+  const taskId = "pr-review-repo-review-context-drift-1048";
+  const worktreePath = `${h.dataDir}/worktrees/review-context-drift-1048`;
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(
+    join(worktreePath, ".quay-blocked.md"),
+    [
+      "Cannot review because stored task head, GitHub PR head, and local worktree HEAD disagree.",
+      "Stored task head: stored-head",
+      "GitHub PR head: live-pr-head",
+      "Local worktree HEAD: local-worktree-head",
+    ].join("\n"),
+  );
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, review_infra_failures_consecutive,
+         review_infra_failure_head_sha, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/1048',
+                 'quay-review-repo-review-context-drift-1048',
+                 ?, 1048, 'stored-head', 1, 2, 'stored-head', ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'stored-head',
+              tmux_session = 'quay-review-context-drift-session'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "brief",
+    content: "review brief",
+    extension: "md",
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "final_prompt",
+    content: "review prompt",
+    extension: "md",
+  });
+  built.github.setPrLightweightSnapshotByNumber(repoId, 1048, {
+    state: "open",
+    headSha: "live-pr-head",
+    baseSha: "base-head",
+    mergeable: "unknown",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: { checkSha: null, items: [] },
+  });
+  built.git.setWorktreeHeadSha(worktreePath, "local-worktree-head");
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "review_context_drift",
+  });
+  const task = h.db
+    .query<
+      {
+        state: string;
+        review_infra_failures_consecutive: number;
+        review_infra_failure_head_sha: string | null;
+        tick_error: string | null;
+      },
+      [string]
+    >(
+      `SELECT state, review_infra_failures_consecutive,
+              review_infra_failure_head_sha, tick_error
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toMatchObject({
+    state: "pr-review",
+    review_infra_failures_consecutive: 2,
+    review_infra_failure_head_sha: "stored-head",
+  });
+  expect(task?.tick_error).toContain("Review context drift detected");
+  expect(task?.tick_error).toContain("Stored task head: stored-head");
+  expect(task?.tick_error).toContain("Live PR head: live-pr-head");
+  expect(task?.tick_error).toContain("Local review worktree HEAD: local-worktree-head");
+
+  const attempts = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM attempts
+        WHERE task_id = ? AND reason = 'review_only'`,
+    )
+    .get(taskId);
+  expect(attempts?.n).toBe(1);
+  const event = h.db
+    .query<{ event_type: string; to_state: string; payload_artifact_id: number | null }, [string]>(
+      `SELECT event_type, to_state, payload_artifact_id
+         FROM events
+        WHERE task_id = ? AND event_type = 'review_context_drift'
+        ORDER BY event_id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  expect(event).toEqual({
+    event_type: "review_context_drift",
+    to_state: "pr-review",
+    payload_artifact_id: expect.any(Number),
+  });
+  const attempt = h.db
+    .query<{ exit_kind: string | null; review_verdict: string | null }, [number]>(
+      `SELECT exit_kind, review_verdict FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(attemptId);
+  expect(attempt).toEqual({
+    exit_kind: "review_context_drift",
+    review_verdict: "errored",
+  });
+});
+
+test("reviewer blocker is preserved when drift probe fails before classification", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-context-drift-probe-fails");
+  const taskId = "pr-review-repo-review-context-drift-probe-fails-1048";
+  const worktreePath = `${h.dataDir}/worktrees/review-context-drift-probe-fails-1048`;
+  mkdirSync(worktreePath, { recursive: true });
+  const blockerPath = join(worktreePath, ".quay-blocked.md");
+  writeFileSync(
+    blockerPath,
+    [
+      "Cannot review because stored task head, GitHub PR head, and local worktree HEAD disagree.",
+      "Stored task head: stored-head",
+      "GitHub PR head: live-pr-head",
+      "Local worktree HEAD: local-worktree-head",
+    ].join("\n"),
+  );
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, review_infra_failures_consecutive,
+         review_infra_failure_head_sha, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/1048',
+                 'quay-review-repo-review-context-drift-probe-fails-1048',
+                 ?, 1048, 'stored-head', 1, 2, 'stored-head', ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'stored-head',
+              tmux_session = 'quay-review-context-drift-probe-fails-session'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "brief",
+    content: "review brief",
+    extension: "md",
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "final_prompt",
+    content: "review prompt",
+    extension: "md",
+  });
+  built.github.setPrLightweightSnapshotByNumber(repoId, 1048, {
+    state: "open",
+    headSha: "live-pr-head",
+    baseSha: "base-head",
+    mergeable: "unknown",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: { checkSha: null, items: [] },
+  });
+  built.git.fail.worktreeHeadSha = (path) => path === worktreePath;
+
+  const failedProbe = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(failedProbe).toContainEqual(
+    expect.objectContaining({
+      task_id: taskId,
+      action: "tick_error",
+      error: expect.stringContaining("worktreeHeadSha failed"),
+    }),
+  );
+  expect(existsSync(blockerPath)).toBe(true);
+  let task = h.db
+    .query<
+      {
+        state: string;
+        review_infra_failures_consecutive: number;
+        review_infra_failure_head_sha: string | null;
+      },
+      [string]
+    >(
+      `SELECT state, review_infra_failures_consecutive,
+              review_infra_failure_head_sha
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    state: "pr-review",
+    review_infra_failures_consecutive: 2,
+    review_infra_failure_head_sha: "stored-head",
+  });
+
+  delete built.git.fail.worktreeHeadSha;
+  built.git.setWorktreeHeadSha(worktreePath, "local-worktree-head");
+
+  const retriedProbe = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(retriedProbe).toContainEqual({
+    task_id: taskId,
+    action: "review_context_drift",
+  });
+  expect(existsSync(blockerPath)).toBe(false);
+  task = h.db
+    .query<
+      {
+        state: string;
+        review_infra_failures_consecutive: number;
+        review_infra_failure_head_sha: string | null;
+      },
+      [string]
+    >(
+      `SELECT state, review_infra_failures_consecutive,
+              review_infra_failure_head_sha
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    state: "pr-review",
+    review_infra_failures_consecutive: 2,
+    review_infra_failure_head_sha: "stored-head",
+  });
+});
+
 test("malformed reviewer result parks as reviewer infrastructure failure", async () => {
   h = createHarness();
   const built = buildTickDeps(h);

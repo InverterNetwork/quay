@@ -203,6 +203,11 @@ For `pr-review`:
   `waiting_external_changes`; tick keeps polling the PR by number and schedules
   a fresh `review_only` attempt when the PR head SHA changes. CI/webhook/manual
   `quay review-pr` calls are safe idempotent pokes, not required re-entry.
+- Reviewer blocker with stored task head, live PR head, or local review
+  worktree HEAD drift: records `review_context_drift`, leaves
+  `review_infra_failures_consecutive` unchanged, and does not schedule a retry.
+  Operators should reconcile the task/worktree to the current PR head before
+  requesting another review.
 - Reviewer infrastructure failures retry at the same SHA twice, then park in
   `non_budget_loop`.
 

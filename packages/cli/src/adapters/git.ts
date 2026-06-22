@@ -332,7 +332,12 @@ export class LocalGitAdapter implements GitPort {
 
   worktreeHeadSha(worktreePath: string): string | null {
     if (!existsSync(worktreePath)) return null;
-    const result = runIn(worktreePath, ["git", "rev-parse", "HEAD"]);
+    const result = runIn(worktreePath, [
+      "git",
+      "rev-parse",
+      "--verify",
+      "HEAD",
+    ]);
     if (result.exitCode !== 0) return null;
     const sha = result.stdout.trim();
     return sha === "" ? null : sha;
