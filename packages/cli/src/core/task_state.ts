@@ -205,7 +205,12 @@ export const TASK_TRANSITIONS = [
   transition(
     "pr-review",
     "pr-review",
-    ["review_infra_failed", "review_requested", "review_spawned"],
+    [
+      "review_context_drift",
+      "review_infra_failed",
+      "review_requested",
+      "review_spawned",
+    ],
     "review attempt retried or observed without changing task state",
   ),
   transition(

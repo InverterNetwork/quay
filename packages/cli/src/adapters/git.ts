@@ -330,6 +330,19 @@ export class LocalGitAdapter implements GitPort {
     return branch === "" || branch === "HEAD" ? null : branch;
   }
 
+  worktreeHeadSha(worktreePath: string): string | null {
+    if (!existsSync(worktreePath)) return null;
+    const result = runIn(worktreePath, [
+      "git",
+      "rev-parse",
+      "--verify",
+      "HEAD",
+    ]);
+    if (result.exitCode !== 0) return null;
+    const sha = result.stdout.trim();
+    return sha === "" ? null : sha;
+  }
+
   worktreeDetach(worktreePath: string): void {
     // Severs the bare clone's tracking of this worktree WITHOUT deleting the
     // directory contents — this is what `quay cancel --keep-worktree`

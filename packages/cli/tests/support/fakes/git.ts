@@ -27,6 +27,7 @@ export class FakeGit implements GitPort {
   readonly diffSummaries = new Map<string, DiffSummary>(); // key = `${repoId}\0${base}\0${head}`
   readonly worktrees = new Set<string>();
   readonly worktreeBranches = new Map<string, { repoId: string; branch: string }>();
+  readonly worktreeHeads = new Map<string, string>();
   readonly reposRoot: string;
   fail: FakeGitFailures = {};
 
@@ -159,11 +160,17 @@ export class FakeGit implements GitPort {
       repoId,
       branch: `pr/${prNumber}@${headSha}`,
     });
+    this.worktreeHeads.set(worktreePath, headSha);
   }
 
   worktreeCurrentBranch(worktreePath: string): string | null {
     this.record("worktreeCurrentBranch", { worktreePath });
     return this.worktreeBranches.get(worktreePath)?.branch ?? null;
+  }
+
+  worktreeHeadSha(worktreePath: string): string | null {
+    this.record("worktreeHeadSha", { worktreePath });
+    return this.worktreeHeads.get(worktreePath) ?? null;
   }
 
   worktreeDetach(worktreePath: string): void {
@@ -182,6 +189,7 @@ export class FakeGit implements GitPort {
     rmSync(worktreePath, { recursive: true, force: true });
     this.worktrees.delete(worktreePath);
     this.worktreeBranches.delete(worktreePath);
+    this.worktreeHeads.delete(worktreePath);
   }
 
   branchDelete(repoId: string, branch: string): void {
@@ -251,6 +259,15 @@ export class FakeGit implements GitPort {
     mkdirSync(worktreePath, { recursive: true });
     this.worktrees.add(worktreePath);
     this.worktreeBranches.set(worktreePath, { repoId, branch });
+  }
+  setWorktreeHeadSha(worktreePath: string, sha: string | null): void {
+    mkdirSync(worktreePath, { recursive: true });
+    this.worktrees.add(worktreePath);
+    if (sha === null) {
+      this.worktreeHeads.delete(worktreePath);
+    } else {
+      this.worktreeHeads.set(worktreePath, sha);
+    }
   }
   setOpenPrBranches(repoId: string, branches: string[]): void {
     this.openPrBranches.set(repoId, new Set(branches));

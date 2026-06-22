@@ -98,7 +98,7 @@ binary and invalid UTF-8 artifacts such as `malformed_signal`.
 | `goal_completion_audit` | Durable audit decision for a complete goal report, including reasons and follow-up feedback. |
 | `ci_failure_excerpt` | CI failure details captured from GitHub checks. |
 | `review_comments` | Snapshot of posted review body and inline comments. Used for review respawns and synthetic review forensics. |
-| `review_blocker` | Reviewer blocker or infrastructure-failure diagnostic. |
+| `review_blocker` | Reviewer blocker, review-context-drift diagnostic, or infrastructure-failure diagnostic. |
 | `conflict_slice` | Snapshot of merge-conflict observation. |
 | `slack_escalation_post` | Human question body recorded by `escalate-human`. |
 | `slack_reply` | Human Slack reply recorded by the orchestrator, or by legacy tick ingestion. |
