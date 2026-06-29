@@ -1705,16 +1705,16 @@ function extractLatestReview(parsed: Record<string, unknown>): PrLatestReview {
   let pick: Record<string, unknown> | null = null;
   let comments = "";
   if (latest.length > 0) {
-    // `gh` returns reviews ordered chronologically; pick the last
-    // CHANGES_REQUESTED review when the decision says CHANGES_REQUESTED so
-    // the dedupe key (`last_review_id_acted_on`) is stable.
     const wanted =
       decision === "CHANGES_REQUESTED"
         ? latest.filter(
             (r) => String(r.state ?? "").toUpperCase() === "CHANGES_REQUESTED",
           )
         : latest;
-    pick = wanted[wanted.length - 1] ?? null;
+    pick =
+      decision === "CHANGES_REQUESTED"
+        ? pickNewestReviewForHead(wanted, parsed)
+        : pickNewestReview(wanted);
     if (pick) {
       comments = pick.body !== undefined ? String(pick.body) : "";
     }
@@ -1731,6 +1731,61 @@ function extractLatestReview(parsed: Record<string, unknown>): PrLatestReview {
   };
 }
 
+function pickNewestReviewForHead(
+  reviews: Array<Record<string, unknown>>,
+  parsed: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const rawHeadSha = parsed.headRefOid;
+  const headSha =
+    typeof rawHeadSha === "string" && rawHeadSha.trim() !== ""
+      ? rawHeadSha
+      : null;
+  if (headSha === null) return pickNewestReview(reviews);
+
+  const currentHeadReviews = reviews.filter(
+    (r) => resolveReviewSubmittedHeadSha(r, parsed) === headSha,
+  );
+  return pickNewestReview(
+    currentHeadReviews.length > 0 ? currentHeadReviews : reviews,
+  );
+}
+
+function pickNewestReview(
+  reviews: Array<Record<string, unknown>>,
+): Record<string, unknown> | null {
+  if (reviews.length === 0) return null;
+  let best = reviews[0] ?? null;
+  let bestTime = best === null ? null : parseReviewSubmittedAt(best);
+  for (let i = 1; i < reviews.length; i += 1) {
+    const candidate = reviews[i] ?? null;
+    if (candidate === null) continue;
+    const candidateTime = parseReviewSubmittedAt(candidate);
+    if (candidateTime !== null && bestTime !== null) {
+      if (candidateTime > bestTime) {
+        best = candidate;
+        bestTime = candidateTime;
+      }
+      continue;
+    }
+    if (candidateTime !== null && bestTime === null) {
+      best = candidate;
+      bestTime = candidateTime;
+      continue;
+    }
+    if (candidateTime === null && bestTime === null) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+function parseReviewSubmittedAt(review: Record<string, unknown>): number | null {
+  const raw = review.submittedAt;
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const time = Date.parse(raw);
+  return Number.isFinite(time) ? time : null;
+}
+
 function extractReviewSubmittedHeadSha(
   picked: Record<string, unknown> | null,
 ): string | null {
@@ -1745,6 +1800,16 @@ function extractReviewSubmittedHeadSha(
     return commitOid;
   }
   return null;
+}
+
+function resolveReviewSubmittedHeadSha(
+  review: Record<string, unknown>,
+  parsed: Record<string, unknown>,
+): string | null {
+  return (
+    extractReviewSubmittedHeadSha(review) ??
+    extractReviewSubmittedHeadSha(resolveReviewFallbackRow(review, parsed))
+  );
 }
 
 // Recover the `reviews` row for the picked `latestReviews` entry. Some `gh`

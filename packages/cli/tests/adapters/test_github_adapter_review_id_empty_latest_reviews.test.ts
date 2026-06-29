@@ -223,6 +223,134 @@ esac
   expect(snap!.latestReview.submittedHeadSha).toBe("head-old");
 });
 
+test("CHANGES_REQUESTED selection uses submittedAt instead of latestReviews order", () => {
+  installGhStub(`
+case "$*" in
+  *"checks"*"--required"*)
+    echo '[]'
+    exit 0
+    ;;
+  *"checks"*)
+    echo '[]'
+    exit 0
+    ;;
+  *"api"*"graphql"*)
+    case "$*" in
+      *"PRR_new_current"*)
+        cat <<'JSON'
+{"data":{"node":{"comments":{"nodes":[
+  {"path":"src/current.ts","line":12,"originalLine":12,"body":"Fix the current-head issue"}
+]}}}}
+JSON
+        exit 0
+        ;;
+      *)
+        echo "graphql called with stale review id: $*" 1>&2
+        exit 99
+        ;;
+    esac
+    ;;
+  *"view"*)
+    cat <<'JSON'
+{
+  "state":"OPEN",
+  "headRefOid":"head-new",
+  "mergeable":"MERGEABLE",
+  "reviewDecision":"CHANGES_REQUESTED",
+  "latestReviews":[
+    {"id":"PRR_new_current","state":"CHANGES_REQUESTED","body":"new current feedback","submittedAt":"2026-06-29T11:14:11Z","commit":{"oid":"head-new"}},
+    {"id":"PRR_old_stale","state":"CHANGES_REQUESTED","body":"old stale feedback","submittedAt":"2026-06-29T08:32:00Z","commit":{"oid":"head-old"}}
+  ],
+  "reviews":[
+    {"id":"PRR_old_stale","state":"CHANGES_REQUESTED","body":"old stale feedback","submittedAt":"2026-06-29T08:32:00Z","commit":{"oid":"head-old"}},
+    {"id":"PRR_new_current","state":"CHANGES_REQUESTED","body":"new current feedback","submittedAt":"2026-06-29T11:14:11Z","commit":{"oid":"head-new"}}
+  ]
+}
+JSON
+    exit 0
+    ;;
+  *)
+    echo '[]'
+    exit 0
+    ;;
+esac
+`);
+  const { reposRoot, repoId } = makeBareDir();
+  const adapter = new GitHubCliAdapter(reposRoot);
+  const snap = adapter.prSnapshot(repoId, "quay/branch");
+  expect(snap).not.toBeNull();
+  expect(snap!.headSha).toBe("head-new");
+  expect(snap!.latestReview.latestReviewId).toBe("PRR_new_current");
+  expect(snap!.latestReview.submittedHeadSha).toBe("head-new");
+  expect(snap!.latestReview.comments).toContain("new current feedback");
+  expect(snap!.latestReview.comments).toContain("Fix the current-head issue");
+  expect(snap!.latestReview.comments).not.toContain("old stale feedback");
+});
+
+test("CHANGES_REQUESTED selection prefers current head over newer stale review", () => {
+  installGhStub(`
+case "$*" in
+  *"checks"*"--required"*)
+    echo '[]'
+    exit 0
+    ;;
+  *"checks"*)
+    echo '[]'
+    exit 0
+    ;;
+  *"api"*"graphql"*)
+    case "$*" in
+      *"PRR_current_older"*)
+        cat <<'JSON'
+{"data":{"node":{"comments":{"nodes":[
+  {"path":"src/current.ts","line":21,"originalLine":21,"body":"Fix the current-head regression"}
+]}}}}
+JSON
+        exit 0
+        ;;
+      *)
+        echo "graphql called with stale review id: $*" 1>&2
+        exit 99
+        ;;
+    esac
+    ;;
+  *"view"*)
+    cat <<'JSON'
+{
+  "state":"OPEN",
+  "headRefOid":"head-new",
+  "mergeable":"MERGEABLE",
+  "reviewDecision":"CHANGES_REQUESTED",
+  "latestReviews":[
+    {"id":"PRR_current_older","state":"CHANGES_REQUESTED","body":"current-head feedback","submittedAt":"2026-06-29T11:14:11Z","commit":{"oid":"head-new"}},
+    {"id":"PRR_stale_newer","state":"CHANGES_REQUESTED","body":"stale newer feedback","submittedAt":"2026-06-29T12:00:00Z","commit":{"oid":"head-old"}}
+  ],
+  "reviews":[
+    {"id":"PRR_current_older","state":"CHANGES_REQUESTED","body":"current-head feedback","submittedAt":"2026-06-29T11:14:11Z","commit":{"oid":"head-new"}},
+    {"id":"PRR_stale_newer","state":"CHANGES_REQUESTED","body":"stale newer feedback","submittedAt":"2026-06-29T12:00:00Z","commit":{"oid":"head-old"}}
+  ]
+}
+JSON
+    exit 0
+    ;;
+  *)
+    echo '[]'
+    exit 0
+    ;;
+esac
+`);
+  const { reposRoot, repoId } = makeBareDir();
+  const adapter = new GitHubCliAdapter(reposRoot);
+  const snap = adapter.prSnapshot(repoId, "quay/branch");
+  expect(snap).not.toBeNull();
+  expect(snap!.headSha).toBe("head-new");
+  expect(snap!.latestReview.latestReviewId).toBe("PRR_current_older");
+  expect(snap!.latestReview.submittedHeadSha).toBe("head-new");
+  expect(snap!.latestReview.comments).toContain("current-head feedback");
+  expect(snap!.latestReview.comments).toContain("Fix the current-head regression");
+  expect(snap!.latestReview.comments).not.toContain("stale newer feedback");
+});
+
 test("empty latestReviews[].id with no recoverable reviews row yields null (no graphql call)", () => {
   // Reviews list is empty (or carries no usable id). Without a recoverable
   // node id, the guard must short-circuit the graphql fetch — otherwise
