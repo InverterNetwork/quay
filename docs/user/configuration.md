@@ -202,7 +202,7 @@ bot account); leaving it unset in that setup will never match the posted
 review and can park the task in `non_budget_loop` after the infra-failure
 retry budget runs out. When Quay sees reviews at the same head SHA from a
 different author, the task error reports the configured login and observed
-review author identities so operators can correct the drift.
+review author identities so operators can correct the identity drift.
 
 Both regular user accounts and GitHub App identities are supported. Use the
 form that matches the reviewer's actual GitHub identity:

@@ -254,6 +254,7 @@ export type TickAction =
   | "review_approved"
   | "review_changes_requested"
   | "review_errored"
+  | "review_context_drift"
   | "review_retry_scheduled"
   | "conflict_respawn_scheduled"
   | "non_budget_loop_parked"
@@ -2062,14 +2063,19 @@ function processRunningReviewAttempt(
     } catch (err) {
       blocker = `Unable to read reviewer blocker file: ${(err as Error).message}`;
     }
-    try {
-      rmSync(blockerPath, { force: true });
-    } catch {}
     // markReviewInfraFailure persists the blocker as a review_blocker
     // artifact inside its txn. A second write here would collide on the
     // (task_id, attempt_id, kind, content_hash) unique index and roll
     // the whole transition back, leaving the task stuck on tick_error.
-    return markReviewInfraFailure(deps, task, blocker, exitInfo, options);
+    const drift = detectReviewContextDrift(deps, task);
+    const result =
+      drift !== null
+        ? markReviewContextDrift(deps, task, blocker, drift, exitInfo)
+        : markReviewInfraFailure(deps, task, blocker, exitInfo, options);
+    try {
+      rmSync(blockerPath, { force: true });
+    } catch {}
+    return result;
   }
 
   if (task.pr_number === null) {
@@ -5051,6 +5057,113 @@ function refreshPrMetadataBeforeReviewRespawn(
   return deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
 }
 
+interface ReviewContextDrift {
+  taskHeadSha: string;
+  prHeadSha: string | null;
+  worktreeHeadSha: string | null;
+}
+
+function detectReviewContextDrift(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+): ReviewContextDrift | null {
+  const snapshot =
+    task.pr_number !== null
+      ? deps.github.prLightweightSnapshotByNumber(task.repo_id, task.pr_number)
+      : deps.github.prLightweightSnapshot(task.repo_id, task.branch_name);
+  const prHeadSha = snapshot?.headSha ?? null;
+  const worktreeHeadSha = deps.git.worktreeHeadSha(task.worktree_path);
+  const knownHeads = [task.head_sha, prHeadSha, worktreeHeadSha].filter(
+    (sha): sha is string => sha !== null && sha !== "",
+  );
+  if (new Set(knownHeads).size <= 1) return null;
+  return {
+    taskHeadSha: task.head_sha,
+    prHeadSha,
+    worktreeHeadSha,
+  };
+}
+
+function composeReviewContextDriftDiagnostic(
+  reviewerBlocker: string,
+  drift: ReviewContextDrift,
+): string {
+  const lines = [
+    "Review context drift detected. The reviewer safely refused to continue because the review target is stale or inconsistent.",
+    "",
+    `Stored task head: ${drift.taskHeadSha}`,
+    `Live PR head: ${drift.prHeadSha ?? "<unavailable>"}`,
+    `Local review worktree HEAD: ${drift.worktreeHeadSha ?? "<unavailable>"}`,
+    "",
+    "This is not a reviewer infrastructure failure. Reconcile the task head/worktree with the current PR head before retrying review.",
+  ];
+  const trimmedBlocker = reviewerBlocker.trim();
+  if (trimmedBlocker !== "") {
+    lines.push("", "Reviewer blocker:", trimmedBlocker);
+  }
+  return lines.join("\n");
+}
+
+function markReviewContextDrift(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  reviewerBlocker: string,
+  drift: ReviewContextDrift,
+  exitInfo: PaneExitInfo,
+): TickTaskResult {
+  collectReviewAttemptArtifacts(deps, task);
+  const now = deps.clock.nowISO();
+  const diagnostic = composeReviewContextDriftDiagnostic(reviewerBlocker, drift);
+
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    const artifact = deps.artifactStore.writeArtifact({
+      taskId: task.task_id,
+      attemptId: task.attempt_id,
+      kind: "review_blocker",
+      content: diagnostic,
+      extension: "md",
+    });
+    deps.db
+      .query(
+        `UPDATE attempts
+            SET ended_at = ?,
+                exit_kind = 'review_context_drift',
+                exit_code = ?,
+                exit_signal = ?,
+                review_verdict = 'errored'
+          WHERE attempt_id = ? AND ended_at IS NULL`,
+      )
+      .run(now, exitInfo.exitCode, exitInfo.exitSignal, task.attempt_id);
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET state = 'pr-review',
+                tick_error = ?,
+                updated_at = ?
+          WHERE task_id = ? AND state = 'pr-review'
+            AND cancel_requested_at IS NULL`,
+      )
+      .run(diagnostic, now, task.task_id);
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state,
+           payload_artifact_id, occurred_at
+         ) VALUES (?, ?, 'review_context_drift', 'pr-review', 'pr-review', ?, ?)`,
+      )
+      .run(task.task_id, task.attempt_id, artifact.artifactId, now);
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+
+  return { task_id: task.task_id, action: "review_context_drift" };
+}
+
 function markReviewInfraFailure(
   deps: TickDeps,
   task: ReviewAttemptTaskRow,
@@ -6609,6 +6722,36 @@ function promoteAndSpawnReviewer(
     );
   }
 
+  const livePr = deps.github.freshPrView(task.repo_id, task.pr_number);
+  const liveHeadSha = livePr?.headSha.trim() ?? "";
+  if (liveHeadSha !== "" && liveHeadSha !== task.head_sha) {
+    const retargeted = enterReview(
+      {
+        db: deps.db,
+        clock: deps.clock,
+        github: deps.github,
+        artifactStore: deps.artifactStore,
+        tmux: deps.tmux,
+      },
+      {
+        repoId: task.repo_id,
+        prNumber: task.pr_number,
+        headSha: liveHeadSha,
+        reviewerEnabled: true,
+        gateQuayOwnedDone: true,
+        referenceReposRoot: deps.referenceReposRoot,
+        ciIgnorePolicy: options.ciIgnorePolicy,
+      },
+    );
+    if (retargeted.scheduled) {
+      return { task_id: task.task_id, action: "review_requested" };
+    }
+    if (retargeted.pending_ci) {
+      return { task_id: task.task_id, action: "ci_pending" };
+    }
+    return { task_id: task.task_id, action: "skipped_predicate" };
+  }
+
   const tokenPreflight = resolveGithubActorToken(
     "reviewer",
     deps,
@@ -6631,6 +6774,16 @@ function promoteAndSpawnReviewer(
         task.pr_number,
         task.head_sha,
       );
+      const worktreeHeadSha = deps.git.worktreeHeadSha(task.worktree_path);
+      if (worktreeHeadSha !== task.head_sha) {
+        return markReviewInfraFailure(
+          deps,
+          task,
+          `review worktree HEAD (${worktreeHeadSha ?? "unknown"}) does not match review head SHA ${task.head_sha}`,
+          EXIT_INFO_NONE,
+          options,
+        );
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return markReviewInfraFailure(deps, task, message, EXIT_INFO_NONE, options);

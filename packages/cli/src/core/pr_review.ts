@@ -40,7 +40,8 @@ export type ReviewVerdict = "approved" | "changes_requested" | "errored" | "supe
 export type EnterReviewSkippedReason =
   | "active_attempt_exists"
   | "terminal_verdict_exists"
-  | "quay_owned_gate_disabled";
+  | "quay_owned_gate_disabled"
+  | "parked_non_synthetic_task";
 
 export type EnterReviewErrorKind = "reviewer_disabled" | "pr_not_found";
 
@@ -232,7 +233,10 @@ export function enterReview(
       `PR ${input.repoId}:${input.prNumber} not found`,
     );
   }
-  const headSha = input.headSha ?? pr.headSha;
+  // `input.headSha` is a caller hint from polling or stored task context. The
+  // PR view is the live authority; using the hint here can schedule a reviewer
+  // against a commit GitHub has already moved past.
+  const headSha = pr.headSha;
   if (headSha.trim() === "") {
     throw new EnterReviewError(
       "pr_not_found",
@@ -254,6 +258,21 @@ export function enterReview(
       scheduled: false,
       pending_ci: false,
       skipped_reason: "quay_owned_gate_disabled",
+    };
+  }
+  if (
+    existing !== null &&
+    existing.state === "non_budget_loop" &&
+    existing.authoring_mode !== "synthetic_review"
+  ) {
+    return {
+      task_id: existing.task_id,
+      attempt_id: null,
+      state: existing.state,
+      review_verdict: null,
+      scheduled: false,
+      pending_ci: false,
+      skipped_reason: "parked_non_synthetic_task",
     };
   }
 
@@ -283,18 +302,23 @@ export function enterReview(
 
   const supersededSessions: string[] = [];
   const repoCiPolicy = loadRepoCiIgnorePolicy(deps.db, input.repoId);
-  const ci = classifyCi(
-    deps.github.prSnapshotByNumber(input.repoId, input.prNumber) ?? {
+  const prSnapshot = deps.github.prSnapshotByNumber(input.repoId, input.prNumber);
+  const ciSnapshot = prSnapshot ?? {
       state: "open",
       headSha,
       baseSha: null,
       mergeable: "unknown",
       latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
       checks: { checkSha: null, items: [] },
-    },
-    null,
-    resolveCiIgnorePolicy(input.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repoCiPolicy),
-  );
+    };
+  const ci =
+    ciSnapshot.headSha === headSha
+      ? classifyCi(
+          ciSnapshot,
+          null,
+          resolveCiIgnorePolicy(input.ciIgnorePolicy ?? EMPTY_CI_IGNORE_POLICY, repoCiPolicy),
+        )
+      : "stale";
   const shouldScheduleNow = ci === "pass";
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -304,6 +328,19 @@ export function enterReview(
       );
       for (const tag of tags) insertTag.run(task.task_id, tag, now);
     }
+
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET pr_number = COALESCE(pr_number, ?),
+                pr_url = COALESCE(pr_url, ?),
+                pr_title = ?,
+                head_sha = ?,
+                updated_at = ?,
+                tick_error = NULL
+          WHERE task_id = ?`,
+      )
+      .run(input.prNumber, pr.url, pr.title, headSha, now, task.task_id);
 
     const toSupersede = deps.db
       .query<SupersededAttemptRow, [string, string]>(
@@ -499,6 +536,9 @@ export function enterReview(
     });
 
     assertTaskState(task.state);
+    const revivingParkedReview =
+      task.state === "non_budget_loop" &&
+      task.authoring_mode === "synthetic_review";
     const transition = transitionTaskState(deps, {
       taskId: task.task_id,
       from: task.state,
@@ -515,7 +555,27 @@ export function enterReview(
           headSha,
         },
         clearTickError: true,
+        resetReviewInfraFailures: revivingParkedReview,
       },
+      ...(revivingParkedReview
+        ? {
+            guards: {
+              authoringMode: "synthetic_review",
+              taskIdPrefix: SYNTHETIC_PR_REVIEW_PREFIX,
+            },
+          }
+        : {}),
+      eventData: revivingParkedReview
+        ? {
+            recovery: "revived_parked_synthetic_review",
+            pr_number: input.prNumber,
+            head_sha: headSha,
+            prior_review_infra_failures:
+              task.review_infra_failures_consecutive,
+            prior_review_infra_failure_head_sha:
+              task.review_infra_failure_head_sha,
+          }
+        : undefined,
     });
     if (!transition.applied) {
       deps.db.exec("ROLLBACK");
