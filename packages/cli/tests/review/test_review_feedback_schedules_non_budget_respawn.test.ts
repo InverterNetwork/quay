@@ -204,3 +204,73 @@ test("done polling ignores stale requested-changes reviews from older head", asy
     non_budget_respawns_consumed: 0,
   });
 });
+
+test("done polling requeues for a newer selected review on the current head", async () => {
+  h = createHarness();
+  h.clock.set("2026-06-29T11:20:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-review-newer-current");
+  const taskId = insertTask(h.db, {
+    taskId: "task-review-newer-current",
+    repoId,
+    state: "done",
+  });
+  seedTaskObjective(h, taskId);
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-06-29T09:06:49.000Z",
+  });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET attempts_consumed = 1,
+              last_review_id_acted_on = 'PRR_old_stale'
+        WHERE task_id = ?`,
+    )
+    .run(taskId);
+
+  const built = buildTickDeps(h);
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, {
+    state: "open",
+    headSha: "head-new",
+    baseSha: "base-rev",
+    mergeable: "mergeable",
+    latestReview: {
+      decision: "CHANGES_REQUESTED",
+      latestReviewId: "PRR_new_current",
+      submittedHeadSha: "head-new",
+      comments: "Fresh current-head feedback selected from the PR reviews.",
+    },
+    checks: {
+      checkSha: "head-new",
+      items: [
+        { name: "build", workflow: null, bucket: "pass", required: true },
+      ],
+    },
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([
+    { task_id: taskId, action: "review_respawn_scheduled" },
+  ]);
+
+  const task = h.db
+    .query<
+      {
+        state: string;
+        last_review_id_acted_on: string | null;
+        non_budget_respawns_consumed: number;
+      },
+      [string]
+    >(
+      `SELECT state, last_review_id_acted_on, non_budget_respawns_consumed
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    state: "queued",
+    last_review_id_acted_on: "PRR_new_current",
+    non_budget_respawns_consumed: 1,
+  });
+});
