@@ -529,6 +529,9 @@ This records the question and moves the task to `waiting_human` while
 preserving the orchestrator claim. Quay does not post to Slack; the
 orchestrator owns routing, posting, waiting, and fallback channels. If
 `--thread-ref` is omitted, the recorded thread metadata can remain empty.
+`--thread-ref` accepts canonical `CHANNEL:THREAD_TS`; the legacy
+`slack:CHANNEL:THREAD_TS` form is normalized before storage. Invalid thread refs
+fail before the task is moved to `waiting_human`.
 
 ## Record Human Reply
 

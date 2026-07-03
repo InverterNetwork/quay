@@ -17,6 +17,7 @@ import { baseBranchNameSchema } from "./base_branch.ts";
 import type { AgentResolver } from "./agents.ts";
 import { QuayError } from "./errors.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import { normalizeSlackThreadRef } from "./slack_thread_ref.ts";
 import {
   composeWorkerPrompt,
   INITIAL_ATTEMPT_GUIDANCE,
@@ -806,20 +807,6 @@ function parseInput(raw: unknown): EnqueueInput {
   throw new QuayError("validation_error", `enqueue input invalid: ${summary}`, {
     issues: result.error.issues,
   });
-}
-
-function normalizeSlackThreadRef(ref: string | null): string | null {
-  if (ref === null) return null;
-  const trimmed = ref.trim();
-  const match = /^(?:slack:)?([A-Z0-9]+):([0-9]+\.[0-9]+)$/.exec(trimmed);
-  if (match === null) {
-    throw new QuayError(
-      "validation_error",
-      "slack_thread_ref must be CHANNEL:THREAD_TS or slack:CHANNEL:THREAD_TS",
-      { slack_thread_ref: ref },
-    );
-  }
-  return `${match[1]}:${match[2]}`;
 }
 
 function lookupRepo(db: DB, repoId: string): RepoRow | null {
