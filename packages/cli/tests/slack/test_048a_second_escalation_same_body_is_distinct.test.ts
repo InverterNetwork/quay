@@ -37,7 +37,7 @@ test("test_048a_second_escalation_same_body_is_distinct", async () => {
   });
   h.db
     .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
-    .run("C48a:0.1", taskId);
+    .run("C48A:0.1", taskId);
 
   const built = buildTickDeps(h);
 
@@ -65,7 +65,7 @@ test("test_048a_second_escalation_same_body_is_distinct", async () => {
   markWaitingHumanLegacy(h.db, taskId);
 
   await tick_once(built.deps); // post #1
-  built.slack.appendHumanReply("C48a:0.1", "yes ship it");
+  built.slack.appendHumanReply("C48A:0.1", "yes ship it");
   await tick_once(built.deps); // ingest reply → awaiting-next-brief
 
   const stateAfterIngest = h.db

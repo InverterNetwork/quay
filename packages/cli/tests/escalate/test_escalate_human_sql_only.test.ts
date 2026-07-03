@@ -121,7 +121,7 @@ test("test_escalate_human_claim_transition_is_sql_only", async () => {
   });
 });
 
-test("test_escalate_human_thread_ref_override_persists", async () => {
+test("test_escalate_human_thread_ref_override_persists_canonical_ref", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
   const repoId = insertRepo(h.db, "repo-escalate-override");
@@ -157,6 +157,92 @@ test("test_escalate_human_thread_ref_override_persists", async () => {
     )
     .get(taskId);
   expect(task!.slack_thread_ref).toBe("C999:0.42");
+});
+
+test("test_escalate_human_thread_ref_override_normalizes_prefixed_ref", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-28T10:00:00.000Z");
+  const repoId = insertRepo(h.db, "repo-escalate-prefixed-override");
+  const taskId = insertTask(h.db, {
+    taskId: "task-escalate-prefixed-override",
+    repoId,
+    state: "awaiting-next-brief",
+  });
+  seedTaskObjective(h, taskId);
+  insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-28T08:00:00.000Z" });
+  h.db
+    .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
+    .run("C123:0.1", taskId);
+
+  const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
+  if (!claim.ok) throw new Error("expected claim");
+  const store = createArtifactStore({ db: h.db, artifactRoot: h.artifactRoot, clock: h.clock });
+
+  const result = await escalate_human(
+    { db: h.db, clock: h.clock, artifactStore: store, ids: h.ids },
+    {
+      taskId,
+      claimId: claim.value.claim_id,
+      questionBody: "prefixed override thread test",
+      threadRef: "slack:C0AEN8KDRT2:1782803100.722179",
+    },
+  );
+  if (!result.ok) throw new Error("expected escalation success");
+
+  const task = h.db
+    .query<{ slack_thread_ref: string | null }, [string]>(
+      `SELECT slack_thread_ref FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(result.value.thread_ref).toBe("C0AEN8KDRT2:1782803100.722179");
+  expect(task!.slack_thread_ref).toBe("C0AEN8KDRT2:1782803100.722179");
+});
+
+test("test_escalate_human_thread_ref_override_rejects_malformed_ref", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-28T10:00:00.000Z");
+  const repoId = insertRepo(h.db, "repo-escalate-invalid-override");
+  const taskId = insertTask(h.db, {
+    taskId: "task-escalate-invalid-override",
+    repoId,
+    state: "awaiting-next-brief",
+  });
+  seedTaskObjective(h, taskId);
+  insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-28T08:00:00.000Z" });
+  h.db
+    .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
+    .run("C123:0.1", taskId);
+
+  const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
+  if (!claim.ok) throw new Error("expected claim");
+  const store = createArtifactStore({ db: h.db, artifactRoot: h.artifactRoot, clock: h.clock });
+
+  const result = await escalate_human(
+    { db: h.db, clock: h.clock, artifactStore: store, ids: h.ids },
+    {
+      taskId,
+      claimId: claim.value.claim_id,
+      questionBody: "invalid override thread test",
+      threadRef: "slack:C0AEN8KDRT2",
+    },
+  );
+
+  expect(result).toMatchObject({
+    ok: false,
+    error: {
+      code: "validation_error",
+      message: "slack_thread_ref must be CHANNEL:THREAD_TS or slack:CHANNEL:THREAD_TS",
+    },
+  });
+  const task = h.db
+    .query<{ state: string; slack_thread_ref: string | null }, [string]>(
+      `SELECT state, slack_thread_ref FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    state: "claimed-by-orchestrator",
+    slack_thread_ref: "C123:0.1",
+  });
 });
 
 test("test_orchestrator_owned_human_loop_records_reply_then_submits_brief", async () => {

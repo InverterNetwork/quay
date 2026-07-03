@@ -48,6 +48,8 @@ import {
   loadTaskGoal,
   type TaskGoalRow,
 } from "./goals.ts";
+import { normalizeSlackThreadRef } from "./slack_thread_ref.ts";
+import { QuayError } from "./errors.ts";
 
 export type ClaimErrorCode =
   | "unknown_task"
@@ -698,10 +700,19 @@ export async function escalate_human(
     );
   }
 
-  const threadRef =
-    input.threadRef !== undefined && input.threadRef !== null
-      ? input.threadRef
-      : row.slack_thread_ref;
+  let threadRef: string | null;
+  try {
+    threadRef = normalizeSlackThreadRef(
+      input.threadRef !== undefined && input.threadRef !== null
+        ? input.threadRef
+        : row.slack_thread_ref,
+    );
+  } catch (err) {
+    if (err instanceof QuayError && err.code === "validation_error") {
+      return fail("validation_error", err.message, err.details);
+    }
+    throw err;
+  }
 
   const prior = loadLatestAttempt(deps.db, input.taskId);
   if (!prior) {

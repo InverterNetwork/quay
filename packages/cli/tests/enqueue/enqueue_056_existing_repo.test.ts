@@ -91,6 +91,81 @@ test("enqueue uses task-level base_branch override for fetch, worktree, and task
   expect(row).toEqual({ task_base: "dev", repo_base: "main" });
 });
 
+test("enqueue stores canonical slack_thread_ref", () => {
+  h = createHarness();
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+  repos.add({ ...REPO });
+
+  const built = buildEnqueueDeps(h);
+  built.git.seedBareClone(REPO.repo_id);
+
+  h.ids.push("33333333aaaaaaaaaaaaaaaaaaaaaaaa");
+  const result = enqueue(built.deps, {
+    repo_id: REPO.repo_id,
+    external_ref: "ITRY-904",
+    brief: "Brief content",
+    ticket_snapshot: "Ticket body",
+    slack_thread_ref: "C0AEN8KDRT2:1782803100.722179",
+  });
+
+  const row = h.db
+    .query<{ slack_thread_ref: string | null }, [string]>(
+      "SELECT slack_thread_ref FROM tasks WHERE task_id = ?",
+    )
+    .get(result.task_id);
+  expect(row?.slack_thread_ref).toBe("C0AEN8KDRT2:1782803100.722179");
+});
+
+test("enqueue normalizes prefixed slack_thread_ref before insert", () => {
+  h = createHarness();
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+  repos.add({ ...REPO });
+
+  const built = buildEnqueueDeps(h);
+  built.git.seedBareClone(REPO.repo_id);
+
+  h.ids.push("44444444aaaaaaaaaaaaaaaaaaaaaaaa");
+  const result = enqueue(built.deps, {
+    repo_id: REPO.repo_id,
+    external_ref: "ITRY-905",
+    brief: "Brief content",
+    ticket_snapshot: "Ticket body",
+    slack_thread_ref: "slack:C0AEN8KDRT2:1782803100.722179",
+  });
+
+  const row = h.db
+    .query<{ slack_thread_ref: string | null }, [string]>(
+      "SELECT slack_thread_ref FROM tasks WHERE task_id = ?",
+    )
+    .get(result.task_id);
+  expect(row?.slack_thread_ref).toBe("C0AEN8KDRT2:1782803100.722179");
+});
+
+test("enqueue rejects malformed slack_thread_ref before task creation", () => {
+  h = createHarness();
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+  repos.add({ ...REPO });
+
+  const built = buildEnqueueDeps(h);
+  built.git.seedBareClone(REPO.repo_id);
+
+  expect(() =>
+    enqueue(built.deps, {
+      repo_id: REPO.repo_id,
+      external_ref: "ITRY-906",
+      brief: "Brief content",
+      ticket_snapshot: "Ticket body",
+      slack_thread_ref: "slack:C0AEN8KDRT2",
+    }),
+  ).toThrow(/slack_thread_ref must be CHANNEL:THREAD_TS/);
+
+  expect(built.git.countCalls("fetch")).toBe(0);
+  const row = h.db
+    .query<{ count: number }, []>("SELECT count(*) AS count FROM tasks")
+    .get();
+  expect(row?.count).toBe(0);
+});
+
 test("enqueue rejects unsafe task-level base_branch override", () => {
   h = createHarness();
   const repos = createRepoService({ db: h.db, clock: h.clock });

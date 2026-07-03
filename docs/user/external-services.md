@@ -147,8 +147,9 @@ Quay stores Slack threads as:
 
 Enqueue-time inputs may include a leading `slack:` route prefix for compatibility
 with upstream delivery-target strings, but Quay strips that prefix and persists
-only the canonical form above. Malformed thread refs are rejected before task
-creation.
+only the canonical form above. `quay escalate-human --thread-ref` follows the
+same storage contract. Malformed thread refs are rejected before task creation or
+task row updates.
 
 The Linear `quay-config` block should use a Slack permalink:
 
