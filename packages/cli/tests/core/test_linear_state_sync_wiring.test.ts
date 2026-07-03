@@ -128,7 +128,7 @@ test("test_linear_sync_record_human_reply_writes_in_progress", async () => {
     repoId,
     state: "awaiting-next-brief",
   });
-  const threadRef = "Cabc:1.0";
+  const threadRef = "CABC:1.0";
   setExternalRef(h, taskId, "ENG-200");
   setSlackThread(h, taskId, threadRef);
   insertAttempt(h.db, {

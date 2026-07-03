@@ -50,7 +50,8 @@ async function setupEscalation(opts: {
     attemptNumber: 1,
     spawnedAt: "2026-04-29T08:00:00.000Z",
   });
-  const threadRef = `C${opts.slug}:0.1`;
+  const channelId = `C${opts.slug.toUpperCase().replace(/[^A-Z0-9]/g, "")}`;
+  const threadRef = `${channelId}:0.1`;
   h.db
     .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
     .run(threadRef, taskId);
