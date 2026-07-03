@@ -145,10 +145,11 @@ Quay stores Slack threads as:
 <channel_id>:<message_ts>
 ```
 
-Task creation and `quay escalate-human --thread-ref` reject malformed Slack
-thread refs. Operator inputs may provide the legacy
-`slack:<channel_id>:<message_ts>` form, but Quay normalizes it to the canonical
-storage shape before writing `tasks.slack_thread_ref`.
+Enqueue-time inputs may include a leading `slack:` route prefix for compatibility
+with upstream delivery-target strings, but Quay strips that prefix and persists
+only the canonical form above. `quay escalate-human --thread-ref` follows the
+same storage contract. Malformed thread refs are rejected before task creation or
+task row updates.
 
 The Linear `quay-config` block should use a Slack permalink:
 

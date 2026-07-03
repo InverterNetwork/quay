@@ -27,9 +27,9 @@ Optional:
   names. If omitted, Quay uses the task id.
 - `--ticket-snapshot-file <path>`: stored as a `ticket_snapshot` artifact.
 - `--slack-thread-ref <channel:ts>`: used later for human escalation. Quay
-  stores this as canonical `CHANNEL:THREAD_TS`. Legacy input in
-  `slack:CHANNEL:THREAD_TS` form is accepted but normalized before task
-  creation; malformed values are rejected.
+  stores the canonical `<channel_id>:<message_ts>` form; `slack:<channel_id>:<message_ts>`
+  is accepted on input and normalized before persistence. Malformed values are
+  rejected before task creation.
 - `--worker-execution <oneshot|goal>`: defaults to `oneshot`. Use `goal` for
   long-running tasks that should continue across worker attempts until the
   worker reports active, blocked, or complete goal status.

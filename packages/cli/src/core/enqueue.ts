@@ -250,6 +250,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
   const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
   const dependencies = input.dependencies ?? [];
+  const slackThreadRef = normalizeSlackThreadRef(input.slack_thread_ref);
   const plannedRunNumber = lookupNextRunNumber(
     deps.db,
     repo.repo_id,
@@ -458,7 +459,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           tmuxId,
           worktreePath,
           retryBudget,
-          input.slack_thread_ref ?? null,
+          slackThreadRef,
           input.authors_json ?? null,
           workerExecution,
           prScreenshotsRequested ? 1 : 0,
