@@ -245,6 +245,9 @@ state the limitation in the PR if screenshots cannot be captured or attached.
 worker agent, requires it to advertise the `screenshots` capability, persists
 the hard prompt mode, and fails before task creation if the capability is
 missing.
+`--slack-thread-ref` accepts canonical `CHANNEL:THREAD_TS`; the legacy
+`slack:CHANNEL:THREAD_TS` form is normalized before storage. Invalid Slack
+thread refs fail enqueue before task creation.
 `--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,
 and `--slack-thread-ref`.
 

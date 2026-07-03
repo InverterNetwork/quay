@@ -26,7 +26,10 @@ Optional:
 - `--external-ref <ref>`: stored on the task and used to derive branch/tmux
   names. If omitted, Quay uses the task id.
 - `--ticket-snapshot-file <path>`: stored as a `ticket_snapshot` artifact.
-- `--slack-thread-ref <channel:ts>`: used later for human escalation.
+- `--slack-thread-ref <channel:ts>`: used later for human escalation. Quay
+  stores this as canonical `CHANNEL:THREAD_TS`. Legacy input in
+  `slack:CHANNEL:THREAD_TS` form is accepted but normalized before task
+  creation; malformed values are rejected.
 - `--worker-execution <oneshot|goal>`: defaults to `oneshot`. Use `goal` for
   long-running tasks that should continue across worker attempts until the
   worker reports active, blocked, or complete goal status.

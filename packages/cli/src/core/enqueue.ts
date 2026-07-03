@@ -793,13 +793,33 @@ function resolveTaskAgentSnapshot(
 
 function parseInput(raw: unknown): EnqueueInput {
   const result = enqueueInputSchema.safeParse(raw);
-  if (result.success) return result.data;
+  if (result.success) {
+    const slackThreadRef = normalizeSlackThreadRef(
+      result.data.slack_thread_ref ?? null,
+    );
+    if (result.data.slack_thread_ref === undefined) return result.data;
+    return { ...result.data, slack_thread_ref: slackThreadRef };
+  }
   const summary = result.error.issues
     .map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`)
     .join("; ");
   throw new QuayError("validation_error", `enqueue input invalid: ${summary}`, {
     issues: result.error.issues,
   });
+}
+
+function normalizeSlackThreadRef(ref: string | null): string | null {
+  if (ref === null) return null;
+  const trimmed = ref.trim();
+  const match = /^(?:slack:)?([A-Z0-9]+):([0-9]+\.[0-9]+)$/.exec(trimmed);
+  if (match === null) {
+    throw new QuayError(
+      "validation_error",
+      "slack_thread_ref must be CHANNEL:THREAD_TS or slack:CHANNEL:THREAD_TS",
+      { slack_thread_ref: ref },
+    );
+  }
+  return `${match[1]}:${match[2]}`;
 }
 
 function lookupRepo(db: DB, repoId: string): RepoRow | null {

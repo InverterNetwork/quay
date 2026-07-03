@@ -121,7 +121,7 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
       "--external-ref",
       "ITRY-900",
       "--slack-thread-ref",
-      "C123:1700000000.0001",
+      "slack:C123:1700000000.0001",
       "--request-pr-screenshots",
     ],
     built.deps,
