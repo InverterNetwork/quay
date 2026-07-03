@@ -165,6 +165,108 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
   );
 });
 
+test("enqueue canonicalizes slack-prefixed thread refs before storing", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const dispatchAdd = await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "repo-enqueue-prefixed-slack",
+      "--url",
+      "git@example.com:o/r.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  expect(dispatchAdd.exitCode).toBe(0);
+  built.git.seedBareClone("repo-enqueue-prefixed-slack");
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      "repo-enqueue-prefixed-slack",
+      "--brief-file",
+      writeTemp("do the thing", "brief.md"),
+      "--slack-thread-ref",
+      "slack:C123:1700000000.0001",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const enqueueResult = JSON.parse(io.out().trim());
+  const row = h.db
+    .query<{ slack_thread_ref: string | null }, [string]>(
+      "SELECT slack_thread_ref FROM tasks WHERE task_id = ?",
+    )
+    .get(enqueueResult.task_id);
+  expect(row?.slack_thread_ref).toBe("C123:1700000000.0001");
+});
+
+test("enqueue rejects malformed slack thread refs before storing a task", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const dispatchAdd = await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "repo-enqueue-bad-slack",
+      "--url",
+      "git@example.com:o/r.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  expect(dispatchAdd.exitCode).toBe(0);
+  built.git.seedBareClone("repo-enqueue-bad-slack");
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      "repo-enqueue-bad-slack",
+      "--brief-file",
+      writeTemp("do the thing", "brief.md"),
+      "--slack-thread-ref",
+      "slack:C123:1700000000.0001:extra",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  const parsed = JSON.parse(io.err());
+  expect(parsed.error).toBe("validation_error");
+  expect(parsed.message).toContain("slack_thread_ref must be");
+  const row = h.db
+    .query<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM tasks WHERE repo_id = 'repo-enqueue-bad-slack'",
+    )
+    .get();
+  expect(row?.n).toBe(0);
+});
+
 test("enqueue rejects value-bearing PR screenshot boolean flag", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
