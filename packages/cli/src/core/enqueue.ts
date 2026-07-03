@@ -151,6 +151,42 @@ export const enqueueInputSchema = z
 
 export type EnqueueInput = z.infer<typeof enqueueInputSchema>;
 
+const SLACK_THREAD_REF_PREFIX = "slack:";
+const SLACK_THREAD_REF_CHANNEL = /^[CGD][A-Z0-9]+$/;
+const SLACK_THREAD_REF_TS = /^\d+\.\d+$/;
+
+export function normalizeSlackThreadRef(
+  ref: string | null | undefined,
+): string | null {
+  if (ref === null || ref === undefined) return null;
+  const trimmed = ref.trim();
+  const unprefixed = trimmed.startsWith(SLACK_THREAD_REF_PREFIX)
+    ? trimmed.slice(SLACK_THREAD_REF_PREFIX.length)
+    : trimmed;
+  const parts = unprefixed.split(":");
+  if (parts.length !== 2) {
+    throw invalidSlackThreadRef(ref);
+  }
+  const [channel, threadTs] = parts;
+  if (
+    channel === undefined ||
+    threadTs === undefined ||
+    !SLACK_THREAD_REF_CHANNEL.test(channel) ||
+    !SLACK_THREAD_REF_TS.test(threadTs)
+  ) {
+    throw invalidSlackThreadRef(ref);
+  }
+  return `${channel}:${threadTs}`;
+}
+
+function invalidSlackThreadRef(ref: string): QuayError {
+  return new QuayError(
+    "validation_error",
+    "slack_thread_ref must be <channel_id>:<message_ts> or slack:<channel_id>:<message_ts>",
+    { slack_thread_ref: ref },
+  );
+}
+
 export interface EnqueueResult {
   task_id: string;
   state: "queued" | "waiting_dependencies";
@@ -249,6 +285,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
   const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
   const dependencies = input.dependencies ?? [];
+  const slackThreadRef = normalizeSlackThreadRef(input.slack_thread_ref);
   const plannedRunNumber = lookupNextRunNumber(
     deps.db,
     repo.repo_id,
@@ -457,7 +494,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           tmuxId,
           worktreePath,
           retryBudget,
-          input.slack_thread_ref ?? null,
+          slackThreadRef,
           input.authors_json ?? null,
           workerExecution,
           prScreenshotsRequested ? 1 : 0,
