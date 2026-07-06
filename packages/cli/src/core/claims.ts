@@ -48,7 +48,10 @@ import {
   loadTaskGoal,
   type TaskGoalRow,
 } from "./goals.ts";
-import { normalizeSlackThreadRef } from "./slack_thread_ref.ts";
+import {
+  normalizeSlackThreadRef,
+  normalizeStoredSlackThreadRef,
+} from "./slack_thread_ref.ts";
 import { QuayError } from "./errors.ts";
 
 export type ClaimErrorCode =
@@ -701,17 +704,17 @@ export async function escalate_human(
   }
 
   let threadRef: string | null;
-  try {
-    threadRef = normalizeSlackThreadRef(
-      input.threadRef !== undefined && input.threadRef !== null
-        ? input.threadRef
-        : row.slack_thread_ref,
-    );
-  } catch (err) {
-    if (err instanceof QuayError && err.code === "validation_error") {
-      return fail("validation_error", err.message, err.details);
+  if (input.threadRef !== undefined && input.threadRef !== null) {
+    try {
+      threadRef = normalizeSlackThreadRef(input.threadRef);
+    } catch (err) {
+      if (err instanceof QuayError && err.code === "validation_error") {
+        return fail("validation_error", err.message, err.details);
+      }
+      throw err;
     }
-    throw err;
+  } else {
+    threadRef = normalizeStoredSlackThreadRef(row.slack_thread_ref);
   }
 
   const prior = loadLatestAttempt(deps.db, input.taskId);
