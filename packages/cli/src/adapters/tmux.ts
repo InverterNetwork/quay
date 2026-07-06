@@ -35,6 +35,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { decodePaneStatus, EXIT_INFO_NONE } from "../core/exit_status.ts";
+import { REVIEW_RESULT_FILENAME } from "../core/preamble.ts";
 import type { PaneExitInfo, TmuxPort, TmuxSpawnInput } from "../ports/tmux.ts";
 
 const PROMPT_FILE = ".quay-prompt.md";
@@ -54,7 +55,7 @@ const EXIT_CODE_FILE = ".quay-exit-code";
 // Per-reviewer-attempt result signal consumed by tick after the reviewer
 // exits. A stale copy can post an obsolete verdict to a later head, so its
 // removal is fail-closed like blockers, logs, and exit markers.
-const REVIEW_RESULT_FILE = ".quay-review-result.json";
+const REVIEW_RESULT_FILE = REVIEW_RESULT_FILENAME;
 // Marker for direct children of the worktree root that belong to a previous
 // Quay attempt. Anything matching this prefix is sweep-eligible at spawn
 // time — see the spawn preflight for why.

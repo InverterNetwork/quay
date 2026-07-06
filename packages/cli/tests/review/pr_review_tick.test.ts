@@ -91,7 +91,7 @@ function seedRunningReviewAttempt(
     taskId,
     attemptId,
     kind: "final_prompt",
-    content: "review prompt",
+    content: "review prompt\n.quay-review-result.json\n",
     extension: "md",
   });
   return { attemptId };
@@ -1760,6 +1760,150 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
     { kind: "tool_trace", n: 1 },
     { kind: "usage", n: 1 },
   ]);
+});
+
+test("reviewer parks immediately when prompt lacked result protocol", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-stale-prompt");
+  const taskId = "pr-review-repo-review-stale-prompt-9";
+  const worktreePath = `${h.dataDir}/worktrees/review-stale-prompt-9`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/9',
+                 'quay-review-repo-review-stale-prompt-9',
+                 ?, 9, 'sha-9', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-9',
+              tmux_session = 'quay-review-session-stale-prompt-9'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "brief",
+    content: "review brief",
+    extension: "md",
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "final_prompt",
+    content: "stale prompt says to post directly with gh pr review",
+    extension: "md",
+  });
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "non_budget_loop_parked",
+  });
+  const task = h.db
+    .query<
+      { state: string; review_infra_failures_consecutive: number; tick_error: string | null },
+      [string]
+    >(
+      `SELECT state, review_infra_failures_consecutive, tick_error
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task?.state).toBe("non_budget_loop");
+  expect(task?.review_infra_failures_consecutive).toBe(3);
+  expect(task?.tick_error).toBe("reviewer did not write .quay-review-result.json");
+  const pending = h.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM attempts
+        WHERE task_id = ? AND reason = 'review_only' AND ended_at IS NULL`,
+    )
+    .get(taskId);
+  expect(pending?.n).toBe(0);
+});
+
+test("missing final prompt artifact does not force immediate protocol parking", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-missing-final-prompt");
+  const taskId = "pr-review-repo-review-missing-final-prompt-9";
+  const worktreePath = `${h.dataDir}/worktrees/review-missing-final-prompt-9`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/9',
+                 'quay-review-repo-review-missing-final-prompt-9',
+                 ?, 9, 'sha-9', 1, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-9',
+              tmux_session = 'quay-review-session-missing-final-prompt-9'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "brief",
+    content: "review brief",
+    extension: "md",
+  });
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "review_retry_scheduled",
+  });
+  const task = h.db
+    .query<
+      { state: string; review_infra_failures_consecutive: number; tick_error: string | null },
+      [string]
+    >(
+      `SELECT state, review_infra_failures_consecutive, tick_error
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task?.state).toBe("pr-review");
+  expect(task?.review_infra_failures_consecutive).toBe(1);
+  expect(task?.tick_error).toBeNull();
 });
 
 test("reviewer blocker with stale task PR and worktree heads records review context drift", async () => {
