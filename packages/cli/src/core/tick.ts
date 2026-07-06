@@ -73,6 +73,7 @@ import {
 import { ensureWorkItemRunIdentity } from "./enqueue.ts";
 import { enqueuePrReadyApprovedOutboxItem } from "./pr_ready_approved_outbox.ts";
 import { enqueueReviewFindingLinearIssuesInOpenTxn } from "./review_finding_linear_outbox.ts";
+import { normalizeStoredSlackThreadRef } from "./slack_thread_ref.ts";
 import {
   processGoalCompletionAudit,
   type GoalCompletionPendingTask,
@@ -5590,7 +5591,8 @@ async function processWaitingHumanTask(
   }
 
   const results: TickTaskResult[] = [];
-  const threadRef = task.slack_thread_ref;
+  const threadRef = normalizeStoredSlackThreadRef(task.slack_thread_ref);
+  if (threadRef === null) return [];
 
   // Step 1: capture the pre-post fence if not yet captured.
   if (art.slack_pre_post_fence_ts === null) {

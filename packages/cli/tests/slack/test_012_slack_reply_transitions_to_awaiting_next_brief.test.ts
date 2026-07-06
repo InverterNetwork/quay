@@ -145,3 +145,69 @@ test("test_012_slack_reply_transitions_to_awaiting_next_brief", async () => {
   expect(typeof handoffPayload.artifact_id).toBe("number");
   expect(handoffPayload.slack_reply_content_hash).toBe(replyArt!.content_hash);
 });
+
+test("waiting human tick normalizes persisted prefixed slack thread refs", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-29T10:00:00.000Z");
+  const repoId = insertRepo(h.db, "repo-012-prefixed");
+  const taskId = insertTask(h.db, {
+    taskId: "task-012-prefixed",
+    repoId,
+    state: "awaiting-next-brief",
+  });
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-04-29T08:00:00.000Z",
+  });
+  const thread = "C012:0.5";
+  h.db
+    .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
+    .run(thread, taskId);
+
+  const built = buildTickDeps(h);
+  const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
+  if (!claim.ok) throw new Error("expected claim");
+  h.ids.push("noncepref");
+  const esc = await escalate_human(
+    {
+      db: h.db,
+      clock: h.clock,
+      artifactStore: built.artifactStore,
+      ids: h.ids,
+    },
+    {
+      taskId,
+      claimId: claim.value.claim_id,
+      questionBody: "ship from a legacy prefixed thread?",
+    },
+  );
+  if (!esc.ok) throw new Error("expected escalate");
+  markWaitingHumanLegacy(h.db, taskId);
+  h.db
+    .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
+    .run(`slack:${thread}`, taskId);
+
+  await tick_once(built.deps);
+  expect(built.slack.fenceCalls).toEqual([thread]);
+  expect(built.slack.searchCalls[0]?.threadRef).toBe(thread);
+  expect(built.slack.postCalls[0]?.threadRef).toBe(thread);
+
+  built.slack.appendHumanReply(thread, "ship it");
+  const r2 = await tick_once(built.deps);
+  const actions = r2.filter((r) => r.task_id === taskId).map((r) => r.action);
+  expect(actions).toContain("slack_reply_ingested");
+  expect(built.slack.listCalls[built.slack.listCalls.length - 1]?.threadRef).toBe(
+    thread,
+  );
+
+  const finalTask = h.db
+    .query<{ state: string; slack_thread_ref: string | null }, [string]>(
+      `SELECT state, slack_thread_ref FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(finalTask).toEqual({
+    state: "awaiting-next-brief",
+    slack_thread_ref: `slack:${thread}`,
+  });
+});
