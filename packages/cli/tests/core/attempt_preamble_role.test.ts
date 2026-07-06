@@ -4,6 +4,7 @@ import {
   loadPreambleBody,
   preambleKindForAttemptReason,
 } from "../../src/core/preamble.ts";
+import { insertPreamble } from "../support/fixtures.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 
 let h: Harness | null = null;
@@ -61,4 +62,42 @@ test("attempt reasons map to the correct preamble role", () => {
   expect(reviewerBody).toContain("You are running as a Quay reviewer worker");
   expect(reviewerBody).toContain("Do not modify code");
   expect(reviewerBody).toContain("You do not push");
+});
+
+test("review preamble fallback supersedes stale direct-post protocol", () => {
+  h = createHarness();
+  const staleId = insertPreamble(
+    h.db,
+    "You are running as a Quay reviewer worker. Post the review directly to GitHub via `gh pr review`.",
+    "review",
+  );
+
+  const reviewerPreambleId = ensurePreambleIdForAttemptReason(
+    h.db,
+    h.clock,
+    "review_only",
+  );
+
+  expect(reviewerPreambleId).toBeGreaterThan(staleId);
+  const reviewerBody = loadPreambleBody(h.db, reviewerPreambleId);
+  expect(reviewerBody).toContain(".quay-review-result.json");
+  expect(reviewerBody).toContain("Do not call `gh pr review`");
+  expect(reviewerBody).not.toContain("Post the review directly");
+});
+
+test("explicit review preamble override must require structured result file", () => {
+  h = createHarness();
+  const staleId = insertPreamble(
+    h.db,
+    "You are running as a Quay reviewer worker. Post the review directly to GitHub via `gh pr review`.",
+    "review",
+  );
+  const db = h.db;
+  const clock = h.clock;
+
+  expect(() =>
+    ensurePreambleIdForAttemptReason(db, clock, "review_only", {
+      overridePreambleId: staleId,
+    }),
+  ).toThrow(/does not require \.quay-review-result\.json/);
 });

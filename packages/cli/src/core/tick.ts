@@ -42,7 +42,10 @@ import {
   enqueueOrchestratorHandoff,
   reopenClaimedOrchestratorHandoffs,
 } from "./orchestrator_handoffs.ts";
-import { ensurePreambleIdForAttemptReason } from "./preamble.ts";
+import {
+  ensurePreambleIdForAttemptReason,
+  REVIEW_RESULT_FILENAME,
+} from "./preamble.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
 import { collectUsageArtifact, persistResolvedAttemptModel } from "./usage.ts";
 import {
@@ -110,7 +113,6 @@ export const DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS = 24;
 export const DEFAULT_RETAINED_CANCELLED_WORKTREE_GC_BATCH_SIZE = 10;
 export const WORKER_GH_TOKEN_ENV = "QUAY_WORKER_GH_TOKEN";
 export const REVIEWER_GH_TOKEN_ENV = "QUAY_REVIEWER_GH_TOKEN";
-const REVIEW_RESULT_FILENAME = ".quay-review-result.json";
 const CODEX_SOURCE_HOME_ENV = "QUAY_CODEX_SOURCE_HOME";
 // Canonical claude worker template, kept here as a named re-export so
 // callers that imported it from `tick.ts` before the agent-resolver
@@ -2456,12 +2458,16 @@ function positiveIntegerField(value: unknown): number | null {
     : null;
 }
 
+function missingReviewResultDiagnostic(): string {
+  return `reviewer did not write ${REVIEW_RESULT_FILENAME}`;
+}
+
 function readReviewResultFile(worktreePath: string): ReviewResultRead {
   const resultPath = join(worktreePath, REVIEW_RESULT_FILENAME);
   if (!existsSync(resultPath)) {
     return {
       ok: false,
-      diagnostic: `reviewer did not write ${REVIEW_RESULT_FILENAME}`,
+      diagnostic: missingReviewResultDiagnostic(),
     };
   }
 
@@ -5175,8 +5181,6 @@ function markReviewInfraFailure(
   collectReviewAttemptArtifacts(deps, task);
   const now = deps.clock.nowISO();
   const sameSha = task.review_infra_failure_head_sha === task.head_sha;
-  const failures = sameSha ? task.review_infra_failures_consecutive + 1 : 1;
-  const parking = failures >= 3;
   const priorBrief = loadAttemptArtifactContent(
     deps.db,
     task.task_id,
@@ -5189,6 +5193,16 @@ function markReviewInfraFailure(
     task.attempt_id,
     "final_prompt",
   );
+  const promptMissedReviewResultProtocol =
+    diagnostic === missingReviewResultDiagnostic() &&
+    !priorPrompt.includes(REVIEW_RESULT_FILENAME);
+  const observedFailures = sameSha
+    ? task.review_infra_failures_consecutive + 1
+    : 1;
+  const failures = promptMissedReviewResultProtocol
+    ? Math.max(observedFailures, 3)
+    : observedFailures;
+  const parking = promptMissedReviewResultProtocol || failures >= 3;
 
   deps.db.exec("BEGIN IMMEDIATE");
   try {
