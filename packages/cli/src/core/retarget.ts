@@ -15,6 +15,7 @@ import {
   transitionTaskState,
 } from "./task_state.ts";
 import { fireFailpoint } from "./failpoints.ts";
+import { normalizeStoredSlackThreadRef } from "./slack_thread_ref.ts";
 
 export type RetargetErrorCode =
   | "unknown_task"
@@ -246,7 +247,7 @@ function retargetUnderLock(
     brief: objective,
     ticket_snapshot: ticketSnapshot,
     external_ref: source.external_ref,
-    slack_thread_ref: source.slack_thread_ref,
+    slack_thread_ref: normalizeStoredSlackThreadRef(source.slack_thread_ref),
     tags,
     authors_json: source.authors_json,
     worker_execution: source.worker_execution,

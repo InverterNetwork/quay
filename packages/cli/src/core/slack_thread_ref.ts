@@ -28,6 +28,20 @@ export function normalizeSlackThreadRef(
   return `${channel}:${threadTs}`;
 }
 
+export function normalizeStoredSlackThreadRef(
+  ref: string | null | undefined,
+): string | null {
+  if (ref === null || ref === undefined) return null;
+  try {
+    return normalizeSlackThreadRef(ref);
+  } catch (err) {
+    if (err instanceof QuayError && err.code === "validation_error") {
+      return ref;
+    }
+    throw err;
+  }
+}
+
 function invalidSlackThreadRef(ref: string): QuayError {
   return new QuayError(
     "validation_error",

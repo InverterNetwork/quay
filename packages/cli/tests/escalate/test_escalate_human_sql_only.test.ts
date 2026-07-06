@@ -121,6 +121,45 @@ test("test_escalate_human_claim_transition_is_sql_only", async () => {
   });
 });
 
+test("test_escalate_human_preserves_legacy_stored_thread_ref", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-28T10:00:00.000Z");
+  const repoId = insertRepo(h.db, "repo-escalate-legacy-ref");
+  const taskId = insertTask(h.db, {
+    taskId: "task-escalate-legacy-ref",
+    repoId,
+    state: "awaiting-next-brief",
+  });
+  seedTaskObjective(h, taskId);
+  insertAttempt(h.db, { taskId, attemptNumber: 1, spawnedAt: "2026-04-28T08:00:00.000Z" });
+  h.db
+    .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
+    .run("Cabc:1.0", taskId);
+
+  const claim = claim_task({ db: h.db, clock: h.clock }, { taskId });
+  if (!claim.ok) throw new Error("expected claim");
+  const store = createArtifactStore({ db: h.db, artifactRoot: h.artifactRoot, clock: h.clock });
+  h.ids.push("legacyref");
+
+  const result = await escalate_human(
+    { db: h.db, clock: h.clock, artifactStore: store, ids: h.ids },
+    {
+      taskId,
+      claimId: claim.value.claim_id,
+      questionBody: "legacy stored thread ref test",
+    },
+  );
+
+  if (!result.ok) throw new Error(`expected escalation success: ${result.error.message}`);
+  expect(result.value.thread_ref).toBe("Cabc:1.0");
+  const task = h.db
+    .query<{ state: string; slack_thread_ref: string | null }, [string]>(
+      `SELECT state, slack_thread_ref FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({ state: "waiting_human", slack_thread_ref: "Cabc:1.0" });
+});
+
 test("test_escalate_human_thread_ref_override_persists_canonical_ref", async () => {
   h = createHarness();
   h.clock.set("2026-04-28T10:00:00.000Z");
