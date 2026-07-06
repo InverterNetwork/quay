@@ -981,7 +981,7 @@ test("review-pr revives a parked synthetic review task for a fresh PR head", asy
   });
 });
 
-test("review-pr does not revive parked synthetic task after result protocol failure", async () => {
+test("review-pr revives parked synthetic task after result protocol failure on new head", async () => {
   h = createHarness();
   const built = buildCliDeps(h);
   built.deps.tickOptions = { reviewerEnabled: true };
@@ -1045,11 +1045,11 @@ test("review-pr does not revive parked synthetic task after result protocol fail
   const out = JSON.parse(io.out());
   expect(out).toMatchObject({
     task_id: taskId,
-    attempt_id: null,
-    state: "non_budget_loop",
-    scheduled: false,
-    skipped_reason: "parked_review_protocol_failure",
+    state: "pr-review",
+    scheduled: true,
+    pending_ci: false,
   });
+  expect(typeof out.attempt_id).toBe("number");
   const task = h.db
     .query<
       {
@@ -1066,17 +1066,81 @@ test("review-pr does not revive parked synthetic task after result protocol fail
     )
     .get(taskId);
   expect(task).toEqual({
-    state: "non_budget_loop",
-    head_sha: "sha-stale",
-    review_infra_failures_consecutive: 3,
-    tick_error: "reviewer did not write .quay-review-result.json",
+    state: "pr-review",
+    head_sha: "sha-current",
+    review_infra_failures_consecutive: 0,
+    tick_error: null,
   });
-  const attempts = h.db
-    .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM attempts WHERE task_id = ?`,
+});
+
+test("review-pr keeps parked synthetic protocol failure parked on same head", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "quay",
+      "--url",
+      "git@github.com:acc/quay.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  const taskId = "pr-review-quay-80";
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, authoring_mode, branch_name, tmux_id,
+         worktree_path, pr_number, pr_url, pr_title, head_sha, retry_budget,
+         review_infra_failures_consecutive, review_infra_failure_head_sha,
+         tick_error, created_at, updated_at
+       ) VALUES (
+         ?, 'quay', 'non_budget_loop', 'synthetic_review', 'quay-review/80',
+         'quay-80', ?, 80, 'https://github.com/acc/quay/pull/80',
+         'Parked protocol review', 'sha-current', 1, 3, 'sha-current',
+         'reviewer did not write .quay-review-result.json',
+         ?, ?
+       )`,
     )
-    .get(taskId);
-  expect(attempts?.n).toBe(0);
+    .run(
+      taskId,
+      join(built.worktreesRoot, "quay-review", "quay", "80"),
+      h.clock.nowISO(),
+      h.clock.nowISO(),
+    );
+  built.github.setPrView("quay", 80, {
+    number: 80,
+    title: "Parked protocol review",
+    body: "Please review again",
+    url: "https://github.com/acc/quay/pull/80",
+    headRefName: "feature/parked-protocol-review",
+    headSha: "sha-current",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", "acc/quay:80"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(io.out())).toMatchObject({
+    task_id: taskId,
+    attempt_id: null,
+    state: "non_budget_loop",
+    scheduled: false,
+    skipped_reason: "parked_review_protocol_failure",
+  });
 });
 
 test("review-pr does not revive a parked Quay-owned non-budget task", async () => {

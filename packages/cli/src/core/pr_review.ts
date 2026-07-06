@@ -22,6 +22,7 @@ import {
 import {
   ensurePreambleIdForAttemptReason,
   loadPreambleBody,
+  MISSING_REVIEW_RESULT_DIAGNOSTIC,
   REVIEW_RESULT_FILENAME,
 } from "./preamble.ts";
 import { renderReferenceReposPrompt } from "./reference_repos.ts";
@@ -162,6 +163,7 @@ interface TaskLookupRow {
   worktree_path: string;
   tmux_id: string;
   pr_number: number | null;
+  head_sha: string | null;
   base_branch: string | null;
   base_sha: string | null;
   review_infra_failures_consecutive: number;
@@ -281,7 +283,11 @@ export function enterReview(
       skipped_reason: "parked_non_synthetic_task",
     };
   }
-  if (existing !== null && isParkedReviewProtocolFailure(existing)) {
+  if (
+    existing !== null &&
+    isParkedReviewProtocolFailure(existing) &&
+    existing.head_sha === headSha
+  ) {
     return {
       task_id: existing.task_id,
       attempt_id: null,
@@ -957,7 +963,8 @@ function findTaskByPr(
                   THEN 'synthetic_review'
                   ELSE t.authoring_mode
                 END AS authoring_mode,
-                t.pr_number, COALESCE(t.base_branch, r.base_branch) AS base_branch,
+                t.pr_number, t.head_sha,
+                COALESCE(t.base_branch, r.base_branch) AS base_branch,
                 t.base_sha,
                 review_infra_failures_consecutive,
                 review_infra_failure_head_sha,
@@ -990,7 +997,8 @@ function findTaskByBranch(
                   THEN 'synthetic_review'
                   ELSE t.authoring_mode
                 END AS authoring_mode,
-                t.pr_number, COALESCE(t.base_branch, r.base_branch) AS base_branch,
+                t.pr_number, t.head_sha,
+                COALESCE(t.base_branch, r.base_branch) AS base_branch,
                 t.base_sha,
                 review_infra_failures_consecutive,
                 review_infra_failure_head_sha,
@@ -1015,7 +1023,8 @@ function findTaskById(db: DB, taskId: string): TaskLookupRow | null {
                   THEN 'synthetic_review'
                   ELSE t.authoring_mode
                 END AS authoring_mode,
-                t.pr_number, COALESCE(t.base_branch, r.base_branch) AS base_branch,
+                t.pr_number, t.head_sha,
+                COALESCE(t.base_branch, r.base_branch) AS base_branch,
                 t.base_sha,
                 review_infra_failures_consecutive,
                 review_infra_failure_head_sha,
@@ -1882,8 +1891,6 @@ function isParkedReviewProtocolFailure(task: TaskLookupRow): boolean {
   return (
     task.state === "non_budget_loop" &&
     task.authoring_mode === "synthetic_review" &&
-    (task.tick_error ?? "").includes(
-      `reviewer did not write ${REVIEW_RESULT_FILENAME}`,
-    )
+    (task.tick_error ?? "").includes(MISSING_REVIEW_RESULT_DIAGNOSTIC)
   );
 }

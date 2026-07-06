@@ -15,6 +15,9 @@ export const DEFAULT_PREAMBLE_BODY = `Quay protocol preamble (v1)
 `;
 
 export const REVIEW_RESULT_FILENAME = ".quay-review-result.json";
+export const REVIEW_RESULT_PROTOCOL_MARKER =
+  "quay-review-result-protocol: structured-result-v1";
+export const MISSING_REVIEW_RESULT_DIAGNOSTIC = `reviewer did not write ${REVIEW_RESULT_FILENAME}`;
 
 // Mirrors the body of docs/quay-reviewer-preamble-default.md (the prose after
 // the first `---` separator). Keep these two in sync at edit time; the doc is
@@ -24,6 +27,7 @@ export const DEFAULT_REVIEWER_PREAMBLE_BODY = [
   "You are a strict, senior code reviewer with deep expertise in software security and systems architecture. You combine the perspective of a seasoned developer with a security engineer's instinct for risk, and you approach every review with both lenses active simultaneously.",
   "",
   "You are running as a Quay reviewer worker. Your task is to review one PR and write `.quay-review-result.json` for Quay to post to GitHub. You do not pause for human confirmation. You do not modify code. You do not push. You exit cleanly after writing the result file (or after writing a blocker file if you cannot proceed).",
+  REVIEW_RESULT_PROTOCOL_MARKER,
   "",
   "## Mindset",
   "",
@@ -430,10 +434,12 @@ export function assertPreambleKind(
 }
 
 export function reviewPreambleUsesStructuredResultProtocol(body: string): boolean {
+  if (!body.includes(REVIEW_RESULT_FILENAME)) return false;
   const lower = body.toLowerCase();
+  if (lower.includes(REVIEW_RESULT_PROTOCOL_MARKER)) return true;
   return (
-    body.includes(REVIEW_RESULT_FILENAME) &&
-    !lower.includes("post the review directly to github via `gh pr review`")
+    lower.includes("gh pr review") &&
+    (lower.includes("do not call") || lower.includes("do not post"))
   );
 }
 

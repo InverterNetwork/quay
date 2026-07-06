@@ -44,6 +44,7 @@ import {
 } from "./orchestrator_handoffs.ts";
 import {
   ensurePreambleIdForAttemptReason,
+  MISSING_REVIEW_RESULT_DIAGNOSTIC,
   REVIEW_RESULT_FILENAME,
 } from "./preamble.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
@@ -2458,16 +2459,12 @@ function positiveIntegerField(value: unknown): number | null {
     : null;
 }
 
-function missingReviewResultDiagnostic(): string {
-  return `reviewer did not write ${REVIEW_RESULT_FILENAME}`;
-}
-
 function readReviewResultFile(worktreePath: string): ReviewResultRead {
   const resultPath = join(worktreePath, REVIEW_RESULT_FILENAME);
   if (!existsSync(resultPath)) {
     return {
       ok: false,
-      diagnostic: missingReviewResultDiagnostic(),
+      diagnostic: MISSING_REVIEW_RESULT_DIAGNOSTIC,
     };
   }
 
@@ -5194,7 +5191,8 @@ function markReviewInfraFailure(
     "final_prompt",
   );
   const promptMissedReviewResultProtocol =
-    diagnostic === missingReviewResultDiagnostic() &&
+    diagnostic === MISSING_REVIEW_RESULT_DIAGNOSTIC &&
+    priorPrompt !== "" &&
     !priorPrompt.includes(REVIEW_RESULT_FILENAME);
   const observedFailures = sameSha
     ? task.review_infra_failures_consecutive + 1
