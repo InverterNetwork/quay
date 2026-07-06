@@ -176,6 +176,54 @@ test("task retarget clones source task into target repo and audits source cancel
   });
 });
 
+test("task retarget preserves legacy stored slack thread ref", async () => {
+  h = createHarness();
+  addRepo(h, "repo-source");
+  addRepo(h, "repo-target");
+
+  const built = buildCliDeps(h);
+  built.git.seedBareClone("repo-source");
+  built.git.seedBareClone("repo-target");
+  h.ids.push("aaaaaaaalegacysource000000000000");
+  h.ids.push("bbbbbbbblegacytarget000000000000");
+
+  const source = enqueue(
+    {
+      db: h.db,
+      clock: h.clock,
+      ids: h.ids,
+      git: built.git,
+      commandRunner: built.commandRunner,
+      artifactStore: built.deps.artifactStore,
+      paths: built.deps.paths,
+      agentResolver: built.deps.agentResolver,
+    },
+    {
+      repo_id: "repo-source",
+      brief: "Move legacy Slack-linked work.",
+    },
+  );
+  h.db
+    .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
+    .run("Cabc:1.0", source.task_id);
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["task", "retarget", source.task_id, "--repo", "repo-target", "--yes"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const payload = JSON.parse(io.out());
+  const cloned = h.db
+    .query<{ slack_thread_ref: string | null }, [string]>(
+      `SELECT slack_thread_ref FROM tasks WHERE task_id = ?`,
+    )
+    .get(payload.retargeted_task_id);
+  expect(cloned?.slack_thread_ref).toBe("Cabc:1.0");
+});
+
 test("task retarget requires explicit confirmation", async () => {
   h = createHarness();
   addRepo(h, "repo-source");

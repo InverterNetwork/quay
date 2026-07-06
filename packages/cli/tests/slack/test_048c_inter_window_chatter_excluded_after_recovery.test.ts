@@ -37,7 +37,7 @@ test("test_048c_inter_window_chatter_excluded_after_recovery", async () => {
     attemptNumber: 1,
     spawnedAt: "2026-04-29T08:00:00.000Z",
   });
-  const THREAD = "C48c:0.1";
+  const THREAD = "C48C:0.1";
   h.db
     .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
     .run(THREAD, taskId);

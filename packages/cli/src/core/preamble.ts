@@ -14,6 +14,11 @@ export const DEFAULT_PREAMBLE_BODY = `Quay protocol preamble (v1)
 8. If you would normally ask a clarifying question, write that question into .quay-blocked.md and exit. Do not guess.
 `;
 
+export const REVIEW_RESULT_FILENAME = ".quay-review-result.json";
+export const REVIEW_RESULT_PROTOCOL_MARKER =
+  "quay-review-result-protocol: structured-result-v1";
+export const MISSING_REVIEW_RESULT_DIAGNOSTIC = `reviewer did not write ${REVIEW_RESULT_FILENAME}`;
+
 // Mirrors the body of docs/quay-reviewer-preamble-default.md (the prose after
 // the first `---` separator). Keep these two in sync at edit time; the doc is
 // the human-readable source of truth and any change here should be reflected
@@ -22,6 +27,7 @@ export const DEFAULT_REVIEWER_PREAMBLE_BODY = [
   "You are a strict, senior code reviewer with deep expertise in software security and systems architecture. You combine the perspective of a seasoned developer with a security engineer's instinct for risk, and you approach every review with both lenses active simultaneously.",
   "",
   "You are running as a Quay reviewer worker. Your task is to review one PR and write `.quay-review-result.json` for Quay to post to GitHub. You do not pause for human confirmation. You do not modify code. You do not push. You exit cleanly after writing the result file (or after writing a blocker file if you cannot proceed).",
+  REVIEW_RESULT_PROTOCOL_MARKER,
   "",
   "## Mindset",
   "",
@@ -267,11 +273,16 @@ export function ensurePreambleId(
   kind: PreambleKind = "code",
 ): number {
   const latest = db
-    .query<{ preamble_id: number }, [string]>(
-      "SELECT preamble_id FROM preambles WHERE kind = ? ORDER BY preamble_id DESC LIMIT 1",
+    .query<{ preamble_id: number; body: string }, [string]>(
+      "SELECT preamble_id, body FROM preambles WHERE kind = ? ORDER BY preamble_id DESC LIMIT 1",
     )
     .get(kind);
-  if (latest) return latest.preamble_id;
+  if (
+    latest &&
+    (kind !== "review" || reviewPreambleUsesStructuredResultProtocol(latest.body))
+  ) {
+    return latest.preamble_id;
+  }
 
   const body =
     kind === "review" ? DEFAULT_REVIEWER_PREAMBLE_BODY : DEFAULT_PREAMBLE_BODY;
@@ -395,21 +406,41 @@ export function assertPreambleKind(
   expected: PreambleKind,
   context: string,
 ): void {
-  const actual = loadPreambleKind(db, preambleId);
-  if (actual === null) {
+  const record = getPreamble(db, preambleId);
+  if (record === null) {
     throw new QuayError(
       "validation_error",
       `${context} preamble ${preambleId} does not exist`,
       { preamble_id: preambleId, expected_kind: expected },
     );
   }
-  if (actual !== expected) {
+  if (record.kind !== expected) {
     throw new QuayError(
       "validation_error",
-      `${context} preamble ${preambleId} has kind ${actual}; expected ${expected}`,
-      { preamble_id: preambleId, actual_kind: actual, expected_kind: expected },
+      `${context} preamble ${preambleId} has kind ${record.kind}; expected ${expected}`,
+      { preamble_id: preambleId, actual_kind: record.kind, expected_kind: expected },
     );
   }
+  if (
+    expected === "review" &&
+    !reviewPreambleUsesStructuredResultProtocol(record.body)
+  ) {
+    throw new QuayError(
+      "validation_error",
+      `${context} preamble ${preambleId} does not require ${REVIEW_RESULT_FILENAME}`,
+      { preamble_id: preambleId, expected_kind: expected },
+    );
+  }
+}
+
+export function reviewPreambleUsesStructuredResultProtocol(body: string): boolean {
+  if (!body.includes(REVIEW_RESULT_FILENAME)) return false;
+  const lower = body.toLowerCase();
+  if (lower.includes(REVIEW_RESULT_PROTOCOL_MARKER)) return true;
+  return (
+    lower.includes("gh pr review") &&
+    (lower.includes("do not call") || lower.includes("do not post"))
+  );
 }
 
 function lookupTaskRepoId(db: DB, taskId: string): string | null {

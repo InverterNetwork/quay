@@ -121,7 +121,7 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
       "--external-ref",
       "ITRY-900",
       "--slack-thread-ref",
-      "C123:1700000000.0001",
+      "slack:C123:1700000000.0001",
       "--request-pr-screenshots",
     ],
     built.deps,
@@ -163,6 +163,108 @@ test("enqueue accepts spec flag form (--repo, --brief-file, --external-ref, --sl
   expect(readFileSync(brief!.file_path, "utf8")).toContain(
     "<quay-pr-screenshot-request",
   );
+});
+
+test("enqueue canonicalizes slack-prefixed thread refs before storing", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const dispatchAdd = await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "repo-enqueue-prefixed-slack",
+      "--url",
+      "git@example.com:o/r.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  expect(dispatchAdd.exitCode).toBe(0);
+  built.git.seedBareClone("repo-enqueue-prefixed-slack");
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      "repo-enqueue-prefixed-slack",
+      "--brief-file",
+      writeTemp("do the thing", "brief.md"),
+      "--slack-thread-ref",
+      "slack:C123:1700000000.0001",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  const enqueueResult = JSON.parse(io.out().trim());
+  const row = h.db
+    .query<{ slack_thread_ref: string | null }, [string]>(
+      "SELECT slack_thread_ref FROM tasks WHERE task_id = ?",
+    )
+    .get(enqueueResult.task_id);
+  expect(row?.slack_thread_ref).toBe("C123:1700000000.0001");
+});
+
+test("enqueue rejects malformed slack thread refs before storing a task", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const dispatchAdd = await dispatch(
+    [
+      "repo",
+      "add",
+      "--id",
+      "repo-enqueue-bad-slack",
+      "--url",
+      "git@example.com:o/r.git",
+      "--base-branch",
+      "main",
+      "--package-manager",
+      "bun",
+      "--install-cmd",
+      "true",
+    ],
+    built.deps,
+    bufferIO(),
+  );
+  expect(dispatchAdd.exitCode).toBe(0);
+  built.git.seedBareClone("repo-enqueue-bad-slack");
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "enqueue",
+      "--repo",
+      "repo-enqueue-bad-slack",
+      "--brief-file",
+      writeTemp("do the thing", "brief.md"),
+      "--slack-thread-ref",
+      "slack:C123:1700000000.0001:extra",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  const parsed = JSON.parse(io.err());
+  expect(parsed.error).toBe("validation_error");
+  expect(parsed.message).toContain("slack_thread_ref must be");
+  const row = h.db
+    .query<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM tasks WHERE repo_id = 'repo-enqueue-bad-slack'",
+    )
+    .get();
+  expect(row?.n).toBe(0);
 });
 
 test("enqueue rejects value-bearing PR screenshot boolean flag", async () => {
@@ -406,6 +508,114 @@ test("escalate-human flag form records question and preserves orchestrator claim
   // Slack transport is orchestrator-owned; the CLI only records artifacts/state.
   expect(built.slack.postCalls).toHaveLength(0);
   expect(built.slack.fenceCalls).toHaveLength(0);
+});
+
+test("escalate-human flag form normalizes prefixed thread refs", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  const repoId = insertRepo(h.db, "repo-esc-prefixed-flag");
+  const taskId = insertTask(h.db, {
+    taskId: "task-esc-prefixed-flag",
+    repoId,
+    state: "awaiting-next-brief",
+  });
+  seedTaskObjective(h, taskId);
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  const claimIo = bufferIO();
+  await dispatch(["task", "claim", taskId], built.deps, claimIo);
+  const { claim_id } = JSON.parse(claimIo.out());
+
+  const questionPath = writeTemp("Need human input", "q.md");
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "escalate-human",
+      taskId,
+      "--claim-id",
+      claim_id,
+      "--question-file",
+      questionPath,
+      "--thread-ref",
+      "slack:C0AEN8KDRT2:1782803100.722179",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  expect(JSON.parse(io.out()).thread_ref).toBe("C0AEN8KDRT2:1782803100.722179");
+  const task = h.db
+    .query<{ slack_thread_ref: string | null }, [string]>(
+      `SELECT slack_thread_ref FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task!.slack_thread_ref).toBe("C0AEN8KDRT2:1782803100.722179");
+});
+
+test("escalate-human flag form rejects malformed thread refs", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+
+  const repoId = insertRepo(h.db, "repo-esc-invalid-flag");
+  const taskId = insertTask(h.db, {
+    taskId: "task-esc-invalid-flag",
+    repoId,
+    state: "awaiting-next-brief",
+  });
+  seedTaskObjective(h, taskId);
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  const claimIo = bufferIO();
+  await dispatch(["task", "claim", taskId], built.deps, claimIo);
+  const { claim_id } = JSON.parse(claimIo.out());
+
+  const questionPath = writeTemp("Need human input", "q.md");
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "escalate-human",
+      taskId,
+      "--claim-id",
+      claim_id,
+      "--question-file",
+      questionPath,
+      "--thread-ref",
+      "slack:C0AEN8KDRT2",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  expect(JSON.parse(io.err())).toMatchObject({
+    error: "validation_error",
+    message: "slack_thread_ref must be CHANNEL:THREAD_TS or slack:CHANNEL:THREAD_TS",
+  });
+  const task = h.db
+    .query<{ state: string; slack_thread_ref: string | null }, [string]>(
+      `SELECT state, slack_thread_ref FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    state: "claimed-by-orchestrator",
+    slack_thread_ref: null,
+  });
 });
 
 test("record-human-reply flag form persists answer and returns to claimed state", async () => {

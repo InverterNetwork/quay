@@ -245,6 +245,9 @@ state the limitation in the PR if screenshots cannot be captured or attached.
 worker agent, requires it to advertise the `screenshots` capability, persists
 the hard prompt mode, and fails before task creation if the capability is
 missing.
+`--slack-thread-ref` accepts canonical `CHANNEL:THREAD_TS`; the legacy
+`slack:CHANNEL:THREAD_TS` form is normalized before storage. Invalid Slack
+thread refs fail enqueue before task creation.
 `--linear-issue` is mutually exclusive with `--brief-file`, `--external-ref`,
 and `--slack-thread-ref`.
 
@@ -526,6 +529,9 @@ This records the question and moves the task to `waiting_human` while
 preserving the orchestrator claim. Quay does not post to Slack; the
 orchestrator owns routing, posting, waiting, and fallback channels. If
 `--thread-ref` is omitted, the recorded thread metadata can remain empty.
+`--thread-ref` accepts canonical `CHANNEL:THREAD_TS`; the legacy
+`slack:CHANNEL:THREAD_TS` form is normalized before storage. Invalid thread refs
+fail before the task is moved to `waiting_human`.
 
 ## Record Human Reply
 

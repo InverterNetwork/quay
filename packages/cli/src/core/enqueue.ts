@@ -18,6 +18,10 @@ import type { AgentResolver } from "./agents.ts";
 import { QuayError } from "./errors.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
 import {
+  normalizeSlackThreadRef,
+  normalizeStoredSlackThreadRef,
+} from "./slack_thread_ref.ts";
+import {
   composeWorkerPrompt,
   INITIAL_ATTEMPT_GUIDANCE,
 } from "./worker_prompt.ts";
@@ -249,6 +253,10 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
   const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
   const dependencies = input.dependencies ?? [];
+  const slackThreadRef =
+    deps.retargetIntent !== undefined
+      ? normalizeStoredSlackThreadRef(input.slack_thread_ref)
+      : normalizeSlackThreadRef(input.slack_thread_ref);
   const plannedRunNumber = lookupNextRunNumber(
     deps.db,
     repo.repo_id,
@@ -457,7 +465,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           tmuxId,
           worktreePath,
           retryBudget,
-          input.slack_thread_ref ?? null,
+          slackThreadRef,
           input.authors_json ?? null,
           workerExecution,
           prScreenshotsRequested ? 1 : 0,
