@@ -17,6 +17,7 @@ import { baseBranchNameSchema } from "./base_branch.ts";
 import type { AgentResolver } from "./agents.ts";
 import { QuayError } from "./errors.ts";
 import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import { normalizeSlackThreadRef } from "./slack_thread_ref.ts";
 import {
   composeWorkerPrompt,
   INITIAL_ATTEMPT_GUIDANCE,
@@ -249,6 +250,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
   const worktreePath = join(deps.paths.worktreesRoot, taskId);
   const retryBudget = deps.retryBudget ?? DEFAULT_RETRY_BUDGET;
   const dependencies = input.dependencies ?? [];
+  const slackThreadRef = normalizeSlackThreadRef(input.slack_thread_ref);
   const plannedRunNumber = lookupNextRunNumber(
     deps.db,
     repo.repo_id,
@@ -457,7 +459,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
           tmuxId,
           worktreePath,
           retryBudget,
-          input.slack_thread_ref ?? null,
+          slackThreadRef,
           input.authors_json ?? null,
           workerExecution,
           prScreenshotsRequested ? 1 : 0,
@@ -793,7 +795,13 @@ function resolveTaskAgentSnapshot(
 
 function parseInput(raw: unknown): EnqueueInput {
   const result = enqueueInputSchema.safeParse(raw);
-  if (result.success) return result.data;
+  if (result.success) {
+    const slackThreadRef = normalizeSlackThreadRef(
+      result.data.slack_thread_ref ?? null,
+    );
+    if (result.data.slack_thread_ref === undefined) return result.data;
+    return { ...result.data, slack_thread_ref: slackThreadRef };
+  }
   const summary = result.error.issues
     .map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`)
     .join("; ");
