@@ -58,15 +58,13 @@ test("reviewer prompt composes static protocol, configurable guidance, and brief
   );
 });
 
-test("reviewer protocol remains present when guidance is stale direct-post prose", () => {
-  const composed = composeReviewerPrompt({
-    reviewerGuidanceBody: "Post the review directly to GitHub via `gh pr review`.",
-    brief: "Review PR #18.",
-  });
-
-  expect(composed.finalPrompt).toContain(REVIEW_RESULT_PROTOCOL_MARKER);
-  expect(composed.finalPrompt).toContain("If it conflicts with the static reviewer protocol above");
-  expect(composed.finalPrompt).toContain("Post the review directly");
+test("reviewer prompt rejects stale direct-post guidance", () => {
+  expect(() =>
+    composeReviewerPrompt({
+      reviewerGuidanceBody: "Post the review directly to GitHub via `gh pr review`.",
+      brief: "Review PR #18.",
+    }),
+  ).toThrow(/conflict with the static reviewer protocol/);
 });
 
 test("stable objective renders inside a tagged section with audit attributes", () => {

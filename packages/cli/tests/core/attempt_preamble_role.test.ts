@@ -98,3 +98,18 @@ test("explicit review preamble override validates only review kind", () => {
     }),
   ).toBe(guidanceId);
 });
+
+test("review preamble resolution rejects stale direct-post guidance", () => {
+  h = createHarness();
+  const staleGuidanceId = insertPreamble(
+    h.db,
+    "Post the review directly to GitHub via `gh pr review`.",
+    "review",
+  );
+
+  expect(() =>
+    ensurePreambleIdForAttemptReason(h!.db, h!.clock, "review_only", {
+      overridePreambleId: staleGuidanceId,
+    }),
+  ).toThrow(/conflict with the static reviewer protocol/);
+});

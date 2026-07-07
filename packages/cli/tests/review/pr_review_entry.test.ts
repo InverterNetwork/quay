@@ -174,6 +174,48 @@ test("review-pr final prompt layers static protocol over repo reviewer guidance"
   );
 });
 
+test("review-pr rejects repo reviewer guidance with direct-post instructions", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  const repoId = insertRepo(h.db, "repo-stale-review-guidance");
+  const guidanceId = insertPreamble(
+    h.db,
+    "Post the review directly to GitHub via `gh pr review`.",
+    "review",
+  );
+  h.db
+    .query(`UPDATE repos SET preamble_reviewer = ? WHERE repo_id = ?`)
+    .run(guidanceId, repoId);
+  built.github.setPrView(repoId, 49, {
+    number: 49,
+    title: "Human PR",
+    body: "Please review",
+    url: "https://github.com/acc/repo-stale-review-guidance/pull/49",
+    headRefName: "feature/stale-guidance",
+    headSha: "stale456",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", `${repoId}:49`],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(4);
+  expect(JSON.parse(io.err()).message).toContain(
+    "conflict with the static reviewer protocol",
+  );
+  expect(
+    h.db
+      .query<{ n: number }, []>(
+        `SELECT COUNT(*) AS n FROM artifacts WHERE kind = 'final_prompt'`,
+      )
+      .get()!.n,
+  ).toBe(0);
+});
+
 test("review-pr reconciles a stale caller head to the current PR head", async () => {
   h = createHarness();
   const built = buildCliDeps(h);

@@ -25,7 +25,10 @@
 import { readFileSync } from "node:fs";
 import type { DB } from "../db/connection.ts";
 import { renderGoalContext, type GoalPromptContext } from "./goals.ts";
-import { REVIEWER_PROTOCOL_PREAMBLE_BODY } from "./preamble.ts";
+import {
+  assertReviewerGuidanceProtocolSafe,
+  REVIEWER_PROTOCOL_PREAMBLE_BODY,
+} from "./preamble.ts";
 import { renderReferenceReposPrompt } from "./reference_repos.ts";
 
 export const DEFAULT_OBJECTIVE_RENDER_CAP_BYTES = 16_384;
@@ -110,6 +113,7 @@ export function composeReviewerPrompt(
   input: ReviewerPromptInput,
 ): WorkerPromptResult {
   const guidance = input.reviewerGuidanceBody.trim();
+  assertReviewerGuidanceProtocolSafe(guidance, "configured reviewer guidance");
   const reviewerGuidanceSection = [
     "## Configurable Reviewer Guidance",
     "",

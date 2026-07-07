@@ -454,6 +454,49 @@ export function assertPreambleKind(
       { preamble_id: preambleId, actual_kind: record.kind, expected_kind: expected },
     );
   }
+  if (expected === "review") {
+    assertReviewerGuidanceProtocolSafe(
+      record.body,
+      `${context} preamble ${preambleId}`,
+    );
+  }
+}
+
+export function assertReviewerGuidanceProtocolSafe(
+  body: string,
+  context: string,
+): void {
+  const conflictingLine = body
+    .split(/\r?\n/)
+    .find((line) => reviewerGuidanceLineConflictsWithProtocol(line));
+  if (conflictingLine === undefined) return;
+  throw new QuayError(
+    "validation_error",
+    `${context} contains reviewer transport instructions that conflict with the static reviewer protocol`,
+    { conflicting_instruction: conflictingLine.trim() },
+  );
+}
+
+function reviewerGuidanceLineConflictsWithProtocol(line: string): boolean {
+  const normalized = line.toLowerCase();
+  if (/\bgh\s+pr\s+review\b/.test(normalized)) {
+    const negatedGhReview =
+      /\b(do not|don't|never|must not|forbidden)\b.{0,120}\bgh\s+pr\s+review\b/;
+    return !negatedGhReview.test(normalized);
+  }
+  const directPostToGitHub =
+    /\b(post|submit|publish)\b.{0,80}\b(review|approval|request changes)\b.{0,80}\b(github|gh)\b/;
+  const githubDirectPost =
+    /\b(github|gh)\b.{0,80}\b(post|submit|publish)\b.{0,80}\b(review|approval|request changes)\b/;
+  const negatedDirectPost =
+    /\b(do not|don't|never|must not|forbidden)\b.{0,120}\b(post|submit|publish)\b/;
+  if (directPostToGitHub.test(normalized)) {
+    return !negatedDirectPost.test(normalized);
+  }
+  if (githubDirectPost.test(normalized)) {
+    return !negatedDirectPost.test(normalized);
+  }
+  return false;
 }
 
 function lookupTaskRepoId(db: DB, taskId: string): string | null {
