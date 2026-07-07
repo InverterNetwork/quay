@@ -27,7 +27,7 @@ import {
 } from "./preamble.ts";
 import { renderReferenceReposPrompt } from "./reference_repos.ts";
 import { assertTaskState, transitionTaskState } from "./task_state.ts";
-import { composeWorkerPrompt } from "./worker_prompt.ts";
+import { composeReviewerPrompt, composeWorkerPrompt } from "./worker_prompt.ts";
 import {
   installWorktreeDependencies,
   loadWorktreeDependencyRepo,
@@ -312,7 +312,7 @@ export function enterReview(
     "review_only",
     { repoId: input.repoId },
   );
-  const preamble = loadPreambleBody(deps.db, preambleId);
+  const reviewerGuidance = loadPreambleBody(deps.db, preambleId);
   const brief = task.authoring_mode === "synthetic_review"
     ? composeSyntheticBrief(pr, input.referenceReposRoot)
     : composeTaskReviewBrief(
@@ -542,19 +542,23 @@ export function enterReview(
       )
       .get(task.task_id, nextAttemptNumber, preambleId, "review_only", 0, headSha);
     if (!attempt) throw new Error("review attempt insert returned no row");
+    const composed = composeReviewerPrompt({
+      reviewerGuidanceBody: reviewerGuidance,
+      brief,
+    });
 
     deps.artifactStore.writeArtifact({
       taskId: task.task_id,
       attemptId: attempt.attempt_id,
       kind: "brief",
-      content: brief,
+      content: composed.brief,
       extension: "md",
     });
     deps.artifactStore.writeArtifact({
       taskId: task.task_id,
       attemptId: attempt.attempt_id,
       kind: "final_prompt",
-      content: `${preamble}\n\n${brief}`,
+      content: composed.finalPrompt,
       extension: "md",
     });
 

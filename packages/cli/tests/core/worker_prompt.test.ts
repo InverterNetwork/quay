@@ -5,9 +5,14 @@ import { join } from "node:path";
 import {
   DEFAULT_OBJECTIVE_RENDER_CAP_BYTES,
   INITIAL_ATTEMPT_GUIDANCE,
+  composeReviewerPrompt,
   composeWorkerPrompt,
   loadOriginalTaskObjective,
 } from "../../src/core/worker_prompt.ts";
+import {
+  REVIEW_RESULT_FILENAME,
+  REVIEW_RESULT_PROTOCOL_MARKER,
+} from "../../src/core/preamble.ts";
 import { createArtifactStore } from "../../src/artifacts/store.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertTask } from "../support/fixtures.ts";
@@ -34,6 +39,34 @@ test("preamble comes first and brief is preamble-stripped final_prompt", () => {
   });
   expect(composed.finalPrompt.startsWith(`${PREAMBLE}\n\n`)).toBe(true);
   expect(composed.finalPrompt).toBe(`${PREAMBLE}\n\n${composed.brief}`);
+});
+
+test("reviewer prompt composes static protocol, configurable guidance, and brief", () => {
+  const composed = composeReviewerPrompt({
+    reviewerGuidanceBody: "Custom repo guidance: focus on auth boundary changes.",
+    brief: "Review PR #17.",
+  });
+
+  expect(composed.brief).toBe("Review PR #17.");
+  expect(composed.finalPrompt).toContain(REVIEW_RESULT_PROTOCOL_MARKER);
+  expect(composed.finalPrompt).toContain(REVIEW_RESULT_FILENAME);
+  expect(composed.finalPrompt).toContain("Do not call `gh pr review`");
+  expect(composed.finalPrompt).toContain("Custom repo guidance");
+  expect(composed.finalPrompt.endsWith("Review PR #17.")).toBe(true);
+  expect(composed.finalPrompt.indexOf(REVIEW_RESULT_PROTOCOL_MARKER)).toBeLessThan(
+    composed.finalPrompt.indexOf("Custom repo guidance"),
+  );
+});
+
+test("reviewer protocol remains present when guidance is stale direct-post prose", () => {
+  const composed = composeReviewerPrompt({
+    reviewerGuidanceBody: "Post the review directly to GitHub via `gh pr review`.",
+    brief: "Review PR #18.",
+  });
+
+  expect(composed.finalPrompt).toContain(REVIEW_RESULT_PROTOCOL_MARKER);
+  expect(composed.finalPrompt).toContain("If it conflicts with the static reviewer protocol above");
+  expect(composed.finalPrompt).toContain("Post the review directly");
 });
 
 test("stable objective renders inside a tagged section with audit attributes", () => {
