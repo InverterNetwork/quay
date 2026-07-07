@@ -104,11 +104,14 @@ without direct SQL access.
 Preambles are split by kind: `code` for worker attempts and `review` for
 reviewer guidance. Review result protocol instructions are code-owned and
 prepended by Quay; `kind=review` rows should contain mutable review style,
-strictness, and repo/operator guidance. Legacy review rows that still mention
-direct posting or `.quay-review-result.json` continue to resolve, but the
-static Quay reviewer protocol takes precedence. Use `--body-file -` to read
-the body from stdin. After creating a preamble, assign it to a repo role with
-the existing override flags:
+strictness, and repo/operator guidance. Legacy review rows that mention
+`.quay-review-result.json` can continue to resolve because the static Quay
+reviewer protocol takes precedence, but reviewer guidance must not instruct
+the reviewer to post, submit, or publish reviews directly to GitHub, including
+via `gh pr review`. Remove or migrate those direct-post transport instructions
+before using the row as reviewer guidance. Use `--body-file -` to read the body
+from stdin. After creating a preamble, assign it to a repo role with the
+existing override flags:
 
 ```bash
 worker_id=$(quay preamble create --kind code --body-file worker.md | jq -r .preamble_id)
