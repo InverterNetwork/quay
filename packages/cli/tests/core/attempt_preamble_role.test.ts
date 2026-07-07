@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  createPreamble,
   ensurePreambleIdForAttemptReason,
   loadPreambleBody,
   preambleKindForAttemptReason,
@@ -65,11 +66,11 @@ test("attempt reasons map to the correct preamble role", () => {
   expect(reviewerBody).toContain("You do not push");
 });
 
-test("review preamble fallback keeps latest reviewer guidance even when legacy prose lacks protocol", () => {
+test("review preamble fallback keeps latest reviewer guidance even when it lacks protocol", () => {
   h = createHarness();
-  const staleId = insertPreamble(
+  const guidanceId = insertPreamble(
     h.db,
-    "You are running as a Quay reviewer worker. Post the review directly to GitHub via `gh pr review`.",
+    "Focus especially on API boundary regressions.",
     "review",
   );
 
@@ -79,9 +80,9 @@ test("review preamble fallback keeps latest reviewer guidance even when legacy p
     "review_only",
   );
 
-  expect(reviewerPreambleId).toBe(staleId);
+  expect(reviewerPreambleId).toBe(guidanceId);
   const reviewerBody = loadPreambleBody(h.db, reviewerPreambleId);
-  expect(reviewerBody).toContain("Post the review directly");
+  expect(reviewerBody).toBe("Focus especially on API boundary regressions.");
   expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain(".quay-review-result.json");
   expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("Do not modify source files");
   expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("call `gh pr review`");
@@ -94,11 +95,11 @@ test("review preamble fallback keeps latest reviewer guidance even when legacy p
   expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`quay-principle` fenced block");
 });
 
-test("explicit review preamble override may point at legacy guidance without protocol text", () => {
+test("explicit review preamble override validates only review kind", () => {
   h = createHarness();
-  const staleId = insertPreamble(
+  const guidanceId = insertPreamble(
     h.db,
-    "You are running as a Quay reviewer worker. Post the review directly to GitHub via `gh pr review`.",
+    "Custom repo review guidance.",
     "review",
   );
   const db = h.db;
@@ -106,7 +107,38 @@ test("explicit review preamble override may point at legacy guidance without pro
 
   expect(
     ensurePreambleIdForAttemptReason(db, clock, "review_only", {
-      overridePreambleId: staleId,
+      overridePreambleId: guidanceId,
     }),
-  ).toBe(staleId);
+  ).toBe(guidanceId);
+});
+
+test("review preamble resolution rejects stale direct-post guidance", () => {
+  h = createHarness();
+  const staleGuidanceId = insertPreamble(
+    h.db,
+    "Post the review directly to GitHub via `gh pr review`.",
+    "review",
+  );
+
+  expect(() =>
+    ensurePreambleIdForAttemptReason(h!.db, h!.clock, "review_only", {
+      overridePreambleId: staleGuidanceId,
+    }),
+  ).toThrow(/conflict with the static reviewer protocol/);
+});
+
+test("review preamble creation rejects stale direct-post guidance", () => {
+  h = createHarness();
+
+  expect(() =>
+    createPreamble(
+      h!.db,
+      h!.clock,
+      "review",
+      "Post the review directly to GitHub via `gh pr review`.",
+    ),
+  ).toThrow(/conflict with the static reviewer protocol/);
+  expect(
+    h.db.query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM preambles`).get(),
+  ).toEqual({ count: 0 });
 });

@@ -27,7 +27,7 @@ export const REVIEWER_PROTOCOL_PREAMBLE_BODY = [
   "This code-owned protocol is authoritative. If later reviewer guidance conflicts with this section, follow this protocol section.",
   "",
   "1. Review the PR and write exactly one reviewer signal file in the worktree root: `.quay-review-result.json` for a completed review, or `.quay-blocked.md` if the review cannot be completed.",
-  "2. Do not modify source files, commit, push, switch branches, open/close PRs, or call `gh pr review`. Quay posts the GitHub review from your structured result.",
+  "2. You may write exactly one reviewer signal file. Do not modify source files, commit, push, switch branches, or open/close PRs. Modify any file other than `.quay-review-result.json` or `.quay-blocked.md` is forbidden. Do not call `gh pr review`. Quay posts the GitHub review from your structured result.",
   "3. The review result JSON must contain exactly one object with `verdict` (`approved` or `changes_requested`), `body` (the GitHub review body), and `findings` (an array, empty when there are no findings). Comment-only reviews are forbidden.",
   "4. Each `findings` item must use this accepted schema: `severity` (`blocking` or `non_blocking`), `title`, `body`, optional `principle_text`, and optional `locations`. Each `locations` item may include `path`, `line`, `start_line`, `end_line`, and `url`; line numbers are 1-based.",
   "5. When there are no findings, use verdict `approved`, body `lgtm!`, and `findings: []`. When findings exist, the body must use the structured review format: `## Review Findings`, then `### Blocking`, then `### Non-blocking`; put `_None._` in any empty section; number findings sequentially across both sections; use 🔴 for blocking finding headings and 🟡 for non-blocking finding headings.",
@@ -41,6 +41,7 @@ export function composeReviewerFinalPrompt(input: {
   brief: string;
 }): string {
   const guidance = input.guidanceBody.trim();
+  assertReviewerGuidanceProtocolSafe(guidance, "configured reviewer guidance");
   const parts = [
     REVIEWER_PROTOCOL_PREAMBLE_BODY,
     guidance.length === 0
@@ -330,6 +331,9 @@ export function createPreamble(
   kind: PreambleKind,
   body: string,
 ): PreambleRecord {
+  if (kind === "review") {
+    assertReviewerGuidanceProtocolSafe(body, "review preamble");
+  }
   const inserted = db
     .query<PreambleRecord, [string, string, string]>(
       `INSERT INTO preambles (body, kind, created_at)
@@ -450,6 +454,27 @@ export function assertPreambleKind(
       { preamble_id: preambleId, actual_kind: record.kind, expected_kind: expected },
     );
   }
+  if (expected === "review") {
+    assertReviewerGuidanceProtocolSafe(
+      record.body,
+      `${context} preamble ${preambleId}`,
+    );
+  }
+}
+
+export function assertReviewerGuidanceProtocolSafe(
+  body: string,
+  context: string,
+): void {
+  const conflictingLine = body
+    .split(/\r?\n/)
+    .find((line) => reviewerGuidanceLineConflictsWithProtocol(line));
+  if (conflictingLine === undefined) return;
+  throw new QuayError(
+    "validation_error",
+    `${context} contains reviewer transport instructions that conflict with the static reviewer protocol`,
+    { conflicting_instruction: conflictingLine.trim() },
+  );
 }
 
 export function reviewPreambleUsesStructuredResultProtocol(body: string): boolean {
@@ -460,6 +485,28 @@ export function reviewPreambleUsesStructuredResultProtocol(body: string): boolea
     lower.includes("gh pr review") &&
     (lower.includes("do not call") || lower.includes("do not post"))
   );
+}
+
+function reviewerGuidanceLineConflictsWithProtocol(line: string): boolean {
+  const normalized = line.toLowerCase();
+  if (/\bgh\s+pr\s+review\b/.test(normalized)) {
+    const negatedGhReview =
+      /\b(do not|don't|never|must not|forbidden)\b.{0,120}\bgh\s+pr\s+review\b/;
+    return !negatedGhReview.test(normalized);
+  }
+  const directPostToGitHub =
+    /\b(post|submit|publish)\b.{0,80}\b(review|approval|request changes)\b.{0,80}\b(github|gh)\b/;
+  const githubDirectPost =
+    /\b(github|gh)\b.{0,80}\b(post|submit|publish)\b.{0,80}\b(review|approval|request changes)\b/;
+  const negatedDirectPost =
+    /\b(do not|don't|never|must not|forbidden)\b.{0,120}\b(post|submit|publish)\b/;
+  if (directPostToGitHub.test(normalized)) {
+    return !negatedDirectPost.test(normalized);
+  }
+  if (githubDirectPost.test(normalized)) {
+    return !negatedDirectPost.test(normalized);
+  }
+  return false;
 }
 
 function lookupTaskRepoId(db: DB, taskId: string): string | null {

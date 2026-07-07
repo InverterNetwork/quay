@@ -80,6 +80,36 @@ test("preamble create accepts stdin and list can filter by kind", async () => {
   ]);
 });
 
+test("preamble create rejects review guidance that conflicts with reviewer protocol", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const io = bufferIO();
+
+  const result = await dispatch(
+    [
+      "preamble",
+      "create",
+      "--kind",
+      "review",
+      "--body",
+      "Post the review directly to GitHub via `gh pr review`.",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  expect(JSON.parse(io.err())).toMatchObject({
+    error: "validation_error",
+    message:
+      "review preamble contains reviewer transport instructions that conflict with the static reviewer protocol",
+  });
+  expect(
+    h.db.query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM preambles`).get(),
+  ).toEqual({ count: 0 });
+});
+
 test("preamble show returns the stored body", async () => {
   h = createHarness();
   const preambleId = insertPreamble(h.db, "inline body", "review");

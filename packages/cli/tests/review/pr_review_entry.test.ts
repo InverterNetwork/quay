@@ -5,11 +5,17 @@ import { join } from "node:path";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { createAgentResolver } from "../../src/core/agents.ts";
+import { REVIEW_RESULT_PROTOCOL_MARKER } from "../../src/core/preamble.ts";
 import type { SupervisorLock } from "../../src/core/supervisor_lock.ts";
 import { WORKER_GH_TOKEN_ENV, tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
-import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
+import {
+  insertAttempt,
+  insertPreamble,
+  insertRepo,
+  insertTask,
+} from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -127,6 +133,96 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
   expect(out2.scheduled).toBe(false);
   expect(out2.skipped_reason).toBe("active_attempt_exists");
   expect(out2.attempt_id).toBe(out.attempt_id);
+});
+
+test("review-pr final prompt layers static protocol over repo reviewer guidance", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  const repoId = insertRepo(h.db, "repo-review-guidance");
+  const guidanceId = insertPreamble(
+    h.db,
+    "Custom reviewer guidance: focus on auth boundary changes.",
+    "review",
+  );
+  h.db
+    .query(`UPDATE repos SET preamble_reviewer = ? WHERE repo_id = ?`)
+    .run(guidanceId, repoId);
+  built.github.setPrView(repoId, 48, {
+    number: 48,
+    title: "Human PR",
+    body: "Please review auth changes",
+    url: "https://github.com/acc/repo-review-guidance/pull/48",
+    headRefName: "feature/auth",
+    headSha: "def456",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", `${repoId}:48`],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  const out = JSON.parse(io.out());
+  const promptRow = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'final_prompt'`,
+    )
+    .get(out.attempt_id);
+  expect(promptRow).toBeDefined();
+  const finalPrompt = readFileSync(promptRow!.file_path, "utf8");
+  expect(finalPrompt).toContain(REVIEW_RESULT_PROTOCOL_MARKER);
+  expect(finalPrompt).toContain(".quay-review-result.json");
+  expect(finalPrompt).toContain("Do not call `gh pr review`");
+  expect(finalPrompt).toContain("Custom reviewer guidance");
+  expect(finalPrompt.indexOf(REVIEW_RESULT_PROTOCOL_MARKER)).toBeLessThan(
+    finalPrompt.indexOf("Custom reviewer guidance"),
+  );
+});
+
+test("review-pr rejects repo reviewer guidance with direct-post instructions", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  built.deps.tickOptions = { reviewerEnabled: true };
+  const repoId = insertRepo(h.db, "repo-stale-review-guidance");
+  const guidanceId = insertPreamble(
+    h.db,
+    "Post the review directly to GitHub via `gh pr review`.",
+    "review",
+  );
+  h.db
+    .query(`UPDATE repos SET preamble_reviewer = ? WHERE repo_id = ?`)
+    .run(guidanceId, repoId);
+  built.github.setPrView(repoId, 49, {
+    number: 49,
+    title: "Human PR",
+    body: "Please review",
+    url: "https://github.com/acc/repo-stale-review-guidance/pull/49",
+    headRefName: "feature/stale-guidance",
+    headSha: "stale456",
+  });
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["review-pr", "--pr", `${repoId}:49`],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(4);
+  expect(JSON.parse(io.err()).message).toContain(
+    "conflict with the static reviewer protocol",
+  );
+  expect(
+    h.db
+      .query<{ n: number }, []>(
+        `SELECT COUNT(*) AS n FROM artifacts WHERE kind = 'final_prompt'`,
+      )
+      .get()!.n,
+  ).toBe(0);
 });
 
 test("review-pr reconciles a stale caller head to the current PR head", async () => {
