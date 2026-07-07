@@ -69,11 +69,18 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
   expect(out.state).toBe("pr-review");
 
   const attempt = h.db
-    .query<{ reason: string; head_sha: string | null }, [number]>(
-      `SELECT reason, head_sha FROM attempts WHERE attempt_id = ?`,
+    .query<
+      { reason: string; head_sha: string | null; review_protocol_version: string | null },
+      [number]
+    >(
+      `SELECT reason, head_sha, review_protocol_version FROM attempts WHERE attempt_id = ?`,
     )
     .get(out.attempt_id);
-  expect(attempt).toEqual({ reason: "review_only", head_sha: "abc123" });
+  expect(attempt).toEqual({
+    reason: "review_only",
+    head_sha: "abc123",
+    review_protocol_version: "structured-result-v1",
+  });
   const briefRow = h.db
     .query<{ file_path: string }, [number]>(
       `SELECT file_path FROM artifacts
@@ -102,6 +109,8 @@ test("review-pr creates a synthetic pr-review task and deduped review attempt", 
     .get(out.attempt_id);
   expect(promptRow).toBeDefined();
   const finalPrompt = readFileSync(promptRow!.file_path, "utf8");
+  expect(finalPrompt.startsWith("Quay reviewer protocol preamble")).toBe(true);
+  expect(finalPrompt).toContain("## Reviewer guidance");
   expect(finalPrompt).toContain(".quay-review-result.json");
   expect(finalPrompt).toContain("Do not call `gh pr review`");
   expect(finalPrompt).toContain("Do not post a GitHub review");

@@ -20,14 +20,16 @@ import {
   type RepoCiIgnorePolicy,
 } from "./ci_policy.ts";
 import {
+  composeReviewerFinalPrompt,
   ensurePreambleIdForAttemptReason,
   loadPreambleBody,
   MISSING_REVIEW_RESULT_DIAGNOSTIC,
+  REVIEW_RESULT_PROTOCOL_VERSION,
   REVIEW_RESULT_FILENAME,
 } from "./preamble.ts";
 import { renderReferenceReposPrompt } from "./reference_repos.ts";
 import { assertTaskState, transitionTaskState } from "./task_state.ts";
-import { composeReviewerPrompt, composeWorkerPrompt } from "./worker_prompt.ts";
+import { composeWorkerPrompt } from "./worker_prompt.ts";
 import {
   installWorktreeDependencies,
   loadWorktreeDependencyRepo,
@@ -312,7 +314,7 @@ export function enterReview(
     "review_only",
     { repoId: input.repoId },
   );
-  const reviewerGuidance = loadPreambleBody(deps.db, preambleId);
+  const preamble = loadPreambleBody(deps.db, preambleId);
   const brief = task.authoring_mode === "synthetic_review"
     ? composeSyntheticBrief(pr, input.referenceReposRoot)
     : composeTaskReviewBrief(
@@ -533,32 +535,40 @@ export function enterReview(
     const attempt = deps.db
       .query<
         InsertAttemptRow,
-        [string, number, number, string, number, string]
+        [string, number, number, string, number, string, string]
       >(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha
-         ) VALUES (?, ?, ?, ?, ?, ?)
+           task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha,
+           review_protocol_version
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
          RETURNING attempt_id`,
       )
-      .get(task.task_id, nextAttemptNumber, preambleId, "review_only", 0, headSha);
+      .get(
+        task.task_id,
+        nextAttemptNumber,
+        preambleId,
+        "review_only",
+        0,
+        headSha,
+        REVIEW_RESULT_PROTOCOL_VERSION,
+      );
     if (!attempt) throw new Error("review attempt insert returned no row");
-    const composed = composeReviewerPrompt({
-      reviewerGuidanceBody: reviewerGuidance,
-      brief,
-    });
 
     deps.artifactStore.writeArtifact({
       taskId: task.task_id,
       attemptId: attempt.attempt_id,
       kind: "brief",
-      content: composed.brief,
+      content: brief,
       extension: "md",
     });
     deps.artifactStore.writeArtifact({
       taskId: task.task_id,
       attemptId: attempt.attempt_id,
       kind: "final_prompt",
-      content: composed.finalPrompt,
+      content: composeReviewerFinalPrompt({
+        guidanceBody: preamble,
+        brief,
+      }),
       extension: "md",
     });
 
