@@ -3,7 +3,7 @@ import {
   ensurePreambleIdForAttemptReason,
   loadPreambleBody,
   preambleKindForAttemptReason,
-  reviewPreambleUsesStructuredResultProtocol,
+  REVIEWER_PROTOCOL_PREAMBLE_BODY,
 } from "../../src/core/preamble.ts";
 import { insertPreamble } from "../support/fixtures.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
@@ -65,7 +65,7 @@ test("attempt reasons map to the correct preamble role", () => {
   expect(reviewerBody).toContain("You do not push");
 });
 
-test("review preamble fallback supersedes stale direct-post protocol", () => {
+test("review preamble fallback keeps latest reviewer guidance even when legacy prose lacks protocol", () => {
   h = createHarness();
   const staleId = insertPreamble(
     h.db,
@@ -79,14 +79,22 @@ test("review preamble fallback supersedes stale direct-post protocol", () => {
     "review_only",
   );
 
-  expect(reviewerPreambleId).toBeGreaterThan(staleId);
+  expect(reviewerPreambleId).toBe(staleId);
   const reviewerBody = loadPreambleBody(h.db, reviewerPreambleId);
-  expect(reviewerBody).toContain(".quay-review-result.json");
-  expect(reviewerBody).toContain("Do not call `gh pr review`");
-  expect(reviewerBody).not.toContain("Post the review directly");
+  expect(reviewerBody).toContain("Post the review directly");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain(".quay-review-result.json");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("Do not modify source files");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("call `gh pr review`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`severity` (`blocking` or `non_blocking`)");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("optional `principle_text`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("optional `locations`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`## Review Findings`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`### Blocking`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`### Non-blocking`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`quay-principle` fenced block");
 });
 
-test("explicit review preamble override must require structured result file", () => {
+test("explicit review preamble override may point at legacy guidance without protocol text", () => {
   h = createHarness();
   const staleId = insertPreamble(
     h.db,
@@ -96,34 +104,9 @@ test("explicit review preamble override must require structured result file", ()
   const db = h.db;
   const clock = h.clock;
 
-  expect(() =>
+  expect(
     ensurePreambleIdForAttemptReason(db, clock, "review_only", {
       overridePreambleId: staleId,
     }),
-  ).toThrow(/does not require \.quay-review-result\.json/);
-});
-
-
-test("review preamble protocol check accepts custom do-not-post wording", () => {
-  expect(
-    reviewPreambleUsesStructuredResultProtocol(
-      [
-        "You are running as a Quay reviewer worker.",
-        "Write `.quay-review-result.json` when the review is complete.",
-        "Do not post the review directly to GitHub via gh pr review.",
-      ].join("\n"),
-    ),
-  ).toBe(true);
-});
-
-test("review preamble protocol check rejects stale direct-post wording with filename mention", () => {
-  expect(
-    reviewPreambleUsesStructuredResultProtocol(
-      [
-        "You are running as a Quay reviewer worker.",
-        "Submit your review with gh pr review.",
-        "The file `.quay-review-result.json` may be mentioned in docs.",
-      ].join("\n"),
-    ),
-  ).toBe(false);
+  ).toBe(staleId);
 });

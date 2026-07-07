@@ -45,6 +45,7 @@ import {
 import {
   ensurePreambleIdForAttemptReason,
   MISSING_REVIEW_RESULT_DIAGNOSTIC,
+  REVIEW_RESULT_PROTOCOL_VERSION,
   REVIEW_RESULT_FILENAME,
 } from "./preamble.ts";
 import { collectToolTraceArtifact } from "./tool_trace.ts";
@@ -391,6 +392,7 @@ interface ReviewAttemptTaskRow {
   attempt_id: number;
   attempt_number: number;
   preamble_id: number;
+  review_protocol_version: string | null;
   head_sha: string;
   tmux_session: string | null;
   spawned_at: string | null;
@@ -1860,7 +1862,8 @@ function readRunningReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
               t.pr_number, t.cancel_requested_at,
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
-              a.attempt_id, a.attempt_number, a.preamble_id, a.head_sha,
+              a.attempt_id, a.attempt_number, a.preamble_id,
+              a.review_protocol_version, a.head_sha,
               a.tmux_session, a.spawned_at, a.kill_intent,
               t.reviewer_agent, t.reviewer_model
          FROM attempts a
@@ -1887,7 +1890,8 @@ function readPendingReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
               t.pr_number, t.cancel_requested_at,
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
-              a.attempt_id, a.attempt_number, a.preamble_id, a.head_sha,
+              a.attempt_id, a.attempt_number, a.preamble_id,
+              a.review_protocol_version, a.head_sha,
               a.tmux_session, a.spawned_at, a.kill_intent,
               t.reviewer_agent, t.reviewer_model
          FROM attempts a
@@ -5254,10 +5258,11 @@ function markReviewInfraFailure(
 
     if (!parking) {
       const retryAttempt = deps.db
-        .query<{ attempt_id: number }, [string, number, number, string, number, string]>(
+        .query<{ attempt_id: number }, [string, number, number, string, number, string, string | null]>(
           `INSERT INTO attempts (
-             task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha
-           ) VALUES (?, ?, ?, ?, ?, ?)
+             task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha,
+             review_protocol_version
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)
            RETURNING attempt_id`,
         )
         .get(
@@ -5267,6 +5272,7 @@ function markReviewInfraFailure(
           "review_only",
           0,
           task.head_sha,
+          task.review_protocol_version,
         );
       if (!retryAttempt) throw new Error("review retry insert returned no row");
       deps.artifactStore.writeArtifact({

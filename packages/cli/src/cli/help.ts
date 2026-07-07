@@ -315,7 +315,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--model-worker <m>", desc: "Optional. Worker model default for this repo." },
       { flag: "--model-reviewer <m>", desc: "Optional. Reviewer model default for this repo." },
       { flag: "--preamble-worker <id>", desc: "Optional. Worker preamble_id override for this repo." },
-      { flag: "--preamble-reviewer <id>", desc: "Optional. Reviewer preamble_id override for this repo." },
+      { flag: "--preamble-reviewer <id>", desc: "Optional. Reviewer guidance preamble_id override for this repo." },
       { flag: "--input <json>", desc: "Alternative: pass the full row as JSON." },
     ],
   },
@@ -336,7 +336,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--model-worker <m>", desc: "Set worker model default. Pass '' to clear." },
       { flag: "--model-reviewer <m>", desc: "Set reviewer model default. Pass '' to clear." },
       { flag: "--preamble-worker <id>", desc: "Set worker preamble_id override. Pass '' to clear." },
-      { flag: "--preamble-reviewer <id>", desc: "Set reviewer preamble_id override. Pass '' to clear." },
+      { flag: "--preamble-reviewer <id>", desc: "Set reviewer guidance preamble_id override. Pass '' to clear." },
       { flag: "--input <json>", desc: "Alternative: pass the patch as JSON." },
     ],
   },
@@ -418,7 +418,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   preamble: {
     path: "preamble",
     synopsis: "quay preamble <subcommand> [options]",
-    summary: "Manage worker and reviewer preamble catalog entries",
+    summary: "Manage worker preambles and reviewer guidance catalog entries",
     subcommands: [
       "preamble list",
       "preamble show",

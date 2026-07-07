@@ -1,8 +1,8 @@
 # Quay Reviewer Worker — Default Preamble
 
-This is the default preamble for the Quay reviewer worker. The original contract was specified in `docs/archive/quay-spec-pr-review.md` §7 (superseded); the replacement spec at `docs/quay-spec-pr-review.md` restates the contract this preamble must enforce. It is read at worker spawn time. Deployments may override the prose by inserting a newer `kind = 'review'` row in the `preambles` SQL table; this file is the shipped default.
+This is the default reviewer guidance for the Quay reviewer worker. Quay now prepends a code-owned reviewer protocol preamble at worker spawn time; that static protocol owns the `.quay-review-result.json` contract and takes precedence over any configurable guidance. Deployments may override the guidance prose by inserting a newer `kind = 'review'` row in the `preambles` SQL table; this file is the shipped default guidance.
 
-It is adapted from the maintainers' interactive `/review` Claude Code skill. The substantive review approach (mindset, codebase-pattern check, link/line-number rigor, domain watchlist, noise-comment rule) is preserved verbatim from that skill; the differences are in the operating envelope (autonomous, no human in the loop, writes `.quay-review-result.json` for Quay to post, follows Quay's `quay-principle` fenced-block contract, uses `.quay-blocked.md` for blockers, verdict mapping restricted to `approved` / `changes_requested`).
+It is adapted from the maintainers' interactive `/review` Claude Code skill. The substantive review approach (mindset, codebase-pattern check, link/line-number rigor, domain watchlist, noise-comment rule) is preserved verbatim from that skill; the operating-envelope rules below are retained for compatibility with existing rows, but the code-owned protocol is authoritative.
 
 ---
 
@@ -75,7 +75,7 @@ The JSON object must have this shape:
 
 - `verdict` is exactly `approved` or `changes_requested`.
 - `body` is the GitHub review body.
-- `findings` is an array. Use `[]` when there are no findings. When findings exist, include one object per finding with enough structure for future parsing: `severity` (`blocking` or `non_blocking`), `title`, `body`, and optional `locations`.
+- `findings` is an array. Use `[]` when there are no findings. When findings exist, include one object per finding with this accepted schema: `severity` (`blocking` or `non_blocking`), `title`, `body`, optional `principle_text`, and optional `locations`.
 
 The body uses the structured findings format below; the verdict is chosen from the verdict mapping.
 
@@ -174,7 +174,7 @@ The description tells the author what to fix here. The principle states the unde
 - **The principle is prose**, not a slug — sentence-shaped, free text, written so a future task could act on it.
 - **No metadata.** No scope. No booleans. No category labels. Just the prose.
 
-In v1, Quay stores the full review body (including any fenced blocks) verbatim in the `review_comments` artifact, but **does not parse the blocks themselves** — structured findings storage and search are deferred to a future spec. Writing the blocks anyway is the right move: when the parser lands, prior reviews are re-parseable from the stored artifacts.
+Quay stores the full review body verbatim in the `review_comments` artifact and parses the top-level `.quay-review-result.json` `findings` array for durable storage and human follow-up automation. The prose body remains the GitHub-facing source of context; the JSON findings array is the machine-readable source.
 
 ## When you cannot review (`.quay-blocked.md`)
 
