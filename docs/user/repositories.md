@@ -82,7 +82,7 @@ ID on the repo role that should use it:
 worker_id=$(quay preamble create --kind code --body-file worker-preamble.md | jq -r .preamble_id)
 quay repo update myrepo --preamble-worker "$worker_id"
 
-reviewer_id=$(quay preamble create --kind review --body-file reviewer-preamble.md | jq -r .preamble_id)
+reviewer_id=$(quay preamble create --kind review --body-file reviewer-guidance.md | jq -r .preamble_id)
 quay repo update myrepo --preamble-reviewer "$reviewer_id"
 ```
 
@@ -95,6 +95,12 @@ for that role:
 quay repo update myrepo --preamble-worker ""
 quay repo update myrepo --preamble-reviewer ""
 ```
+
+Reviewer overrides are guidance, not the result-file protocol. Quay prepends
+its static reviewer protocol to every review prompt and snapshots that
+protocol version on the review attempt. The `--preamble-reviewer` flag and
+`preamble_reviewer` export field are retained for compatibility with existing
+repo configs.
 
 ## List, Export, And Import
 

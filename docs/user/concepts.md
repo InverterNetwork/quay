@@ -64,8 +64,9 @@ Every attempt has:
 - A `brief` artifact: a structured composed prompt body with the original
   task objective (rendered from the task-level `task_objective` artifact),
   the current attempt's guidance, and any diagnostics for this attempt.
-- A `final_prompt` artifact: Quay's worker preamble followed by the
-  composed `brief`.
+- A `final_prompt` artifact: for code-worker attempts, Quay's worker preamble
+  followed by the composed `brief`; for review attempts, Quay's static
+  reviewer protocol followed by reviewer guidance and the review `brief`.
 - Optional artifacts captured during or after the worker run.
 
 Budget-consuming attempts increment `attempts_consumed` when tick promotes the
@@ -92,7 +93,8 @@ Artifacts are snapshots of data that crosses a boundary, such as:
 - `ticket_snapshot`
 - `task_objective` (task-level; the raw original brief, source of every later attempt's stable objective section)
 - `brief` (per-attempt composed body)
-- `final_prompt` (preamble + `brief`)
+- `final_prompt` (worker preamble + `brief`, or reviewer protocol + guidance
+  + review `brief`)
 - `session_log`
 - `blocker`
 - `malformed_signal`

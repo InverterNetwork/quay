@@ -20,9 +20,11 @@ import {
   type RepoCiIgnorePolicy,
 } from "./ci_policy.ts";
 import {
+  composeReviewerFinalPrompt,
   ensurePreambleIdForAttemptReason,
   loadPreambleBody,
   MISSING_REVIEW_RESULT_DIAGNOSTIC,
+  REVIEW_RESULT_PROTOCOL_VERSION,
   REVIEW_RESULT_FILENAME,
 } from "./preamble.ts";
 import { renderReferenceReposPrompt } from "./reference_repos.ts";
@@ -533,14 +535,23 @@ export function enterReview(
     const attempt = deps.db
       .query<
         InsertAttemptRow,
-        [string, number, number, string, number, string]
+        [string, number, number, string, number, string, string]
       >(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha
-         ) VALUES (?, ?, ?, ?, ?, ?)
+           task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha,
+           review_protocol_version
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
          RETURNING attempt_id`,
       )
-      .get(task.task_id, nextAttemptNumber, preambleId, "review_only", 0, headSha);
+      .get(
+        task.task_id,
+        nextAttemptNumber,
+        preambleId,
+        "review_only",
+        0,
+        headSha,
+        REVIEW_RESULT_PROTOCOL_VERSION,
+      );
     if (!attempt) throw new Error("review attempt insert returned no row");
 
     deps.artifactStore.writeArtifact({
@@ -554,7 +565,10 @@ export function enterReview(
       taskId: task.task_id,
       attemptId: attempt.attempt_id,
       kind: "final_prompt",
-      content: `${preamble}\n\n${brief}`,
+      content: composeReviewerFinalPrompt({
+        guidanceBody: preamble,
+        brief,
+      }),
       extension: "md",
     });
 

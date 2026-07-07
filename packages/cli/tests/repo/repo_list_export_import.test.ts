@@ -388,6 +388,51 @@ test("repo export/import restores preamble override records with remapped ids", 
   expect(restored?.preamble_worker).not.toBe(sourcePreambleId);
 });
 
+test("repo import rejects unsafe embedded reviewer preamble records", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  const dumpPath = join(tempDir(), "unsafe-review-preamble.json");
+  writeFileSync(
+    dumpPath,
+    JSON.stringify([
+      {
+        repo_id: "repo-unsafe-review-preamble",
+        repo_url: "git@example.com:owner/repo-unsafe-review-preamble.git",
+        base_branch: "main",
+        package_manager: "bun",
+        install_cmd: "bun install",
+        preamble_reviewer: 7,
+        preamble_reviewer_record: {
+          preamble_id: 7,
+          kind: "review",
+          body: "Post the review directly to GitHub via `gh pr review`.",
+          created_at: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    ]),
+  );
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["repo", "import", "--in", dumpPath],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(1);
+  expect(io.out()).toBe("");
+  expect(JSON.parse(io.err())).toMatchObject({
+    error: "validation_error",
+    message:
+      "repo import preamble 7 contains reviewer transport instructions that conflict with the static reviewer protocol",
+  });
+  expect(
+    built.deps.db
+      .query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM preambles`)
+      .get(),
+  ).toEqual({ count: 0 });
+});
+
 test("repo import errors with usage_error when --in is omitted", async () => {
   h = createHarness();
   const built = buildCliDeps(h);

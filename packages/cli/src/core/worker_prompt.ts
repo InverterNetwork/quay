@@ -25,6 +25,10 @@
 import { readFileSync } from "node:fs";
 import type { DB } from "../db/connection.ts";
 import { renderGoalContext, type GoalPromptContext } from "./goals.ts";
+import {
+  assertReviewerGuidanceProtocolSafe,
+  REVIEWER_PROTOCOL_PREAMBLE_BODY,
+} from "./preamble.ts";
 import { renderReferenceReposPrompt } from "./reference_repos.ts";
 
 export const DEFAULT_OBJECTIVE_RENDER_CAP_BYTES = 16_384;
@@ -66,6 +70,11 @@ export interface WorkerPromptResult {
   finalPrompt: string;
 }
 
+export interface ReviewerPromptInput {
+  reviewerGuidanceBody: string;
+  brief: string;
+}
+
 export function composeWorkerPrompt(
   input: WorkerPromptInput,
 ): WorkerPromptResult {
@@ -98,6 +107,28 @@ export function composeWorkerPrompt(
   const brief = sections.join("\n\n");
   const finalPrompt = `${input.preambleBody}\n\n${brief}`;
   return { brief, finalPrompt };
+}
+
+export function composeReviewerPrompt(
+  input: ReviewerPromptInput,
+): WorkerPromptResult {
+  const guidance = input.reviewerGuidanceBody.trim();
+  assertReviewerGuidanceProtocolSafe(guidance, "configured reviewer guidance");
+  const reviewerGuidanceSection = [
+    "## Configurable Reviewer Guidance",
+    "",
+    "The following guidance is configurable. If it conflicts with the static reviewer protocol above, follow the static reviewer protocol.",
+    "",
+    guidance.length > 0 ? guidance : "(No additional reviewer guidance configured.)",
+  ].join("\n");
+  return {
+    brief: input.brief,
+    finalPrompt: [
+      REVIEWER_PROTOCOL_PREAMBLE_BODY,
+      reviewerGuidanceSection,
+      input.brief,
+    ].join("\n\n"),
+  };
 }
 
 // Loads the canonical original task objective for a task. The objective is

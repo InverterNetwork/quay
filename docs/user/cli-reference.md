@@ -102,15 +102,22 @@ record, including its `preamble_id`, so operators can register preambles
 without direct SQL access.
 
 Preambles are split by kind: `code` for worker attempts and `review` for
-reviewer attempts. Use `--body-file -` to read the body from stdin. After
-creating a preamble, assign it to a repo role with the existing override
-flags:
+reviewer guidance. Review result protocol instructions are code-owned and
+prepended by Quay; `kind=review` rows should contain mutable review style,
+strictness, and repo/operator guidance. Legacy review rows that mention
+`.quay-review-result.json` can continue to resolve because the static Quay
+reviewer protocol takes precedence, but reviewer guidance must not instruct
+the reviewer to post, submit, or publish reviews directly to GitHub, including
+via `gh pr review`. Remove or migrate those direct-post transport instructions
+before using the row as reviewer guidance. Use `--body-file -` to read the body
+from stdin. After creating a preamble, assign it to a repo role with the
+existing override flags:
 
 ```bash
 worker_id=$(quay preamble create --kind code --body-file worker.md | jq -r .preamble_id)
 quay repo update myrepo --preamble-worker "$worker_id"
 
-reviewer_id=$(quay preamble create --kind review --body-file reviewer.md | jq -r .preamble_id)
+reviewer_id=$(quay preamble create --kind review --body-file reviewer-guidance.md | jq -r .preamble_id)
 quay repo update myrepo --preamble-reviewer "$reviewer_id"
 ```
 
@@ -148,9 +155,11 @@ quay repo apply-tags <repo_id> --from <path>
 
 `repo add` and `repo update` also accept `--input <json>` for structured
 automation. Agent/model flags set per-repo worker and reviewer defaults.
-Preamble flags pin that repo role to a specific `preambles.preamble_id`;
-when omitted, attempts continue using the latest global preamble for their
-role.
+Preamble flags pin that repo role to a specific `preambles.preamble_id`.
+For reviewers, `--preamble-reviewer` is a compatibility name for the reviewer
+guidance row; it does not replace Quay's static reviewer result protocol.
+When omitted, attempts continue using the latest global preamble/guidance for
+their role.
 Use `repo update --agent-worker ""`, `--agent-reviewer ""`,
 `--model-worker ""`, `--model-reviewer ""`, `--preamble-worker ""`, or
 `--preamble-reviewer ""` to clear an override and fall back to deployment or
