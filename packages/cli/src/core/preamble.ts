@@ -334,6 +334,9 @@ export function createPreamble(
   kind: PreambleKind,
   body: string,
 ): PreambleRecord {
+  if (kind === "review") {
+    assertReviewerGuidanceProtocolSafe(body, "review preamble");
+  }
   const inserted = db
     .query<PreambleRecord, [string, string, string]>(
       `INSERT INTO preambles (body, kind, created_at)

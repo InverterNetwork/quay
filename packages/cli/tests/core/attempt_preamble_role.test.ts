@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  createPreamble,
   ensurePreambleIdForAttemptReason,
   loadPreambleBody,
   preambleKindForAttemptReason,
@@ -112,4 +113,20 @@ test("review preamble resolution rejects stale direct-post guidance", () => {
       overridePreambleId: staleGuidanceId,
     }),
   ).toThrow(/conflict with the static reviewer protocol/);
+});
+
+test("review preamble creation rejects stale direct-post guidance", () => {
+  h = createHarness();
+
+  expect(() =>
+    createPreamble(
+      h!.db,
+      h!.clock,
+      "review",
+      "Post the review directly to GitHub via `gh pr review`.",
+    ),
+  ).toThrow(/conflict with the static reviewer protocol/);
+  expect(
+    h.db.query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM preambles`).get(),
+  ).toEqual({ count: 0 });
 });
