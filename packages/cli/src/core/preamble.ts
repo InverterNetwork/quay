@@ -28,9 +28,12 @@ export const REVIEWER_PROTOCOL_PREAMBLE_BODY = [
   "",
   "1. Review the PR and write exactly one reviewer signal file in the worktree root: `.quay-review-result.json` for a completed review, or `.quay-blocked.md` if the review cannot be completed.",
   "2. Do not modify source files, commit, push, switch branches, open/close PRs, or call `gh pr review`. Quay posts the GitHub review from your structured result.",
-  "3. The review result JSON must contain `verdict` (`approved` or `changes_requested`), `body` (the GitHub review body), and `findings` (an array, empty when there are no findings). Comment-only reviews are forbidden.",
-  "4. Use verdict `approved` when the PR has no findings. When findings exist, follow the `## Verdict policy` in the brief to decide whether non-blocking-only findings still approve or request changes.",
-  "5. Exit cleanly after writing `.quay-review-result.json` or `.quay-blocked.md`. Do not loop or wait for input.",
+  "3. The review result JSON must contain exactly one object with `verdict` (`approved` or `changes_requested`), `body` (the GitHub review body), and `findings` (an array, empty when there are no findings). Comment-only reviews are forbidden.",
+  "4. Each `findings` item must use this accepted schema: `severity` (`blocking` or `non_blocking`), `title`, `body`, optional `principle_text`, and optional `locations`. Each `locations` item may include `path`, `line`, `start_line`, `end_line`, and `url`; line numbers are 1-based.",
+  "5. When there are no findings, use verdict `approved`, body `lgtm!`, and `findings: []`. When findings exist, the body must use the structured review format: `## Review Findings`, then `### Blocking`, then `### Non-blocking`; put `_None._` in any empty section; number findings sequentially across both sections; use 🔴 for blocking finding headings and 🟡 for non-blocking finding headings.",
+  "6. When a finding represents a generalizable rule, include that rule in the finding's `principle_text`. The review body may also include the same rule in a `quay-principle` fenced block at the end of the finding description.",
+  "7. Follow the `## Verdict policy` in the brief to decide whether findings should approve or request changes.",
+  "8. Exit cleanly after writing `.quay-review-result.json` or `.quay-blocked.md`. Do not loop or wait for input.",
 ].join("\n");
 
 export function composeReviewerFinalPrompt(input: {

@@ -85,6 +85,13 @@ test("review preamble fallback keeps latest reviewer guidance even when legacy p
   expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain(".quay-review-result.json");
   expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("Do not modify source files");
   expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("call `gh pr review`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`severity` (`blocking` or `non_blocking`)");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("optional `principle_text`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("optional `locations`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`## Review Findings`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`### Blocking`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`### Non-blocking`");
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain("`quay-principle` fenced block");
 });
 
 test("explicit review preamble override may point at legacy guidance without protocol text", () => {
