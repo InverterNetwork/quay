@@ -403,7 +403,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
       assertPreambleKind(db, input.preamble_worker, "code", "repo worker");
     }
     if (input.preamble_reviewer !== undefined && input.preamble_reviewer !== null) {
-      assertPreambleKind(db, input.preamble_reviewer, "review", "repo reviewer");
+      assertPreambleKind(db, input.preamble_reviewer, "review", "repo reviewer guidance");
     }
   }
 

@@ -130,3 +130,16 @@ test("repo preamble overrides must reference the matching preamble kind", () => 
   expect(() => repos.add({ ...REPO, preamble_worker: reviewPreamble }))
     .toThrow(/expected code/);
 });
+
+test("repo reviewer preamble overrides reject direct-post guidance", () => {
+  h = createHarness();
+  const staleReviewPreamble = insertPreamble(
+    h.db,
+    "Post the review directly to GitHub via `gh pr review`.",
+    "review",
+  );
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+
+  expect(() => repos.add({ ...REPO, preamble_reviewer: staleReviewPreamble }))
+    .toThrow(/conflict with the static reviewer protocol/);
+});

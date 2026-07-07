@@ -1762,6 +1762,89 @@ test("reviewer infrastructure failures retry twice then park at same SHA", async
   ]);
 });
 
+test("reviewer infrastructure retry preserves null protocol provenance for copied legacy prompt", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-review-legacy-retry");
+  const taskId = "pr-review-repo-review-legacy-retry-9";
+  const worktreePath = `${h.dataDir}/worktrees/review-legacy-retry-9`;
+  mkdirSync(worktreePath, { recursive: true });
+  h.db
+    .query(
+      `INSERT INTO tasks (
+         task_id, repo_id, state, branch_name, tmux_id, worktree_path,
+         pr_number, head_sha, retry_budget, review_infra_failures_consecutive,
+         review_infra_failure_head_sha, created_at, updated_at
+       ) VALUES (?, ?, 'pr-review', 'quay-review/9', 'quay-review-repo-review-legacy-retry-9',
+                 ?, 9, 'sha-9', 1, 0, NULL, ?, ?)`,
+    )
+    .run(taskId, repoId, worktreePath, h.clock.nowISO(), h.clock.nowISO());
+  seedTaskObjective(h, taskId);
+  const attemptId = insertAttempt(h.db, {
+    taskId,
+    reason: "review_only",
+    consumedBudget: 0,
+    spawnedAt: h.clock.nowISO(),
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET head_sha = 'sha-9', tmux_session = 'quay-review-legacy-session-9'
+        WHERE attempt_id = ?`,
+    )
+    .run(attemptId);
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "brief",
+    content: "legacy review brief",
+    extension: "md",
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId,
+    kind: "final_prompt",
+    content:
+      "legacy review prompt that mentions .quay-review-result.json but predates code-owned protocol provenance",
+    extension: "md",
+  });
+
+  const results = await tick_once(built.deps, reviewerTickOptions());
+
+  expect(results).toContainEqual({
+    task_id: taskId,
+    action: "review_retry_scheduled",
+  });
+  const retryAttempt = h.db
+    .query<
+      { attempt_id: number; review_protocol_version: string | null },
+      [string]
+    >(
+      `SELECT attempt_id, review_protocol_version
+         FROM attempts
+        WHERE task_id = ? AND reason = 'review_only' AND spawned_at IS NULL
+        ORDER BY attempt_id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  expect(retryAttempt).not.toBeNull();
+  expect(retryAttempt?.review_protocol_version).toBeNull();
+  const retryPromptRow = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'final_prompt'`,
+    )
+    .get(retryAttempt!.attempt_id);
+  expect(retryPromptRow).not.toBeNull();
+  expect(readFileSync(retryPromptRow!.file_path, "utf8")).toBe(
+    "legacy review prompt that mentions .quay-review-result.json but predates code-owned protocol provenance",
+  );
+});
+
 test("reviewer parks immediately when prompt lacked result protocol", async () => {
   h = createHarness();
   const built = buildTickDeps(h);

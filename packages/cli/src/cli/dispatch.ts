@@ -39,6 +39,7 @@ import { parseImportToml, planImport } from "../core/tags/import_toml.ts";
 import { QuayError } from "../core/errors.ts";
 import type { PreambleKind } from "../core/preamble.ts";
 import {
+  assertReviewerGuidanceProtocolSafe,
   createPreamble,
   getPreamble,
   listPreambles,
@@ -2016,6 +2017,12 @@ function ensureImportedPreambleRecord(
   db: DB,
   record: RepoExportPreambleRecord,
 ): number {
+  if (record.kind === "review") {
+    assertReviewerGuidanceProtocolSafe(
+      record.body,
+      `repo import preamble ${record.preamble_id}`,
+    );
+  }
   const existing = db
     .query<{ preamble_id: number }, [string, string, string]>(
       `SELECT preamble_id

@@ -437,9 +437,9 @@ Concurrent code-worker activity on the same worktree is uncommon (substrate seri
 
 No new worktree lock is introduced. A code worker holding the exclusive lock blocks reviewer spawn; tick retries on the next pass. Reviewers themselves don't take the exclusive lock — they only need a stable read view, and the substrate's existing serialization is enough for v1.
 
-### 6.3 Reviewer preamble
+### 6.3 Reviewer protocol and guidance
 
-Reviewer preambles use the same storage pattern as code-worker preambles: rows in the `preambles` SQL table, distinguished by the new `kind` column added in §5.4 (`'code'` vs `'review'`).
+Reviewer guidance uses the same storage pattern as code-worker preambles: rows in the `preambles` SQL table, distinguished by the new `kind` column added in §5.4 (`'code'` vs `'review'`). The immutable reviewer protocol is code-owned and prepended at prompt composition time.
 
 Spawn-time selection:
 
@@ -449,15 +449,15 @@ WHERE kind = 'review'
 ORDER BY preamble_id DESC LIMIT 1
 ```
 
-If no `kind = 'review'` row exists, the seeder inserts one whose body is sourced from a TS constant `DEFAULT_REVIEWER_PREAMBLE_BODY` defined alongside the existing `DEFAULT_PREAMBLE_BODY` (`src/core/preamble.ts:4`). The constant's prose mirrors `docs/quay-reviewer-preamble-default.md` — that markdown file is the human-readable source-of-truth, inlined into the TS constant at edit time. (Trade-off: edits to the markdown file require a corresponding edit to the constant. The alternative — reading the markdown at runtime — adds I/O and a packaging concern for no real benefit; the existing code-worker preamble uses the inline-constant pattern, and reviewer preambles match it.)
+If no `kind = 'review'` row exists, the seeder inserts one whose body is sourced from a TS constant `DEFAULT_REVIEWER_PREAMBLE_BODY` defined alongside the existing `DEFAULT_PREAMBLE_BODY` (`src/core/preamble.ts:4`). The constant's prose mirrors the configurable guidance section of `docs/quay-reviewer-preamble-default.md`.
 
 The reviewer attempt's `attempts.preamble_id` references the selected row, exactly as a code-worker attempt's `preamble_id` references its `kind = 'code'` preamble. This gives prompt-version correlation for free: a future analysis can join `attempts` to `preambles` to ask "which findings came out of which reviewer prompt?"
 
-Deployment override: a deployment customizes the reviewer preamble by inserting a new `kind = 'review'` row (typically via a migration in the deployment's own repo, or a one-off SQL command at install time). The new row becomes the latest and is picked up on the next reviewer spawn. The current row stays in the table — `preambles` is append-only, so historical attempts retain their reference to the prompt-version they actually ran with.
+Deployment override: a deployment customizes reviewer guidance by inserting a new `kind = 'review'` row (typically via a migration in the deployment's own repo, or a one-off SQL command at install time). The new row becomes the latest and is picked up on the next reviewer spawn. The current row stays in the table — `preambles` is append-only, so historical attempts retain their reference to the guidance version they actually ran with.
 
 No `[reviewer].preamble_path` config key. The storage mechanism is the database, identical to code workers; deployments don't manage two preamble systems.
 
-The preamble carries the entirety of the reviewer-worker contract surface: what the worker reads, how it composes the review body, severity, line-number accuracy, the verdict mapping (`approved` vs. `changes_requested` only — no comment-only), and writing `.quay-review-result.json` for Quay to post. The contract pieces themselves are enumerated in §7.1; the prose enforcing them lives in `docs/quay-reviewer-preamble-default.md` (the source-of-truth) and is mirrored verbatim in `DEFAULT_REVIEWER_PREAMBLE_BODY` in the source. The preamble also asks the worker to write optional `quay-principle` fenced blocks for generalizable rules; v1 stores the blocks verbatim in the `review_comments` artifact but doesn't parse them — that's deferred to the future findings/search spec.
+The static protocol carries the reviewer-worker contract surface: allowed signal files, `.quay-review-result.json`, the `quay-review-result-protocol: structured-result-v1` marker, verdict constraints (`approved` vs. `changes_requested` only — no comment-only), direct-post prohibition, and blocker behavior. The selected review guidance is appended below that protocol and may tune review focus, strictness, and style, but cannot override the static protocol.
 
 ### 6.4 Capacity cap (separate)
 
@@ -683,7 +683,7 @@ Nothing removed. The existing human-review respawn loop in `src/core/non_budget_
 - `docs/quay-spec-deployment-adapters.md` — Linear + Slack adapters. Soft dependency for richer synthetic-task briefs (§8.1).
 - `docs/archive/quay-spec-pr-review.md` — superseded prior draft. Source for still-valid design pieces this spec carries forward (synthetic `task_id` identity, active `(task_id, head_sha)` dedup, force-push handling). Also the original home of the older fenced `quay-principle` contract.
 - `docs/orchestrator-design-notes.md` §3.1, §3.2, §5, §7 — broader rationale, v2+ shape, deferred-work catalogue.
-- `docs/quay-reviewer-preamble-default.md` — human-readable source-of-truth for the default reviewer preamble. Inlined verbatim into the `DEFAULT_REVIEWER_PREAMBLE_BODY` constant at edit time (§6.3).
+- `docs/quay-reviewer-preamble-default.md` — human-readable source-of-truth for the default configurable reviewer guidance. Inlined into the `DEFAULT_REVIEWER_PREAMBLE_BODY` constant at edit time (§6.3).
 
 ### 8.4 Forward compatibility / v2 graduation
 

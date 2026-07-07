@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   DEFAULT_PREAMBLE_BODY,
   DEFAULT_REVIEWER_PREAMBLE_BODY,
+  REVIEWER_PROTOCOL_PREAMBLE_BODY,
 } from "../../src/core/preamble.ts";
 
 test("code preamble instructs workers to use conventional-commit PR title prefixes", () => {
@@ -34,14 +35,14 @@ test("reviewer preamble does not instruct title rewrites on human-authored PRs",
   expect(DEFAULT_REVIEWER_PREAMBLE_BODY).toContain("Do not modify code");
 });
 
-test("reviewer preamble permits only review result and blocker signal writes", () => {
-  expect(DEFAULT_REVIEWER_PREAMBLE_BODY).toContain(
+test("static reviewer protocol permits only review result and blocker signal writes", () => {
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain(
     "You may write exactly one reviewer signal file",
   );
-  expect(DEFAULT_REVIEWER_PREAMBLE_BODY).toContain(
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain(
     "Modify any file other than `.quay-review-result.json` or `.quay-blocked.md`",
   );
-  expect(DEFAULT_REVIEWER_PREAMBLE_BODY).toContain(
-    "modify any file outside `.quay-review-result.json` or `.quay-blocked.md`",
+  expect(REVIEWER_PROTOCOL_PREAMBLE_BODY).toContain(
+    "Do not call `gh pr review`",
   );
 });

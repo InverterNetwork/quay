@@ -51,6 +51,7 @@ export interface TaskGetCurrentAttempt {
   attempt_id: number;
   attempt_number: number;
   preamble_id: number;
+  review_protocol_version: string | null;
   reason: string;
   consumed_budget: number;
   spawned_at: string | null;
@@ -271,7 +272,8 @@ export function getTask(db: DB, taskId: string): TaskGetPayload | null {
 
   const attempt = db
     .query<TaskGetCurrentAttempt, [string]>(
-      `SELECT attempt_id, attempt_number, preamble_id, reason, consumed_budget,
+      `SELECT attempt_id, attempt_number, preamble_id, review_protocol_version,
+              reason, consumed_budget,
               spawned_at, ended_at, exit_kind, kill_intent,
               agent_name, agent_model
          FROM attempts
