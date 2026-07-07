@@ -1412,7 +1412,7 @@ function buildMatrixReadModel(runtime: AdminApiRuntime): Record<string, unknown>
     ),
     matrixRow(
       "PROMPTS",
-      "reviewer preamble",
+      "reviewer guidance",
       "preamble_reviewer",
       latestPreamble(runtime.db, "review")?.preamble_id.toString() ?? null,
       repos,
@@ -2052,7 +2052,7 @@ function validatePreamblePatch(
 ): void {
   const entries = [
     ["worker", "code", patch.preamble_worker],
-    ["reviewer", "review", patch.preamble_reviewer],
+    ["reviewer guidance", "review", patch.preamble_reviewer],
   ] as const;
   for (const [role, kind, preambleId] of entries) {
     if (preambleId === undefined || preambleId === null) continue;
@@ -2441,7 +2441,7 @@ function buildPreambleSummaries(
       : countRepoPreambleOverrides(runtime.db, kind, preambleId);
     return {
       kind,
-      title: kind === "review" ? "Reviewer preamble" : "Worker preamble",
+      title: kind === "review" ? "Reviewer guidance" : "Worker preamble",
       version: preambleId,
       body,
       refs: preambleId === 0 ? 0 : countPreambleRefs(runtime.db, preambleId),
@@ -2472,7 +2472,7 @@ function buildRepoEffectivePreamble(
     source: configured === null ? "global" : "repo",
     configured_preamble_id: configured,
     effective_preamble_id: effectiveId,
-    title: kind === "review" ? "Reviewer preamble" : "Worker preamble",
+    title: kind === "review" ? "Reviewer guidance" : "Worker preamble",
     body,
     refs: effectiveId === 0 ? 0 : countPreambleRefs(runtime.db, effectiveId),
     last_edited: row?.created_at ?? null,

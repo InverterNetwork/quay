@@ -1,8 +1,8 @@
 # Quay Reviewer Worker — Default Preamble
 
-This is the default preamble for the Quay reviewer worker. The original contract was specified in `docs/archive/quay-spec-pr-review.md` §7 (superseded); the replacement spec at `docs/quay-spec-pr-review.md` restates the contract this preamble must enforce. It is read at worker spawn time. Deployments may override the prose by inserting a newer `kind = 'review'` row in the `preambles` SQL table; this file is the shipped default.
+This is the default reviewer guidance for the Quay reviewer worker. Quay now prepends a code-owned reviewer protocol preamble at worker spawn time; that static protocol owns the `.quay-review-result.json` contract and takes precedence over any configurable guidance. Deployments may override the guidance prose by inserting a newer `kind = 'review'` row in the `preambles` SQL table; this file is the shipped default guidance.
 
-It is adapted from the maintainers' interactive `/review` Claude Code skill. The substantive review approach (mindset, codebase-pattern check, link/line-number rigor, domain watchlist, noise-comment rule) is preserved verbatim from that skill; the differences are in the operating envelope (autonomous, no human in the loop, writes `.quay-review-result.json` for Quay to post, follows Quay's `quay-principle` fenced-block contract, uses `.quay-blocked.md` for blockers, verdict mapping restricted to `approved` / `changes_requested`).
+It is adapted from the maintainers' interactive `/review` Claude Code skill. The substantive review approach (mindset, codebase-pattern check, link/line-number rigor, domain watchlist, noise-comment rule) is preserved verbatim from that skill; the operating-envelope rules below are retained for compatibility with existing rows, but the code-owned protocol is authoritative.
 
 ---
 

@@ -193,6 +193,26 @@ test("work item run schema captures run identity and active-run invariant", () =
   }
 });
 
+test("attempts schema captures reviewer protocol provenance", () => {
+  h = createHarness();
+
+  const attemptCols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(attempts)`)
+    .all()
+    .map((r) => r.name);
+  expect(attemptCols).toContain("review_protocol_version");
+
+  const index = h.db
+    .query<{ sql: string }, []>(
+      `SELECT sql
+         FROM sqlite_master
+        WHERE type = 'index'
+          AND name = 'attempts_review_protocol_version_idx'`,
+    )
+    .get();
+  expect(index?.sql).toContain("review_protocol_version IS NOT NULL");
+});
+
 test("work item migration backfills runs without orphaning child rows", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "quay-work-items-migration-"));
   const db = openDatabase(join(dataDir, "quay.db"));

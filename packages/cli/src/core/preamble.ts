@@ -15,9 +15,38 @@ export const DEFAULT_PREAMBLE_BODY = `Quay protocol preamble (v1)
 `;
 
 export const REVIEW_RESULT_FILENAME = ".quay-review-result.json";
+export const REVIEW_RESULT_PROTOCOL_VERSION = "structured-result-v1";
 export const REVIEW_RESULT_PROTOCOL_MARKER =
-  "quay-review-result-protocol: structured-result-v1";
+  `quay-review-result-protocol: ${REVIEW_RESULT_PROTOCOL_VERSION}`;
 export const MISSING_REVIEW_RESULT_DIAGNOSTIC = `reviewer did not write ${REVIEW_RESULT_FILENAME}`;
+
+export const REVIEWER_PROTOCOL_PREAMBLE_BODY = [
+  "Quay reviewer protocol preamble",
+  REVIEW_RESULT_PROTOCOL_MARKER,
+  "",
+  "This code-owned protocol is authoritative. If later reviewer guidance conflicts with this section, follow this protocol section.",
+  "",
+  "1. Review the PR and write exactly one reviewer signal file in the worktree root: `.quay-review-result.json` for a completed review, or `.quay-blocked.md` if the review cannot be completed.",
+  "2. Do not modify source files, commit, push, switch branches, open/close PRs, or call `gh pr review`. Quay posts the GitHub review from your structured result.",
+  "3. The review result JSON must contain `verdict` (`approved` or `changes_requested`), `body` (the GitHub review body), and `findings` (an array, empty when there are no findings). Comment-only reviews are forbidden.",
+  "4. Use verdict `approved` when the PR has no findings. When findings exist, follow the `## Verdict policy` in the brief to decide whether non-blocking-only findings still approve or request changes.",
+  "5. Exit cleanly after writing `.quay-review-result.json` or `.quay-blocked.md`. Do not loop or wait for input.",
+].join("\n");
+
+export function composeReviewerFinalPrompt(input: {
+  guidanceBody: string;
+  brief: string;
+}): string {
+  const guidance = input.guidanceBody.trim();
+  const parts = [
+    REVIEWER_PROTOCOL_PREAMBLE_BODY,
+    guidance.length === 0
+      ? "## Reviewer guidance\n\nNo additional reviewer guidance is configured."
+      : `## Reviewer guidance\n\n${guidance}`,
+    input.brief.trim(),
+  ];
+  return parts.join("\n\n").trimEnd();
+}
 
 // Mirrors the body of docs/quay-reviewer-preamble-default.md (the prose after
 // the first `---` separator). Keep these two in sync at edit time; the doc is
@@ -277,10 +306,7 @@ export function ensurePreambleId(
       "SELECT preamble_id, body FROM preambles WHERE kind = ? ORDER BY preamble_id DESC LIMIT 1",
     )
     .get(kind);
-  if (
-    latest &&
-    (kind !== "review" || reviewPreambleUsesStructuredResultProtocol(latest.body))
-  ) {
+  if (latest) {
     return latest.preamble_id;
   }
 
@@ -419,16 +445,6 @@ export function assertPreambleKind(
       "validation_error",
       `${context} preamble ${preambleId} has kind ${record.kind}; expected ${expected}`,
       { preamble_id: preambleId, actual_kind: record.kind, expected_kind: expected },
-    );
-  }
-  if (
-    expected === "review" &&
-    !reviewPreambleUsesStructuredResultProtocol(record.body)
-  ) {
-    throw new QuayError(
-      "validation_error",
-      `${context} preamble ${preambleId} does not require ${REVIEW_RESULT_FILENAME}`,
-      { preamble_id: preambleId, expected_kind: expected },
     );
   }
 }
