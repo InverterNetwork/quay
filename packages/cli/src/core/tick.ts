@@ -5258,7 +5258,7 @@ function markReviewInfraFailure(
 
     if (!parking) {
       const retryAttempt = deps.db
-        .query<{ attempt_id: number }, [string, number, number, string, number, string, string]>(
+        .query<{ attempt_id: number }, [string, number, number, string, number, string, string | null]>(
           `INSERT INTO attempts (
              task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha,
              review_protocol_version
@@ -5272,7 +5272,7 @@ function markReviewInfraFailure(
           "review_only",
           0,
           task.head_sha,
-          task.review_protocol_version ?? REVIEW_RESULT_PROTOCOL_VERSION,
+          task.review_protocol_version,
         );
       if (!retryAttempt) throw new Error("review retry insert returned no row");
       deps.artifactStore.writeArtifact({
