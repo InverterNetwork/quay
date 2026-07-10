@@ -276,6 +276,7 @@ export const DEFAULT_REVIEWER_PREAMBLE_BODY = [
 ].join("\n");
 
 export type PreambleKind = "code" | "review";
+export type RepoGuidanceRole = "worker" | "reviewer";
 
 export interface PreambleSummary {
   preamble_id: number;
@@ -284,6 +285,20 @@ export interface PreambleSummary {
 }
 
 export interface PreambleRecord extends PreambleSummary {
+  body: string;
+}
+
+export interface RepoGuidanceRecord {
+  guidance_id: number;
+  repo_id: string;
+  role: RepoGuidanceRole;
+  body: string;
+  created_at: string;
+}
+
+export interface ResolvedPreamble {
+  preambleId: number;
+  repoGuidanceId: number | null;
   body: string;
 }
 
@@ -298,6 +313,10 @@ export interface PreambleResolutionOptions {
 
 export function preambleKindForAttemptReason(reason: string): PreambleKind {
   return reason === "review_only" ? "review" : "code";
+}
+
+export function repoGuidanceRoleForPreambleKind(kind: PreambleKind): RepoGuidanceRole {
+  return kind === "review" ? "reviewer" : "worker";
 }
 
 export function ensurePreambleId(
@@ -408,6 +427,32 @@ export function ensurePreambleIdForAttemptReason(
   return ensurePreambleId(db, clock, kind);
 }
 
+export function resolvePreambleForAttemptReason(
+  db: DB,
+  clock: Clock,
+  reason: string,
+  options: PreambleResolutionOptions = {},
+): ResolvedPreamble {
+  const preambleId = ensurePreambleIdForAttemptReason(db, clock, reason, options);
+  const kind = preambleKindForAttemptReason(reason);
+  const baseBody = loadPreambleBody(db, preambleId);
+  const repoId =
+    options.repoId ?? (options.taskId ? lookupTaskRepoId(db, options.taskId) : null);
+  const guidance = repoId === null || repoId === undefined
+    ? null
+    : latestRepoGuidance(db, repoId, repoGuidanceRoleForPreambleKind(kind));
+  return {
+    preambleId,
+    repoGuidanceId: guidance?.guidance_id ?? null,
+    body: composeRepoSpecificPreamble({
+      repoId: repoId ?? null,
+      baseBody,
+      guidanceBody: guidance?.body ?? null,
+      role: repoGuidanceRoleForPreambleKind(kind),
+    }),
+  };
+}
+
 export function ensureReviewerPreambleId(db: DB, clock: Clock): number {
   return ensurePreambleIdForAttemptReason(db, clock, "review_only");
 }
@@ -420,6 +465,91 @@ export function loadPreambleBody(db: DB, preambleId: number): string {
     .get(preambleId);
   if (!row) throw new Error(`preamble ${preambleId} not found`);
   return row.body;
+}
+
+export function composeRepoSpecificPreamble(input: {
+  repoId: string | null;
+  role: RepoGuidanceRole;
+  baseBody: string;
+  guidanceBody: string | null;
+}): string {
+  const guidance = input.guidanceBody?.trim() ?? "";
+  if (guidance.length === 0) return input.baseBody;
+  if (input.role === "reviewer") {
+    assertReviewerGuidanceProtocolSafe(guidance, `repo ${input.repoId ?? "<unknown>"} reviewer guidance`);
+  }
+  const repoLabel = input.repoId ?? "repo";
+  return [
+    input.baseBody.trimEnd(),
+    `## Repo-specific guidance (${repoLabel})`,
+    "",
+    "This repo-specific guidance is additive. If it conflicts with the global preamble above, follow this repo-specific guidance.",
+    "",
+    guidance,
+  ].join("\n");
+}
+
+export function createRepoGuidance(
+  db: DB,
+  clock: Clock,
+  input: { repoId: string; role: RepoGuidanceRole; body: string },
+): RepoGuidanceRecord {
+  assertRepoExists(db, input.repoId);
+  if (input.role === "reviewer") {
+    assertReviewerGuidanceProtocolSafe(input.body, `repo ${input.repoId} reviewer guidance`);
+  }
+  const inserted = db
+    .query<RepoGuidanceRecord, [string, string, string, string]>(
+      `INSERT INTO repo_guidance (repo_id, role, body, created_at)
+       VALUES (?, ?, ?, ?)
+       RETURNING guidance_id, repo_id, role, body, created_at`,
+    )
+    .get(input.repoId, input.role, input.body, clock.nowISO());
+  if (!inserted) throw new Error("repo guidance insert returned no row");
+  return inserted;
+}
+
+export function latestRepoGuidance(
+  db: DB,
+  repoId: string,
+  role: RepoGuidanceRole,
+): RepoGuidanceRecord | null {
+  return (
+    db
+      .query<RepoGuidanceRecord, [string, string]>(
+        `SELECT guidance_id, repo_id, role, body, created_at
+           FROM repo_guidance
+          WHERE repo_id = ? AND role = ?
+          ORDER BY guidance_id DESC
+          LIMIT 1`,
+      )
+      .get(repoId, role) ?? null
+  );
+}
+
+export function listRepoGuidance(
+  db: DB,
+  repoId: string,
+  role?: RepoGuidanceRole,
+): RepoGuidanceRecord[] {
+  if (role !== undefined) {
+    return db
+      .query<RepoGuidanceRecord, [string, string]>(
+        `SELECT guidance_id, repo_id, role, body, created_at
+           FROM repo_guidance
+          WHERE repo_id = ? AND role = ?
+          ORDER BY guidance_id ASC`,
+      )
+      .all(repoId, role);
+  }
+  return db
+    .query<RepoGuidanceRecord, [string]>(
+      `SELECT guidance_id, repo_id, role, body, created_at
+         FROM repo_guidance
+        WHERE repo_id = ?
+        ORDER BY guidance_id ASC`,
+    )
+    .all(repoId);
 }
 
 export function loadPreambleKind(db: DB, preambleId: number): PreambleKind | null {
@@ -517,6 +647,19 @@ function lookupTaskRepoId(db: DB, taskId: string): string | null {
       )
       .get(taskId)?.repo_id ?? null
   );
+}
+
+function assertRepoExists(db: DB, repoId: string): void {
+  const row = db
+    .query<{ repo_id: string }, [string]>(
+      "SELECT repo_id FROM repos WHERE repo_id = ?",
+    )
+    .get(repoId);
+  if (!row) {
+    throw new QuayError("unknown_repo", `repo "${repoId}" not found`, {
+      repo_id: repoId,
+    });
+  }
 }
 
 function lookupRepoPreambleOverride(

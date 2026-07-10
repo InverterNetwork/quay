@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { Card } from '../components/Card';
@@ -10,7 +10,7 @@ import { Field } from './Field';
 import { Section, SubGroup } from './Section';
 import { Toc, type TocItem } from './Toc';
 import type { GlobalConfigSummary, PreambleSummary, RepoEffectivePreamble, RepoSummary } from '../store/data';
-import type { ChangeEntry, RepoUpdateChange } from '../store/dirty';
+import type { ChangeEntry, RepoGuidanceSetChange, RepoUpdateChange } from '../store/dirty';
 import { TagNamespaceEditor } from './TagNamespaceEditor';
 
 const TOC: TocItem[] = [
@@ -116,18 +116,35 @@ interface BodyProps {
 
 function Body({ repo, global, changes, onChange, active, setActive }: BodyProps) {
   const field = createRepoFieldAccess(repo, changes, onChange);
+  const guidance = createRepoGuidanceAccess(repo, changes, onChange);
   const globalWorkerPreamble = global.preambles.find((preamble) => preamble.kind === 'code') ?? null;
   const globalReviewerPreamble = global.preambles.find((preamble) => preamble.kind === 'review') ?? null;
-  const workerPreamble = effectiveWithPending(
+  const workerBasePreamble = effectiveWithPending(
     repo.effectivePreambles.worker,
     field.value('preamble_worker', idString(repo.preambleWorker)),
     globalWorkerPreamble,
   );
-  const reviewerPreamble = effectiveWithPending(
+  const workerPreamble = {
+    ...workerBasePreamble,
+    body: composePendingGuidanceBody(
+      repo.id,
+      workerBasePreamble.body,
+      guidance.value('worker'),
+    ),
+  };
+  const reviewerBasePreamble = effectiveWithPending(
     repo.effectivePreambles.reviewer,
     field.value('preamble_reviewer', idString(repo.preambleReviewer)),
     globalReviewerPreamble,
   );
+  const reviewerPreamble = {
+    ...reviewerBasePreamble,
+    body: composePendingGuidanceBody(
+      repo.id,
+      reviewerBasePreamble.body,
+      guidance.value('reviewer'),
+    ),
+  };
 
   return (
     <div
@@ -337,6 +354,13 @@ function Body({ repo, global, changes, onChange, active, setActive }: BodyProps)
                   onCommit={(next) => field.commit('preamble_worker', next)}
                 />
                 <RepoPreambleCard preamble={workerPreamble} />
+                <RepoGuidanceEditor
+                  repoId={repo.id}
+                  role="worker"
+                  value={guidance.value('worker')}
+                  dirty={guidance.dirty('worker')}
+                  onCommit={(next) => guidance.commit('worker', next)}
+                />
               </SubGroup>
               <SubGroup title="Reviewer">
                 <Field
@@ -351,6 +375,13 @@ function Body({ repo, global, changes, onChange, active, setActive }: BodyProps)
                   onCommit={(next) => field.commit('preamble_reviewer', next)}
                 />
                 <RepoPreambleCard preamble={reviewerPreamble} />
+                <RepoGuidanceEditor
+                  repoId={repo.id}
+                  role="reviewer"
+                  value={guidance.value('reviewer')}
+                  dirty={guidance.dirty('reviewer')}
+                  onCommit={(next) => guidance.commit('reviewer', next)}
+                />
               </SubGroup>
             </div>
             <ComposedPreview preamble={workerPreamble} guidanceTemplates={global.retryTemplates} repoId={repo.id} />
@@ -447,6 +478,72 @@ function createRepoFieldAccess(
       });
     },
   };
+}
+
+type GuidanceRole = RepoGuidanceSetChange['role'];
+
+function createRepoGuidanceAccess(
+  repo: RepoSummary,
+  changes: ChangeEntry[],
+  onChange: (entry: ChangeEntry) => void,
+) {
+  function baseline(role: GuidanceRole): string {
+    return repo.effectivePreambles[role].repoGuidanceBody ?? '';
+  }
+
+  function changeId(role: GuidanceRole): string {
+    return `repo:${repo.id}:guidance:${role}`;
+  }
+
+  function pendingValue(role: GuidanceRole): string | undefined {
+    const entry = changes.find((change) => change.id === changeId(role));
+    if (entry?.change.type !== 'repo_guidance.set') return undefined;
+    return entry.change.body;
+  }
+
+  return {
+    value(role: GuidanceRole): string {
+      return pendingValue(role) ?? baseline(role);
+    },
+    dirty(role: GuidanceRole): boolean {
+      return changes.some((change) => change.id === changeId(role));
+    },
+    commit(role: GuidanceRole, body: string): void {
+      const next = body.trim();
+      onChange({
+        id: changeId(role),
+        scope: repo.id,
+        label: `${repo.id} ${role} guidance`,
+        before: formatFieldValue(baseline(role)),
+        after: formatFieldValue(next),
+        change: {
+          type: 'repo_guidance.set',
+          repo_id: repo.id,
+          role,
+          body: next,
+        },
+      });
+    },
+  };
+}
+
+function composePendingGuidanceBody(repoId: string, baseBody: string, guidanceBody: string): string {
+  const guidance = guidanceBody.trim();
+  if (guidance.length === 0) return baseBody;
+  return [
+    stripExistingRepoGuidance(baseBody, repoId),
+    `## Repo-specific guidance (${repoId})`,
+    '',
+    'This repo-specific guidance is additive. If it conflicts with the global preamble above, follow this repo-specific guidance.',
+    '',
+    guidance,
+  ].join('\n');
+}
+
+function stripExistingRepoGuidance(body: string, repoId: string): string {
+  const marker = `## Repo-specific guidance (${repoId})`;
+  const idx = body.indexOf(marker);
+  return (idx === -1 ? body : body.slice(0, idx)).trimEnd();
 }
 
 const NULLABLE_REPO_FIELDS = new Set<RepoPatchKey>([
@@ -552,6 +649,62 @@ function RepoPreambleCard({ preamble }: { preamble: RepoEffectivePreamble }) {
         </T>
         <span style={{ flex: 1 }} />
       </HStack>
+    </Card>
+  );
+}
+
+function RepoGuidanceEditor({
+  repoId: _repoId,
+  role,
+  value,
+  dirty,
+  onCommit,
+}: {
+  repoId: string;
+  role: GuidanceRole;
+  value: string;
+  dirty: boolean;
+  onCommit: (next: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  return (
+    <Card padding={18}>
+      <HStack gap={10} style={{ marginBottom: 12 }}>
+        <Icon.Layers size={14} style={{ color: role === 'worker' ? 'var(--accent)' : 'var(--ink-3)' }} />
+        <T as="h3" kind="h4">
+          {role === 'worker' ? 'Worker appendix' : 'Reviewer appendix'}
+        </T>
+        <Badge tone={dirty ? 'warn' : value.trim() ? 'accent' : 'neutral'} size="sm" variant="outline">
+          {dirty ? 'staged' : value.trim() ? 'configured' : 'empty'}
+        </Badge>
+        <span style={{ flex: 1 }} />
+        <Button size="sm" variant="ghost" onClick={() => onCommit(draft)}>
+          Stage
+        </Button>
+      </HStack>
+      <textarea
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => onCommit(draft)}
+        style={{
+          width: '100%',
+          minHeight: 112,
+          resize: 'vertical',
+          background: dirty ? 'var(--warn-soft)' : 'var(--surface-2)',
+          border: `1px solid ${dirty ? 'var(--warn-line)' : 'var(--line)'}`,
+          borderRadius: 'var(--r-sm)',
+          padding: '10px 12px',
+          fontFamily: 'var(--mono)',
+          fontSize: 12,
+          lineHeight: 1.55,
+          color: 'var(--ink)',
+          outline: 'none',
+        }}
+      />
+      <T kind="mono-sm" color="var(--ink-3)" style={{ display: 'block', marginTop: 10 }}>
+        repo_guidance · {value.length} bytes · {value.split('\n').length} lines
+      </T>
     </Card>
   );
 }

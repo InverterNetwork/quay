@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
 import { enqueue } from "../../src/core/enqueue.ts";
-import { ensurePreambleIdForAttemptReason } from "../../src/core/preamble.ts";
+import {
+  createRepoGuidance,
+  ensurePreambleIdForAttemptReason,
+} from "../../src/core/preamble.ts";
 import { createRepoService } from "../../src/core/repos/service.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
 import { buildEnqueueDeps } from "../support/enqueue_deps.ts";
@@ -120,6 +123,90 @@ test("enqueue stores repo-selected worker preamble id on the attempt and prompt"
       "Repo-specific worker preamble\n\n",
     ),
   ).toBe(true);
+});
+
+test("enqueue composes additive repo worker guidance and records provenance", () => {
+  h = createHarness();
+  const preambleId = insertPreamble(h.db, "Global worker preamble", "code");
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+  repos.add({ ...REPO, preamble_worker: preambleId });
+  const guidance = createRepoGuidance(h.db, h.clock, {
+    repoId: REPO.repo_id,
+    role: "worker",
+    body: "Use the pinned schema for this repo.",
+  });
+
+  const built = buildEnqueueDeps(h);
+  built.git.seedBareClone(REPO.repo_id);
+  h.ids.push("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+  const result = enqueue(built.deps, {
+    repo_id: REPO.repo_id,
+    external_ref: "BRIX-1887",
+    brief: "Do the thing",
+  });
+
+  const attempt = h.db
+    .query<{ preamble_id: number; repo_guidance_id: number | null }, [number]>(
+      `SELECT preamble_id, repo_guidance_id FROM attempts WHERE attempt_id = ?`,
+    )
+    .get(result.attempt_id);
+  expect(attempt).toEqual({
+    preamble_id: preambleId,
+    repo_guidance_id: guidance.guidance_id,
+  });
+
+  const finalPrompt = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'final_prompt'`,
+    )
+    .get(result.attempt_id);
+  const body = readFileSync(finalPrompt!.file_path, "utf8");
+  expect(body).toContain("Global worker preamble");
+  expect(body).toContain("## Repo-specific guidance (repo-preamble)");
+  expect(body).toContain("Use the pinned schema for this repo.");
+});
+
+test("repo guidance CLI appends and reads latest guidance", async () => {
+  h = createHarness();
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+  repos.add(REPO);
+  const built = buildCliDeps(h);
+
+  let io = bufferIO();
+  let result = await dispatch(
+    [
+      "repo",
+      "guidance-set",
+      REPO.repo_id,
+      "--role",
+      "reviewer",
+      "--body",
+      "Reviewer appendix",
+    ],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(io.out())).toMatchObject({
+    repo_id: REPO.repo_id,
+    role: "reviewer",
+    body: "Reviewer appendix",
+  });
+
+  io = bufferIO();
+  result = await dispatch(
+    ["repo", "guidance-get", REPO.repo_id, "--role", "reviewer"],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(io.out())).toMatchObject({
+    repo_id: REPO.repo_id,
+    role: "reviewer",
+    body: "Reviewer appendix",
+  });
 });
 
 test("repo preamble overrides must reference the matching preamble kind", () => {
