@@ -17,6 +17,7 @@ import { baseBranchNameSchema } from "./base_branch.ts";
 import type { AgentResolver } from "./agents.ts";
 import { QuayError } from "./errors.ts";
 import { resolvePreambleForAttemptReason } from "./preamble.ts";
+import { isTaskType } from "./task_type.ts";
 import {
   normalizeSlackThreadRef,
   normalizeStoredSlackThreadRef,
@@ -99,6 +100,10 @@ export const enqueueInputSchema = z
     reviewer_agent: z.string().min(1).nullable().optional(),
     reviewer_model: z.string().min(1).nullable().optional(),
     worker_execution: z.enum(["oneshot", "goal"]).optional(),
+    task_type: z
+      .enum(["bugfix", "feature", "chore", "refactor"])
+      .nullable()
+      .optional(),
     base_branch: baseBranchNameSchema.optional(),
     request_pr_screenshots: z.boolean().optional(),
     require_pr_screenshots: z.boolean().optional(),
@@ -413,6 +418,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         taskId,
         repoId: repo.repo_id,
         externalRef: input.external_ref ?? null,
+        taskType: input.task_type ?? null,
         now,
       });
 
@@ -704,23 +710,32 @@ export function ensureWorkItemRunIdentity(
     taskId: string;
     repoId: string;
     externalRef: string | null;
+    taskType: unknown;
     now: string;
   },
 ): WorkItemRunIdentity {
+  if (input.taskType !== null && !isTaskType(input.taskType)) {
+    throw new QuayError("validation_error", "task_type invalid", {
+      task_type: input.taskType,
+    });
+  }
   const source = input.externalRef === null ? "synthetic" : "linear";
   const externalRef = input.externalRef ?? input.taskId;
   const proposedWorkItemId = `wi:${input.taskId}`;
 
   db.query(
     `INSERT INTO work_items (
-       work_item_id, source, repo_id, external_ref, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(source, repo_id, external_ref) DO UPDATE SET updated_at = excluded.updated_at`,
+       work_item_id, source, repo_id, external_ref, task_type, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source, repo_id, external_ref) DO UPDATE SET
+       task_type = COALESCE(excluded.task_type, work_items.task_type),
+       updated_at = excluded.updated_at`,
   ).run(
     proposedWorkItemId,
     source,
     input.repoId,
     externalRef,
+    input.taskType,
     input.now,
     input.now,
   );

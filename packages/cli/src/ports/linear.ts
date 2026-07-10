@@ -84,6 +84,10 @@ export interface LinearPort {
   // quay-fixable condition.
   setIssueState(identifier: string, stateName: string): Promise<void>;
 
+  // Updates the Linear issue markdown description. Used by enqueue-time
+  // metadata writeback after Quay infers missing canonical config fields.
+  updateIssueBody(identifier: string, body: string): Promise<void>;
+
   // Creates a follow-up issue in the configured/default Linear team. When
   // supplied, `idempotencyKey` is forwarded as Linear's client-generated issue
   // id so provider retries converge even if Quay crashes before persisting the
