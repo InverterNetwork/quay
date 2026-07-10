@@ -169,6 +169,7 @@ test("work item run schema captures run identity and active-run invariant", () =
     "external_ref",
     "created_at",
     "updated_at",
+    "task_type",
   ]);
 
   const indexes = h.db
@@ -529,6 +530,7 @@ test("work item repair migration upgrades pre-repo-id work_items schema", () => 
       "external_ref",
       "created_at",
       "updated_at",
+      "task_type",
     ]);
     const indexSql = db
       .query<{ sql: string }, []>(

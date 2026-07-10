@@ -19,6 +19,11 @@ export interface FakeLinearStateChange {
   stateName: string;
 }
 
+export interface FakeLinearBodyUpdate {
+  identifier: string;
+  body: string;
+}
+
 export interface FakeLinearCreatedIssueCall extends LinearCreateIssueInput {}
 
 export class FakeLinearAdapter implements LinearPort {
@@ -29,6 +34,7 @@ export class FakeLinearAdapter implements LinearPort {
   // order so tests can assert on the writeback shape AND the absence of
   // duplicate writes when idempotency should have suppressed the call.
   setIssueStateCalls: FakeLinearStateChange[] = [];
+  updateIssueBodyCalls: FakeLinearBodyUpdate[] = [];
   createIssueCalls: FakeLinearCreatedIssueCall[] = [];
 
   private states = new Map<string, FakeLinearState>();
@@ -163,6 +169,17 @@ export class FakeLinearAdapter implements LinearPort {
     if (current === stateName) return;
     this.currentStates.set(identifier, stateName);
     this.setIssueStateCalls.push({ identifier, stateName });
+  }
+
+  async updateIssueBody(identifier: string, body: string): Promise<void> {
+    this.updateIssueBodyCalls.push({ identifier, body });
+    const state = this.states.get(identifier);
+    if (state?.kind === "issue") {
+      this.states.set(identifier, {
+        kind: "issue",
+        issue: { ...state.issue, body },
+      });
+    }
   }
 
   async createIssue(input: LinearCreateIssueInput): Promise<LinearCreatedIssue> {

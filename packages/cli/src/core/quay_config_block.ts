@@ -5,6 +5,7 @@
 
 import { QuayError } from "./errors.ts";
 import { BASE_BRANCH_ERROR, isValidBaseBranchName } from "./base_branch.ts";
+import { isTaskType, type TaskType } from "./task_type.ts";
 
 export interface QuayConfigAuthor {
   name: string;
@@ -14,6 +15,7 @@ export interface QuayConfigAuthor {
 export interface QuayConfigBlock {
   repo: string;
   base_branch: string | null;
+  task_type: TaskType | null;
   tags: string[];
   worker_execution: "oneshot" | "goal";
   slack_thread_ref: string | null;
@@ -109,6 +111,31 @@ export function stripQuayConfigBlock(body: string): string {
   return [...lines.slice(0, openLine), ...lines.slice(closeLine + 1)].join(
     "\n",
   );
+}
+
+export function setQuayConfigTaskType(body: string, taskType: TaskType): string {
+  const normalized = body.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const blocks = findFencedBlocks(normalized);
+  if (blocks.length !== 1) return body;
+
+  const lines = normalized.split("\n");
+  const block = blocks[0]!;
+  for (let i = block.openLine + 1; i < block.closeLine; i++) {
+    if (/^[ \t]*task_type\s*:/.test(lines[i] ?? "")) {
+      lines[i] = `task_type: ${taskType}`;
+      return lines.join("\n");
+    }
+  }
+
+  let insertAt = block.openLine + 1;
+  for (let i = block.openLine + 1; i < block.closeLine; i++) {
+    if (/^[ \t]*repo\s*:/.test(lines[i] ?? "")) {
+      insertAt = i + 1;
+      break;
+    }
+  }
+  lines.splice(insertAt, 0, `task_type: ${taskType}`);
+  return lines.join("\n");
 }
 
 // --- YAML parsing -------------------------------------------------------
@@ -343,6 +370,15 @@ function validateBlock(yaml: { [key: string]: YamlValue }): QuayConfigBlock {
   }
   const repo = rawRepo;
 
+  let task_type: TaskType | null = null;
+  if ("task_type" in yaml && yaml.task_type !== null && yaml.task_type !== undefined) {
+    const raw = yaml.task_type;
+    if (!isTaskType(raw)) {
+      throw blockError("task_type must be bugfix, feature, chore, or refactor");
+    }
+    task_type = raw;
+  }
+
   // base_branch (optional task-level override)
   let base_branch: string | null = null;
   if (
@@ -450,6 +486,7 @@ function validateBlock(yaml: { [key: string]: YamlValue }): QuayConfigBlock {
   return {
     repo,
     base_branch,
+    task_type,
     tags,
     worker_execution,
     slack_thread_ref,

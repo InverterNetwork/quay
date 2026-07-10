@@ -211,6 +211,7 @@ interface AdminMissionControlUmbrellaChildren {
 interface AdminMissionControlTask {
   id: string;
   workItemId: string | null;
+  taskType: "bugfix" | "feature" | "chore" | "refactor" | null;
   runNumber: number | null;
   supersededByRun: string | null;
   ext: string;
@@ -662,6 +663,7 @@ function isWriteRoute(
 interface MissionControlTaskRow {
   task_id: string;
   work_item_id: string | null;
+  task_type: "bugfix" | "feature" | "chore" | "refactor" | null;
   run_number: number | null;
   superseded_by_run: string | null;
   repo_id: string;
@@ -749,7 +751,7 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
   return db
     .query<MissionControlTaskRow, SQLQueryBindings[]>(
       `WITH candidate_tasks AS (
-         SELECT t.task_id, t.work_item_id, t.run_number,
+         SELECT t.task_id, t.work_item_id, wi.task_type, t.run_number,
                 (
                   SELECT successor.task_id
                     FROM tasks successor
@@ -827,6 +829,7 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                 END AS terminal_bucket
            FROM tasks t
            JOIN repos r ON r.repo_id = t.repo_id
+           LEFT JOIN work_items wi ON wi.work_item_id = t.work_item_id
            LEFT JOIN task_goals tg ON tg.task_id = t.task_id
            LEFT JOIN umbrella_workflows parent_uw ON parent_uw.final_pr_task_id = t.task_id
            LEFT JOIN umbrella_tasks child_ut ON child_ut.task_id = t.task_id
@@ -842,7 +845,7 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                 ) AS bucket_rank
            FROM candidate_tasks
        )
-       SELECT task_id, work_item_id, run_number, superseded_by_run,
+       SELECT task_id, work_item_id, task_type, run_number, superseded_by_run,
               repo_id, repo_url, external_ref, state, authoring_mode, branch_name,
               pr_number, pr_url, pr_title, attempts_consumed, retry_budget, authors_json,
               worker_agent, worker_model, reviewer_agent, reviewer_model,
@@ -889,6 +892,7 @@ async function missionControlTaskFromRow(
   const task: AdminMissionControlTask = {
     id: row.task_id,
     workItemId: row.work_item_id,
+    taskType: row.task_type,
     runNumber: row.run_number,
     supersededByRun: row.superseded_by_run,
     ext: row.external_ref ?? "—",

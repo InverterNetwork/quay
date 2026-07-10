@@ -3761,6 +3761,7 @@ function ensureUmbrellaFinalPrTask(
         taskId,
         repoId: workflow.repo_id,
         externalRef: workflow.external_ref,
+        taskType: null,
         now,
       });
       deps.db

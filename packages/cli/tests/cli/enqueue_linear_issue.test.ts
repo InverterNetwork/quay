@@ -51,6 +51,7 @@ const SLACK_THREAD_REF = "C0123ABC:1700000123.000001";
 interface BlockOpts {
   repo?: string;
   base_branch?: string | null;
+  task_type?: "bugfix" | "feature" | "chore" | "refactor" | null;
   tags?: string[];
   slack_thread?: string | null;
   authors?: { name: string; slack_id: string }[];
@@ -70,6 +71,9 @@ function quayConfigBlock(opts: BlockOpts = {}): string {
     { name: "Marvin Gross", slack_id: "U07ABCDEFGH" },
   ];
   const lines: string[] = [`${FENCE}quay-config`, `repo: ${repo}`, "tags:"];
+  if (opts.task_type !== null && opts.task_type !== undefined) {
+    lines.splice(2, 0, `task_type: ${opts.task_type}`);
+  }
   if (opts.base_branch !== null && opts.base_branch !== undefined) {
     lines.splice(2, 0, `base_branch: ${opts.base_branch}`);
   }
@@ -335,18 +339,32 @@ test("test_enqueue_linear_issue_end_to_end", async () => {
   expect(built.linear.getIssueCalls).toContain("ENG-1276");
   expect(built.slack.fetchThreadContextCalls).toContain(SLACK_THREAD_REF);
   expect(built.validatorRunner.runCalls).toHaveLength(1);
+  expect(built.linear.updateIssueBodyCalls).toHaveLength(1);
+  expect(built.linear.updateIssueBodyCalls[0]!.body).toContain("task_type: feature");
+  expect(built.validatorRunner.runCalls[0]!.payload).toMatchObject({
+    task_type: "feature",
+  });
 
   // Task row carries the adapter-derived fields.
   const taskRow = h.db
     .query<
-      { external_ref: string | null; slack_thread_ref: string | null; authors_json: string | null },
+      {
+        external_ref: string | null;
+        slack_thread_ref: string | null;
+        authors_json: string | null;
+        task_type: string | null;
+      },
       [string]
     >(
-      `SELECT external_ref, slack_thread_ref, authors_json FROM tasks WHERE task_id = ?`,
+      `SELECT t.external_ref, t.slack_thread_ref, t.authors_json, wi.task_type
+         FROM tasks t
+         JOIN work_items wi ON wi.work_item_id = t.work_item_id
+        WHERE t.task_id = ?`,
     )
     .get(enqResult.task_id);
   expect(taskRow?.external_ref).toBe("ENG-1276");
   expect(taskRow?.slack_thread_ref).toBe(SLACK_THREAD_REF);
+  expect(taskRow?.task_type).toBe("feature");
   expect(taskRow?.authors_json).not.toBeNull();
   const authors = JSON.parse(taskRow!.authors_json!);
   expect(authors).toEqual([
@@ -361,6 +379,45 @@ test("test_enqueue_linear_issue_end_to_end", async () => {
     )
     .all(enqResult.task_id);
   expect(tags.map((r) => r.tag)).toEqual(["auth-session", "cache"]);
+});
+
+test("enqueue preserves explicit task_type from quay-config", async () => {
+  h = createHarness();
+  const built = buildCliDeps(h);
+  await addRepo(built);
+
+  built.linear.setIssue(
+    makeIssue({
+      identifier: "ENG-1881",
+      block: {
+        task_type: "bugfix",
+        tags: ["bug", "cache"],
+      },
+    }),
+  );
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["enqueue", "--repo", REPO_ID, "--linear-issue", "ENG-1881"],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(built.linear.updateIssueBodyCalls).toHaveLength(0);
+  expect(built.validatorRunner.runCalls[0]!.payload).toMatchObject({
+    task_type: "bugfix",
+  });
+  const enqResult = JSON.parse(io.out().trim());
+  const row = h.db
+    .query<{ task_type: string | null }, [string]>(
+      `SELECT wi.task_type
+         FROM tasks t
+         JOIN work_items wi ON wi.work_item_id = t.work_item_id
+        WHERE t.task_id = ?`,
+    )
+    .get(enqResult.task_id);
+  expect(row?.task_type).toBe("bugfix");
 });
 
 test("complete Linear blocker is snapshotted but does not create dependency row", async () => {

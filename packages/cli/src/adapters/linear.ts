@@ -444,6 +444,25 @@ export class LinearAdapter implements LinearPort {
     };
   }
 
+  async updateIssueBody(identifier: string, body: string): Promise<void> {
+    const response = await this.postGraphQL(
+      identifier,
+      UPDATE_ISSUE_BODY_MUTATION,
+      { id: identifier, description: body },
+    );
+    const parsed = this.parseGraphQLEnvelope<{
+      issueUpdate: { success: boolean } | null;
+    }>(identifier, response);
+    if (parsed === null) return;
+    if (parsed.issueUpdate === null || parsed.issueUpdate.success !== true) {
+      throw new QuayError(
+        "adapter_error",
+        `Linear ${identifier}: issueUpdate returned success=false`,
+        { adapter: "linear", retryable: false },
+      );
+    }
+  }
+
   private rememberSyncedState(identifier: string, stateName: string): void {
     // Re-inserting an existing key is a no-op for the cap check; net new
     // identifiers trip the eviction. `keys().next().value` is the oldest
@@ -1049,6 +1068,12 @@ const GET_TEAM_BY_KEY_QUERY = `query GetTeamByKey($key: String!) {
 // adapter never persists the returned issue body — only `success` matters.
 const UPDATE_ISSUE_STATE_MUTATION = `mutation UpdateIssueState($id: String!, $stateId: String!) {
   issueUpdate(id: $id, input: { stateId: $stateId }) {
+    success
+  }
+}`;
+
+const UPDATE_ISSUE_BODY_MUTATION = `mutation UpdateIssueBody($id: String!, $description: String!) {
+  issueUpdate(id: $id, input: { description: $description }) {
     success
   }
 }`;
