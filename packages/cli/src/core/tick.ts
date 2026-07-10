@@ -165,9 +165,10 @@ export interface TickOptions {
   // ingest matches the right author when tick and worker authenticate as
   // different identities. Defaults to whatever `gh api user` reports.
   reviewerLogin?: string;
-  // Absolute path to a fallback file (expected mode 0600) whose contents
-  // are exported as `GH_TOKEN` in the worker tmux pane's environment.
-  // `QUAY_WORKER_GH_TOKEN` in the tick process environment wins when present.
+  // Absolute path to the preferred worker GitHub auth handoff file
+  // (expected mode 0600) whose contents are exported as `GH_TOKEN` in the
+  // worker tmux pane's environment. When configured, this explicit Quay-
+  // managed handoff wins over ambient tick process env.
   workerGhTokenFile?: string;
   // Absolute path to a fallback file (expected mode 0600) whose contents
   // are exported as `GH_TOKEN` in the reviewer tmux pane's environment.
@@ -6561,6 +6562,16 @@ function resolveGithubActorToken(
     actor === "worker" ? options.workerGhTokenFile : options.reviewerGhTokenFile;
   const fileConfigName = `${actor}.gh_token_file`;
 
+  if (actor === "worker" && fileOption !== undefined) {
+    return resolveGithubActorTokenFile(
+      deps,
+      repoId,
+      actor,
+      fileConfigName,
+      fileOption,
+    );
+  }
+
   const envToken = env[envName];
   if (envToken !== undefined) {
     if (envToken.trim().length === 0) {
@@ -6608,6 +6619,22 @@ function resolveGithubActorToken(
     };
   }
 
+  return resolveGithubActorTokenFile(
+    deps,
+    repoId,
+    actor,
+    fileConfigName,
+    fileOption,
+  );
+}
+
+function resolveGithubActorTokenFile(
+  deps: TickDeps,
+  repoId: string,
+  actor: GithubActor,
+  fileConfigName: string,
+  fileOption: string,
+): GithubActorTokenResult {
   let token: string;
   try {
     token = readFileSync(fileOption, "utf8").trim();
