@@ -56,16 +56,18 @@ pre-approve checklist step), not more text.
 
 ## Repo-specific routing (not in the global preambles)
 
-Per gate 4, these belong in per-repo guidance (AGENTS.md / reviewer guidance catalog):
+Per gate 4, these belong in per-repo guidance (AGENTS.md / reviewer guidance catalog).
+Repo-routed items use the relaxed N≥2 threshold (split-threshold amendment, see 04);
+**drafted texts for all four are in `06-repo-guidance.md`**:
 
-- **iTRY-monorepo** (accepted, n=3): new/changed stats or APY responses must be validated
+- **iTRY-monorepo** (n=3): new/changed stats or APY responses must be validated
   against the pinned frontend consumer schemas before changing shape or scale.
-- **iTRY-monorepo** (watch, n=2): public, unauthenticated endpoints must be registered in
-  `isPublicSessionlessPath` in **both** entrypoints (`lambda-hono.ts`, `index.ts`).
-- **brix-landing** (watch, n=2): landing-page metrics must use the same data sources/derivation
+- **iTRY-monorepo** (n=2, 2 independent reviewers): public, unauthenticated endpoints must be
+  registered in `isPublicSessionlessPath` in **both** entrypoints (`lambda-hono.ts`, `index.ts`).
+- **brix-landing** (n=2): landing-page metrics must use the same data sources/derivation
   as the app (`/api/v1/itry/stats` paths), not landing-side recomputation.
-- **atlas** (watch, n=2): enforce `bun run typecheck` in CI; the reviewer approved a head that
-  failed typecheck (atlas#37) — a CI lever, not a prompt lever.
+- **atlas** (n=2): enforce `bun run typecheck` in CI; the reviewer approved a head that
+  failed typecheck (atlas#37) — a CI lever, not a prompt lever (workflow draft in 06).
 
 ## Known limitations
 

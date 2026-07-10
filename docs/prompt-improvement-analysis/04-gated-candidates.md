@@ -1,6 +1,9 @@
 # Prompt-improvement analysis — 04: §7 gate decisions
 
 **Date:** 2026-07-10. Thresholds: recurring N≥3 distinct tasks/PRs; global K≥2 repos.
+**Amended same day:** split threshold adopted — global preambles keep N≥3; repo-routed
+guidance accepts N≥2 (one-repo blast radius, cheap to revert). See `06-repo-guidance.md`
+for the resulting repo-level artifacts.
 Support notation: `B: tasks/repos` (Quay-reviewer CRs, worker tier 2), `A: PRs/repos/reviewers`
 (human CRs on quay-owned PRs), `C: PRs/reviewers` (human CRs on human PRs, reviewer-only).
 `miss` = PRs where the bot approved the identical SHA the human then CR'd.
@@ -53,8 +56,8 @@ before approving). Gate 1: none of these are in review v6 except as generic phra
 | CHECKS ("run repo typecheck before approving/PR") | Reject (gate 3), borderline | Only 2 PRs (atlas#37 approved with failing typecheck; #977 lint-rule relaxation). High-embarrassment miss; revisit at N≥3 or fix via CI lever in atlas (typecheck not CI-enforced there). |
 | PERF as **worker** rule | Reject (gate 3 via B) | B support thin; human PERF findings were mostly non-blocking style. Kept only as reviewer clause R10. |
 | Scope/architecture CRs (#83 APY split, #1127 WAF redesign, #985 nav move, #15 event-indexing model) | Route: task-brief lever | Gate 2: product/design decisions, not prompt-shaped defects. |
-| brix-landing "mirror the app's data sources" (#83, #97) | Route: repo guidance (n=2, watch) | Repo-specific consistency convention. |
-| iTRY-monorepo `isPublicSessionlessPath` registration for public endpoints (#1113, C#1048) | Route: repo guidance (n=2, watch) | Exactly the repo-idiom case gate 2 routes to AGENTS.md / reviewer guidance catalog. |
+| brix-landing "mirror the app's data sources" (#83, #97) | Route: repo guidance (n=2, **accepted** under split threshold) | Repo-specific consistency convention; single-reviewer but owner-set house rule. Draft in 06. |
+| iTRY-monorepo `isPublicSessionlessPath` registration for public endpoints (#1113, C#1048) | Route: repo guidance (n=2, **accepted** under split threshold; 2 independent reviewers) | Exactly the repo-idiom case gate 2 routes to AGENTS.md / reviewer guidance catalog. Draft in 06. |
 | iTRY-monorepo pinned frontend consumer schemas (B×5 findings 1 task, #1059, #1048) | Route: repo guidance (n=3, **accepted repo-level**) | Global W7/R7 covers the class; the repo doc should name the actual pinned-schema locations. |
 | Worker preamble §§9–12 (BRIX titles, Didier changelog, monorepo scopes) | Flag only | Pre-existing repo-specific content in the global prompt (violates gate 4 routing); moving it is an operational change (per-repo preamble wiring), not part of this proposal. |
 
