@@ -210,6 +210,61 @@ test("worker spawn fails before tmux when actor token is invalid", async () => {
   expect(pendingAttemptReason(h, taskId)).toBe("initial");
 });
 
+test("worker PR visibility permission failure is classified as auth invalid", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-worker-pr-permission-denied");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-worker-pr-permission-denied",
+    state: "queued",
+  });
+  const attemptId = insertAttempt(h.db, { taskId, consumedBudget: 0 });
+  insertFinalPromptArtifact(
+    h.db,
+    h.artifactRoot,
+    h.clock,
+    taskId,
+    attemptId,
+    "worker prompt",
+  );
+  const token = "ghs_WORKER_NO_PR_READ_TOKEN";
+  built.github.setPrExistsWithTokenHandler(() => {
+    throw new Error(
+      `gh pr list --head quay/task-worker-pr-permission-denied --state all failed: GraphQL: Resource not accessible by integration (${token})`,
+    );
+  });
+
+  const results = await tick_once(built.deps, {
+    env: { [WORKER_GH_TOKEN_ENV]: token },
+  });
+
+  const match = results.find((r) => r.task_id === taskId);
+  expect(match?.action).toBe("worker_auth_invalid");
+  expect(match?.error).toContain("Resource not accessible by integration");
+  expect(match?.error).not.toContain(token);
+  expect(built.github.tokenAccessCalls).toEqual([
+    { repoId, token, actor: "worker" },
+  ]);
+  expect(built.github.prExistsWithTokenCalls).toEqual([
+    {
+      repoId,
+      branch: "quay/task-worker-pr-permission-denied",
+      token,
+    },
+  ]);
+  expect(built.github.calls).toHaveLength(0);
+  expect(built.tmux.spawnCalls).toHaveLength(0);
+  expect(attemptSpawnedAt(h, attemptId)).toBe("2026-01-01T00:00:00.000Z");
+  const task = h.db
+    .query<{ state: string; tick_error: string | null }, [string]>(
+      `SELECT state, tick_error FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({ state: "queued", tick_error: null });
+  expect(workerAuthEventCount(h, taskId)).toBe(1);
+});
+
 test("worker auth preflight retries once with freshly resolved token then spawns", async () => {
   h = createHarness();
   const built = buildTickDeps(h);

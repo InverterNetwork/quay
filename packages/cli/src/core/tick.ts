@@ -6896,10 +6896,17 @@ function isGithubAuthFailureMessage(message: string): boolean {
   return (
     normalized.includes("bad credentials") ||
     normalized.includes("http 401") ||
+    normalized.includes("http 403") ||
     normalized.includes("status 401") ||
+    normalized.includes("status 403") ||
     normalized.includes("requires authentication") ||
     normalized.includes("authentication failed") ||
-    normalized.includes("could not read username")
+    normalized.includes("could not read username") ||
+    normalized.includes("resource not accessible by integration") ||
+    normalized.includes("insufficient oauth scope") ||
+    normalized.includes("insufficient permission") ||
+    normalized.includes("permission denied") ||
+    normalized.includes("forbidden")
   );
 }
 

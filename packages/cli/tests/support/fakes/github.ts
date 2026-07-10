@@ -86,6 +86,9 @@ export class FakeGitHub implements GitHubPort {
     token: string,
     actor: "worker" | "reviewer",
   ) => void = () => {};
+  private prExistsWithTokenHandler:
+    | ((repoId: string, branch: string, token: string) => boolean | null)
+    | null = null;
   private mergePullRequestHandler:
     | ((repoId: string, prNumber: number, expectedHeadSha: string) => void)
     | null = null;
@@ -101,6 +104,8 @@ export class FakeGitHub implements GitHubPort {
     token: string,
   ): boolean {
     this.prExistsWithTokenCalls.push({ repoId, branch, token });
+    const handled = this.prExistsWithTokenHandler?.(repoId, branch, token);
+    if (handled !== undefined && handled !== null) return handled;
     return this.prExisting.get(`${repoId}\0${branch}`) ?? false;
   }
 
@@ -405,6 +410,12 @@ export class FakeGitHub implements GitHubPort {
     ) => void,
   ): void {
     this.tokenAccessHandler = handler;
+  }
+
+  setPrExistsWithTokenHandler(
+    handler: (repoId: string, branch: string, token: string) => boolean | null,
+  ): void {
+    this.prExistsWithTokenHandler = handler;
   }
 }
 
