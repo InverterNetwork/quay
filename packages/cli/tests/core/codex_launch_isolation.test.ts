@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { createAgentResolver } from "../../src/core/agents.ts";
@@ -196,7 +196,7 @@ test("worker spawn fails before tmux when actor token is invalid", async () => {
   });
 
   const match = results.find((r) => r.task_id === taskId);
-  expect(match?.action).toBe("spawn_substrate_failed");
+  expect(match?.action).toBe("worker_auth_invalid");
   expect(match?.error).toContain("worker GitHub token");
   expect(match?.error).toContain("HTTP 401");
   expect(match?.error).not.toContain(token);
@@ -206,7 +206,116 @@ test("worker spawn fails before tmux when actor token is invalid", async () => {
   expect(built.github.calls).toHaveLength(0);
   expect(built.github.prExistsWithTokenCalls).toHaveLength(0);
   expect(built.tmux.spawnCalls).toHaveLength(0);
-  expect(attemptSpawnedAt(h, attemptId)).toBeNull();
+  expect(attemptSpawnedAt(h, attemptId)).toBe("2026-01-01T00:00:00.000Z");
+  expect(pendingAttemptReason(h, taskId)).toBe("initial");
+});
+
+test("worker auth preflight retries once with freshly resolved token then spawns", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-worker-auth-refresh");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-worker-auth-refresh",
+    state: "queued",
+  });
+  const attemptId = insertAttempt(h.db, { taskId, consumedBudget: 0 });
+  insertFinalPromptArtifact(
+    h.db,
+    h.artifactRoot,
+    h.clock,
+    taskId,
+    attemptId,
+    "worker prompt",
+  );
+  const tokenPath = join(h.dataDir, "worker-gh-token-refresh");
+  mkdirSync(h.dataDir, { recursive: true });
+  writeFileSync(tokenPath, "ghs_stale_worker_token\n");
+  built.github.setTokenAccessHandler((_repoId, token) => {
+    if (token === "ghs_stale_worker_token") {
+      throw new Error("HTTP 401: Bad credentials");
+    }
+  });
+
+  const first = await tick_once(built.deps, {
+    workerGhTokenFile: tokenPath,
+    env: {},
+  });
+
+  expect(first).toContainEqual({
+    task_id: taskId,
+    action: "worker_auth_invalid",
+    error: expect.stringContaining("HTTP 401"),
+  });
+  expect(built.tmux.spawnCalls).toHaveLength(0);
+  writeFileSync(tokenPath, "ghs_fresh_worker_token\n");
+
+  const second = await tick_once(built.deps, {
+    workerGhTokenFile: tokenPath,
+    env: {},
+  });
+
+  expect(second).toContainEqual({ task_id: taskId, action: "spawned" });
+  expect(built.github.tokenAccessCalls.map((c) => c.token)).toEqual([
+    "ghs_stale_worker_token",
+    "ghs_fresh_worker_token",
+  ]);
+  expect(built.tmux.spawnCalls).toHaveLength(1);
+  expect(built.tmux.spawnCalls[0]?.envFiles).toEqual([
+    { name: "GH_TOKEN", path: tokenPath },
+  ]);
+});
+
+test("worker auth preflight escalates clearly after the fresh-auth retry fails", async () => {
+  h = createHarness();
+  const built = buildTickDeps(h);
+  const repoId = insertRepo(h.db, "repo-worker-auth-repeated");
+  const taskId = insertTask(h.db, {
+    repoId,
+    taskId: "task-worker-auth-repeated",
+    state: "queued",
+  });
+  const attemptId = insertAttempt(h.db, { taskId, consumedBudget: 0 });
+  insertFinalPromptArtifact(
+    h.db,
+    h.artifactRoot,
+    h.clock,
+    taskId,
+    attemptId,
+    "worker prompt",
+  );
+  const token = "ghs_REPEATED_BAD_WORKER_TOKEN";
+  built.github.setTokenAccessHandler(() => {
+    throw new Error(`HTTP 401: Bad credentials for ${token}`);
+  });
+
+  await tick_once(built.deps, {
+    env: { [WORKER_GH_TOKEN_ENV]: token },
+  });
+  const second = await tick_once(built.deps, {
+    env: { [WORKER_GH_TOKEN_ENV]: token },
+  });
+
+  expect(second).toContainEqual({
+    task_id: taskId,
+    action: "worker_auth_invalid",
+    error: expect.stringContaining("HTTP 401"),
+  });
+  expect(built.tmux.spawnCalls).toHaveLength(0);
+  const task = h.db
+    .query<{ state: string; attempts_consumed: number; tick_error: string | null }, [string]>(
+      `SELECT state, attempts_consumed, tick_error FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    state: "awaiting-next-brief",
+    attempts_consumed: 0,
+    tick_error: null,
+  });
+  expect(workerAuthEventCount(h, taskId)).toBe(2);
+  expect(workerAuthHandoffCount(h, taskId)).toBe(1);
+  expect(lastFailureBody(h, taskId)).toContain("Worker GitHub auth invalid");
+  expect(lastFailureBody(h, taskId)).not.toContain(token);
 });
 
 test("worker empty token fails with clear error", async () => {
@@ -233,7 +342,7 @@ test("worker empty token fails with clear error", async () => {
   });
 
   const match = results.find((r) => r.task_id === taskId);
-  expect(match?.action).toBe("spawn_substrate_failed");
+  expect(match?.action).toBe("worker_auth_invalid");
   expect(match?.error).toContain(WORKER_GH_TOKEN_ENV);
   expect(match?.error).toMatch(/empty/i);
   expect(built.github.tokenAccessCalls).toHaveLength(0);
@@ -313,4 +422,51 @@ function spawnedTokenSource(harness: Harness, taskId: string): string | null {
   if (!row?.event_data) return null;
   const data = JSON.parse(row.event_data) as { github_token_source?: string };
   return data.github_token_source ?? null;
+}
+
+function pendingAttemptReason(harness: Harness, taskId: string): string | null {
+  return (
+    harness.db
+      .query<{ reason: string }, [string]>(
+        `SELECT reason FROM attempts WHERE task_id = ? AND spawned_at IS NULL`,
+      )
+      .get(taskId)?.reason ?? null
+  );
+}
+
+function workerAuthEventCount(harness: Harness, taskId: string): number {
+  return (
+    harness.db
+      .query<{ n: number }, [string]>(
+        `SELECT COUNT(*) AS n
+           FROM events
+          WHERE task_id = ? AND event_type = 'worker_auth_invalid'`,
+      )
+      .get(taskId)?.n ?? 0
+  );
+}
+
+function workerAuthHandoffCount(harness: Harness, taskId: string): number {
+  return (
+    harness.db
+      .query<{ n: number }, [string]>(
+        `SELECT COUNT(*) AS n
+           FROM orchestrator_handoffs
+          WHERE task_id = ? AND reason = 'worker_auth_invalid'`,
+      )
+      .get(taskId)?.n ?? 0
+  );
+}
+
+function lastFailureBody(harness: Harness, taskId: string): string {
+  const row = harness.db
+    .query<{ file_path: string }, [string]>(
+      `SELECT file_path
+         FROM artifacts
+        WHERE task_id = ? AND kind = 'last_failure'
+        ORDER BY artifact_id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  if (!row) return "";
+  return readFileSync(row.file_path, "utf8");
 }
