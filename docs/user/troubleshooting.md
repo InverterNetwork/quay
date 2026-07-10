@@ -176,6 +176,21 @@ After asking a human, use `record-human-reply` to persist the answer, then
 `submit-brief --reason advice_answered`; that reason is allowed because it does
 not consume retry budget.
 
+## `worker_auth_invalid`
+
+The worker GitHub token failed Quay's spawn-time auth preflight. Quay retries
+once after re-reading the configured token source. If the retry also fails, the
+task moves to `awaiting-next-brief` with a `worker_auth_invalid` handoff.
+
+Check the configured worker token source:
+
+```bash
+GH_TOKEN="$QUAY_WORKER_GH_TOKEN" gh api repos/{owner}/{repo} --jq .full_name
+```
+
+For file-based tokens, rotate `worker.gh_token_file` and submit an operator
+brief once the token can read the repository, see PRs, and push the task branch.
+
 ## `worktree_error`
 
 Repeated spawn failures parked the task. Inspect:

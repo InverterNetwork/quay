@@ -800,6 +800,28 @@ test("orchestrator handoffs carry next eligibility timestamp", () => {
     .all()
     .map((r) => r.name);
   expect(cols).toContain("next_eligible_at");
+
+  const indexes = h.db
+    .query<{ name: string; sql: string }, []>(
+      `SELECT name, sql
+         FROM sqlite_master
+        WHERE type = 'index'
+          AND tbl_name = 'orchestrator_handoffs'
+          AND name NOT LIKE 'sqlite_autoindex_%'
+        ORDER BY name`,
+    )
+    .all();
+  expect(indexes.map((r) => r.name)).toEqual([
+    "orchestrator_handoffs_outbox_item_idx",
+    "orchestrator_handoffs_pending_eligible_idx",
+    "orchestrator_handoffs_status_created_idx",
+    "orchestrator_handoffs_task_status_idx",
+  ]);
+  expect(
+    indexes.find(
+      (r) => r.name === "orchestrator_handoffs_pending_eligible_idx",
+    )?.sql,
+  ).toContain("WHERE status = 'pending'");
 });
 
 test("outbox items support delivery and workflow metadata", () => {

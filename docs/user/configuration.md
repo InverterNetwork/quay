@@ -87,7 +87,7 @@ forwarded_display_name_header = "X-Hermes-User-Display-Name"
 reference_repos_root = "/home/hermes/.hermes/code"
 
 [worker]
-# Preferred worker token source: QUAY_WORKER_GH_TOKEN in tick env.
+# Preferred worker token source: explicit Quay-managed token file.
 # gh_token_file = "/run/hermes/worker-gh-token"
 
 [reviewer]
@@ -223,12 +223,22 @@ spawns before promotion unless it has a reviewer-specific token source.
 Preferred deployment shape:
 
 ```bash
-export QUAY_WORKER_GH_TOKEN="<worker-app-token>"
+install -m 600 /dev/null /run/hermes/worker-gh-token
+printf '%s\n' "<worker-app-token>" > /run/hermes/worker-gh-token
 export QUAY_REVIEWER_GH_TOKEN="<reviewer-app-token>"
 exec quay tick
 ```
 
-Worker panes receive `QUAY_WORKER_GH_TOKEN` as their pane-local `GH_TOKEN`.
+with:
+
+```toml
+[worker]
+gh_token_file = "/run/hermes/worker-gh-token"
+```
+
+Worker panes receive `worker.gh_token_file` as their pane-local `GH_TOKEN`
+when configured; otherwise `QUAY_WORKER_GH_TOKEN` is accepted as an explicit
+role env source.
 Quay clears `GITHUB_TOKEN`, `QUAY_WORKER_GH_TOKEN`, and
 `QUAY_REVIEWER_GH_TOKEN` before launching the agent so there is one canonical
 token source and roles cannot bleed into each other. Quay also places a
@@ -241,16 +251,22 @@ and `git add .` from the worker cannot stage the generated credential file.
 Reviewer panes receive `QUAY_REVIEWER_GH_TOKEN` as their pane-local
 `GH_TOKEN` with the same environment clearing. Both worker and reviewer tokens
 are probed against the target repository before their attempts are promoted.
-Invalid, expired, empty, missing, or repo-inaccessible tokens fail as
-`spawn_substrate_failed`; reviewer auth failures stay out of the
+Worker tokens are checked before tmux starts by exercising repo access, branch
+PR visibility, and worker write access. Invalid, expired, empty, missing, or
+repo-inaccessible worker tokens fail as `worker_auth_invalid`: Quay retries one
+freshly resolved token source, then moves the task to `awaiting-next-brief`
+with a `worker_auth_invalid` handoff if the preflight still fails. Reviewer
+auth failures remain `spawn_substrate_failed` and stay out of the
 `review_infra_failed` retry accounting.
 
-`worker.gh_token_file` and `reviewer.gh_token_file` are fallback sources used
-only when the matching role env var is unset. The file is expected mode `0600`,
-read fresh on every spawn, `cat`'d inside the pane, and exported as `GH_TOKEN`.
-The path lands in the pane wrapper script, but token bytes themselves never
-appear in any process argv. Rotation is transparent: write the new token to the
-file and the next matching attempt picks it up.
+`worker.gh_token_file` is the preferred worker source when configured, even if
+`QUAY_WORKER_GH_TOKEN` is also present in the tick environment.
+`reviewer.gh_token_file` remains a reviewer fallback used only when
+`QUAY_REVIEWER_GH_TOKEN` is unset. Token files are expected mode `0600`, read
+fresh on every spawn, `cat`'d inside the pane, and exported as `GH_TOKEN`. The
+path lands in the pane wrapper script, but token bytes themselves never appear
+in any process argv. Rotation is transparent: write the new token to the file
+and the next matching attempt picks it up.
 
 ## Agent Invocation
 
@@ -401,7 +417,7 @@ enqueue or review; empty roots render an explicit `(none discovered)` list.
 | `QUAY_CONFIG_FILE` | Direct config file path. |
 | `LINEAR_API_KEY` | Default Linear bot token env var. |
 | `SLACK_TOKEN` | Default Slack bot token env var. |
-| `QUAY_WORKER_GH_TOKEN` | Worker-specific GitHub token exported as `GH_TOKEN` only for worker panes. |
+| `QUAY_WORKER_GH_TOKEN` | Worker-specific GitHub token exported as `GH_TOKEN` only for worker panes when `worker.gh_token_file` is not configured. |
 | `QUAY_REVIEWER_GH_TOKEN` | Reviewer-specific GitHub token exported as `GH_TOKEN` only for reviewer panes. |
 | `QUAY_LINEAR_TIMEOUT_MS` | Linear adapter HTTP timeout. |
 | `QUAY_SLACK_TIMEOUT_MS` | Slack adapter HTTP timeout. |
