@@ -102,10 +102,14 @@ binary and invalid UTF-8 artifacts such as `malformed_signal`.
 | `conflict_slice` | Snapshot of merge-conflict observation. |
 | `slack_escalation_post` | Human question body recorded by `escalate-human`. |
 | `slack_reply` | Human Slack reply recorded by the orchestrator, or by legacy tick ingestion. |
-| `last_failure` | Would-be retry brief when retry budget is exhausted. |
+| `last_failure` | Would-be retry brief when retry budget is exhausted, or a terminal worker-auth preflight diagnostic after the one fresh-auth retry also fails. |
 
 ## Tick Errors
 
 Tick isolates per-task failures. When one task fails during a tick, Quay records
 a `tick_error` event and continues processing other tasks. A later successful
 tick path clears the task's `tick_error` field.
+
+Worker GitHub auth preflight failures are not `tick_error`: they are classified
+as `worker_auth_invalid`, retried once with freshly resolved credentials, then
+surfaced through an `awaiting-next-brief` handoff if the retry also fails.

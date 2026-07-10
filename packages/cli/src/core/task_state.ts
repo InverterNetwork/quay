@@ -92,8 +92,14 @@ export const TASK_TRANSITIONS = [
   transition(
     "queued",
     "queued",
-    ["pr_adopted"],
-    "existing external PR adopted for code-worker ownership",
+    ["pr_adopted", "worker_auth_invalid"],
+    "queued task remains queued after a non-spawn transition",
+  ),
+  transition(
+    "queued",
+    "awaiting-next-brief",
+    ["worker_auth_invalid"],
+    "worker auth failed after the allowed fresh-auth retry",
   ),
   transition(
     "running",

@@ -241,8 +241,12 @@ and `git add .` from the worker cannot stage the generated credential file.
 Reviewer panes receive `QUAY_REVIEWER_GH_TOKEN` as their pane-local
 `GH_TOKEN` with the same environment clearing. Both worker and reviewer tokens
 are probed against the target repository before their attempts are promoted.
-Invalid, expired, empty, missing, or repo-inaccessible tokens fail as
-`spawn_substrate_failed`; reviewer auth failures stay out of the
+Worker tokens are checked before tmux starts by exercising repo access, branch
+PR visibility, and worker write access. Invalid, expired, empty, missing, or
+repo-inaccessible worker tokens fail as `worker_auth_invalid`: Quay retries one
+freshly resolved token source, then moves the task to `awaiting-next-brief`
+with a `worker_auth_invalid` handoff if the preflight still fails. Reviewer
+auth failures remain `spawn_substrate_failed` and stay out of the
 `review_infra_failed` retry accounting.
 
 `worker.gh_token_file` and `reviewer.gh_token_file` are fallback sources used
