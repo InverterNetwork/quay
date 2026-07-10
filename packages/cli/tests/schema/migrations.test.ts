@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { test, expect, afterEach } from "bun:test";
 import { openDatabase } from "../../src/db/connection.ts";
 import { loadMigrationsFromDir, runMigrations } from "../../src/db/migrate.ts";
+import { EMBEDDED_MIGRATIONS } from "../../src/build/embedded.generated.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertRepo, insertTask } from "../support/fixtures.ts";
 import { TASK_TERMINAL_STATES } from "../../src/core/task_state.ts";
@@ -145,6 +146,14 @@ test("test_schema_creates_required_tables", () => {
   for (const t of required) {
     expect(names.has(t)).toBe(true);
   }
+});
+
+test("embedded migrations match disk migrations", () => {
+  const diskMigrations = loadMigrationsFromDir(MIGRATIONS_DIR);
+  expect(EMBEDDED_MIGRATIONS.map((m) => m.name)).toEqual(
+    diskMigrations.map((m) => m.name),
+  );
+  expect(EMBEDDED_MIGRATIONS).toEqual(diskMigrations);
 });
 
 test("work item run schema captures run identity and active-run invariant", () => {
