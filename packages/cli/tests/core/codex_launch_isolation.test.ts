@@ -240,7 +240,7 @@ test("worker empty token fails with clear error", async () => {
   expect(built.tmux.spawnCalls).toHaveLength(0);
 });
 
-test("worker token file is exported as pane GH_TOKEN without exposing token bytes", async () => {
+test("worker token file is preferred over ambient env without exposing token bytes", async () => {
   h = createHarness();
   const built = buildTickDeps(h);
   const repoId = insertRepo(h.db, "repo-worker-token-file");
@@ -265,7 +265,12 @@ test("worker token file is exported as pane GH_TOKEN without exposing token byte
 
   const results = await tick_once(built.deps, {
     workerGhTokenFile: tokenPath,
-    env: {},
+    env: {
+      [WORKER_GH_TOKEN_ENV]: "ghs_STALE_WORKER_ENV_TOKEN",
+      GH_TOKEN: "ghs_stale_ambient_token",
+      GITHUB_TOKEN: "ghs_stale_secondary_token",
+      [REVIEWER_GH_TOKEN_ENV]: "ghs_reviewer_should_not_leak",
+    },
   });
 
   expect(results).toContainEqual({ task_id: taskId, action: "spawned" });
@@ -281,6 +286,10 @@ test("worker token file is exported as pane GH_TOKEN without exposing token byte
   });
   expect(call.envFiles).toEqual([{ name: "GH_TOKEN", path: tokenPath }]);
   expect(JSON.stringify(call)).not.toContain(token);
+  expect(JSON.stringify(call)).not.toContain("ghs_STALE_WORKER_ENV_TOKEN");
+  expect(JSON.stringify(call)).not.toContain("ghs_stale_ambient_token");
+  expect(JSON.stringify(call)).not.toContain("ghs_stale_secondary_token");
+  expect(JSON.stringify(call)).not.toContain("ghs_reviewer_should_not_leak");
   expect(spawnedTokenSource(h, taskId)).toBe("file:worker.gh_token_file");
 });
 
