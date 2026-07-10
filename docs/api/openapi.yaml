@@ -978,6 +978,8 @@ components:
         - source
         - configured_preamble_id
         - effective_preamble_id
+        - repo_guidance_id
+        - repo_guidance_body
         - title
         - body
         - refs
@@ -1006,6 +1008,15 @@ components:
         effective_preamble_id:
           type: integer
           minimum: 0
+        repo_guidance_id:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        repo_guidance_body:
+          type:
+            - string
+            - "null"
         title:
           type: string
         body:
@@ -1911,6 +1922,7 @@ components:
           items:
             oneOf:
               - $ref: "#/components/schemas/RepoUpdateChange"
+              - $ref: "#/components/schemas/RepoGuidanceSetChange"
               - $ref: "#/components/schemas/TagsReplaceChange"
               - $ref: "#/components/schemas/IdentityMappingsReplaceChange"
             discriminator:
@@ -1982,6 +1994,27 @@ components:
             - integer
             - "null"
           minimum: 1
+    RepoGuidanceSetChange:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - repo_id
+        - role
+        - body
+      properties:
+        type:
+          type: string
+          const: repo_guidance.set
+        repo_id:
+          type: string
+        role:
+          type: string
+          enum:
+            - worker
+            - reviewer
+        body:
+          type: string
     TagsReplaceChange:
       type: object
       additionalProperties: false
