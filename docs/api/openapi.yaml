@@ -613,6 +613,7 @@ components:
       required:
         - id
         - workItemId
+        - taskType
         - runNumber
         - supersededByRun
         - ext
@@ -642,6 +643,10 @@ components:
         id:
           type: string
         workItemId:
+          type:
+            - string
+            - "null"
+        taskType:
           type:
             - string
             - "null"
@@ -1037,6 +1042,7 @@ components:
         - data_dir
         - paths
         - operations
+        - ci_policy
         - adapters
         - agents
         - preambles
@@ -1057,6 +1063,8 @@ components:
           $ref: "#/components/schemas/RuntimePaths"
         operations:
           $ref: "#/components/schemas/OperationsReadModel"
+        ci_policy:
+          $ref: "#/components/schemas/CiPolicyReadModel"
         adapters:
           type: array
           items:
@@ -1125,6 +1133,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AdminField"
+    CiPolicyReadModel:
+      type: object
+      additionalProperties: false
+      required:
+        - ignored_check_names
+        - ignored_workflow_names
+      properties:
+        ignored_check_names:
+          type: array
+          items:
+            type: string
+        ignored_workflow_names:
+          type: array
+          items:
+            type: string
     AdminField:
       type: object
       additionalProperties: false
@@ -1923,6 +1946,7 @@ components:
             oneOf:
               - $ref: "#/components/schemas/RepoUpdateChange"
               - $ref: "#/components/schemas/RepoGuidanceSetChange"
+              - $ref: "#/components/schemas/DeploymentSettingsUpdateChange"
               - $ref: "#/components/schemas/TagsReplaceChange"
               - $ref: "#/components/schemas/IdentityMappingsReplaceChange"
             discriminator:
@@ -2015,6 +2039,43 @@ components:
             - reviewer
         body:
           type: string
+    DeploymentSettingsUpdateChange:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - patch
+      properties:
+        type:
+          type: string
+          const: deployment_settings.update
+        patch:
+          $ref: "#/components/schemas/DeploymentSettingsPatch"
+    DeploymentSettingsPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        worker_agent:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        worker_model:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        reviewer_agent:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        reviewer_model:
+          type:
+            - string
+            - "null"
+          minLength: 1
     TagsReplaceChange:
       type: object
       additionalProperties: false
