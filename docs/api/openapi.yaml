@@ -889,6 +889,7 @@ components:
         - archived_at
         - created_at
         - active_task_count
+        - ci_policy
         - effective_preambles
         - tag_namespaces
         - inherited_tag_namespaces
@@ -953,6 +954,8 @@ components:
         active_task_count:
           type: integer
           minimum: 0
+        ci_policy:
+          $ref: "#/components/schemas/RepoCiPolicy"
         effective_preambles:
           $ref: "#/components/schemas/RepoEffectivePreambles"
         tag_namespaces:
@@ -974,6 +977,38 @@ components:
           $ref: "#/components/schemas/RepoEffectivePreamble"
         reviewer:
           $ref: "#/components/schemas/RepoEffectivePreamble"
+    RepoCiPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - ignore_mode
+        - ignored_check_names
+        - ignored_workflow_names
+        - effective_ignored_check_names
+        - effective_ignored_workflow_names
+      properties:
+        ignore_mode:
+          type: string
+          enum:
+            - inherit
+            - extend
+            - replace
+        ignored_check_names:
+          type: array
+          items:
+            type: string
+        ignored_workflow_names:
+          type: array
+          items:
+            type: string
+        effective_ignored_check_names:
+          type: array
+          items:
+            type: string
+        effective_ignored_workflow_names:
+          type: array
+          items:
+            type: string
     RepoEffectivePreamble:
       type: object
       additionalProperties: false
@@ -2018,6 +2053,20 @@ components:
             - integer
             - "null"
           minimum: 1
+        ci_ignore_mode:
+          type: string
+          enum:
+            - inherit
+            - extend
+            - replace
+        ignored_check_names:
+          type: array
+          items:
+            type: string
+        ignored_workflow_names:
+          type: array
+          items:
+            type: string
     RepoGuidanceSetChange:
       type: object
       additionalProperties: false
