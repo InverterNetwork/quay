@@ -75,6 +75,8 @@ interface QuayAdminRepoEffectivePreamble {
   source: 'repo' | 'global';
   configured_preamble_id: number | null;
   effective_preamble_id: number;
+  repo_guidance_id: number | null;
+  repo_guidance_body: string | null;
   title: string;
   body: string;
   refs: number;
@@ -470,6 +472,8 @@ function toRepoEffectivePreamble(preamble: QuayAdminRepoEffectivePreamble) {
     source: preamble.source,
     configuredPreambleId: preamble.configured_preamble_id,
     effectivePreambleId: preamble.effective_preamble_id,
+    repoGuidanceId: preamble.repo_guidance_id,
+    repoGuidanceBody: preamble.repo_guidance_body,
     title: preamble.title,
     body: preamble.body,
     refs: preamble.refs,

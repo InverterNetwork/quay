@@ -33,6 +33,13 @@ export interface TagsReplaceChange {
   tag_namespaces: TagNamespaceInput[];
 }
 
+export interface RepoGuidanceSetChange {
+  type: 'repo_guidance.set';
+  repo_id: string;
+  role: 'worker' | 'reviewer';
+  body: string;
+}
+
 export interface DeploymentSettingsUpdateChange {
   type: 'deployment_settings.update';
   patch: Partial<{
@@ -43,7 +50,7 @@ export interface DeploymentSettingsUpdateChange {
   }>;
 }
 
-export type AdminChange = RepoUpdateChange | DeploymentSettingsUpdateChange | TagsReplaceChange;
+export type AdminChange = RepoUpdateChange | RepoGuidanceSetChange | DeploymentSettingsUpdateChange | TagsReplaceChange;
 
 export interface ChangeEntry {
   id: string;

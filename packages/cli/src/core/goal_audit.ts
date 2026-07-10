@@ -13,7 +13,7 @@ import {
 } from "./goals.ts";
 import type { GoalEvidence, GoalReport } from "./goal_report.ts";
 import { enqueueOrchestratorHandoff } from "./orchestrator_handoffs.ts";
-import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import { resolvePreambleForAttemptReason } from "./preamble.ts";
 import {
   composeWorkerPrompt,
   loadOriginalTaskObjective,
@@ -687,12 +687,13 @@ function rejectGoalCompletion(
       )
       .run(now, input.task.task_id, input.attempt.goal_id);
 
-    const preambleId = ensurePreambleIdForAttemptReason(
+    const resolvedPreamble = resolvePreambleForAttemptReason(
       deps.db,
       deps.clock,
       GOAL_AUDIT_REJECTED_ATTEMPT_REASON,
       { repoId: input.task.repo_id },
     );
+    const preambleId = resolvedPreamble.preambleId;
     const objective = loadOriginalTaskObjective(deps.db, input.task.task_id);
     const goalContext = loadGoalPromptContext(deps.db, input.task.task_id);
     const prBaseBranch = loadTaskPrBaseBranch(deps.db, input.task.task_id);
@@ -704,7 +705,7 @@ function rejectGoalCompletion(
       deps.db,
       input.task.task_id,
     );
-    const preambleBody = loadPreambleBody(deps.db, preambleId);
+    const preambleBody = resolvedPreamble.body;
     const guidance = [
       "The goal completion audit rejected the previous complete report.",
       "",
@@ -737,17 +738,18 @@ function rejectGoalCompletion(
     const attemptRow = deps.db
       .query<
         { attempt_id: number },
-        [string, number, number, string, string | null]
+        [string, number, number, number | null, string, string | null]
       >(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, reason, consumed_budget, goal_id
-         ) VALUES (?, ?, ?, ?, 0, ?)
+           task_id, attempt_number, preamble_id, repo_guidance_id, reason, consumed_budget, goal_id
+         ) VALUES (?, ?, ?, ?, ?, 0, ?)
          RETURNING attempt_id`,
       )
       .get(
         input.task.task_id,
         input.attempt.attempt_number + 1,
         preambleId,
+        resolvedPreamble.repoGuidanceId,
         GOAL_AUDIT_REJECTED_ATTEMPT_REASON,
         input.attempt.goal_id,
       );
