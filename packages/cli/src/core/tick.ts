@@ -5518,8 +5518,16 @@ function maybeAssignPrimaryContributor(
       );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const conflict = isDeterministicAssigneeError(message);
     try {
-      service.markConflict({ slackUserId: mapping.slack_user_id, error: message });
+      if (conflict) {
+        service.markConflict({ slackUserId: mapping.slack_user_id, error: message });
+      } else {
+        service.markAssignmentFailure({
+          slackUserId: mapping.slack_user_id,
+          error: message,
+        });
+      }
       deps.db
         .query(
           `INSERT INTO events (task_id, event_type, occurred_at, event_data)
@@ -5533,10 +5541,24 @@ function maybeAssignPrimaryContributor(
             slack_user_id: mapping.slack_user_id,
             github_login: mapping.github_login,
             error: message,
+            retryable: !conflict,
           }),
         );
     } catch {}
   }
+}
+
+function isDeterministicAssigneeError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return [
+    "could not resolve to a user",
+    "could not resolve to user",
+    "no user could be found",
+    "user could not be found",
+    "invalid assignee",
+    "not assignable",
+    "cannot assign",
+  ].some((marker) => normalized.includes(marker));
 }
 
 function parsePrimaryTaskAuthor(

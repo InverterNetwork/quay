@@ -9,6 +9,7 @@ import { Icon } from '../icons/Icon';
 import type {
   IdentityDiscovery,
   IdentityMapping,
+  UnmappedIdentityContributor,
 } from '../store/data';
 import type { ChangeEntry, IdentityMappingInput, IdentityMappingsReplaceChange } from '../store/dirty';
 
@@ -37,6 +38,7 @@ const EMPTY_DRAFT: DraftMapping = {
 
 export function IdentityMappingEditor({
   baseline,
+  discovery,
   changes,
   onChange,
 }: IdentityMappingEditorProps) {
@@ -57,6 +59,12 @@ export function IdentityMappingEditor({
   );
   const dirty = pending !== undefined;
   const showComposer = adding || current.length === 0;
+  const suggestions = useMemo(() => {
+    const mappedSlackIds = new Set(current.map((mapping) => mapping.slack_user_id));
+    return discovery.unmappedContributors
+      .filter((candidate) => !mappedSlackIds.has(candidate.slackUserId))
+      .slice(0, 4);
+  }, [current, discovery.unmappedContributors]);
 
   function commit(nextRaw: IdentityMappingInput[]) {
     const next = normalizeMappings(nextRaw);
@@ -85,8 +93,8 @@ export function IdentityMappingEditor({
     commit(current.filter((mapping) => mapping.slack_user_id !== slackUserId));
   }
 
-  function startMapping() {
-    setDraft(EMPTY_DRAFT);
+  function startMapping(candidate?: UnmappedIdentityContributor) {
+    setDraft(candidate === undefined ? EMPTY_DRAFT : draftFromContributor(candidate));
     setAdding(true);
   }
 
@@ -122,7 +130,7 @@ export function IdentityMappingEditor({
             variant="secondary"
             size="sm"
             leading={<Icon.Plus size={12} />}
-            onClick={startMapping}
+            onClick={() => startMapping()}
           >
             Add mapping
           </Button>
@@ -159,6 +167,62 @@ export function IdentityMappingEditor({
           </div>
         )}
       </Card>
+
+      {suggestions.length > 0 && (
+        <Card padding={0}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1fr) auto',
+              gap: 8,
+              alignItems: 'center',
+              padding: '10px 14px',
+              borderBottom: '1px solid var(--line)',
+            }}
+          >
+            <T kind="mono-sm" color="var(--ink-3)">
+              [[identity_discovery.unmapped]] - {discovery.unmappedContributors.length} found
+            </T>
+          </div>
+          <div style={{ display: 'grid' }}>
+            {suggestions.map((candidate) => (
+              <div
+                key={candidate.slackUserId}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'minmax(0, 1fr) auto',
+                  gap: 10,
+                  alignItems: 'center',
+                  minHeight: 42,
+                  padding: '8px 14px',
+                  borderBottom: '1px solid var(--line)',
+                }}
+              >
+                <T
+                  kind="mono-sm"
+                  color="var(--ink-2)"
+                  style={{
+                    display: 'block',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {candidate.slackUserId} - {candidate.slackDisplayName} - {candidate.taskCount} task{candidate.taskCount === 1 ? '' : 's'}
+                </T>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leading={<Icon.Plus size={12} />}
+                  onClick={() => startMapping(candidate)}
+                >
+                  Map
+                </Button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {showComposer && (
         <Card padding={14}>
@@ -335,6 +399,16 @@ function draftToInput(draft: DraftMapping): IdentityMappingInput | null {
     github_login: githubLogin,
     status: 'mapped',
     source: 'manual',
+  };
+}
+
+function draftFromContributor(candidate: UnmappedIdentityContributor): DraftMapping {
+  return {
+    slackUserId: candidate.slackUserId,
+    slackDisplayName: candidate.slackDisplayName,
+    slackHandle: candidate.slackHandle ?? '',
+    slackEmail: '',
+    githubLogin: '',
   };
 }
 

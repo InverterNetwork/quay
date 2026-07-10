@@ -1031,6 +1031,8 @@ components:
         - preambles
         - retry_templates
         - tag_namespaces
+        - identity_mappings
+        - identity_discovery
       properties:
         revision:
           type: string
@@ -1062,6 +1064,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TagNamespace"
+        identity_mappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/IdentityMapping"
+        identity_discovery:
+          $ref: "#/components/schemas/IdentityDiscovery"
     RuntimePaths:
       type: object
       additionalProperties: false
@@ -1745,6 +1753,109 @@ components:
         extended_by:
           type: integer
           minimum: 0
+    IdentityMapping:
+      type: object
+      additionalProperties: false
+      required:
+        - slack_user_id
+        - slack_display_name
+        - slack_handle
+        - slack_email
+        - github_login
+        - status
+        - source
+        - last_used_at
+        - last_used_task_id
+        - last_used_pr_number
+        - last_error
+        - created_at
+        - updated_at
+      properties:
+        slack_user_id:
+          type: string
+        slack_display_name:
+          type: string
+        slack_handle:
+          type:
+            - string
+            - "null"
+        slack_email:
+          type:
+            - string
+            - "null"
+        github_login:
+          type: string
+        status:
+          type: string
+          enum:
+            - mapped
+            - verified
+            - conflict
+        source:
+          type: string
+          enum:
+            - manual
+            - csv
+            - auto
+            - task
+        last_used_at:
+          type:
+            - string
+            - "null"
+        last_used_task_id:
+          type:
+            - string
+            - "null"
+        last_used_pr_number:
+          type:
+            - integer
+            - "null"
+        last_error:
+          type:
+            - string
+            - "null"
+        created_at:
+          type: string
+        updated_at:
+          type: string
+    IdentityDiscovery:
+      type: object
+      additionalProperties: false
+      required:
+        - unmapped_contributors
+      properties:
+        unmapped_contributors:
+          type: array
+          items:
+            $ref: "#/components/schemas/UnmappedIdentityContributor"
+    UnmappedIdentityContributor:
+      type: object
+      additionalProperties: false
+      required:
+        - slack_user_id
+        - slack_display_name
+        - slack_handle
+        - task_count
+        - last_external_ref
+        - last_seen_at
+      properties:
+        slack_user_id:
+          type: string
+        slack_display_name:
+          type: string
+        slack_handle:
+          type:
+            - string
+            - "null"
+        task_count:
+          type: integer
+          minimum: 1
+        last_external_ref:
+          type:
+            - string
+            - "null"
+        last_seen_at:
+          type: string
     MatrixReadModel:
       type: object
       additionalProperties: false
@@ -1801,6 +1912,7 @@ components:
             oneOf:
               - $ref: "#/components/schemas/RepoUpdateChange"
               - $ref: "#/components/schemas/TagsReplaceChange"
+              - $ref: "#/components/schemas/IdentityMappingsReplaceChange"
             discriminator:
               propertyName: type
     RepoUpdateChange:
@@ -1909,6 +2021,62 @@ components:
           type: array
           items:
             type: string
+    IdentityMappingsReplaceChange:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - mappings
+      properties:
+        type:
+          type: string
+          const: identity_mappings.replace
+        mappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/IdentityMappingInput"
+    IdentityMappingInput:
+      type: object
+      additionalProperties: false
+      required:
+        - slack_user_id
+        - slack_display_name
+        - github_login
+      properties:
+        slack_user_id:
+          type: string
+          minLength: 1
+        slack_display_name:
+          type: string
+          minLength: 1
+        slack_handle:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        slack_email:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        github_login:
+          type: string
+          minLength: 1
+          maxLength: 39
+          pattern: "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
+        status:
+          type: string
+          enum:
+            - mapped
+            - verified
+            - conflict
+        source:
+          type: string
+          enum:
+            - manual
+            - csv
+            - auto
+            - task
     ChangePreview:
       type: object
       additionalProperties: false

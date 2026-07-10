@@ -39,6 +39,10 @@ export interface IdentityMappingService {
     taskId: string;
     prNumber: number;
   }): void;
+  markAssignmentFailure(input: {
+    slackUserId: string;
+    error: string;
+  }): void;
   markConflict(input: {
     slackUserId: string;
     error: string;
@@ -146,7 +150,28 @@ export function createIdentityMappingService(deps: {
       .run(input.error, nowISO(), input.slackUserId);
   }
 
-  return { list, findBySlackId, replaceAll, markUsed, markConflict };
+  function markAssignmentFailure(input: {
+    slackUserId: string;
+    error: string;
+  }): void {
+    deps.db
+      .query(
+        `UPDATE identity_mappings
+            SET last_error = ?,
+                updated_at = ?
+          WHERE slack_user_id = ?`,
+      )
+      .run(input.error, nowISO(), input.slackUserId);
+  }
+
+  return {
+    list,
+    findBySlackId,
+    replaceAll,
+    markUsed,
+    markAssignmentFailure,
+    markConflict,
+  };
 }
 
 export function normalizeIdentityMappingInput(

@@ -97,6 +97,9 @@ export class FakeGitHub implements GitHubPort {
   private mergePullRequestHandler:
     | ((repoId: string, prNumber: number, expectedHeadSha: string) => void)
     | null = null;
+  private addPullRequestAssigneesHandler:
+    | ((repoId: string, prNumber: number, logins: string[]) => void)
+    | null = null;
 
   prExistsForBranch(repoId: string, branch: string): boolean {
     this.calls.push({ repoId, branch });
@@ -183,6 +186,13 @@ export class FakeGitHub implements GitHubPort {
     logins: string[],
   ): void {
     this.addPullRequestAssigneesCalls.push({ repoId, prNumber, logins: [...logins] });
+    this.addPullRequestAssigneesHandler?.(repoId, prNumber, logins);
+  }
+
+  setAddPullRequestAssigneesHandler(
+    handler: ((repoId: string, prNumber: number, logins: string[]) => void) | null,
+  ): void {
+    this.addPullRequestAssigneesHandler = handler;
   }
 
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {

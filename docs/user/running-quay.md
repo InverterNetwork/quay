@@ -78,6 +78,13 @@ Initial endpoints:
 - `POST /v1/agent/sessions/<session_id>/approvals/<approval_id>`
 - `POST /v1/agent/sessions/<session_id>/stop`
 
+`GET /v1/global` includes `identity_mappings`, the persisted Slack user ID to
+GitHub login table, and `identity_discovery`, recent task authors with Slack
+IDs that do not have a mapping yet. Configuration change sets support
+`identity_mappings.replace`; the operation replaces the deployment mapping
+table after validating duplicate Slack IDs, duplicate GitHub logins, and GitHub
+login syntax.
+
 Configuration writes are limited to structured Admin UI change requests that
 Quay validates and fences with the read-model revision returned by the API.
 Clients should preview a change set before applying it, and must reload when the
