@@ -71,6 +71,7 @@ import {
   enterReview,
   type TaskAuthoringMode,
 } from "./pr_review.ts";
+import { createIdentityMappingService } from "./identity_mappings.ts";
 import { ensureWorkItemRunIdentity } from "./enqueue.ts";
 import { enqueuePrReadyApprovedOutboxItem } from "./pr_ready_approved_outbox.ts";
 import { enqueueReviewFindingLinearIssuesInOpenTxn } from "./review_finding_linear_outbox.ts";
@@ -301,13 +302,24 @@ interface QueuedTaskRow {
 interface RunningTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   base_branch: string | null;
   tmux_id: string;
   worktree_path: string;
   pr_number: number | null;
+  authors_json: string | null;
   cancel_requested_at: string | null;
   worker_execution: "oneshot" | "goal";
+  pr_assignee_login: string | null;
+}
+
+interface PrAssigneeCandidateTask {
+  task_id: string;
+  repo_id: string;
+  authoring_mode: TaskAuthoringMode;
+  authors_json: string | null;
+  pr_assignee_login: string | null;
 }
 
 interface PrOpenTaskRow {
@@ -316,10 +328,12 @@ interface PrOpenTaskRow {
   authoring_mode: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
+  authors_json: string | null;
   cancel_requested_at: string | null;
   last_review_id_acted_on: string | null;
   last_conflict_observation: string | null;
   github_pr_polled_at: string | null;
+  pr_assignee_login: string | null;
 }
 
 interface PrReviewTaskRow {
@@ -551,6 +565,14 @@ class TickGithubCache implements GitHubPort {
     this.prSnapshotByBranch.delete(`${input.repoId}\0${input.headBranch}`);
     this.lightweightByBranch.delete(`${input.repoId}\0${input.headBranch}`);
     return pr;
+  }
+
+  addPullRequestAssignees(
+    repoId: string,
+    prNumber: number,
+    logins: string[],
+  ): void {
+    this.inner.addPullRequestAssignees(repoId, prNumber, logins);
   }
 
   updatePullRequestBody(repoId: string, prNumber: number, body: string): void {
@@ -1631,9 +1653,11 @@ function readRunning(db: DB): RunningTaskRow[] {
   return db
     .query<RunningTaskRow, []>(
       `SELECT t.task_id, t.repo_id, t.branch_name,
+              t.authoring_mode,
               COALESCE(t.base_branch, r.base_branch) AS base_branch,
               t.tmux_id, t.worktree_path,
-              t.pr_number, t.cancel_requested_at, t.worker_execution
+              t.pr_number, t.authors_json, t.cancel_requested_at,
+              t.worker_execution, t.pr_assignee_login
          FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
         WHERE t.state = 'running'
         ORDER BY t.created_at, t.task_id`,
@@ -1688,7 +1712,7 @@ function readWaitingHuman(db: DB): WaitingHumanTaskRow[] {
 function readPrOpen(db: DB): PrOpenTaskRow[] {
   return db
     .query<PrOpenTaskRow, []>(
-      `SELECT task_id, repo_id, branch_name, worktree_path,
+      `SELECT task_id, repo_id, branch_name, worktree_path, authors_json,
               CASE
                 WHEN authoring_mode = 'quay_owned'
                  AND task_id LIKE 'pr-review-%'
@@ -1696,7 +1720,8 @@ function readPrOpen(db: DB): PrOpenTaskRow[] {
                 ELSE authoring_mode
               END AS authoring_mode,
               cancel_requested_at, last_review_id_acted_on,
-              last_conflict_observation, github_pr_polled_at
+              last_conflict_observation, github_pr_polled_at,
+              pr_assignee_login
          FROM tasks
         WHERE state = 'pr-open'
         ORDER BY created_at, task_id`,
@@ -2024,6 +2049,14 @@ function processRunningTask(
     ctxAttempt,
     { sessionName: attempt.tmux_session, spawnWindow: false, exitInfo },
   );
+  if (res.outcome === "pr_opened") {
+    try {
+      const snapshot = deps.github.prSnapshot(task.repo_id, task.branch_name);
+      if (snapshot !== null) {
+        maybeAssignPrimaryContributor(deps, task, snapshot);
+      }
+    } catch {}
+  }
   return outcomeToResult(task.task_id, res.outcome, false);
 }
 
@@ -2623,6 +2656,7 @@ function processPrOpenTask(
   // state, conflict, CI). The CLI/operator surface reads these columns; if
   // we wait until after CI passes we miss the entire pr-open window.
   persistPrMetadata(deps, task.task_id, snapshot);
+  maybeAssignPrimaryContributor(deps, task, snapshot);
 
   // 1. Terminal PR state (merged / closed_unmerged) takes precedence over
   //    everything else — even pending CI. A human merging or closing the PR
@@ -5429,6 +5463,102 @@ function persistPrMetadata(
     // Best-effort: PR-metadata observability never blocks the state
     // machine. A SQL failure here will be retried on the next tick.
   }
+}
+
+function maybeAssignPrimaryContributor(
+  deps: TickDeps,
+  task: PrAssigneeCandidateTask,
+  snapshot: PrSnapshot,
+): void {
+  if (task.authoring_mode !== "quay_owned") return;
+  if (task.pr_assignee_login !== null) return;
+  if (snapshot.state !== "open") return;
+  const prNumber = snapshot.prNumber ?? null;
+  if (prNumber === null) return;
+  const author = parsePrimaryTaskAuthor(task.authors_json);
+  if (author === null) return;
+
+  const service = createIdentityMappingService({ db: deps.db, clock: deps.clock });
+  const mapping = service.findBySlackId(author.slack_id);
+  if (mapping === null || mapping.status === "conflict") return;
+
+  try {
+    deps.github.addPullRequestAssignees(task.repo_id, prNumber, [
+      mapping.github_login,
+    ]);
+    service.markUsed({
+      slackUserId: mapping.slack_user_id,
+      taskId: task.task_id,
+      prNumber,
+    });
+    const now = deps.clock.nowISO();
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET pr_assignee_login = ?,
+                pr_assignee_selected_at = ?,
+                updated_at = ?
+          WHERE task_id = ?
+            AND pr_assignee_login IS NULL`,
+      )
+      .run(mapping.github_login, now, now, task.task_id);
+    deps.db
+      .query(
+        `INSERT INTO events (task_id, event_type, occurred_at, event_data)
+         VALUES (?, 'pr_assignee_selected', ?, ?)`,
+      )
+      .run(
+        task.task_id,
+        now,
+        JSON.stringify({
+          pr_number: prNumber,
+          slack_user_id: mapping.slack_user_id,
+          github_login: mapping.github_login,
+        }),
+      );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    try {
+      service.markConflict({ slackUserId: mapping.slack_user_id, error: message });
+      deps.db
+        .query(
+          `INSERT INTO events (task_id, event_type, occurred_at, event_data)
+           VALUES (?, 'pr_assignee_selection_failed', ?, ?)`,
+        )
+        .run(
+          task.task_id,
+          deps.clock.nowISO(),
+          JSON.stringify({
+            pr_number: prNumber,
+            slack_user_id: mapping.slack_user_id,
+            github_login: mapping.github_login,
+            error: message,
+          }),
+        );
+    } catch {}
+  }
+}
+
+function parsePrimaryTaskAuthor(
+  authorsJson: string | null,
+): { name: string; slack_id: string } | null {
+  if (authorsJson === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(authorsJson);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const first = parsed[0];
+  if (first === null || typeof first !== "object") return null;
+  const name = (first as { name?: unknown }).name;
+  const slackId = (first as { slack_id?: unknown }).slack_id;
+  if (typeof slackId !== "string" || slackId.trim() === "") return null;
+  return {
+    name: typeof name === "string" && name.trim() !== "" ? name.trim() : slackId.trim(),
+    slack_id: slackId.trim(),
+  };
 }
 
 function normalizePrBaseRef(baseRef: string | null | undefined): string | null {

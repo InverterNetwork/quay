@@ -6,6 +6,16 @@ export interface TagNamespaceInput {
   values: string[];
 }
 
+export interface IdentityMappingInput {
+  slack_user_id: string;
+  slack_display_name: string;
+  slack_handle?: string | null;
+  slack_email?: string | null;
+  github_login: string;
+  status?: 'mapped' | 'verified' | 'conflict';
+  source?: 'manual' | 'csv' | 'auto' | 'task';
+}
+
 export interface RepoUpdateChange {
   type: 'repo.update';
   repo_id: string;
@@ -40,6 +50,11 @@ export interface RepoGuidanceSetChange {
   body: string;
 }
 
+export interface IdentityMappingsReplaceChange {
+  type: 'identity_mappings.replace';
+  mappings: IdentityMappingInput[];
+}
+
 export interface DeploymentSettingsUpdateChange {
   type: 'deployment_settings.update';
   patch: Partial<{
@@ -50,7 +65,12 @@ export interface DeploymentSettingsUpdateChange {
   }>;
 }
 
-export type AdminChange = RepoUpdateChange | RepoGuidanceSetChange | DeploymentSettingsUpdateChange | TagsReplaceChange;
+export type AdminChange =
+  | RepoUpdateChange
+  | RepoGuidanceSetChange
+  | DeploymentSettingsUpdateChange
+  | TagsReplaceChange
+  | IdentityMappingsReplaceChange;
 
 export interface ChangeEntry {
   id: string;

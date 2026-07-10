@@ -222,6 +222,8 @@ function makeGlobal(): GlobalConfigSummary {
     ],
     retryTemplates: [],
     tagNamespaces: [],
+    identityMappings: [],
+    identityDiscovery: { unmappedContributors: [] },
   };
 }
 

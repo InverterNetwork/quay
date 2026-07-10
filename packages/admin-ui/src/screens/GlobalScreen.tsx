@@ -24,6 +24,7 @@ import type {
 import type { ChangeEntry, DeploymentSettingsUpdateChange } from '../store/dirty';
 import { MatrixScreen } from './MatrixScreen';
 import { TagNamespaceEditor } from './TagNamespaceEditor';
+import { IdentityMappingEditor } from './IdentityMappingEditor';
 
 const TOC: TocItem[] = [
   { id: 'ops', label: 'Operations' },
@@ -33,6 +34,7 @@ const TOC: TocItem[] = [
   { id: 'agents', label: 'Default agents' },
   { id: 'prompts', label: 'Default prompts' },
   { id: 'tags', label: 'Default tags' },
+  { id: 'identity-mapping', label: 'Identity mapping' },
 ];
 
 interface GlobalScreenProps {
@@ -416,6 +418,20 @@ function SettingsBody({ global, changes, onChange, onOpenPreamble, active, setAc
             changes={changes}
             onChange={onChange}
             emptyText="No deployment tag namespaces are configured."
+          />
+        </Section>
+
+        <Section
+          n="08"
+          id="identity-mapping"
+          title="Identity mapping"
+          hint="Slack user ID <-> GitHub handle - used to auto-assign pull requests"
+        >
+          <IdentityMappingEditor
+            baseline={global.identityMappings}
+            discovery={global.identityDiscovery}
+            changes={changes}
+            onChange={onChange}
           />
         </Section>
         <div style={{ height: 80 }} />

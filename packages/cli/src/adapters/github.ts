@@ -170,6 +170,28 @@ export class GitHubCliAdapter implements GitHubPort {
     }
   }
 
+  addPullRequestAssignees(
+    repoId: string,
+    prNumber: number,
+    logins: string[],
+  ): void {
+    for (const login of logins) {
+      const result = this.run(repoId, [
+        "gh",
+        "pr",
+        "edit",
+        String(prNumber),
+        "--add-assignee",
+        login,
+      ]);
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `gh pr edit ${prNumber} --add-assignee ${login} failed: ${result.stderr.trim() || result.stdout.trim()}`,
+        );
+      }
+    }
+  }
+
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {
     // `prCheckStatus` is the convenience read that does not flow through the
     // tick-side `classifyCi`. Keep the same fail-closed semantics here:

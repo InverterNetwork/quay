@@ -8,6 +8,7 @@ import {
   DEFAULT_CLAUDE_REVIEWER_INVOCATION,
   DEFAULT_CLAUDE_WORKER_INVOCATION,
 } from "../../src/core/agents.ts";
+import { createIdentityMappingService } from "../../src/core/identity_mappings.ts";
 import { createRepoGuidance } from "../../src/core/preamble.ts";
 import { createRepoService } from "../../src/core/repos/service.ts";
 import { createTagService } from "../../src/core/tags/service.ts";
@@ -2241,6 +2242,107 @@ test("POST /v1/changes/apply preserves effective defaults on first partial deplo
     worker_model: "gpt-5.4",
     reviewer_agent: "codex",
     reviewer_model: "toml-reviewer-model",
+  });
+});
+
+test("GET /v1/global includes identity mappings and unmapped contributor discovery", async () => {
+  h = createHarness();
+  const repoId = insertRepo(h.db, "repo-identities");
+  const taskId = insertTask(h.db, { repoId, taskId: "task-identities" });
+  h.db
+    .query(
+      `UPDATE tasks
+          SET external_ref = ?,
+              authors_json = ?,
+              updated_at = ?
+        WHERE task_id = ?`,
+    )
+    .run(
+      "BRIX-1855",
+      JSON.stringify([
+        { name: "Mira Tonio", slack_id: "U02MIRA9K" },
+        { name: "Alex Park", slack_id: "U04ALEXK3" },
+      ]),
+      "2026-07-01T12:00:00.000Z",
+      taskId,
+    );
+  createIdentityMappingService({ db: h.db, clock: h.clock }).replaceAll([
+    {
+      slack_user_id: "U02MIRA9K",
+      slack_display_name: "Mira Tonio",
+      github_login: "mira-tonio",
+      status: "verified",
+    },
+  ]);
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/global"));
+  const body = await responseJson(response);
+
+  expect(body.identity_mappings).toEqual([
+    expect.objectContaining({
+      slack_user_id: "U02MIRA9K",
+      slack_display_name: "Mira Tonio",
+      github_login: "mira-tonio",
+      status: "verified",
+    }),
+  ]);
+  expect(body.identity_discovery).toEqual({
+    unmapped_contributors: [
+      expect.objectContaining({
+        slack_user_id: "U04ALEXK3",
+        slack_display_name: "Alex Park",
+        task_count: 1,
+        last_external_ref: "BRIX-1855",
+      }),
+    ],
+  });
+});
+
+test("POST /v1/changes/apply replaces identity mappings", async () => {
+  h = createHarness();
+  const handler = createHandler();
+  const revision = await currentRevision(handler);
+
+  const response = await handler(postJson("/v1/changes/apply", {
+    base_revision: revision,
+    changes: [
+      {
+        type: "identity_mappings.replace",
+        mappings: [
+          {
+            slack_user_id: "U02MIRA9K",
+            slack_display_name: "Mira Tonio",
+            slack_handle: "mira",
+            github_login: "mira-tonio",
+            status: "mapped",
+          },
+        ],
+      },
+    ],
+  }));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(JSON.stringify(body.preview)).toContain("identity mappings: replace 0 mappings with 1 mappings");
+  const row = h.db
+    .query<{
+      slack_user_id: string;
+      slack_display_name: string;
+      slack_handle: string | null;
+      github_login: string;
+      status: string;
+    }, []>(
+      `SELECT slack_user_id, slack_display_name, slack_handle, github_login, status
+         FROM identity_mappings`,
+    )
+    .get();
+  expect(row).toEqual({
+    slack_user_id: "U02MIRA9K",
+    slack_display_name: "Mira Tonio",
+    slack_handle: "mira",
+    github_login: "mira-tonio",
+    status: "mapped",
   });
 });
 
