@@ -32,6 +32,7 @@ export interface MissionControlUmbrellaChildren {
 export interface MissionControlTask {
   id: string;
   workItemId: string | null;
+  taskType: 'bugfix' | 'feature' | 'chore' | 'refactor' | null;
   runNumber: number | null;
   supersededByRun: string | null;
   ext: string;

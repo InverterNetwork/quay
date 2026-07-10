@@ -9,6 +9,7 @@ export interface TicketContext {
   external_ref: string;
   repo: string;
   base_branch: string | null;
+  task_type: "bugfix" | "feature" | "chore" | "refactor" | null;
   umbrella: TicketUmbrellaContext | null;
   brief: string;
   ticket_snapshot: string;

@@ -36,6 +36,7 @@ test("test_quay_config_block_parses_tags_and_slack_thread", () => {
 ${block(
   [
     "repo: test-repo",
+    "task_type: bugfix",
     "tags:",
     "  - auth-session",
     "  - cache",
@@ -51,11 +52,42 @@ Trailing prose.`;
   const parsed = parseQuayConfigBlock(body);
   expect(parsed).not.toBeNull();
   expect(parsed!.repo).toBe("test-repo");
+  expect(parsed!.task_type).toBe("bugfix");
   expect(parsed!.tags).toEqual(["auth-session", "cache"]);
   expect(parsed!.slack_thread_ref).toBe("C0123ABC:1700000123.000001");
   expect(parsed!.authors).toEqual([
     { name: "Fabian Scherer", slack_id: "U06TDC56VJB" },
   ]);
+});
+
+test("test_quay_config_block_parses_absent_task_type_as_null", () => {
+  const body = block(
+    [
+      "repo: test-repo",
+      "tags:",
+      "  - foo",
+      "authors:",
+      "  - name: A",
+      "    slack_id: U001",
+    ].join("\n"),
+  );
+  expect(parseQuayConfigBlock(body)?.task_type).toBeNull();
+});
+
+test("test_quay_config_block_errors_on_invalid_task_type", () => {
+  const body = block(
+    [
+      "repo: test-repo",
+      "task_type: investigation",
+      "tags:",
+      "  - foo",
+      "authors:",
+      "  - name: A",
+      "    slack_id: U001",
+    ].join("\n"),
+  );
+  const err = expectBlockInvalid(() => parseQuayConfigBlock(body));
+  expect(err.details?.detail).toMatch(/task_type/);
 });
 
 test("test_quay_config_block_returns_null_when_block_missing", () => {
@@ -125,6 +157,7 @@ test("test_quay_config_block_ignores_unknown_keys", () => {
       "repo",
       "slack_thread_ref",
       "tags",
+      "task_type",
       "umbrella",
       "worker_execution",
     ].sort(),

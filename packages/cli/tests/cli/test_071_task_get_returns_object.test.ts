@@ -21,6 +21,16 @@ test("test_071_task_get_returns_object", async () => {
   const repoId = insertRepo(h.db, "repo-get");
   const taskId = insertTask(h.db, { taskId: "task-get", repoId, state: "queued" });
   h.db
+    .query(
+      `INSERT INTO work_items (
+         work_item_id, source, repo_id, external_ref, task_type, created_at, updated_at
+       ) VALUES (?, 'linear', ?, 'BRIX-1881', 'bugfix', ?, ?)`,
+    )
+    .run("wi-task-get", repoId, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+  h.db
+    .query(`UPDATE tasks SET work_item_id = ?, external_ref = ? WHERE task_id = ?`)
+    .run("wi-task-get", "BRIX-1881", taskId);
+  h.db
     .query(`UPDATE tasks SET slack_thread_ref = ? WHERE task_id = ?`)
     .run("GPRIVATE123:999.000000", taskId);
   insertAttempt(h.db, {
@@ -51,6 +61,7 @@ test("test_071_task_get_returns_object", async () => {
   expect(typeof parsed).toBe("object");
   expect(parsed).not.toBeNull();
   expect(parsed.task_id).toBe(taskId);
+  expect(parsed.task_type).toBe("bugfix");
   expect(parsed.state).toBe("queued");
   expect(parsed.repo_id).toBe(repoId);
   expect(parsed.dependency_status).toEqual({

@@ -408,6 +408,9 @@ function TaskCard({ task, highlight }: { task: MissionControlTask; highlight: bo
         ) : (
           <Chip leading={<Icon.Repo size={11} />}>{task.repo}</Chip>
         )}
+        {task.taskType !== null && (
+          <Chip leading={<Icon.Filter size={11} />}>{task.taskType}</Chip>
+        )}
         {task.pr !== null && task.prUrl !== null && (
           <LinkChip href={task.prUrl} leading={<Icon.GitPR size={11} />} title={`Open PR #${task.pr}`}>
             {isUmbrella ? `final PR #${task.pr}` : `#${task.pr}`}
