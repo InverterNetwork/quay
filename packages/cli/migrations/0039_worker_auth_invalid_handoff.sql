@@ -56,4 +56,11 @@ CREATE INDEX orchestrator_handoffs_status_created_idx
 CREATE INDEX orchestrator_handoffs_task_status_idx
   ON orchestrator_handoffs(task_id, status, handoff_id);
 
+CREATE INDEX orchestrator_handoffs_pending_eligible_idx
+  ON orchestrator_handoffs(status, next_eligible_at, created_at, handoff_id)
+  WHERE status = 'pending';
+
+CREATE INDEX orchestrator_handoffs_outbox_item_idx
+  ON orchestrator_handoffs(outbox_item_id);
+
 PRAGMA legacy_alter_table = OFF;
