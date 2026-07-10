@@ -90,6 +90,9 @@ test("test_linear_sync_queue_does_not_block_on_enqueue", async () => {
       throw new Error("not used");
     },
     setIssueState: () => new Promise<void>((r) => (resolveSetState = r)),
+    async updateIssueBody() {
+      throw new Error("not used");
+    },
     async createIssue() {
       throw new Error("not used");
     },

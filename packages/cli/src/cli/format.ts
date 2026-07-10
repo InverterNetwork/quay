@@ -9,6 +9,7 @@ import type { TicketAuthor } from "../ports/ticket_context.ts";
 export interface TaskListRow {
   task_id: string;
   work_item_id: string | null;
+  task_type: "bugfix" | "feature" | "chore" | "refactor" | null;
   run_number: number | null;
   superseded_by_run: string | null;
   repo_id: string;
@@ -83,7 +84,7 @@ export interface TaskGetPayload extends TaskListRow {
 }
 
 const TASK_LIST_COLUMNS = `
-  t.task_id, t.work_item_id, t.run_number,
+  t.task_id, t.work_item_id, wi.task_type, t.run_number,
   (
     SELECT successor.task_id
       FROM tasks successor
@@ -103,6 +104,7 @@ const TASK_LIST_COLUMNS = `
 interface TaskListRawRow {
   task_id: string;
   work_item_id: string | null;
+  task_type: "bugfix" | "feature" | "chore" | "refactor" | null;
   run_number: number | null;
   superseded_by_run: string | null;
   repo_id: string;
@@ -129,6 +131,7 @@ function rowToList(db: DB, r: TaskListRawRow): TaskListRow {
   return {
     task_id: r.task_id,
     work_item_id: r.work_item_id,
+    task_type: r.task_type,
     run_number: r.run_number,
     superseded_by_run: r.superseded_by_run,
     repo_id: r.repo_id,
@@ -203,7 +206,9 @@ export function listTasks(db: DB): TaskListRow[] {
   const rows = db
     .query<TaskListRawRow, []>(
       `SELECT ${TASK_LIST_COLUMNS}
-         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+         FROM tasks t
+         JOIN repos r ON r.repo_id = t.repo_id
+         LEFT JOIN work_items wi ON wi.work_item_id = t.work_item_id
         ORDER BY t.created_at, t.task_id`,
     )
     .all();
@@ -264,7 +269,9 @@ export function getTask(db: DB, taskId: string): TaskGetPayload | null {
       `SELECT ${TASK_LIST_COLUMNS},
               t.authors_json, t.slack_thread_ref,
               t.pr_number, t.pr_url, t.head_sha, t.base_sha
-         FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
+         FROM tasks t
+         JOIN repos r ON r.repo_id = t.repo_id
+         LEFT JOIN work_items wi ON wi.work_item_id = t.work_item_id
         WHERE t.task_id = ?`,
     )
     .get(taskId);

@@ -52,6 +52,7 @@ const VALID_DRAFT = {
   body:
     "Refactor the auth-session cache to evict entries when a user logs out. Context: stale entries persist for 30 minutes after revocation.",
   repo: "my-repo",
+  task_type: "refactor",
   tags: ["auth-session", "cache"],
   authors: [{ name: "Fabian Scherer", slack_id: "U06TDC56VJB" }],
 };
@@ -512,6 +513,7 @@ test("test_validate_ticket_hermes_first_draft_missing_tags_fails", () => {
     body:
       "Refactor the auth-session cache to evict entries when a user logs out.\n\nContext: the cache currently retains entries for 30 minutes regardless of session lifecycle, which means revoked sessions can still grant access until the entry expires naturally.",
     repo: "my-repo",
+    task_type: "refactor",
     tags: [],
     slack_thread: "C0AEN8KDRT2:1777622349.373109",
     authors: [{ name: "Fabian Scherer", slack_id: "U06TDC56VJB" }],
@@ -548,7 +550,7 @@ test("shipped default schema parses and matches §6 field set", () => {
   );
   const schema = loadSchema(repoConfig);
   expect(Object.keys(schema.required).sort()).toEqual(
-    ["authors", "body", "repo", "tags"],
+    ["authors", "body", "repo", "tags", "task_type"],
   );
   expect(Object.keys(schema.optional).sort()).toEqual(
     ["base_branch", "external_ref", "slack_thread", "worker_execution"],

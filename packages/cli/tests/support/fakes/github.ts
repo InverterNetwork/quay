@@ -36,6 +36,11 @@ export class FakeGitHub implements GitHubPort {
     prNumber: number;
     body: string;
   }[] = [];
+  readonly addPullRequestAssigneesCalls: {
+    repoId: string;
+    prNumber: number;
+    logins: string[];
+  }[] = [];
   // Explicit per-(repo, branch) PR snapshots take precedence over the legacy
   // `setPrCheckStatus`-derived synthesis.
   readonly snapshots = new Map<string, PrSnapshot | null>();
@@ -86,8 +91,14 @@ export class FakeGitHub implements GitHubPort {
     token: string,
     actor: "worker" | "reviewer",
   ) => void = () => {};
+  private prExistsWithTokenHandler:
+    | ((repoId: string, branch: string, token: string) => boolean | null)
+    | null = null;
   private mergePullRequestHandler:
     | ((repoId: string, prNumber: number, expectedHeadSha: string) => void)
+    | null = null;
+  private addPullRequestAssigneesHandler:
+    | ((repoId: string, prNumber: number, logins: string[]) => void)
     | null = null;
 
   prExistsForBranch(repoId: string, branch: string): boolean {
@@ -101,6 +112,8 @@ export class FakeGitHub implements GitHubPort {
     token: string,
   ): boolean {
     this.prExistsWithTokenCalls.push({ repoId, branch, token });
+    const handled = this.prExistsWithTokenHandler?.(repoId, branch, token);
+    if (handled !== undefined && handled !== null) return handled;
     return this.prExisting.get(`${repoId}\0${branch}`) ?? false;
   }
 
@@ -165,6 +178,21 @@ export class FakeGitHub implements GitHubPort {
     if (existing !== null) {
       this.setPrView(repoId, prNumber, { ...existing, body });
     }
+  }
+
+  addPullRequestAssignees(
+    repoId: string,
+    prNumber: number,
+    logins: string[],
+  ): void {
+    this.addPullRequestAssigneesCalls.push({ repoId, prNumber, logins: [...logins] });
+    this.addPullRequestAssigneesHandler?.(repoId, prNumber, logins);
+  }
+
+  setAddPullRequestAssigneesHandler(
+    handler: ((repoId: string, prNumber: number, logins: string[]) => void) | null,
+  ): void {
+    this.addPullRequestAssigneesHandler = handler;
   }
 
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {
@@ -405,6 +433,12 @@ export class FakeGitHub implements GitHubPort {
     ) => void,
   ): void {
     this.tokenAccessHandler = handler;
+  }
+
+  setPrExistsWithTokenHandler(
+    handler: (repoId: string, branch: string, token: string) => boolean | null,
+  ): void {
+    this.prExistsWithTokenHandler = handler;
   }
 }
 

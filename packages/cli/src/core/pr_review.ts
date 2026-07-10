@@ -21,9 +21,8 @@ import {
 } from "./ci_policy.ts";
 import {
   composeReviewerFinalPrompt,
-  ensurePreambleIdForAttemptReason,
-  loadPreambleBody,
   MISSING_REVIEW_RESULT_DIAGNOSTIC,
+  resolvePreambleForAttemptReason,
   REVIEW_RESULT_PROTOCOL_VERSION,
   REVIEW_RESULT_FILENAME,
 } from "./preamble.ts";
@@ -308,13 +307,14 @@ export function enterReview(
       reviewerModel: input.reviewerModel ?? null,
     });
   const tags = dedupeTags(input.tags ?? []);
-  const preambleId = ensurePreambleIdForAttemptReason(
+  const resolvedPreamble = resolvePreambleForAttemptReason(
     deps.db,
     deps.clock,
     "review_only",
     { repoId: input.repoId },
   );
-  const preamble = loadPreambleBody(deps.db, preambleId);
+  const preambleId = resolvedPreamble.preambleId;
+  const preamble = resolvedPreamble.body;
   const brief = task.authoring_mode === "synthetic_review"
     ? composeSyntheticBrief(pr, input.referenceReposRoot)
     : composeTaskReviewBrief(
@@ -535,18 +535,19 @@ export function enterReview(
     const attempt = deps.db
       .query<
         InsertAttemptRow,
-        [string, number, number, string, number, string, string]
+        [string, number, number, number | null, string, number, string, string]
       >(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha,
+           task_id, attempt_number, preamble_id, repo_guidance_id, reason, consumed_budget, head_sha,
            review_protocol_version
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING attempt_id`,
       )
       .get(
         task.task_id,
         nextAttemptNumber,
         preambleId,
+        resolvedPreamble.repoGuidanceId,
         "review_only",
         0,
         headSha,
@@ -1295,13 +1296,14 @@ function scheduleAdoptedWorkerAttempt(
     now: string;
   },
 ): { attempt_id: number } {
-  const preambleId = ensurePreambleIdForAttemptReason(
+  const resolvedPreamble = resolvePreambleForAttemptReason(
     deps.db,
     deps.clock,
     "adopt_pr",
     { repoId: input.task.repo_id },
   );
-  const preambleBody = loadPreambleBody(deps.db, preambleId);
+  const preambleId = resolvedPreamble.preambleId;
+  const preambleBody = resolvedPreamble.body;
   const nextAttemptNumber = nextAttemptNumberForTask(
     deps.db,
     input.task.task_id,
@@ -1368,13 +1370,20 @@ function scheduleAdoptedWorkerAttempt(
     });
 
     const attempt = deps.db
-      .query<{ attempt_id: number }, [string, number, number, string, number]>(
+      .query<{ attempt_id: number }, [string, number, number, number | null, string, number]>(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, reason, consumed_budget
-         ) VALUES (?, ?, ?, ?, ?)
+           task_id, attempt_number, preamble_id, repo_guidance_id, reason, consumed_budget
+         ) VALUES (?, ?, ?, ?, ?, ?)
          RETURNING attempt_id`,
       )
-      .get(input.task.task_id, nextAttemptNumber, preambleId, "adopt_pr", 1);
+      .get(
+        input.task.task_id,
+        nextAttemptNumber,
+        preambleId,
+        resolvedPreamble.repoGuidanceId,
+        "adopt_pr",
+        1,
+      );
     if (!attempt) throw new Error("adopted worker attempt insert returned no row");
 
     deps.artifactStore.writeArtifact({

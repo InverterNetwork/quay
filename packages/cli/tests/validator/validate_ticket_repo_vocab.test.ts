@@ -79,6 +79,7 @@ const BASE_PAYLOAD = {
   body:
     "Refactor the cache to evict entries when a user logs out. Context: stale entries persist for 30 minutes after revocation.",
   repo: "repo-a",
+  task_type: "refactor",
   tags: ["area-bonding-curve"],
   authors: [{ name: "Fabian", slack_id: "U06TDC56VJB" }],
 };

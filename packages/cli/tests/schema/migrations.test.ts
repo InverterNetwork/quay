@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { test, expect, afterEach } from "bun:test";
 import { openDatabase } from "../../src/db/connection.ts";
 import { loadMigrationsFromDir, runMigrations } from "../../src/db/migrate.ts";
+import { EMBEDDED_MIGRATIONS } from "../../src/build/embedded.generated.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertRepo, insertTask } from "../support/fixtures.ts";
 import { TASK_TERMINAL_STATES } from "../../src/core/task_state.ts";
@@ -147,6 +148,14 @@ test("test_schema_creates_required_tables", () => {
   }
 });
 
+test("embedded migrations match disk migrations", () => {
+  const diskMigrations = loadMigrationsFromDir(MIGRATIONS_DIR);
+  expect(EMBEDDED_MIGRATIONS.map((m) => m.name)).toEqual(
+    diskMigrations.map((m) => m.name),
+  );
+  expect(EMBEDDED_MIGRATIONS).toEqual(diskMigrations);
+});
+
 test("work item run schema captures run identity and active-run invariant", () => {
   h = createHarness();
 
@@ -169,6 +178,7 @@ test("work item run schema captures run identity and active-run invariant", () =
     "external_ref",
     "created_at",
     "updated_at",
+    "task_type",
   ]);
 
   const indexes = h.db
@@ -529,6 +539,7 @@ test("work item repair migration upgrades pre-repo-id work_items schema", () => 
       "external_ref",
       "created_at",
       "updated_at",
+      "task_type",
     ]);
     const indexSql = db
       .query<{ sql: string }, []>(
@@ -614,6 +625,36 @@ test("deployment_settings table stores mutable agent defaults", () => {
     "created_at",
     "updated_at",
   ]);
+});
+
+test("identity_mappings table stores Slack to GitHub assignee mappings", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(identity_mappings)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toEqual([
+    "slack_user_id",
+    "slack_display_name",
+    "slack_handle",
+    "slack_email",
+    "github_login",
+    "status",
+    "source",
+    "last_used_at",
+    "last_used_task_id",
+    "last_used_pr_number",
+    "last_error",
+    "created_at",
+    "updated_at",
+  ]);
+
+  const taskCols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(tasks)`)
+    .all()
+    .map((r) => r.name);
+  expect(taskCols).toContain("pr_assignee_login");
+  expect(taskCols).toContain("pr_assignee_selected_at");
 });
 
 test("umbrella workflow tables capture workflow and task links", () => {
@@ -800,6 +841,28 @@ test("orchestrator handoffs carry next eligibility timestamp", () => {
     .all()
     .map((r) => r.name);
   expect(cols).toContain("next_eligible_at");
+
+  const indexes = h.db
+    .query<{ name: string; sql: string }, []>(
+      `SELECT name, sql
+         FROM sqlite_master
+        WHERE type = 'index'
+          AND tbl_name = 'orchestrator_handoffs'
+          AND name NOT LIKE 'sqlite_autoindex_%'
+        ORDER BY name`,
+    )
+    .all();
+  expect(indexes.map((r) => r.name)).toEqual([
+    "orchestrator_handoffs_outbox_item_idx",
+    "orchestrator_handoffs_pending_eligible_idx",
+    "orchestrator_handoffs_status_created_idx",
+    "orchestrator_handoffs_task_status_idx",
+  ]);
+  expect(
+    indexes.find(
+      (r) => r.name === "orchestrator_handoffs_pending_eligible_idx",
+    )?.sql,
+  ).toContain("WHERE status = 'pending'");
 });
 
 test("outbox items support delivery and workflow metadata", () => {

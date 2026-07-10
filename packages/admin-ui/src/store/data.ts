@@ -43,6 +43,8 @@ export interface RepoEffectivePreamble {
   source: 'repo' | 'global';
   configuredPreambleId: number | null;
   effectivePreambleId: number;
+  repoGuidanceId: number | null;
+  repoGuidanceBody: string | null;
   title: string;
   body: string;
   refs: number;
@@ -82,6 +84,38 @@ export interface TagNamespace {
   values: string[];
   inheritedBy?: number;
   extendedBy?: number;
+}
+
+export type IdentityMappingStatus = 'mapped' | 'verified' | 'conflict';
+export type IdentityMappingSource = 'manual' | 'csv' | 'auto' | 'task';
+
+export interface IdentityMapping {
+  slackUserId: string;
+  slackDisplayName: string;
+  slackHandle: string | null;
+  slackEmail: string | null;
+  githubLogin: string;
+  status: IdentityMappingStatus;
+  source: IdentityMappingSource;
+  lastUsedAt: string | null;
+  lastUsedTaskId: string | null;
+  lastUsedPrNumber: number | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UnmappedIdentityContributor {
+  slackUserId: string;
+  slackDisplayName: string;
+  slackHandle: string | null;
+  taskCount: number;
+  lastExternalRef: string | null;
+  lastSeenAt: string;
+}
+
+export interface IdentityDiscovery {
+  unmappedContributors: UnmappedIdentityContributor[];
 }
 
 export interface ConfigFieldSummary {
@@ -145,6 +179,8 @@ export interface GlobalConfigSummary {
   preambles: PreambleSummary[];
   retryTemplates: GuidanceTemplate[];
   tagNamespaces: TagNamespace[];
+  identityMappings: IdentityMapping[];
+  identityDiscovery: IdentityDiscovery;
 }
 
 export interface MatrixRow {

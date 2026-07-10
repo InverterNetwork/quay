@@ -51,6 +51,33 @@ The flow is:
 If Linear is disabled, the command fails with `adapter_not_enabled`. If the
 token env var is missing, it fails with `adapter_not_configured`.
 
+## Slack To GitHub Identity Mapping
+
+Tasks can list Linear `quay-config` authors by Slack user ID:
+
+```yaml
+authors:
+  - name: Ada Lovelace
+    slack_id: U06TDC56VJB
+```
+
+Quay stores a deployment-level Slack user ID to GitHub login mapping in the
+Admin UI global configuration view. The Admin API exposes persisted mappings as
+`identity_mappings` and recent unmapped task authors as
+`identity_discovery.unmapped_contributors`; apply updates with the
+`identity_mappings.replace` change type.
+
+When a Quay-owned task reaches an open PR, tick looks up the first valid task
+author Slack ID and calls GitHub to add the mapped login as an assignee. A
+successful assignment marks the mapping `verified`, records the last task and
+PR number on the mapping, and stores the selected login on the task.
+
+Unmapped authors and mappings already marked `conflict` are skipped. GitHub
+errors that show the login cannot be resolved or assigned mark the mapping
+`conflict` so operators can correct it. Transient GitHub failures, such as
+network errors, rate limits, or 5xx responses, only update `last_error`; the
+mapping remains eligible and tick retries assignment on a later pass.
+
 ## Linear Blocked-By Dependencies
 
 At enqueue time, Quay reads Linear's native blocked-by relations for the issue.

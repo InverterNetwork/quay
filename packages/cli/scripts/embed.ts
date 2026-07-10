@@ -29,6 +29,7 @@ const WORKSPACE_ROOT = resolve(PACKAGE_ROOT, "..", "..");
 const MIGRATIONS_DIR = join(PACKAGE_ROOT, "migrations");
 const SCHEMA_FILE = join(PACKAGE_ROOT, "config", "ticket_schema.toml");
 const OUT_FILE = join(PACKAGE_ROOT, "src", "build", "embedded.generated.ts");
+const OUT_FILE_GIT_PATH = "packages/cli/src/build/embedded.generated.ts";
 const DEFAULT_UI_DIST_DIR = join(PACKAGE_ROOT, "..", "admin-ui", "dist");
 
 interface EmbeddedUiAsset {
@@ -135,10 +136,23 @@ function readGitSha(): string {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    return dirty.length > 0 ? `${sha}+dirty` : sha;
+    return hasRelevantDirtyStatus(dirty) ? `${sha}+dirty` : sha;
   } catch {
     return "unknown";
   }
+}
+
+export function hasRelevantDirtyStatus(statusPorcelain: string): boolean {
+  return statusPorcelain
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .some((line) => !isGeneratedOutputStatusLine(line));
+}
+
+function isGeneratedOutputStatusLine(statusLine: string): boolean {
+  const path = statusLine.slice(3);
+  return path === OUT_FILE_GIT_PATH;
 }
 
 export function formatBuildVersion(

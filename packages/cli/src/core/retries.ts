@@ -3,7 +3,7 @@ import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
 import { enqueueOrchestratorHandoff } from "./orchestrator_handoffs.ts";
-import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import { resolvePreambleForAttemptReason } from "./preamble.ts";
 import {
   composeWorkerPrompt,
   loadTaskPrBaseBranch,
@@ -87,12 +87,13 @@ export function scheduleDeterministicRetry(
 ): ScheduleDeterministicRetryResult {
   const now = deps.clock.nowISO();
   const template = ensureRetryTemplate(deps.db, deps.clock, input.reason);
-  const preambleId = ensurePreambleIdForAttemptReason(
+  const resolvedPreamble = resolvePreambleForAttemptReason(
     deps.db,
     deps.clock,
     input.reason,
     { taskId: input.taskId },
   );
+  const preambleId = resolvedPreamble.preambleId;
   const objective = loadOriginalTaskObjective(deps.db, input.taskId);
   const goalContext = loadGoalPromptContext(deps.db, input.taskId);
   const prBaseBranch = loadTaskPrBaseBranch(deps.db, input.taskId);
@@ -104,7 +105,7 @@ export function scheduleDeterministicRetry(
     deps.db,
     input.taskId,
   );
-  const preambleBody = loadPreambleBody(deps.db, preambleId);
+  const preambleBody = resolvedPreamble.body;
   const composed = composeWorkerPrompt({
     preambleBody,
     taskObjective: objective,
@@ -194,17 +195,18 @@ export function scheduleDeterministicRetry(
   const attempt = deps.db
     .query<
       { attempt_id: number },
-      [string, number, number, number, string, string | null]
+      [string, number, number, number | null, number, string, string | null]
     >(
       `INSERT INTO attempts (
-         task_id, attempt_number, preamble_id, template_id, reason, consumed_budget, goal_id
-       ) VALUES (?, ?, ?, ?, ?, 1, ?)
+         task_id, attempt_number, preamble_id, repo_guidance_id, template_id, reason, consumed_budget, goal_id
+       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
        RETURNING attempt_id`,
     )
     .get(
       input.taskId,
       input.prevAttempt.attempt_number + 1,
       preambleId,
+      resolvedPreamble.repoGuidanceId,
       template.template_id,
       input.reason,
       goalId,
@@ -317,12 +319,13 @@ export function scheduleCleanSpawnRetry(
   const priorBrief = input.prevAttempt.reason === "review_only"
     ? loadMostRecentBrief(deps.db, input.taskId)
     : loadMostRecentWorkerBrief(deps.db, input.taskId);
-  const preambleId = ensurePreambleIdForAttemptReason(
+  const resolvedPreamble = resolvePreambleForAttemptReason(
     deps.db,
     deps.clock,
     input.prevAttempt.reason,
     { taskId: input.taskId },
   );
+  const preambleId = resolvedPreamble.preambleId;
   const goalId =
     input.prevAttempt.reason === "review_only"
       ? null
@@ -330,17 +333,18 @@ export function scheduleCleanSpawnRetry(
   const attempt = deps.db
     .query<
       { attempt_id: number },
-      [string, number, number, number | null, string, number, string | null]
+      [string, number, number, number | null, number | null, string, number, string | null]
     >(
       `INSERT INTO attempts (
-         task_id, attempt_number, preamble_id, template_id, reason, consumed_budget, goal_id
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         task_id, attempt_number, preamble_id, repo_guidance_id, template_id, reason, consumed_budget, goal_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING attempt_id`,
     )
     .get(
       input.taskId,
       input.prevAttempt.attempt_number + 1,
       preambleId,
+      resolvedPreamble.repoGuidanceId,
       input.prevAttempt.template_id,
       input.prevAttempt.reason,
       input.prevAttempt.consumed_budget,
@@ -355,12 +359,11 @@ export function scheduleCleanSpawnRetry(
     content: priorBrief,
     extension: "md",
   });
-  const preamble = loadPreambleBody(deps.db, preambleId);
   deps.artifactStore.writeArtifact({
     taskId: input.taskId,
     attemptId: attempt.attempt_id,
     kind: "final_prompt",
-    content: `${preamble}\n\n${priorBrief}`,
+    content: `${resolvedPreamble.body}\n\n${priorBrief}`,
     extension: "md",
   });
   deps.db

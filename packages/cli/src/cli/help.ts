@@ -288,6 +288,8 @@ const COMMANDS: Record<string, CommandSpec> = {
       "repo unset-tags",
       "repo get-tags",
       "repo apply-tags",
+      "repo guidance-get",
+      "repo guidance-set",
     ],
   },
   "repo add": {
@@ -413,6 +415,25 @@ const COMMANDS: Record<string, CommandSpec> = {
       'Reads a { "namespaces": { "<ns>": { "values": [...], "required": bool }, ... } } document. Any existing namespaces not present in the input are removed. An empty namespaces object clears everything. Pass - as path to read from stdin. The operation is transactional: on validation failure nothing is written.',
     flags: [
       { flag: "--from <path>", desc: "Path to a JSON file (required). Use - for stdin." },
+    ],
+  },
+  "repo guidance-get": {
+    path: "repo guidance-get",
+    synopsis: "quay repo guidance-get <repo_id> [--role <worker|reviewer>] [--history]",
+    summary: "Show additive repo guidance appendix rows.",
+    flags: [
+      { flag: "--role <role>", desc: "Limit to worker or reviewer guidance." },
+      { flag: "--history", desc: "Show all append-only versions instead of only latest." },
+    ],
+  },
+  "repo guidance-set": {
+    path: "repo guidance-set",
+    synopsis: "quay repo guidance-set <repo_id> --role <worker|reviewer> (--body <text>|--body-file <path|->)",
+    summary: "Append a new additive repo guidance version.",
+    flags: [
+      { flag: "--role <role>", desc: "worker or reviewer." },
+      { flag: "--body <text>", desc: "Inline guidance body." },
+      { flag: "--body-file <path|->", desc: "Read guidance body from a file or stdin." },
     ],
   },
   preamble: {

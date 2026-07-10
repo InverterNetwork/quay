@@ -71,6 +71,7 @@ import {
   enterReview,
   type TaskAuthoringMode,
 } from "./pr_review.ts";
+import { createIdentityMappingService } from "./identity_mappings.ts";
 import { ensureWorkItemRunIdentity } from "./enqueue.ts";
 import { enqueuePrReadyApprovedOutboxItem } from "./pr_ready_approved_outbox.ts";
 import { enqueueReviewFindingLinearIssuesInOpenTxn } from "./review_finding_linear_outbox.ts";
@@ -165,9 +166,10 @@ export interface TickOptions {
   // ingest matches the right author when tick and worker authenticate as
   // different identities. Defaults to whatever `gh api user` reports.
   reviewerLogin?: string;
-  // Absolute path to a fallback file (expected mode 0600) whose contents
-  // are exported as `GH_TOKEN` in the worker tmux pane's environment.
-  // `QUAY_WORKER_GH_TOKEN` in the tick process environment wins when present.
+  // Absolute path to the preferred worker GitHub auth handoff file
+  // (expected mode 0600) whose contents are exported as `GH_TOKEN` in the
+  // worker tmux pane's environment. When configured, this explicit Quay-
+  // managed handoff wins over ambient tick process env.
   workerGhTokenFile?: string;
   // Absolute path to a fallback file (expected mode 0600) whose contents
   // are exported as `GH_TOKEN` in the reviewer tmux pane's environment.
@@ -244,6 +246,7 @@ export type TickAction =
   | "crashed"
   | "spawn_window_recovered"
   | "spawn_failed"
+  | "worker_auth_invalid"
   | "wall_clock_killed"
   | "stale_killed"
   | "kill_intent_set"
@@ -299,13 +302,24 @@ interface QueuedTaskRow {
 interface RunningTaskRow {
   task_id: string;
   repo_id: string;
+  authoring_mode: TaskAuthoringMode;
   branch_name: string;
   base_branch: string | null;
   tmux_id: string;
   worktree_path: string;
   pr_number: number | null;
+  authors_json: string | null;
   cancel_requested_at: string | null;
   worker_execution: "oneshot" | "goal";
+  pr_assignee_login: string | null;
+}
+
+interface PrAssigneeCandidateTask {
+  task_id: string;
+  repo_id: string;
+  authoring_mode: TaskAuthoringMode;
+  authors_json: string | null;
+  pr_assignee_login: string | null;
 }
 
 interface PrOpenTaskRow {
@@ -314,10 +328,12 @@ interface PrOpenTaskRow {
   authoring_mode: TaskAuthoringMode;
   branch_name: string;
   worktree_path: string;
+  authors_json: string | null;
   cancel_requested_at: string | null;
   last_review_id_acted_on: string | null;
   last_conflict_observation: string | null;
   github_pr_polled_at: string | null;
+  pr_assignee_login: string | null;
 }
 
 interface PrReviewTaskRow {
@@ -392,6 +408,7 @@ interface ReviewAttemptTaskRow {
   attempt_id: number;
   attempt_number: number;
   preamble_id: number;
+  repo_guidance_id: number | null;
   review_protocol_version: string | null;
   head_sha: string;
   tmux_session: string | null;
@@ -475,6 +492,8 @@ interface PendingAttemptRow {
   attempt_number: number;
   consumed_budget: number;
   preamble_id: number;
+  template_id: number | null;
+  reason: string;
 }
 
 interface PendingReviewRequestRow {
@@ -546,6 +565,14 @@ class TickGithubCache implements GitHubPort {
     this.prSnapshotByBranch.delete(`${input.repoId}\0${input.headBranch}`);
     this.lightweightByBranch.delete(`${input.repoId}\0${input.headBranch}`);
     return pr;
+  }
+
+  addPullRequestAssignees(
+    repoId: string,
+    prNumber: number,
+    logins: string[],
+  ): void {
+    this.inner.addPullRequestAssignees(repoId, prNumber, logins);
   }
 
   updatePullRequestBody(repoId: string, prNumber: number, body: string): void {
@@ -1626,9 +1653,11 @@ function readRunning(db: DB): RunningTaskRow[] {
   return db
     .query<RunningTaskRow, []>(
       `SELECT t.task_id, t.repo_id, t.branch_name,
+              t.authoring_mode,
               COALESCE(t.base_branch, r.base_branch) AS base_branch,
               t.tmux_id, t.worktree_path,
-              t.pr_number, t.cancel_requested_at, t.worker_execution
+              t.pr_number, t.authors_json, t.cancel_requested_at,
+              t.worker_execution, t.pr_assignee_login
          FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
         WHERE t.state = 'running'
         ORDER BY t.created_at, t.task_id`,
@@ -1683,7 +1712,7 @@ function readWaitingHuman(db: DB): WaitingHumanTaskRow[] {
 function readPrOpen(db: DB): PrOpenTaskRow[] {
   return db
     .query<PrOpenTaskRow, []>(
-      `SELECT task_id, repo_id, branch_name, worktree_path,
+      `SELECT task_id, repo_id, branch_name, worktree_path, authors_json,
               CASE
                 WHEN authoring_mode = 'quay_owned'
                  AND task_id LIKE 'pr-review-%'
@@ -1691,7 +1720,8 @@ function readPrOpen(db: DB): PrOpenTaskRow[] {
                 ELSE authoring_mode
               END AS authoring_mode,
               cancel_requested_at, last_review_id_acted_on,
-              last_conflict_observation, github_pr_polled_at
+              last_conflict_observation, github_pr_polled_at,
+              pr_assignee_login
          FROM tasks
         WHERE state = 'pr-open'
         ORDER BY created_at, task_id`,
@@ -1862,7 +1892,7 @@ function readRunningReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
               t.pr_number, t.cancel_requested_at,
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
-              a.attempt_id, a.attempt_number, a.preamble_id,
+              a.attempt_id, a.attempt_number, a.preamble_id, a.repo_guidance_id,
               a.review_protocol_version, a.head_sha,
               a.tmux_session, a.spawned_at, a.kill_intent,
               t.reviewer_agent, t.reviewer_model
@@ -1890,7 +1920,7 @@ function readPendingReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
               t.pr_number, t.cancel_requested_at,
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
-              a.attempt_id, a.attempt_number, a.preamble_id,
+              a.attempt_id, a.attempt_number, a.preamble_id, a.repo_guidance_id,
               a.review_protocol_version, a.head_sha,
               a.tmux_session, a.spawned_at, a.kill_intent,
               t.reviewer_agent, t.reviewer_model
@@ -2019,6 +2049,14 @@ function processRunningTask(
     ctxAttempt,
     { sessionName: attempt.tmux_session, spawnWindow: false, exitInfo },
   );
+  if (res.outcome === "pr_opened") {
+    try {
+      const snapshot = deps.github.prSnapshot(task.repo_id, task.branch_name);
+      if (snapshot !== null) {
+        maybeAssignPrimaryContributor(deps, task, snapshot);
+      }
+    } catch {}
+  }
   return outcomeToResult(task.task_id, res.outcome, false);
 }
 
@@ -2618,6 +2656,7 @@ function processPrOpenTask(
   // state, conflict, CI). The CLI/operator surface reads these columns; if
   // we wait until after CI passes we miss the entire pr-open window.
   persistPrMetadata(deps, task.task_id, snapshot);
+  maybeAssignPrimaryContributor(deps, task, snapshot);
 
   // 1. Terminal PR state (merged / closed_unmerged) takes precedence over
   //    everything else — even pending CI. A human merging or closing the PR
@@ -3757,6 +3796,7 @@ function ensureUmbrellaFinalPrTask(
         taskId,
         repoId: workflow.repo_id,
         externalRef: workflow.external_ref,
+        taskType: null,
         now,
       });
       deps.db
@@ -5258,17 +5298,18 @@ function markReviewInfraFailure(
 
     if (!parking) {
       const retryAttempt = deps.db
-        .query<{ attempt_id: number }, [string, number, number, string, number, string, string | null]>(
+      .query<{ attempt_id: number }, [string, number, number, number | null, string, number, string, string | null]>(
           `INSERT INTO attempts (
-             task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha,
+             task_id, attempt_number, preamble_id, repo_guidance_id, reason, consumed_budget, head_sha,
              review_protocol_version
-           ) VALUES (?, ?, ?, ?, ?, ?, ?)
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING attempt_id`,
         )
         .get(
           task.task_id,
           task.attempt_number + 1,
           task.preamble_id,
+          task.repo_guidance_id,
           "review_only",
           0,
           task.head_sha,
@@ -5422,6 +5463,124 @@ function persistPrMetadata(
     // Best-effort: PR-metadata observability never blocks the state
     // machine. A SQL failure here will be retried on the next tick.
   }
+}
+
+function maybeAssignPrimaryContributor(
+  deps: TickDeps,
+  task: PrAssigneeCandidateTask,
+  snapshot: PrSnapshot,
+): void {
+  if (task.authoring_mode !== "quay_owned") return;
+  if (task.pr_assignee_login !== null) return;
+  if (snapshot.state !== "open") return;
+  const prNumber = snapshot.prNumber ?? null;
+  if (prNumber === null) return;
+  const author = parsePrimaryTaskAuthor(task.authors_json);
+  if (author === null) return;
+
+  const service = createIdentityMappingService({ db: deps.db, clock: deps.clock });
+  const mapping = service.findBySlackId(author.slack_id);
+  if (mapping === null || mapping.status === "conflict") return;
+
+  try {
+    deps.github.addPullRequestAssignees(task.repo_id, prNumber, [
+      mapping.github_login,
+    ]);
+    service.markUsed({
+      slackUserId: mapping.slack_user_id,
+      taskId: task.task_id,
+      prNumber,
+    });
+    const now = deps.clock.nowISO();
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET pr_assignee_login = ?,
+                pr_assignee_selected_at = ?,
+                updated_at = ?
+          WHERE task_id = ?
+            AND pr_assignee_login IS NULL`,
+      )
+      .run(mapping.github_login, now, now, task.task_id);
+    deps.db
+      .query(
+        `INSERT INTO events (task_id, event_type, occurred_at, event_data)
+         VALUES (?, 'pr_assignee_selected', ?, ?)`,
+      )
+      .run(
+        task.task_id,
+        now,
+        JSON.stringify({
+          pr_number: prNumber,
+          slack_user_id: mapping.slack_user_id,
+          github_login: mapping.github_login,
+        }),
+      );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const conflict = isDeterministicAssigneeError(message);
+    try {
+      if (conflict) {
+        service.markConflict({ slackUserId: mapping.slack_user_id, error: message });
+      } else {
+        service.markAssignmentFailure({
+          slackUserId: mapping.slack_user_id,
+          error: message,
+        });
+      }
+      deps.db
+        .query(
+          `INSERT INTO events (task_id, event_type, occurred_at, event_data)
+           VALUES (?, 'pr_assignee_selection_failed', ?, ?)`,
+        )
+        .run(
+          task.task_id,
+          deps.clock.nowISO(),
+          JSON.stringify({
+            pr_number: prNumber,
+            slack_user_id: mapping.slack_user_id,
+            github_login: mapping.github_login,
+            error: message,
+            retryable: !conflict,
+          }),
+        );
+    } catch {}
+  }
+}
+
+function isDeterministicAssigneeError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return [
+    "could not resolve to a user",
+    "could not resolve to user",
+    "no user could be found",
+    "user could not be found",
+    "invalid assignee",
+    "not assignable",
+    "cannot assign",
+  ].some((marker) => normalized.includes(marker));
+}
+
+function parsePrimaryTaskAuthor(
+  authorsJson: string | null,
+): { name: string; slack_id: string } | null {
+  if (authorsJson === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(authorsJson);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const first = parsed[0];
+  if (first === null || typeof first !== "object") return null;
+  const name = (first as { name?: unknown }).name;
+  const slackId = (first as { slack_id?: unknown }).slack_id;
+  if (typeof slackId !== "string" || slackId.trim() === "") return null;
+  return {
+    name: typeof name === "string" && name.trim() !== "" ? name.trim() : slackId.trim(),
+    slack_id: slackId.trim(),
+  };
 }
 
 function normalizePrBaseRef(baseRef: string | null | undefined): string | null {
@@ -6293,12 +6452,145 @@ function loadPendingAttempt(db: DB, taskId: string): PendingAttemptRow | null {
   return (
     db
       .query<PendingAttemptRow, [string]>(
-        `SELECT attempt_id, attempt_number, consumed_budget, preamble_id
+        `SELECT attempt_id, attempt_number, consumed_budget, preamble_id,
+                template_id, reason
            FROM attempts
           WHERE task_id = ? AND spawned_at IS NULL AND ended_at IS NULL`,
       )
       .get(taskId) ?? null
   );
+}
+
+function previousAttemptExitKind(
+  db: DB,
+  taskId: string,
+  attemptNumber: number,
+): string | null {
+  const row = db
+    .query<{ exit_kind: string | null }, [string, number]>(
+      `SELECT exit_kind
+         FROM attempts
+        WHERE task_id = ? AND attempt_number < ?
+        ORDER BY attempt_number DESC
+        LIMIT 1`,
+    )
+    .get(taskId, attemptNumber);
+  return row?.exit_kind ?? null;
+}
+
+function handleWorkerAuthInvalidPreflight(
+  deps: TickDeps,
+  task: QueuedTaskRow,
+  pending: PendingAttemptRow,
+  diagnostic: string,
+): TickTaskResult {
+  const now = deps.clock.nowISO();
+  const repeated =
+    previousAttemptExitKind(deps.db, task.task_id, pending.attempt_number) ===
+    "worker_auth_invalid";
+  deps.db.exec("BEGIN");
+  try {
+    const attemptUpdate = deps.db
+      .query(
+        `UPDATE attempts
+            SET spawned_at = ?,
+                ended_at = ?,
+                exit_kind = 'worker_auth_invalid'
+          WHERE attempt_id = ?
+            AND spawned_at IS NULL
+            AND ended_at IS NULL`,
+      )
+      .run(now, now, pending.attempt_id);
+    if (((attemptUpdate as { changes?: number }).changes ?? 0) === 0) {
+      deps.db.exec("ROLLBACK");
+      return { task_id: task.task_id, action: "skipped_predicate" };
+    }
+    if (repeated) {
+      const artifact = deps.artifactStore.writeArtifact({
+        taskId: task.task_id,
+        attemptId: pending.attempt_id,
+        kind: "last_failure",
+        content: [
+          "# Worker GitHub auth invalid",
+          "",
+          "Quay retried once with freshly resolved worker GitHub credentials, but the spawn-time preflight still failed.",
+          "",
+          "## Diagnostic",
+          "",
+          diagnostic,
+        ].join("\n"),
+        extension: "md",
+      });
+      const taskUpdate = deps.db
+        .query(
+          `UPDATE tasks
+              SET state = 'awaiting-next-brief',
+                  tick_error = NULL,
+                  updated_at = ?
+            WHERE task_id = ?
+              AND state = 'queued'
+              AND cancel_requested_at IS NULL`,
+        )
+        .run(now, task.task_id);
+      if (((taskUpdate as { changes?: number }).changes ?? 0) === 0) {
+        deps.db.exec("ROLLBACK");
+        return { task_id: task.task_id, action: "skipped_predicate" };
+      }
+      const event = deps.db
+        .query<{ event_id: number }, [string, number, number, string, string]>(
+          `INSERT INTO events (
+             task_id, attempt_id, event_type, from_state, to_state,
+             payload_artifact_id, occurred_at, event_data
+           ) VALUES (?, ?, 'worker_auth_invalid', 'queued', 'awaiting-next-brief', ?, ?, ?)
+           RETURNING event_id`,
+        )
+        .get(
+          task.task_id,
+          pending.attempt_id,
+          artifact.artifactId,
+          now,
+          JSON.stringify({ repeated: true, diagnostic }),
+        );
+      if (!event) throw new Error("worker_auth_invalid event insert returned no row");
+      enqueueOrchestratorHandoff(deps, {
+        taskId: task.task_id,
+        reason: "worker_auth_invalid",
+        stateEventId: event.event_id,
+        payload: {
+          attempt_id: pending.attempt_id,
+          artifact_id: artifact.artifactId,
+        },
+      });
+    } else {
+      scheduleCleanSpawnRetry(deps, {
+        taskId: task.task_id,
+        prevAttempt: pending,
+      });
+      deps.db
+        .query(
+          `INSERT INTO events (
+             task_id, attempt_id, event_type, from_state, to_state, occurred_at, event_data
+           ) VALUES (?, ?, 'worker_auth_invalid', 'queued', 'queued', ?, ?)`,
+        )
+        .run(
+          task.task_id,
+          pending.attempt_id,
+          now,
+          JSON.stringify({ repeated: false, diagnostic }),
+        );
+    }
+    deps.db.exec("COMMIT");
+    return {
+      task_id: task.task_id,
+      action: "worker_auth_invalid",
+      error: diagnostic,
+    };
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
 }
 
 function loadFinalPrompt(db: DB, taskId: string, attemptId: number): string {
@@ -6426,21 +6718,34 @@ function promoteAndSpawn(
   const agentIdentity = probeAgentIdentity(agentInvocation);
   const githubToken = resolveGithubActorToken("worker", deps, task.repo_id, options);
   if (!githubToken.ok) {
-    return {
-      task_id: task.task_id,
-      action: "spawn_substrate_failed",
-      error: githubToken.error,
-    };
+    return handleWorkerAuthInvalidPreflight(
+      deps,
+      task,
+      pending,
+      githubToken.error,
+    );
   }
   deps.git.fetchBranchIfExists(task.repo_id, task.branch_name);
   const remoteSha = deps.git.remoteHeadSha(task.repo_id, task.branch_name);
-  const prExisted = deps.github.prExistsForBranchWithToken(
-    task.repo_id,
-    task.branch_name,
-    githubToken.token,
-  )
-    ? 1
-    : 0;
+  let prExisted: 0 | 1;
+  try {
+    prExisted = deps.github.prExistsForBranchWithToken(
+      task.repo_id,
+      task.branch_name,
+      githubToken.token,
+    )
+      ? 1
+      : 0;
+  } catch (err) {
+    const message = redactSecret(
+      err instanceof Error ? err.message : String(err),
+      githubToken.token,
+    );
+    if (isGithubAuthFailureMessage(message)) {
+      return handleWorkerAuthInvalidPreflight(deps, task, pending, message);
+    }
+    throw err;
+  }
   const now = deps.clock.nowISO();
   const refreshResult = refreshDependencyReleasedWorktreeIfNeeded(
     deps,
@@ -6561,6 +6866,16 @@ function resolveGithubActorToken(
     actor === "worker" ? options.workerGhTokenFile : options.reviewerGhTokenFile;
   const fileConfigName = `${actor}.gh_token_file`;
 
+  if (actor === "worker" && fileOption !== undefined) {
+    return resolveGithubActorTokenFile(
+      deps,
+      repoId,
+      actor,
+      fileConfigName,
+      fileOption,
+    );
+  }
+
   const envToken = env[envName];
   if (envToken !== undefined) {
     if (envToken.trim().length === 0) {
@@ -6608,6 +6923,22 @@ function resolveGithubActorToken(
     };
   }
 
+  return resolveGithubActorTokenFile(
+    deps,
+    repoId,
+    actor,
+    fileConfigName,
+    fileOption,
+  );
+}
+
+function resolveGithubActorTokenFile(
+  deps: TickDeps,
+  repoId: string,
+  actor: GithubActor,
+  fileConfigName: string,
+  fileOption: string,
+): GithubActorTokenResult {
   let token: string;
   try {
     token = readFileSync(fileOption, "utf8").trim();
@@ -6713,6 +7044,25 @@ function usesCodexRuntime(agentName: string, agentInvocation: string): boolean {
 function redactSecret(message: string, secret: string): string {
   if (secret.length === 0) return message;
   return message.split(secret).join("[redacted]");
+}
+
+function isGithubAuthFailureMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("bad credentials") ||
+    normalized.includes("http 401") ||
+    normalized.includes("http 403") ||
+    normalized.includes("status 401") ||
+    normalized.includes("status 403") ||
+    normalized.includes("requires authentication") ||
+    normalized.includes("authentication failed") ||
+    normalized.includes("could not read username") ||
+    normalized.includes("resource not accessible by integration") ||
+    normalized.includes("insufficient oauth scope") ||
+    normalized.includes("insufficient permission") ||
+    normalized.includes("permission denied") ||
+    normalized.includes("forbidden")
+  );
 }
 
 function promoteAndSpawnReviewer(

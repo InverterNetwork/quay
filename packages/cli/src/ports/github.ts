@@ -70,6 +70,11 @@ export interface GitHubPort {
   // state in the same call path.
   freshPrSnapshotByNumber(repoId: string, prNumber: number): PrSnapshot | null;
   freshPrView(repoId: string, prNumber: number): PullRequestView | null;
+  addPullRequestAssignees(
+    repoId: string,
+    prNumber: number,
+    logins: string[],
+  ): void;
   mergePullRequest(
     repoId: string,
     prNumber: number,

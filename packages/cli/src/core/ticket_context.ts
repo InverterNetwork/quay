@@ -188,6 +188,7 @@ export async function fetchTicketContextWithIssue(
     external_ref: externalRef,
     repo: block.repo,
     base_branch: block.base_branch,
+    task_type: block.task_type,
     umbrella: block.umbrella,
     brief,
     ticket_snapshot,

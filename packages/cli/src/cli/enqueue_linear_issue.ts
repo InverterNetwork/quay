@@ -19,7 +19,11 @@ import {
   LINEAR_STATE_IN_PROGRESS,
   syncLinearState,
 } from "../core/linear_state_sync.ts";
-import { parseQuayConfigBlock } from "../core/quay_config_block.ts";
+import {
+  parseQuayConfigBlock,
+  setQuayConfigTaskType,
+} from "../core/quay_config_block.ts";
+import { inferTaskType, type TaskType } from "../core/task_type.ts";
 import { mergeNormalizedTags } from "../core/tag_normalize.ts";
 import { TASK_TERMINAL_STATES } from "../core/task_state.ts";
 import { fetchTicketContextWithIssue } from "../core/ticket_context.ts";
@@ -133,6 +137,14 @@ export async function handleEnqueueLinearIssue(
     );
     ctx = fetched.ctx;
     issue = fetched.issue;
+  } catch (err) {
+    return emitError(io, err);
+  }
+
+  try {
+    const prepared = await ensureTicketTaskType(deps.linear, issue, ctx, ctx.tags);
+    issue = prepared.issue;
+    ctx = prepared.ctx;
   } catch (err) {
     return emitError(io, err);
   }
@@ -277,6 +289,7 @@ export async function handleEnqueueLinearIssue(
       slack_thread_ref: ctx.slack_thread_ref,
       tags: mergedTags,
       worker_execution: ctx.worker_execution,
+      task_type: ctx.task_type,
       base_branch: resolvedBaseBranch ?? undefined,
       request_pr_screenshots: args.requestPrScreenshots,
       require_pr_screenshots: args.requirePrScreenshots,
@@ -324,6 +337,62 @@ export async function handleEnqueueLinearIssue(
 interface DependencyTaskRow {
   task_id: string;
   state: string;
+}
+
+async function ensureTicketTaskType(
+  linear: LinearPort,
+  issue: LinearIssue,
+  ctx: TicketContext,
+  tags: readonly string[],
+): Promise<{ issue: LinearIssue; ctx: TicketContext }> {
+  if (ctx.task_type !== null) return { issue, ctx };
+
+  const taskType = inferTaskType({
+    title: issue.title,
+    body: issue.body,
+    tags,
+  });
+  const updatedBody = setQuayConfigTaskType(issue.body, taskType);
+  if (updatedBody !== issue.body) {
+    await linear.updateIssueBody(issue.identifier, updatedBody);
+  }
+  const updatedIssue = { ...issue, body: updatedBody };
+  return {
+    issue: updatedIssue,
+    ctx: {
+      ...ctx,
+      task_type: taskType,
+      ticket_snapshot: setSnapshotTaskType(ctx.ticket_snapshot, updatedIssue, taskType),
+    },
+  };
+}
+
+function setSnapshotTaskType(
+  snapshot: string,
+  issue: LinearIssue,
+  taskType: TaskType,
+): string {
+  try {
+    const parsed = JSON.parse(snapshot) as {
+      linear_issue?: unknown;
+      quay_config_block?: unknown;
+      [key: string]: unknown;
+    };
+    parsed.linear_issue = issue;
+    if (
+      parsed.quay_config_block !== null &&
+      typeof parsed.quay_config_block === "object" &&
+      !Array.isArray(parsed.quay_config_block)
+    ) {
+      parsed.quay_config_block = {
+        ...parsed.quay_config_block,
+        task_type: taskType,
+      };
+    }
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return snapshot;
+  }
 }
 
 interface LinearDependencySnapshot {
@@ -586,10 +655,16 @@ async function buildLinearUmbrellaChildPlans(
         },
         childExternalRef,
       );
-      ctx = fetched.ctx;
+      const prepared = await ensureTicketTaskType(
+        deps.linear,
+        fetched.issue,
+        fetched.ctx,
+        fetched.ctx.tags,
+      );
+      ctx = prepared.ctx;
       validateUmbrellaChildContext(deps, {
         ctx,
-        issue: fetched.issue,
+        issue: prepared.issue,
         repoId: input.repoId,
         baseBranch: input.baseBranch,
         parentExternalRef: input.parentExternalRef,
@@ -915,6 +990,7 @@ function enqueueLinearUmbrellaChildTask(
         slack_thread_ref: ctx.slack_thread_ref,
         tags: ctx.tags,
         worker_execution: ctx.worker_execution,
+        task_type: ctx.task_type,
         base_branch: input.workflow.feature_branch,
         umbrella: {
           external_ref: input.workflow.external_ref,
@@ -1418,6 +1494,7 @@ export function buildValidatorPayload(
   const payload: Record<string, unknown> = {
     body: issue.body,
     repo: ctx.repo,
+    task_type: ctx.task_type,
     tags: mergedTags,
     authors: ctx.authors,
     external_ref: ctx.external_ref,

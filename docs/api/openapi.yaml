@@ -613,6 +613,7 @@ components:
       required:
         - id
         - workItemId
+        - taskType
         - runNumber
         - supersededByRun
         - ext
@@ -642,6 +643,10 @@ components:
         id:
           type: string
         workItemId:
+          type:
+            - string
+            - "null"
+        taskType:
           type:
             - string
             - "null"
@@ -884,6 +889,7 @@ components:
         - archived_at
         - created_at
         - active_task_count
+        - ci_policy
         - effective_preambles
         - tag_namespaces
         - inherited_tag_namespaces
@@ -948,6 +954,8 @@ components:
         active_task_count:
           type: integer
           minimum: 0
+        ci_policy:
+          $ref: "#/components/schemas/RepoCiPolicy"
         effective_preambles:
           $ref: "#/components/schemas/RepoEffectivePreambles"
         tag_namespaces:
@@ -969,6 +977,38 @@ components:
           $ref: "#/components/schemas/RepoEffectivePreamble"
         reviewer:
           $ref: "#/components/schemas/RepoEffectivePreamble"
+    RepoCiPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - ignore_mode
+        - ignored_check_names
+        - ignored_workflow_names
+        - effective_ignored_check_names
+        - effective_ignored_workflow_names
+      properties:
+        ignore_mode:
+          type: string
+          enum:
+            - inherit
+            - extend
+            - replace
+        ignored_check_names:
+          type: array
+          items:
+            type: string
+        ignored_workflow_names:
+          type: array
+          items:
+            type: string
+        effective_ignored_check_names:
+          type: array
+          items:
+            type: string
+        effective_ignored_workflow_names:
+          type: array
+          items:
+            type: string
     RepoEffectivePreamble:
       type: object
       additionalProperties: false
@@ -978,6 +1018,8 @@ components:
         - source
         - configured_preamble_id
         - effective_preamble_id
+        - repo_guidance_id
+        - repo_guidance_body
         - title
         - body
         - refs
@@ -1006,6 +1048,15 @@ components:
         effective_preamble_id:
           type: integer
           minimum: 0
+        repo_guidance_id:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        repo_guidance_body:
+          type:
+            - string
+            - "null"
         title:
           type: string
         body:
@@ -1026,11 +1077,14 @@ components:
         - data_dir
         - paths
         - operations
+        - ci_policy
         - adapters
         - agents
         - preambles
         - retry_templates
         - tag_namespaces
+        - identity_mappings
+        - identity_discovery
       properties:
         revision:
           type: string
@@ -1044,6 +1098,8 @@ components:
           $ref: "#/components/schemas/RuntimePaths"
         operations:
           $ref: "#/components/schemas/OperationsReadModel"
+        ci_policy:
+          $ref: "#/components/schemas/CiPolicyReadModel"
         adapters:
           type: array
           items:
@@ -1062,6 +1118,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TagNamespace"
+        identity_mappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/IdentityMapping"
+        identity_discovery:
+          $ref: "#/components/schemas/IdentityDiscovery"
     RuntimePaths:
       type: object
       additionalProperties: false
@@ -1106,6 +1168,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AdminField"
+    CiPolicyReadModel:
+      type: object
+      additionalProperties: false
+      required:
+        - ignored_check_names
+        - ignored_workflow_names
+      properties:
+        ignored_check_names:
+          type: array
+          items:
+            type: string
+        ignored_workflow_names:
+          type: array
+          items:
+            type: string
     AdminField:
       type: object
       additionalProperties: false
@@ -1745,6 +1822,109 @@ components:
         extended_by:
           type: integer
           minimum: 0
+    IdentityMapping:
+      type: object
+      additionalProperties: false
+      required:
+        - slack_user_id
+        - slack_display_name
+        - slack_handle
+        - slack_email
+        - github_login
+        - status
+        - source
+        - last_used_at
+        - last_used_task_id
+        - last_used_pr_number
+        - last_error
+        - created_at
+        - updated_at
+      properties:
+        slack_user_id:
+          type: string
+        slack_display_name:
+          type: string
+        slack_handle:
+          type:
+            - string
+            - "null"
+        slack_email:
+          type:
+            - string
+            - "null"
+        github_login:
+          type: string
+        status:
+          type: string
+          enum:
+            - mapped
+            - verified
+            - conflict
+        source:
+          type: string
+          enum:
+            - manual
+            - csv
+            - auto
+            - task
+        last_used_at:
+          type:
+            - string
+            - "null"
+        last_used_task_id:
+          type:
+            - string
+            - "null"
+        last_used_pr_number:
+          type:
+            - integer
+            - "null"
+        last_error:
+          type:
+            - string
+            - "null"
+        created_at:
+          type: string
+        updated_at:
+          type: string
+    IdentityDiscovery:
+      type: object
+      additionalProperties: false
+      required:
+        - unmapped_contributors
+      properties:
+        unmapped_contributors:
+          type: array
+          items:
+            $ref: "#/components/schemas/UnmappedIdentityContributor"
+    UnmappedIdentityContributor:
+      type: object
+      additionalProperties: false
+      required:
+        - slack_user_id
+        - slack_display_name
+        - slack_handle
+        - task_count
+        - last_external_ref
+        - last_seen_at
+      properties:
+        slack_user_id:
+          type: string
+        slack_display_name:
+          type: string
+        slack_handle:
+          type:
+            - string
+            - "null"
+        task_count:
+          type: integer
+          minimum: 1
+        last_external_ref:
+          type:
+            - string
+            - "null"
+        last_seen_at:
+          type: string
     MatrixReadModel:
       type: object
       additionalProperties: false
@@ -1800,7 +1980,10 @@ components:
           items:
             oneOf:
               - $ref: "#/components/schemas/RepoUpdateChange"
+              - $ref: "#/components/schemas/RepoGuidanceSetChange"
+              - $ref: "#/components/schemas/DeploymentSettingsUpdateChange"
               - $ref: "#/components/schemas/TagsReplaceChange"
+              - $ref: "#/components/schemas/IdentityMappingsReplaceChange"
             discriminator:
               propertyName: type
     RepoUpdateChange:
@@ -1870,6 +2053,78 @@ components:
             - integer
             - "null"
           minimum: 1
+        ci_ignore_mode:
+          type: string
+          enum:
+            - inherit
+            - extend
+            - replace
+        ignored_check_names:
+          type: array
+          items:
+            type: string
+        ignored_workflow_names:
+          type: array
+          items:
+            type: string
+    RepoGuidanceSetChange:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - repo_id
+        - role
+        - body
+      properties:
+        type:
+          type: string
+          const: repo_guidance.set
+        repo_id:
+          type: string
+        role:
+          type: string
+          enum:
+            - worker
+            - reviewer
+        body:
+          type: string
+    DeploymentSettingsUpdateChange:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - patch
+      properties:
+        type:
+          type: string
+          const: deployment_settings.update
+        patch:
+          $ref: "#/components/schemas/DeploymentSettingsPatch"
+    DeploymentSettingsPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        worker_agent:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        worker_model:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        reviewer_agent:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        reviewer_model:
+          type:
+            - string
+            - "null"
+          minLength: 1
     TagsReplaceChange:
       type: object
       additionalProperties: false
@@ -1909,6 +2164,62 @@ components:
           type: array
           items:
             type: string
+    IdentityMappingsReplaceChange:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - mappings
+      properties:
+        type:
+          type: string
+          const: identity_mappings.replace
+        mappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/IdentityMappingInput"
+    IdentityMappingInput:
+      type: object
+      additionalProperties: false
+      required:
+        - slack_user_id
+        - slack_display_name
+        - github_login
+      properties:
+        slack_user_id:
+          type: string
+          minLength: 1
+        slack_display_name:
+          type: string
+          minLength: 1
+        slack_handle:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        slack_email:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        github_login:
+          type: string
+          minLength: 1
+          maxLength: 39
+          pattern: "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
+        status:
+          type: string
+          enum:
+            - mapped
+            - verified
+            - conflict
+        source:
+          type: string
+          enum:
+            - manual
+            - csv
+            - auto
+            - task
     ChangePreview:
       type: object
       additionalProperties: false

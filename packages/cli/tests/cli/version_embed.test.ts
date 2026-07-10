@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   formatBuildVersion,
+  hasRelevantDirtyStatus,
   readEmbeddedUiAssets,
 } from "../../scripts/embed.ts";
 
@@ -15,6 +16,20 @@ test("formatBuildVersion uses the injected release tag when present", () => {
 test("formatBuildVersion falls back to dev for local builds", () => {
   expect(formatBuildVersion(undefined, "99caa0b")).toBe("dev+99caa0b");
   expect(formatBuildVersion("  ", "99caa0b")).toBe("dev+99caa0b");
+});
+
+test("generated embed output alone does not mark release builds dirty", () => {
+  expect(
+    hasRelevantDirtyStatus(" M packages/cli/src/build/embedded.generated.ts"),
+  ).toBe(false);
+  expect(
+    hasRelevantDirtyStatus(
+      [
+        " M packages/cli/src/build/embedded.generated.ts",
+        " M packages/cli/src/admin/api.ts",
+      ].join("\n"),
+    ),
+  ).toBe(true);
 });
 
 test("readEmbeddedUiAssets packages explicit UI dist assets deterministically", () => {

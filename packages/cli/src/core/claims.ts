@@ -35,7 +35,7 @@ import {
   completeClaimedOrchestratorHandoffs,
   reopenClaimedOrchestratorHandoffs,
 } from "./orchestrator_handoffs.ts";
-import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import { resolvePreambleForAttemptReason } from "./preamble.ts";
 import {
   composeWorkerPrompt,
   loadTaskPrBaseBranch,
@@ -504,13 +504,14 @@ export async function submit_brief(
 
   const now = deps.clock.nowISO();
   const consumedBudget = input.reason === "blocker_resolved" ? 1 : 0;
-  const preambleId = ensurePreambleIdForAttemptReason(
+  const resolvedPreamble = resolvePreambleForAttemptReason(
     deps.db,
     deps.clock,
     input.reason,
     { taskId: input.taskId },
   );
-  const preambleBody = loadPreambleBody(deps.db, preambleId);
+  const preambleId = resolvedPreamble.preambleId;
+  const preambleBody = resolvedPreamble.body;
   const objective = loadOriginalTaskObjective(deps.db, input.taskId);
   const prBaseBranch = loadTaskPrBaseBranch(deps.db, input.taskId);
   const prScreenshotsRequested = loadTaskPrScreenshotsRequested(
@@ -613,17 +614,18 @@ export async function submit_brief(
     const attemptRow = deps.db
       .query<
         { attempt_id: number },
-        [string, number, number, string, number, string | null]
+        [string, number, number, number | null, string, number, string | null]
       >(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, reason, consumed_budget, goal_id
-         ) VALUES (?, ?, ?, ?, ?, ?)
+           task_id, attempt_number, preamble_id, repo_guidance_id, reason, consumed_budget, goal_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
          RETURNING attempt_id`,
       )
       .get(
         input.taskId,
         prior.attempt_number + 1,
         preambleId,
+        resolvedPreamble.repoGuidanceId,
         input.reason,
         consumedBudget,
         goal?.goal_id ?? null,

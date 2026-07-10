@@ -40,9 +40,13 @@ import { QuayError } from "../core/errors.ts";
 import type { PreambleKind } from "../core/preamble.ts";
 import {
   assertReviewerGuidanceProtocolSafe,
+  createRepoGuidance,
   createPreamble,
   getPreamble,
+  latestRepoGuidance,
   listPreambles,
+  listRepoGuidance,
+  type RepoGuidanceRole,
 } from "../core/preamble.ts";
 import {
   cancel_task,
@@ -1587,6 +1591,12 @@ function handleRepo(
     case "apply-tags":
       if (wantsHelp(rest)) return printHelp(io, ["repo", "apply-tags"]);
       return handleRepoApplyTags(rest, deps.tagService, io);
+    case "guidance-get":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "guidance-get"]);
+      return handleRepoGuidanceGet(rest, deps.db, io);
+    case "guidance-set":
+      if (wantsHelp(rest)) return printHelp(io, ["repo", "guidance-set"]);
+      return handleRepoGuidanceSet(rest, deps.db, deps.clock, io);
     default:
       // Mirror bare `quay repo`: structured envelope plus the noun's usage
       // block so a typo gets the same recovery hint as the missing-sub case.
@@ -1746,6 +1756,82 @@ function handleRepoUpdate(
   const row = service.update(repoId, patch);
   io.stdout(`${JSON.stringify(row)}\n`);
   return { exitCode: 0 };
+}
+
+function parseRepoGuidanceRole(raw: string, io: CliIO): RepoGuidanceRole | null {
+  if (raw === "worker" || raw === "reviewer") return raw;
+  writeError(io, "usage_error", `repo guidance role must be worker or reviewer (got ${raw})`, {
+    role: raw,
+  });
+  return null;
+}
+
+function handleRepoGuidanceGet(
+  argv: string[],
+  db: DB,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, { valued: ["--role"], boolean: ["--history"] });
+  if (!validation.ok) return writeError(io, "usage_error", validation.message, validation.details);
+  const repoId = positional(argv);
+  if (!repoId) return writeError(io, "usage_error", "repo guidance-get requires <repo_id>");
+  const roleRaw = readFlag(argv, "--role");
+  const role = roleRaw === null ? null : parseRepoGuidanceRole(roleRaw, io);
+  if (roleRaw !== null && role === null) return { exitCode: 1 };
+  const rows = argv.includes("--history")
+    ? listRepoGuidance(db, repoId, role ?? undefined)
+    : role === null
+      ? {
+          worker: latestRepoGuidance(db, repoId, "worker"),
+          reviewer: latestRepoGuidance(db, repoId, "reviewer"),
+        }
+      : latestRepoGuidance(db, repoId, role);
+  io.stdout(`${JSON.stringify(rows)}\n`);
+  return { exitCode: 0 };
+}
+
+function handleRepoGuidanceSet(
+  argv: string[],
+  db: DB,
+  clock: Clock,
+  io: CliIO,
+): DispatchResult {
+  const validation = validateFlags(argv, {
+    valued: ["--role", "--body", "--body-file"],
+  });
+  if (!validation.ok) return writeError(io, "usage_error", validation.message, validation.details);
+  const repoId = positional(argv);
+  if (!repoId) return writeError(io, "usage_error", "repo guidance-set requires <repo_id>");
+  const roleRaw = readFlag(argv, "--role");
+  if (roleRaw === null) {
+    return writeError(io, "usage_error", "repo guidance-set requires --role <worker|reviewer>");
+  }
+  const role = parseRepoGuidanceRole(roleRaw, io);
+  if (role === null) return { exitCode: 1 };
+  const bodyRead = readBodyArg(argv, io, "repo guidance-set");
+  if (!bodyRead.ok) return writeError(io, "usage_error", bodyRead.message);
+  const row = createRepoGuidance(db, clock, { repoId, role, body: bodyRead.value });
+  io.stdout(`${JSON.stringify(row)}\n`);
+  return { exitCode: 0 };
+}
+
+function readBodyArg(
+  argv: string[],
+  io: CliIO,
+  command: string,
+): { ok: true; value: string } | { ok: false; message: string } {
+  const bodyFlag = readFlag(argv, "--body");
+  const bodyFile = readFlag(argv, "--body-file");
+  if ((bodyFlag === null && bodyFile === null) || (bodyFlag !== null && bodyFile !== null)) {
+    return { ok: false, message: `${command} requires exactly one of --body or --body-file` };
+  }
+  if (bodyFlag !== null) return { ok: true, value: bodyFlag };
+  if (bodyFile === "-") {
+    if (io.stdin === undefined) return { ok: false, message: "stdin is not available" };
+    return { ok: true, value: io.stdin() };
+  }
+  const fileRead = tryReadFile(bodyFile as string);
+  return fileRead.ok ? { ok: true, value: fileRead.value } : fileRead;
 }
 
 function handleRepoList(

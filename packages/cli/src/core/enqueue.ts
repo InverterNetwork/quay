@@ -16,7 +16,12 @@ import {
 import { baseBranchNameSchema } from "./base_branch.ts";
 import type { AgentResolver } from "./agents.ts";
 import { QuayError } from "./errors.ts";
-import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import { isTaskType } from "./task_type.ts";
+import {
+  ensurePreambleIdForAttemptReason,
+  loadPreambleBody,
+  resolvePreambleForAttemptReason,
+} from "./preamble.ts";
 import {
   normalizeSlackThreadRef,
   normalizeStoredSlackThreadRef,
@@ -99,6 +104,10 @@ export const enqueueInputSchema = z
     reviewer_agent: z.string().min(1).nullable().optional(),
     reviewer_model: z.string().min(1).nullable().optional(),
     worker_execution: z.enum(["oneshot", "goal"]).optional(),
+    task_type: z
+      .enum(["bugfix", "feature", "chore", "refactor"])
+      .nullable()
+      .optional(),
     base_branch: baseBranchNameSchema.optional(),
     request_pr_screenshots: z.boolean().optional(),
     require_pr_screenshots: z.boolean().optional(),
@@ -396,13 +405,14 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     installWorktreeDependencies(deps.commandRunner, repo, worktreePath);
 
     // Step 6: SQL transaction + artifact writes.
-    const preambleId = ensurePreambleIdForAttemptReason(
+    const resolvedPreamble = resolvePreambleForAttemptReason(
       deps.db,
       deps.clock,
       "initial",
       { repoId: repo.repo_id },
     );
-    const preambleBody = loadPreambleBody(deps.db, preambleId);
+    const preambleId = resolvedPreamble.preambleId;
+    const preambleBody = resolvedPreamble.body;
     const now = deps.clock.nowISO();
 
     deps.db.exec("BEGIN");
@@ -412,6 +422,7 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
         taskId,
         repoId: repo.repo_id,
         externalRef: input.external_ref ?? null,
+        taskType: input.task_type ?? null,
         now,
       });
 
@@ -583,14 +594,14 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       const attemptRow = deps.db
         .query<
           { attempt_id: number },
-          [string, number, number, string, number, string | null]
+          [string, number, number, number | null, string, number, string | null]
         >(
           `INSERT INTO attempts (
-             task_id, attempt_number, preamble_id, reason, consumed_budget, goal_id
-           ) VALUES (?, ?, ?, ?, ?, ?)
+             task_id, attempt_number, preamble_id, repo_guidance_id, reason, consumed_budget, goal_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)
            RETURNING attempt_id`,
         )
-        .get(taskId, 1, preambleId, "initial", 1, goalId);
+        .get(taskId, 1, preambleId, resolvedPreamble.repoGuidanceId, "initial", 1, goalId);
       if (!attemptRow) throw new Error("attempt insert returned no row");
       attemptId = attemptRow.attempt_id;
 
@@ -703,23 +714,32 @@ export function ensureWorkItemRunIdentity(
     taskId: string;
     repoId: string;
     externalRef: string | null;
+    taskType: unknown;
     now: string;
   },
 ): WorkItemRunIdentity {
+  if (input.taskType !== null && !isTaskType(input.taskType)) {
+    throw new QuayError("validation_error", "task_type invalid", {
+      task_type: input.taskType,
+    });
+  }
   const source = input.externalRef === null ? "synthetic" : "linear";
   const externalRef = input.externalRef ?? input.taskId;
   const proposedWorkItemId = `wi:${input.taskId}`;
 
   db.query(
     `INSERT INTO work_items (
-       work_item_id, source, repo_id, external_ref, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(source, repo_id, external_ref) DO UPDATE SET updated_at = excluded.updated_at`,
+       work_item_id, source, repo_id, external_ref, task_type, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source, repo_id, external_ref) DO UPDATE SET
+       task_type = COALESCE(excluded.task_type, work_items.task_type),
+       updated_at = excluded.updated_at`,
   ).run(
     proposedWorkItemId,
     source,
     input.repoId,
     externalRef,
+    input.taskType,
     input.now,
     input.now,
   );

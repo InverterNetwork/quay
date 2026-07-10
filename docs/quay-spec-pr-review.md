@@ -548,8 +548,8 @@ enabled = false                # default. Whether the reviewer subsystem runs at
 gate_quay_owned_done = false   # default. Whether Quay-owned done requires an approved Quay review.
 # Preferred reviewer token source is the tick process environment:
 # QUAY_REVIEWER_GH_TOKEN=<reviewer-app-token>. Quay validates it and exports
-# it as GH_TOKEN only for reviewer panes; worker panes use QUAY_WORKER_GH_TOKEN
-# or worker.gh_token_file. GitHub blocks self-review, so missing reviewer auth
+# it as GH_TOKEN only for reviewer panes; worker panes prefer worker.gh_token_file
+# and fall back to QUAY_WORKER_GH_TOKEN. GitHub blocks self-review, so missing reviewer auth
 # is a hard `spawn_substrate_failed` before the review attempt is promoted.
 #
 # Migration fallback: path to a file (mode 0600) whose contents tick exports
