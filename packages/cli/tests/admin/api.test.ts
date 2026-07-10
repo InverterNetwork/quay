@@ -8,6 +8,7 @@ import {
   DEFAULT_CLAUDE_REVIEWER_INVOCATION,
   DEFAULT_CLAUDE_WORKER_INVOCATION,
 } from "../../src/core/agents.ts";
+import { createRepoGuidance } from "../../src/core/preamble.ts";
 import { createRepoService } from "../../src/core/repos/service.ts";
 import { createTagService } from "../../src/core/tags/service.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
@@ -2427,6 +2428,45 @@ test("GET /v1/repos/:id exposes effective repo preamble provenance", async () =>
     source: "global",
     configured_preamble_id: null,
   });
+});
+
+test("GET /v1/repos/:id composes repo guidance only when non-empty", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  const preambleId = insertPreamble(h.db, "global worker preamble", "code");
+  repoService.add({
+    repo_id: "repo-guided",
+    repo_url: "git@example.com:owner/repo-guided.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+    preamble_worker: preambleId,
+  });
+  createRepoGuidance(h.db, h.clock, {
+    repoId: "repo-guided",
+    role: "worker",
+    body: "Follow repo-local registration.",
+  });
+  const handler = createHandler({ repoService });
+
+  const response = await handler(new Request("http://quay.local/v1/repos/repo-guided"));
+  const body = await responseJson(response) as {
+    effective_preambles: {
+      worker: Record<string, unknown>;
+      reviewer: Record<string, unknown>;
+    };
+  };
+
+  expect(body.effective_preambles.worker.body).toContain(
+    "## Repo-specific guidance (repo-guided)",
+  );
+  expect(body.effective_preambles.worker.body).toContain(
+    "Follow repo-local registration.",
+  );
+  expect(body.effective_preambles.worker.repo_guidance_id).toBe(1);
+  expect(body.effective_preambles.reviewer.body).not.toContain(
+    "## Repo-specific guidance",
+  );
 });
 
 test("GET /v1/matrix returns repo override rows", async () => {

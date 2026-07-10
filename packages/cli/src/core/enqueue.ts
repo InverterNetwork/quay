@@ -17,7 +17,11 @@ import { baseBranchNameSchema } from "./base_branch.ts";
 import type { AgentResolver } from "./agents.ts";
 import { QuayError } from "./errors.ts";
 import { isTaskType } from "./task_type.ts";
-import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import {
+  ensurePreambleIdForAttemptReason,
+  loadPreambleBody,
+  resolvePreambleForAttemptReason,
+} from "./preamble.ts";
 import {
   normalizeSlackThreadRef,
   normalizeStoredSlackThreadRef,
@@ -401,13 +405,14 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
     installWorktreeDependencies(deps.commandRunner, repo, worktreePath);
 
     // Step 6: SQL transaction + artifact writes.
-    const preambleId = ensurePreambleIdForAttemptReason(
+    const resolvedPreamble = resolvePreambleForAttemptReason(
       deps.db,
       deps.clock,
       "initial",
       { repoId: repo.repo_id },
     );
-    const preambleBody = loadPreambleBody(deps.db, preambleId);
+    const preambleId = resolvedPreamble.preambleId;
+    const preambleBody = resolvedPreamble.body;
     const now = deps.clock.nowISO();
 
     deps.db.exec("BEGIN");
@@ -589,14 +594,14 @@ export function enqueue(deps: EnqueueDeps, rawInput: unknown): EnqueueResult {
       const attemptRow = deps.db
         .query<
           { attempt_id: number },
-          [string, number, number, string, number, string | null]
+          [string, number, number, number | null, string, number, string | null]
         >(
           `INSERT INTO attempts (
-             task_id, attempt_number, preamble_id, reason, consumed_budget, goal_id
-           ) VALUES (?, ?, ?, ?, ?, ?)
+             task_id, attempt_number, preamble_id, repo_guidance_id, reason, consumed_budget, goal_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)
            RETURNING attempt_id`,
         )
-        .get(taskId, 1, preambleId, "initial", 1, goalId);
+        .get(taskId, 1, preambleId, resolvedPreamble.repoGuidanceId, "initial", 1, goalId);
       if (!attemptRow) throw new Error("attempt insert returned no row");
       attemptId = attemptRow.attempt_id;
 

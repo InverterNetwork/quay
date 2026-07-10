@@ -46,7 +46,7 @@ import {
   captureGoalEvidenceArtifacts,
   type CapturedGoalEvidence,
 } from "./goal_audit.ts";
-import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import { resolvePreambleForAttemptReason } from "./preamble.ts";
 import {
   composeWorkerPrompt,
   loadTaskPrBaseBranch,
@@ -739,12 +739,13 @@ function scheduleGoalProtocolRepairInOpenTxn(
   diagnostics: string,
   now: string,
 ): number {
-  const preambleId = ensurePreambleIdForAttemptReason(
+  const resolvedPreamble = resolvePreambleForAttemptReason(
     deps.db,
     deps.clock,
     "malformed_goal_report",
     { repoId: task.repo_id },
   );
+  const preambleId = resolvedPreamble.preambleId;
   const objective = loadOriginalTaskObjective(deps.db, task.task_id);
   const goalContext = loadGoalPromptContext(deps.db, task.task_id);
   const prBaseBranch = loadTaskPrBaseBranch(deps.db, task.task_id);
@@ -756,7 +757,7 @@ function scheduleGoalProtocolRepairInOpenTxn(
     deps.db,
     task.task_id,
   );
-  const preambleBody = loadPreambleBody(deps.db, preambleId);
+  const preambleBody = resolvedPreamble.body;
   const guidance = [
     "The previous goal-mode worker wrote an invalid .quay-goal-report.json.",
     "Repair the protocol error before continuing normal work.",
@@ -787,17 +788,18 @@ function scheduleGoalProtocolRepairInOpenTxn(
   const attemptRow = deps.db
     .query<
       { attempt_id: number },
-      [string, number, number, string | null]
+      [string, number, number, number | null, string | null]
     >(
       `INSERT INTO attempts (
-         task_id, attempt_number, preamble_id, reason, consumed_budget, goal_id
-       ) VALUES (?, ?, ?, 'malformed_goal_report', 0, ?)
+         task_id, attempt_number, preamble_id, repo_guidance_id, reason, consumed_budget, goal_id
+       ) VALUES (?, ?, ?, ?, 'malformed_goal_report', 0, ?)
        RETURNING attempt_id`,
     )
     .get(
       task.task_id,
       attempt.attempt_number + 1,
       preambleId,
+      resolvedPreamble.repoGuidanceId,
       attempt.goal_id,
     );
   if (!attemptRow) throw new Error("goal protocol repair attempt insert returned no row");
@@ -994,12 +996,13 @@ function ingestActiveGoalReport(
       return outcome;
     }
 
-    const preambleId = ensurePreambleIdForAttemptReason(
+    const resolvedPreamble = resolvePreambleForAttemptReason(
       deps.db,
       deps.clock,
       GOAL_CONTINUE_ATTEMPT_REASON,
       { repoId: task.repo_id },
     );
+    const preambleId = resolvedPreamble.preambleId;
     const objective = loadOriginalTaskObjective(deps.db, task.task_id);
     const goalContext = loadGoalPromptContext(deps.db, task.task_id);
     const prBaseBranch = loadTaskPrBaseBranch(deps.db, task.task_id);
@@ -1011,7 +1014,7 @@ function ingestActiveGoalReport(
       deps.db,
       task.task_id,
     );
-    const preambleBody = loadPreambleBody(deps.db, preambleId);
+    const preambleBody = resolvedPreamble.body;
     const guidance = composeGoalContinuationGuidance(report, warnings);
     const composed = composeWorkerPrompt({
       preambleBody,
@@ -1033,17 +1036,18 @@ function ingestActiveGoalReport(
     const attemptRow = deps.db
       .query<
         { attempt_id: number },
-        [string, number, number, string, string | null]
+        [string, number, number, number | null, string, string | null]
       >(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, reason, consumed_budget, goal_id
-         ) VALUES (?, ?, ?, ?, 0, ?)
+           task_id, attempt_number, preamble_id, repo_guidance_id, reason, consumed_budget, goal_id
+         ) VALUES (?, ?, ?, ?, ?, 0, ?)
          RETURNING attempt_id`,
       )
       .get(
         task.task_id,
         attempt.attempt_number + 1,
         preambleId,
+        resolvedPreamble.repoGuidanceId,
         GOAL_CONTINUE_ATTEMPT_REASON,
         attempt.goal_id,
       );

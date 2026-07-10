@@ -43,6 +43,8 @@ export interface RepoEffectivePreamble {
   source: 'repo' | 'global';
   configuredPreambleId: number | null;
   effectivePreambleId: number;
+  repoGuidanceId: number | null;
+  repoGuidanceBody: string | null;
   title: string;
   body: string;
   refs: number;

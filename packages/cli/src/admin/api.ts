@@ -33,8 +33,12 @@ import {
 } from "./agent_gateway.ts";
 import {
   assertPreambleKind,
+  assertReviewerGuidanceProtocolSafe,
+  composeRepoSpecificPreamble,
+  createRepoGuidance,
   DEFAULT_PREAMBLE_BODY,
   DEFAULT_REVIEWER_PREAMBLE_BODY,
+  latestRepoGuidance,
   type PreambleKind,
 } from "../core/preamble.ts";
 import { DEFAULT_RETRY_TEMPLATES } from "../core/retries.ts";
@@ -254,6 +258,8 @@ interface AdminRepoEffectivePreamble {
   source: "repo" | "global";
   configured_preamble_id: number | null;
   effective_preamble_id: number;
+  repo_guidance_id: number | null;
+  repo_guidance_body: string | null;
   title: string;
   body: string;
   refs: number;
@@ -323,6 +329,15 @@ const repoUpdateChangeSchema = z
     path: ["patch"],
   });
 
+const repoGuidanceSetChangeSchema = z
+  .object({
+    type: z.literal("repo_guidance.set"),
+    repo_id: z.string().min(1),
+    role: z.enum(["worker", "reviewer"]),
+    body: z.string(),
+  })
+  .strict();
+
 const deploymentSettingsPatchSchema = z
   .object({
     worker_agent: z.string().min(1).nullable().optional(),
@@ -381,6 +396,7 @@ const tagReplaceChangeSchema = z
 
 const changeSchema = z.union([
   repoUpdateChangeSchema,
+  repoGuidanceSetChangeSchema,
   deploymentSettingsUpdateChangeSchema,
   tagReplaceChangeSchema,
 ]);
@@ -1646,6 +1662,9 @@ function auditChangeSummaries(change: AdminChange): string[] {
       .filter((field) => field in change.patch)
       .map((field) => `repo ${change.repo_id}: update ${field}`);
   }
+  if (change.type === "repo_guidance.set") {
+    return [`repo ${change.repo_id}: set ${change.role} guidance`];
+  }
   if (change.type === "deployment_settings.update") {
     return DEPLOYMENT_SETTINGS_PATCH_FIELDS
       .filter((field) => field in change.patch)
@@ -1662,6 +1681,10 @@ function targetResourcesFromChanges(changes: AdminChange[]): string[] {
   const targets = new Set<string>();
   for (const change of changes) {
     if (change.type === "repo.update") {
+      targets.add(`repo:${change.repo_id}`);
+      continue;
+    }
+    if (change.type === "repo_guidance.set") {
       targets.add(`repo:${change.repo_id}`);
       continue;
     }
@@ -1751,7 +1774,7 @@ async function parseChangeRequest(request: Request): Promise<{
       422,
       "unsupported_change",
       `unsupported change type "${unsupported}"`,
-      { supported_types: ["repo.update", "deployment_settings.update", "tags.replace"] },
+      { supported_types: ["repo.update", "repo_guidance.set", "deployment_settings.update", "tags.replace"] },
     );
   }
   const result = changeRequestSchema.safeParse(raw);
@@ -1800,6 +1823,7 @@ function unsupportedChangeType(raw: unknown): string | null {
     if (
       typeof type === "string" &&
       type !== "repo.update" &&
+      type !== "repo_guidance.set" &&
       type !== "deployment_settings.update" &&
       type !== "tags.replace"
     ) {
@@ -1833,6 +1857,10 @@ function buildChangePreview(
   for (const [index, change] of changes.entries()) {
     if (change.type === "repo.update") {
       operations.push(...repoUpdateOperations(runtime, change, index));
+      continue;
+    }
+    if (change.type === "repo_guidance.set") {
+      operations.push(...repoGuidanceSetOperations(runtime, change, index));
       continue;
     }
     if (change.type === "deployment_settings.update") {
@@ -1879,6 +1907,30 @@ function repoUpdateOperations(
     });
   }
   return operations;
+}
+
+function repoGuidanceSetOperations(
+  runtime: AdminApiRuntime,
+  change: Extract<AdminChange, { type: "repo_guidance.set" }>,
+  changeIndex: number,
+): AdminChangeOperation[] {
+  assertActiveRepo(runtime, change.repo_id);
+  if (change.role === "reviewer") {
+    assertReviewerGuidanceProtocolSafe(change.body, `repo ${change.repo_id} reviewer guidance`);
+  }
+  const before = latestRepoGuidance(runtime.db, change.repo_id, change.role)?.body ?? "";
+  if (before === change.body) return [];
+  return [{
+    op_id: `change-${changeIndex + 1}:repo_guidance:${change.role}`,
+    type: "repo_guidance.set",
+    scope: "repo",
+    target: change.repo_id,
+    field: change.role,
+    before,
+    after: change.body,
+    summary:
+      `repo ${change.repo_id}: set ${change.role} guidance from ${formatPreviewValue(before)} to ${formatPreviewValue(change.body)}`,
+  }];
 }
 
 function deploymentSettingsUpdateOperations(
@@ -1950,6 +2002,18 @@ function applyOneChange(runtime: AdminApiRuntime, change: AdminChange): void {
     validateAgentPatch(runtime, change.repo_id, change.patch);
     validatePreamblePatch(runtime, change.repo_id, change.patch);
     runtime.repoService.update(change.repo_id, change.patch);
+    return;
+  }
+  if (change.type === "repo_guidance.set") {
+    repoGuidanceSetOperations(runtime, change, 0);
+    createRepoGuidance(runtime.db, {
+      now: () => new Date(),
+      nowISO: () => new Date().toISOString(),
+    }, {
+      repoId: change.repo_id,
+      role: change.role,
+      body: change.body,
+    });
     return;
   }
   if (change.type === "deployment_settings.update") {
@@ -2119,6 +2183,17 @@ function computeAdminRevision(runtime: AdminApiRuntime): string {
     ci_policy: ciPolicyFromConfig(runtime.config),
     deployment_settings: deploymentSettings(runtime),
     repos: runtime.repoService.list({ activeOnly: true }),
+    repo_guidance: Object.fromEntries(
+      runtime.repoService
+        .list({ activeOnly: true })
+        .map((repo) => [
+          repo.repo_id,
+          {
+            worker: latestRepoGuidance(runtime.db, repo.repo_id, "worker"),
+            reviewer: latestRepoGuidance(runtime.db, repo.repo_id, "reviewer"),
+          },
+        ]),
+    ),
     deployment_tags: runtime.tagService.getVocab("deployment"),
     repo_tags: Object.fromEntries(
       runtime.repoService
@@ -2470,14 +2545,22 @@ function buildRepoEffectivePreamble(
   const body = row?.body ??
     (kind === "review" ? DEFAULT_REVIEWER_PREAMBLE_BODY : DEFAULT_PREAMBLE_BODY);
   const effectiveId = row?.preamble_id ?? 0;
+  const guidance = latestRepoGuidance(runtime.db, repo.repo_id, role);
   return {
     role,
     kind,
     source: configured === null ? "global" : "repo",
     configured_preamble_id: configured,
     effective_preamble_id: effectiveId,
+    repo_guidance_id: guidance?.guidance_id ?? null,
+    repo_guidance_body: guidance?.body ?? null,
     title: kind === "review" ? "Reviewer guidance" : "Worker preamble",
-    body,
+    body: composeRepoSpecificPreamble({
+      repoId: repo.repo_id,
+      role,
+      baseBody: body,
+      guidanceBody: guidance?.body ?? null,
+    }),
     refs: effectiveId === 0 ? 0 : countPreambleRefs(runtime.db, effectiveId),
     last_edited: row?.created_at ?? null,
   };

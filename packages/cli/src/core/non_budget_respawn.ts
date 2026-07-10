@@ -21,7 +21,7 @@
 import type { ArtifactStore } from "../artifacts/store.ts";
 import type { DB } from "../db/connection.ts";
 import type { Clock } from "../ports/clock.ts";
-import { ensurePreambleIdForAttemptReason, loadPreambleBody } from "./preamble.ts";
+import { resolvePreambleForAttemptReason } from "./preamble.ts";
 import {
   composeWorkerPrompt,
   loadTaskPrBaseBranch,
@@ -180,12 +180,13 @@ export function scheduleNonBudgetRespawn(
 
     // Schedule a new attempt with consumed_budget = 0.
     const template = ensureNonBudgetTemplate(deps.db, deps.clock, input.reason);
-    const preambleId = ensurePreambleIdForAttemptReason(
+    const resolvedPreamble = resolvePreambleForAttemptReason(
       deps.db,
       deps.clock,
       input.reason,
       { taskId: input.taskId },
     );
+    const preambleId = resolvedPreamble.preambleId;
     const objective = loadOriginalTaskObjective(deps.db, input.taskId);
     const prBaseBranch = loadTaskPrBaseBranch(deps.db, input.taskId);
     const prScreenshotsRequested = loadTaskPrScreenshotsRequested(
@@ -197,7 +198,7 @@ export function scheduleNonBudgetRespawn(
       input.taskId,
     );
     const goalContext = loadGoalPromptContext(deps.db, input.taskId);
-    const preambleBody = loadPreambleBody(deps.db, preambleId);
+    const preambleBody = resolvedPreamble.body;
     const composed = composeWorkerPrompt({
       preambleBody,
       taskObjective: objective,
@@ -227,17 +228,18 @@ export function scheduleNonBudgetRespawn(
     const attempt = deps.db
       .query<
         { attempt_id: number },
-        [string, number, number, number, string, string | null]
+        [string, number, number, number | null, number, string, string | null]
       >(
         `INSERT INTO attempts (
-           task_id, attempt_number, preamble_id, template_id, reason, consumed_budget, goal_id
-         ) VALUES (?, ?, ?, ?, ?, 0, ?)
+           task_id, attempt_number, preamble_id, repo_guidance_id, template_id, reason, consumed_budget, goal_id
+         ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
          RETURNING attempt_id`,
       )
       .get(
         input.taskId,
         input.prevAttempt.attempt_number + 1,
         preambleId,
+        resolvedPreamble.repoGuidanceId,
         template.template_id,
         input.reason,
         goalId,

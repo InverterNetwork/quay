@@ -394,6 +394,7 @@ interface ReviewAttemptTaskRow {
   attempt_id: number;
   attempt_number: number;
   preamble_id: number;
+  repo_guidance_id: number | null;
   review_protocol_version: string | null;
   head_sha: string;
   tmux_session: string | null;
@@ -1866,7 +1867,7 @@ function readRunningReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
               t.pr_number, t.cancel_requested_at,
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
-              a.attempt_id, a.attempt_number, a.preamble_id,
+              a.attempt_id, a.attempt_number, a.preamble_id, a.repo_guidance_id,
               a.review_protocol_version, a.head_sha,
               a.tmux_session, a.spawned_at, a.kill_intent,
               t.reviewer_agent, t.reviewer_model
@@ -1894,7 +1895,7 @@ function readPendingReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
               t.pr_number, t.cancel_requested_at,
               t.review_infra_failures_consecutive,
               t.review_infra_failure_head_sha,
-              a.attempt_id, a.attempt_number, a.preamble_id,
+              a.attempt_id, a.attempt_number, a.preamble_id, a.repo_guidance_id,
               a.review_protocol_version, a.head_sha,
               a.tmux_session, a.spawned_at, a.kill_intent,
               t.reviewer_agent, t.reviewer_model
@@ -5263,17 +5264,18 @@ function markReviewInfraFailure(
 
     if (!parking) {
       const retryAttempt = deps.db
-        .query<{ attempt_id: number }, [string, number, number, string, number, string, string | null]>(
+      .query<{ attempt_id: number }, [string, number, number, number | null, string, number, string, string | null]>(
           `INSERT INTO attempts (
-             task_id, attempt_number, preamble_id, reason, consumed_budget, head_sha,
+             task_id, attempt_number, preamble_id, repo_guidance_id, reason, consumed_budget, head_sha,
              review_protocol_version
-           ) VALUES (?, ?, ?, ?, ?, ?, ?)
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING attempt_id`,
         )
         .get(
           task.task_id,
           task.attempt_number + 1,
           task.preamble_id,
+          task.repo_guidance_id,
           "review_only",
           0,
           task.head_sha,
