@@ -36,6 +36,11 @@ export class FakeGitHub implements GitHubPort {
     prNumber: number;
     body: string;
   }[] = [];
+  readonly addPullRequestAssigneesCalls: {
+    repoId: string;
+    prNumber: number;
+    logins: string[];
+  }[] = [];
   // Explicit per-(repo, branch) PR snapshots take precedence over the legacy
   // `setPrCheckStatus`-derived synthesis.
   readonly snapshots = new Map<string, PrSnapshot | null>();
@@ -91,6 +96,9 @@ export class FakeGitHub implements GitHubPort {
     | null = null;
   private mergePullRequestHandler:
     | ((repoId: string, prNumber: number, expectedHeadSha: string) => void)
+    | null = null;
+  private addPullRequestAssigneesHandler:
+    | ((repoId: string, prNumber: number, logins: string[]) => void)
     | null = null;
 
   prExistsForBranch(repoId: string, branch: string): boolean {
@@ -170,6 +178,21 @@ export class FakeGitHub implements GitHubPort {
     if (existing !== null) {
       this.setPrView(repoId, prNumber, { ...existing, body });
     }
+  }
+
+  addPullRequestAssignees(
+    repoId: string,
+    prNumber: number,
+    logins: string[],
+  ): void {
+    this.addPullRequestAssigneesCalls.push({ repoId, prNumber, logins: [...logins] });
+    this.addPullRequestAssigneesHandler?.(repoId, prNumber, logins);
+  }
+
+  setAddPullRequestAssigneesHandler(
+    handler: ((repoId: string, prNumber: number, logins: string[]) => void) | null,
+  ): void {
+    this.addPullRequestAssigneesHandler = handler;
   }
 
   prCheckStatus(repoId: string, branch: string): PrCheckStatus {

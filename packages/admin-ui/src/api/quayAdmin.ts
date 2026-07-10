@@ -5,6 +5,8 @@ import type {
   ConfigFieldSummary,
   GlobalConfigSummary,
   GuidanceTemplate,
+  IdentityDiscovery,
+  IdentityMapping,
   MatrixReadModel,
   MatrixRow,
   PreambleSummary,
@@ -150,6 +152,35 @@ interface QuayAdminTagNamespace {
   extended_by?: number;
 }
 
+interface QuayAdminIdentityMapping {
+  slack_user_id: string;
+  slack_display_name: string;
+  slack_handle: string | null;
+  slack_email: string | null;
+  github_login: string;
+  status: 'mapped' | 'verified' | 'conflict';
+  source: 'manual' | 'csv' | 'auto' | 'task';
+  last_used_at: string | null;
+  last_used_task_id: string | null;
+  last_used_pr_number: number | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface QuayAdminIdentityDiscovery {
+  unmapped_contributors: QuayAdminUnmappedIdentityContributor[];
+}
+
+interface QuayAdminUnmappedIdentityContributor {
+  slack_user_id: string;
+  slack_display_name: string;
+  slack_handle: string | null;
+  task_count: number;
+  last_external_ref: string | null;
+  last_seen_at: string;
+}
+
 interface QuayAdminGlobal {
   revision: string;
   config_path: string | null;
@@ -179,6 +210,8 @@ interface QuayAdminGlobal {
   preambles: QuayAdminPreamble[];
   retry_templates: QuayAdminGuidanceTemplate[];
   tag_namespaces: QuayAdminTagNamespace[];
+  identity_mappings: QuayAdminIdentityMapping[];
+  identity_discovery: QuayAdminIdentityDiscovery;
 }
 
 interface QuayAdminMatrixRow {
@@ -516,6 +549,8 @@ function toGlobalSummary(global: QuayAdminGlobal): GlobalConfigSummary {
     preambles: global.preambles.map(toPreambleSummary),
     retryTemplates: global.retry_templates.map(toGuidanceTemplate),
     tagNamespaces: global.tag_namespaces.map(toTagNamespace),
+    identityMappings: global.identity_mappings.map(toIdentityMapping),
+    identityDiscovery: toIdentityDiscovery(global.identity_discovery),
   };
 }
 
@@ -586,6 +621,37 @@ function toTagNamespace(namespace: QuayAdminTagNamespace): TagNamespace {
     values: namespace.values,
     inheritedBy: namespace.inherited_by,
     extendedBy: namespace.extended_by,
+  };
+}
+
+function toIdentityMapping(mapping: QuayAdminIdentityMapping): IdentityMapping {
+  return {
+    slackUserId: mapping.slack_user_id,
+    slackDisplayName: mapping.slack_display_name,
+    slackHandle: mapping.slack_handle,
+    slackEmail: mapping.slack_email,
+    githubLogin: mapping.github_login,
+    status: mapping.status,
+    source: mapping.source,
+    lastUsedAt: mapping.last_used_at,
+    lastUsedTaskId: mapping.last_used_task_id,
+    lastUsedPrNumber: mapping.last_used_pr_number,
+    lastError: mapping.last_error,
+    createdAt: mapping.created_at,
+    updatedAt: mapping.updated_at,
+  };
+}
+
+function toIdentityDiscovery(discovery: QuayAdminIdentityDiscovery): IdentityDiscovery {
+  return {
+    unmappedContributors: discovery.unmapped_contributors.map((candidate) => ({
+      slackUserId: candidate.slack_user_id,
+      slackDisplayName: candidate.slack_display_name,
+      slackHandle: candidate.slack_handle,
+      taskCount: candidate.task_count,
+      lastExternalRef: candidate.last_external_ref,
+      lastSeenAt: candidate.last_seen_at,
+    })),
   };
 }
 

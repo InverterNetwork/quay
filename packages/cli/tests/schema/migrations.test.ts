@@ -627,6 +627,36 @@ test("deployment_settings table stores mutable agent defaults", () => {
   ]);
 });
 
+test("identity_mappings table stores Slack to GitHub assignee mappings", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(identity_mappings)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toEqual([
+    "slack_user_id",
+    "slack_display_name",
+    "slack_handle",
+    "slack_email",
+    "github_login",
+    "status",
+    "source",
+    "last_used_at",
+    "last_used_task_id",
+    "last_used_pr_number",
+    "last_error",
+    "created_at",
+    "updated_at",
+  ]);
+
+  const taskCols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(tasks)`)
+    .all()
+    .map((r) => r.name);
+  expect(taskCols).toContain("pr_assignee_login");
+  expect(taskCols).toContain("pr_assignee_selected_at");
+});
+
 test("umbrella workflow tables capture workflow and task links", () => {
   h = createHarness();
   const workflowCols = h.db

@@ -20,6 +20,13 @@ import {
   type DeploymentSettingsPatch,
   type DeploymentSettingsRow,
 } from "../core/deployment_settings.ts";
+import {
+  createIdentityMappingService,
+  editableIdentityMapping,
+  normalizeIdentityMappingInput,
+  type IdentityMapping,
+  type IdentityMappingInput,
+} from "../core/identity_mappings.ts";
 import { TASK_STATES, type TaskState } from "../core/task_state.ts";
 import {
   adminAuthAllowedHeaders,
@@ -188,6 +195,35 @@ interface AdminTagNamespace {
   extended_by?: number;
 }
 
+interface AdminIdentityMapping {
+  slack_user_id: string;
+  slack_display_name: string;
+  slack_handle: string | null;
+  slack_email: string | null;
+  github_login: string;
+  status: "mapped" | "verified" | "conflict";
+  source: string;
+  last_used_at: string | null;
+  last_used_task_id: string | null;
+  last_used_pr_number: number | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AdminIdentityDiscovery {
+  unmapped_contributors: AdminUnmappedContributor[];
+}
+
+interface AdminUnmappedContributor {
+  slack_user_id: string;
+  slack_display_name: string;
+  slack_handle: string | null;
+  task_count: number;
+  last_external_ref: string | null;
+  last_seen_at: string;
+}
+
 interface AdminMatrixRow {
   group: string;
   label: string;
@@ -317,6 +353,26 @@ const tagNamespaceInputSchema = z
   })
   .strict();
 
+const githubLoginSchema = z
+  .string()
+  .min(1)
+  .max(39)
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/, {
+    message: "must be a valid GitHub login",
+  });
+
+const identityMappingInputSchema = z
+  .object({
+    slack_user_id: z.string().min(1),
+    slack_display_name: z.string().min(1),
+    slack_handle: z.string().min(1).nullable().optional(),
+    slack_email: z.string().min(1).nullable().optional(),
+    github_login: githubLoginSchema,
+    status: z.enum(["mapped", "verified", "conflict"]).optional(),
+    source: z.enum(["manual", "csv", "auto", "task"]).optional(),
+  })
+  .strict();
+
 const repoUpdateChangeSchema = z
   .object({
     type: z.literal("repo.update"),
@@ -394,11 +450,44 @@ const tagReplaceChangeSchema = z
     }
   });
 
+const identityMappingsReplaceChangeSchema = z
+  .object({
+    type: z.literal("identity_mappings.replace"),
+    mappings: z.array(identityMappingInputSchema),
+  })
+  .strict()
+  .superRefine((change, ctx) => {
+    const slackIds = new Set<string>();
+    const githubLogins = new Set<string>();
+    for (const [index, raw] of change.mappings.entries()) {
+      const mapping = normalizeIdentityMappingInput(raw);
+      const slackIdKey = mapping.slack_user_id;
+      const githubKey = mapping.github_login.toLowerCase();
+      if (slackIds.has(slackIdKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["mappings", index, "slack_user_id"],
+          message: `duplicate Slack user id "${mapping.slack_user_id}"`,
+        });
+      }
+      if (githubLogins.has(githubKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["mappings", index, "github_login"],
+          message: `duplicate GitHub login "${mapping.github_login}"`,
+        });
+      }
+      slackIds.add(slackIdKey);
+      githubLogins.add(githubKey);
+    }
+  });
+
 const changeSchema = z.union([
   repoUpdateChangeSchema,
   repoGuidanceSetChangeSchema,
   deploymentSettingsUpdateChangeSchema,
   tagReplaceChangeSchema,
+  identityMappingsReplaceChangeSchema,
 ]);
 
 const changeRequestSchema = z
@@ -1360,6 +1449,8 @@ function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown>
     preambles: buildPreambleSummaries(runtime, repos.length),
     retry_templates: buildRetryTemplates(runtime),
     tag_namespaces: deploymentTagNamespaces(runtime),
+    identity_mappings: identityMappings(runtime),
+    identity_discovery: identityDiscovery(runtime),
   };
 }
 
@@ -1670,6 +1761,9 @@ function auditChangeSummaries(change: AdminChange): string[] {
       .filter((field) => field in change.patch)
       .map((field) => `deployment settings: update ${field}`);
   }
+  if (change.type === "identity_mappings.replace") {
+    return [`identity mappings: replace ${change.mappings.length} mappings`];
+  }
   const prefix = change.scope === "deployment"
     ? "deployment tags"
     : `repo ${change.repo_id!} tags`;
@@ -1689,6 +1783,10 @@ function targetResourcesFromChanges(changes: AdminChange[]): string[] {
       continue;
     }
     if (change.type === "deployment_settings.update") {
+      targets.add("deployment");
+      continue;
+    }
+    if (change.type === "identity_mappings.replace") {
       targets.add("deployment");
       continue;
     }
@@ -1736,6 +1834,9 @@ function auditOperationSummary(operation: AdminChangeOperation): string {
       ? `${prefix}: replace tag namespace`
       : `${prefix}: replace ${operation.field}`;
   }
+  if (operation.type === "identity_mappings.replace") {
+    return "identity mappings: replace mappings";
+  }
   return `${operation.scope} ${operation.target}: ${operation.type}`;
 }
 
@@ -1774,7 +1875,15 @@ async function parseChangeRequest(request: Request): Promise<{
       422,
       "unsupported_change",
       `unsupported change type "${unsupported}"`,
-      { supported_types: ["repo.update", "repo_guidance.set", "deployment_settings.update", "tags.replace"] },
+      {
+        supported_types: [
+          "repo.update",
+          "repo_guidance.set",
+          "deployment_settings.update",
+          "identity_mappings.replace",
+          "tags.replace",
+        ],
+      },
     );
   }
   const result = changeRequestSchema.safeParse(raw);
@@ -1825,6 +1934,7 @@ function unsupportedChangeType(raw: unknown): string | null {
       type !== "repo.update" &&
       type !== "repo_guidance.set" &&
       type !== "deployment_settings.update" &&
+      type !== "identity_mappings.replace" &&
       type !== "tags.replace"
     ) {
       return type;
@@ -1865,6 +1975,10 @@ function buildChangePreview(
     }
     if (change.type === "deployment_settings.update") {
       operations.push(...deploymentSettingsUpdateOperations(runtime, change, index));
+      continue;
+    }
+    if (change.type === "identity_mappings.replace") {
+      operations.push(...identityMappingsReplaceOperations(runtime, change, index));
       continue;
     }
     operations.push(...tagReplaceOperations(runtime, change, index));
@@ -1997,6 +2111,27 @@ function tagReplaceOperations(
   return operations;
 }
 
+function identityMappingsReplaceOperations(
+  runtime: AdminApiRuntime,
+  change: Extract<AdminChange, { type: "identity_mappings.replace" }>,
+  changeIndex: number,
+): AdminChangeOperation[] {
+  const before = editableIdentityMappings(runtime);
+  const after = normalizedIdentityMappings(change.mappings);
+  if (stableJson(before) === stableJson(after)) return [];
+  return [{
+    op_id: `change-${changeIndex + 1}:identity_mappings`,
+    type: "identity_mappings.replace",
+    scope: "deployment",
+    target: "identity_mappings",
+    field: "identity_mappings",
+    before,
+    after,
+    summary:
+      `identity mappings: replace ${before.length} mappings with ${after.length} mappings`,
+  }];
+}
+
 function applyOneChange(runtime: AdminApiRuntime, change: AdminChange): void {
   if (change.type === "repo.update") {
     validateAgentPatch(runtime, change.repo_id, change.patch);
@@ -2021,6 +2156,10 @@ function applyOneChange(runtime: AdminApiRuntime, change: AdminChange): void {
     createDeploymentSettingsService({ db: runtime.db }).update(change.patch, {
       defaultsWhenEmpty: effectiveDeploymentSettings(runtime),
     });
+    return;
+  }
+  if (change.type === "identity_mappings.replace") {
+    createIdentityMappingService({ db: runtime.db }).replaceAll(change.mappings);
     return;
   }
   const repoId = change.scope === "repo" ? change.repo_id! : null;
@@ -2182,6 +2321,9 @@ function computeAdminRevision(runtime: AdminApiRuntime): string {
     version: 1,
     ci_policy: ciPolicyFromConfig(runtime.config),
     deployment_settings: deploymentSettings(runtime),
+    identity_mappings: createIdentityMappingService({ db: runtime.db })
+      .list()
+      .map(editableIdentityMapping),
     repos: runtime.repoService.list({ activeOnly: true }),
     repo_guidance: Object.fromEntries(
       runtime.repoService
@@ -2679,6 +2821,138 @@ function deploymentTagNamespaces(runtime: AdminApiRuntime): AdminTagNamespace[] 
     inherited_by: inheritedBy,
     extended_by: extendedBy.get(ns.name) ?? 0,
   }));
+}
+
+function identityMappings(runtime: AdminApiRuntime): AdminIdentityMapping[] {
+  return createIdentityMappingService({ db: runtime.db }).list().map((mapping) => ({
+    slack_user_id: mapping.slack_user_id,
+    slack_display_name: mapping.slack_display_name,
+    slack_handle: mapping.slack_handle,
+    slack_email: mapping.slack_email,
+    github_login: mapping.github_login,
+    status: mapping.status,
+    source: mapping.source,
+    last_used_at: mapping.last_used_at,
+    last_used_task_id: mapping.last_used_task_id,
+    last_used_pr_number: mapping.last_used_pr_number,
+    last_error: mapping.last_error,
+    created_at: mapping.created_at,
+    updated_at: mapping.updated_at,
+  }));
+}
+
+function identityDiscovery(runtime: AdminApiRuntime): AdminIdentityDiscovery {
+  return {
+    unmapped_contributors: unmappedIdentityContributors(runtime),
+  };
+}
+
+function editableIdentityMappings(runtime: AdminApiRuntime): Required<IdentityMappingInput>[] {
+  return createIdentityMappingService({ db: runtime.db })
+    .list()
+    .map(editableIdentityMapping);
+}
+
+function normalizedIdentityMappings(
+  mappings: IdentityMappingInput[],
+): Required<IdentityMappingInput>[] {
+  return mappings
+    .map(normalizeIdentityMappingInput)
+    .filter((mapping) =>
+      mapping.slack_user_id !== "" &&
+      mapping.slack_display_name !== "" &&
+      mapping.github_login !== ""
+    )
+    .map((mapping) => ({
+      slack_user_id: mapping.slack_user_id,
+      slack_display_name: mapping.slack_display_name,
+      slack_handle: mapping.slack_handle ?? null,
+      slack_email: mapping.slack_email ?? null,
+      github_login: mapping.github_login,
+      status: mapping.status ?? "mapped",
+      source: mapping.source ?? "manual",
+    }))
+    .sort((a, b) => a.slack_user_id.localeCompare(b.slack_user_id));
+}
+
+interface IdentityTaskAuthorRow {
+  authors_json: string | null;
+  external_ref: string | null;
+  updated_at: string;
+}
+
+function unmappedIdentityContributors(
+  runtime: AdminApiRuntime,
+): AdminUnmappedContributor[] {
+  const mapped = new Set(
+    createIdentityMappingService({ db: runtime.db })
+      .list()
+      .map((mapping) => mapping.slack_user_id),
+  );
+  const rows = runtime.db
+    .query<IdentityTaskAuthorRow, []>(
+      `SELECT t.authors_json, t.external_ref, t.updated_at
+         FROM tasks t
+         JOIN repos r ON r.repo_id = t.repo_id
+        WHERE t.authors_json IS NOT NULL
+          AND r.archived_at IS NULL
+        ORDER BY t.updated_at DESC, t.task_id ASC`,
+    )
+    .all();
+  const seen = new Map<string, AdminUnmappedContributor>();
+  for (const row of rows) {
+    for (const author of parseIdentityTaskAuthors(row.authors_json)) {
+      if (mapped.has(author.slack_user_id)) continue;
+      const existing = seen.get(author.slack_user_id);
+      if (existing === undefined) {
+        seen.set(author.slack_user_id, {
+          slack_user_id: author.slack_user_id,
+          slack_display_name: author.slack_display_name,
+          slack_handle: author.slack_handle,
+          task_count: 1,
+          last_external_ref: row.external_ref,
+          last_seen_at: row.updated_at,
+        });
+      } else {
+        existing.task_count += 1;
+      }
+    }
+  }
+  return [...seen.values()]
+    .sort((a, b) => b.last_seen_at.localeCompare(a.last_seen_at))
+    .slice(0, 25);
+}
+
+function parseIdentityTaskAuthors(
+  authorsJson: string | null,
+): Array<{
+  slack_user_id: string;
+  slack_display_name: string;
+  slack_handle: string | null;
+}> {
+  if (authorsJson === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(authorsJson);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const authors = [];
+  for (const entry of parsed) {
+    if (entry === null || typeof entry !== "object") continue;
+    const slackId = (entry as { slack_id?: unknown }).slack_id;
+    if (typeof slackId !== "string" || slackId.trim() === "") continue;
+    const name = (entry as { name?: unknown }).name;
+    authors.push({
+      slack_user_id: slackId.trim(),
+      slack_display_name: typeof name === "string" && name.trim() !== ""
+        ? name.trim()
+        : slackId.trim(),
+      slack_handle: null,
+    });
+  }
+  return authors;
 }
 
 function repoTagExtensionCounts(db: DB): Map<string, number> {
