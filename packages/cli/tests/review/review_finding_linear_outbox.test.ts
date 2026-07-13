@@ -1,17 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { dispatch } from "../../src/cli/dispatch.ts";
-import { bufferIO } from "../../src/cli/io.ts";
 import {
   enqueueReviewFindingLinearIssuesInOpenTxn,
-  processReviewFindingLinearIssueOutboxItem,
   REVIEW_FINDING_LINEAR_ISSUE_OUTBOX_KIND,
 } from "../../src/core/review_finding_linear_outbox.ts";
 import { persistStructuredReviewFindingsInOpenTxn } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
-import { buildCliDeps } from "../support/cli_deps.ts";
-import { FakeLinearAdapter } from "../support/fakes/linear.ts";
-import { QuayError } from "../../src/core/errors.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -19,7 +13,7 @@ afterEach(() => {
   h = null;
 });
 
-test("synthetic non-blocking findings enqueue and deliver one Linear issue", async () => {
+test("synthetic non-blocking findings enqueue one Linear issue outbox row", () => {
   h = createHarness();
   const seeded = seedReviewFindingTask("synthetic_review");
   persistFindings(seeded, [
@@ -33,105 +27,13 @@ test("synthetic non-blocking findings enqueue and deliver one Linear issue", asy
   expect(outbox).toHaveLength(1);
   const item = outbox[0]!;
   expect(item.kind).toBe(REVIEW_FINDING_LINEAR_ISSUE_OUTBOX_KIND);
-
-  const linear = new FakeLinearAdapter();
-  await processReviewFindingLinearIssueOutboxItem(
-    { db: h.db, clock: h.clock, linear },
-    { outboxItemId: item.outbox_item_id },
-  );
-
-  expect(linear.createIssueCalls).toHaveLength(1);
-  const call = linear.createIssueCalls[0]!;
-  expect(call.title).toBe("Persist the follow-up");
-  expect(call.body).toContain("src/a.ts:7-9");
-  expect(call.body).toContain("quay-principle");
-  expect(call.idempotencyKey).toMatch(
-    /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-  );
-  expect(linkCount()).toBe(1);
-});
-
-test("outbox deliver command executes the Linear issue delivery handler", async () => {
-  h = createHarness();
-  const built = buildCliDeps(h);
-  const seeded = seedReviewFindingTask("synthetic_review");
-  persistFindings(seeded, [
-    finding("non_blocking", "CLI follow-up", "Body text"),
-  ]);
-  const outbox = listFindingOutbox()[0]!;
-  const io = bufferIO();
-
-  const result = await dispatch(
-    ["outbox", "deliver", String(outbox.outbox_item_id)],
-    built.deps,
-    io,
-  );
-
-  expect(result.exitCode).toBe(0);
-  expect(io.err()).toBe("");
-  expect(JSON.parse(io.out())).toMatchObject({
-    outbox_item_id: outbox.outbox_item_id,
-    status: "completed",
-  });
-  expect(built.linear.createIssueCalls).toHaveLength(1);
-  expect(linkCount()).toBe(1);
-});
-
-test("outbox deliver command rejects disabled Linear adapter before delivery", async () => {
-  h = createHarness();
-  const built = buildCliDeps(h, { linearEnabled: false });
-  const seeded = seedReviewFindingTask("synthetic_review");
-  persistFindings(seeded, [
-    finding("non_blocking", "CLI follow-up", "Body text"),
-  ]);
-  const outbox = listFindingOutbox()[0]!;
-  const io = bufferIO();
-
-  const result = await dispatch(
-    ["outbox", "deliver", String(outbox.outbox_item_id)],
-    built.deps,
-    io,
-  );
-
-  expect(result.exitCode).toBe(1);
-  expect(io.out()).toBe("");
-  expect(JSON.parse(io.err())).toMatchObject({
-    error: "adapter_not_enabled",
-    adapter: "linear",
-  });
-  expect(built.linear.createIssueCalls).toHaveLength(0);
-  expect(linkCount()).toBe(0);
-});
-
-test("outbox deliver normalizes Linear delivery failures through CLI errors", async () => {
-  h = createHarness();
-  const built = buildCliDeps(h);
-  const seeded = seedReviewFindingTask("synthetic_review");
-  persistFindings(seeded, [
-    finding("non_blocking", "CLI failure", "Body text"),
-  ]);
-  const outbox = listFindingOutbox()[0]!;
-  built.linear.createIssue = async () => {
-    throw new QuayError("adapter_error", "Linear failed", {
-      adapter: "linear",
-      retryable: true,
-    });
-  };
-  const io = bufferIO();
-
-  const result = await dispatch(
-    ["outbox", "deliver", String(outbox.outbox_item_id)],
-    built.deps,
-    io,
-  );
-
-  expect(result.exitCode).toBe(1);
-  expect(io.out()).toBe("");
-  expect(JSON.parse(io.err())).toMatchObject({
-    error: "adapter_error",
-    message: "Linear failed",
-    adapter: "linear",
-  });
+  const payload = JSON.parse(item.payload_json ?? "{}");
+  expect(payload.title).toBe("Persist the follow-up");
+  expect(payload.principle_text).toBe("Prefer durable side effects.");
+  expect(payload.locations).toHaveLength(1);
+  expect(payload.locations[0].path).toBe("src/a.ts");
+  expect(payload.locations[0].start_line).toBe(7);
+  expect(payload.locations[0].end_line).toBe(9);
 });
 
 test("adopted external PR findings are human-owned and blocking findings are skipped", () => {
@@ -158,119 +60,17 @@ test("quay-owned review findings do not create Linear follow-up outbox rows", ()
   expect(listFindingOutbox()).toHaveLength(0);
 });
 
-test("retrying a Linear issue outbox row does not create duplicate issues", async () => {
-  h = createHarness();
-  const seeded = seedReviewFindingTask("synthetic_review");
-  persistFindings(seeded, [
-    finding("non_blocking", "Retry follow-up", "Body text"),
-  ]);
-  const outbox = listFindingOutbox()[0]!;
-  const linear = new FakeLinearAdapter();
-
-  await processReviewFindingLinearIssueOutboxItem(
-    { db: h.db, clock: h.clock, linear },
-    { outboxItemId: outbox.outbox_item_id },
-  );
-
-  h.db
-    .query(
-      `UPDATE outbox_items
-          SET status = 'pending',
-              claim_id = NULL,
-              claimed_at = NULL
-        WHERE outbox_item_id = ?`,
-    )
-    .run(outbox.outbox_item_id);
-  await processReviewFindingLinearIssueOutboxItem(
-    { db: h.db, clock: h.clock, linear },
-    { outboxItemId: outbox.outbox_item_id },
-  );
-
-  expect(linear.createIssueCalls).toHaveLength(1);
-  expect(linkCount()).toBe(1);
-});
-
-test("Linear rate limits preserve retry-after as outbox cooldown", async () => {
-  h = createHarness();
-  h.clock.set("2026-06-11T16:00:00.000Z");
-  const seeded = seedReviewFindingTask("synthetic_review");
-  persistFindings(seeded, [
-    finding("non_blocking", "Rate limited follow-up", "Body text"),
-  ]);
-  const outbox = listFindingOutbox()[0]!;
-  const linear = new FakeLinearAdapter();
-  linear.createIssue = async () => {
-    throw new QuayError("adapter_error", "Linear rate-limited", {
-      adapter: "linear",
-      retryable: true,
-      retry_after: 90,
-    });
-  };
-
-  await expect(
-    processReviewFindingLinearIssueOutboxItem(
-      { db: h.db, clock: h.clock, linear },
-      { outboxItemId: outbox.outbox_item_id },
-    ),
-  ).rejects.toThrow("Linear rate-limited");
-
-  const row = h.db
-    .query<{ next_eligible_at: string | null }, [number]>(
-      `SELECT next_eligible_at FROM outbox_items WHERE outbox_item_id = ?`,
-    )
-    .get(outbox.outbox_item_id);
-  expect(row?.next_eligible_at).toBe("2026-06-11T16:01:30.000Z");
-});
-
-test("provider idempotency converges when link persistence fails after Linear create", async () => {
-  h = createHarness();
-  const seeded = seedReviewFindingTask("synthetic_review");
-  persistFindings(seeded, [
-    finding("non_blocking", "Crash-window follow-up", "Body text"),
-  ]);
-  const outbox = listFindingOutbox()[0]!;
-  const linear = new FakeLinearAdapter();
-
-  h.db.exec(
-    `CREATE TRIGGER review_finding_external_links_crash
-       BEFORE INSERT ON review_finding_external_links
-       BEGIN
-         SELECT RAISE(FAIL, 'simulated link write crash');
-       END`,
-  );
-  await expect(
-    processReviewFindingLinearIssueOutboxItem(
-      { db: h.db, clock: h.clock, linear },
-      { outboxItemId: outbox.outbox_item_id },
-    ),
-  ).rejects.toThrow("simulated link write crash");
-  h.db.exec("DROP TRIGGER review_finding_external_links_crash");
-
-  await processReviewFindingLinearIssueOutboxItem(
-    { db: h.db, clock: h.clock, linear },
-    { outboxItemId: outbox.outbox_item_id },
-  );
-
-  expect(linear.createIssueCalls).toHaveLength(2);
-  expect(linear.createIssueCalls[0]!.idempotencyKey).toBe(
-    linear.createIssueCalls[1]!.idempotencyKey,
-  );
-  expect(linkProviderExternalId()).toBe("linear-created-1");
-  expect(linkCount()).toBe(1);
-});
-
-test("re-persisting the same review reuses outbox idempotency and reattaches the provider link", async () => {
+test("re-persisting the same review reattaches an existing provider link to the new finding", () => {
   h = createHarness();
   const seeded = seedReviewFindingTask("synthetic_review");
   const rows = [finding("non_blocking", "Stable follow-up", "Body text")];
   persistFindings(seeded, rows);
   const outbox = listFindingOutbox()[0]!;
-  const linear = new FakeLinearAdapter();
-  await processReviewFindingLinearIssueOutboxItem(
-    { db: h.db, clock: h.clock, linear },
-    { outboxItemId: outbox.outbox_item_id },
-  );
   const firstFindingId = currentFindingId();
+  // Simulate the orchestrator recording the delivered Linear issue back into
+  // Quay's dedup ledger. Re-enqueue must then reattach the link to the newly
+  // persisted finding rather than minting a second outbox row.
+  seedExternalLink(firstFindingId, outbox.outbox_item_id);
 
   persistFindings(seeded, rows);
 
@@ -371,6 +171,38 @@ function listFindingOutbox(): Array<{
     .all(REVIEW_FINDING_LINEAR_ISSUE_OUTBOX_KIND);
 }
 
+// Seed the Quay-owned dedup ledger row the orchestrator would write back after
+// creating the Linear issue, so enqueue's reattachment path can be exercised
+// without the (removed) in-process delivery handler.
+function seedExternalLink(findingId: number, outboxItemId: number): void {
+  if (!h) throw new Error("missing harness");
+  const finding = h.db
+    .query<{ task_id: string; review_id: string; fingerprint: string }, [number]>(
+      `SELECT task_id, review_id, fingerprint
+         FROM review_findings
+        WHERE finding_id = ?`,
+    )
+    .get(findingId);
+  if (finding === null) throw new Error(`finding ${findingId} not found`);
+  const now = h.clock.nowISO();
+  h.db
+    .query(
+      `INSERT INTO review_finding_external_links (
+         finding_id, task_id, review_id, fingerprint, provider,
+         provider_external_id, provider_url, outbox_item_id, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'linear', 'linear-created-1', 'https://linear.test/1', ?, ?, ?)`,
+    )
+    .run(
+      findingId,
+      finding.task_id,
+      finding.review_id,
+      finding.fingerprint,
+      outboxItemId,
+      now,
+      now,
+    );
+}
+
 function linkCount(): number {
   if (!h) throw new Error("missing harness");
   return h.db
@@ -396,13 +228,4 @@ function linkFindingId(): number | null {
       `SELECT finding_id FROM review_finding_external_links LIMIT 1`,
     )
     .get()!.finding_id;
-}
-
-function linkProviderExternalId(): string | null {
-  if (!h) throw new Error("missing harness");
-  return h.db
-    .query<{ provider_external_id: string | null }, []>(
-      `SELECT provider_external_id FROM review_finding_external_links LIMIT 1`,
-    )
-    .get()!.provider_external_id;
 }
