@@ -74,7 +74,7 @@ import {
 import { createIdentityMappingService } from "./identity_mappings.ts";
 import { ensureWorkItemRunIdentity } from "./enqueue.ts";
 import { enqueuePrReadyApprovedOutboxItem } from "./pr_ready_approved_outbox.ts";
-import { enqueueReviewFindingLinearIssuesInOpenTxn } from "./review_finding_linear_outbox.ts";
+import { enqueueReviewFindingLinearIssuesIfEnabledInOpenTxn } from "./review_finding_linear_policy.ts";
 import { normalizeStoredSlackThreadRef } from "./slack_thread_ref.ts";
 import {
   processGoalCompletionAudit,
@@ -2276,10 +2276,13 @@ function persistReviewFindingsInOpenTxn(
     now,
     rawReviewResult,
   });
-  enqueueReviewFindingLinearIssuesInOpenTxn(deps, {
+  // Enqueue gate (BRIX-1898): only place the Linear-issue outbox row when the
+  // toggle resolves on for this repo. Findings persistence above is unchanged.
+  enqueueReviewFindingLinearIssuesIfEnabledInOpenTxn(deps, {
     taskId: task.task_id,
     attemptId: task.attempt_id,
     reviewId,
+    repoId: task.repo_id,
   });
 }
 

@@ -47,6 +47,7 @@ export interface QuayAdminRepo {
   model_reviewer: string | null;
   preamble_worker: number | null;
   preamble_reviewer: number | null;
+  review_finding_linear_enabled: boolean | null;
   archived_at: string | null;
   created_at: string;
 }
@@ -203,6 +204,9 @@ interface QuayAdminGlobal {
     ignored_workflow_names: string[];
   };
   adapters: QuayAdminAdapter[];
+  review_findings: {
+    linear_enabled: boolean;
+  };
   agents: {
     defaults: QuayAdminAgentDefaults;
     invocations: QuayAdminAgentInvocation[];
@@ -461,13 +465,17 @@ function toRepoSummary(repo: QuayAdminRepoDetail): RepoSummary {
     repo.preamble_worker,
     repo.preamble_reviewer,
   ].filter(Boolean);
+  // Tri-state override: both on (true) and off (false) count as overrides;
+  // only inherit (null) does not. `filter(Boolean)` above would drop `false`,
+  // so count this one by non-null instead.
+  const reviewFindingOverrides = repo.review_finding_linear_enabled != null ? 1 : 0;
 
   return {
     revision: repo.revision,
     id: repo.repo_id,
     active: repo.active_task_count,
     agent: repo.agent_worker ?? 'inherits',
-    overrides: overrideFields.length,
+    overrides: overrideFields.length + reviewFindingOverrides,
     url: repo.repo_url,
     baseBranch: repo.base_branch,
     createdAt: repo.created_at,
@@ -482,6 +490,7 @@ function toRepoSummary(repo: QuayAdminRepoDetail): RepoSummary {
     modelReviewer: repo.model_reviewer,
     preambleWorker: repo.preamble_worker,
     preambleReviewer: repo.preamble_reviewer,
+    reviewFindingLinearEnabled: repo.review_finding_linear_enabled,
     ciPolicy: {
       ignoreMode: repo.ci_policy.ignore_mode,
       ignoredCheckNames: repo.ci_policy.ignored_check_names,
@@ -537,6 +546,9 @@ function toGlobalSummary(global: QuayAdminGlobal): GlobalConfigSummary {
       ignoredWorkflowNames: global.ci_policy.ignored_workflow_names,
     },
     adapters: global.adapters.map(toAdapterSummary),
+    reviewFindings: {
+      linearEnabled: global.review_findings.linear_enabled,
+    },
     agents: {
       defaults: {
         worker: global.agents.defaults.worker,

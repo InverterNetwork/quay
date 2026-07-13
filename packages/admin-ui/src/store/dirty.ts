@@ -33,6 +33,7 @@ export interface RepoUpdateChange {
     model_reviewer: string | null;
     preamble_worker: string | number | null;
     preamble_reviewer: string | number | null;
+    review_finding_linear_enabled: boolean | null;
   }>;
 }
 
@@ -62,6 +63,7 @@ export interface DeploymentSettingsUpdateChange {
     worker_model: string | null;
     reviewer_agent: string | null;
     reviewer_model: string | null;
+    review_finding_linear_enabled: boolean | null;
   }>;
 }
 

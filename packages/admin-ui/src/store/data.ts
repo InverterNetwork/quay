@@ -20,6 +20,9 @@ export interface RepoSummary {
   modelReviewer?: string | null;
   preambleWorker?: number | null;
   preambleReviewer?: number | null;
+  // Per-repo override for filing non-blocking review findings as Linear
+  // issues. null = inherit the global default, true = on, false = off.
+  reviewFindingLinearEnabled?: boolean | null;
   ciPolicy: RepoCiPolicySummary;
   effectivePreambles: {
     worker: RepoEffectivePreamble;
@@ -172,6 +175,11 @@ export interface GlobalConfigSummary {
     ignoredWorkflowNames: string[];
   };
   adapters: AdapterSummary[];
+  reviewFindings: {
+    // Global default (policy) for filing non-blocking review findings as
+    // Linear issues. Distinct from the Linear adapter's connectivity flag.
+    linearEnabled: boolean;
+  };
   agents: {
     defaults: AgentDefaults;
     invocations: AgentInvocation[];

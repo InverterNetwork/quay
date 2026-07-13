@@ -271,6 +271,7 @@ function repoPendingValue(repo: RepoSummary, changes: ChangeEntry[]) {
     if (entry?.change.type !== 'repo.update') return fallback;
     const pending = entry.change.patch[field as keyof typeof entry.change.patch];
     if (typeof pending === 'number') return String(pending);
+    if (typeof pending === 'boolean') return pending ? 'on' : 'off';
     return pending === undefined ? fallback : pending;
   };
 }

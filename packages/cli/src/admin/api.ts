@@ -400,6 +400,7 @@ const deploymentSettingsPatchSchema = z
     worker_model: z.string().min(1).nullable().optional(),
     reviewer_agent: z.string().min(1).nullable().optional(),
     reviewer_model: z.string().min(1).nullable().optional(),
+    review_finding_linear_enabled: z.boolean().nullable().optional(),
   })
   .strict();
 
@@ -1437,6 +1438,12 @@ function buildGlobalReadModel(runtime: AdminApiRuntime): Record<string, unknown>
       ignored_workflow_names: ciPolicyFromConfig(runtime.config).ignoredWorkflowNames,
     },
     adapters: buildAdapterSummaries(runtime),
+    review_findings: {
+      // Global default (policy, distinct from the Linear adapter's
+      // connectivity `enabled` flag). Gates the review-finding -> Linear
+      // issue enqueue for `synthetic_review` tasks only.
+      linear_enabled: effectiveReviewFindingLinearEnabled(runtime),
+    },
     agents: {
       defaults: {
         worker: agentSelection.defaults.worker,
@@ -2171,6 +2178,7 @@ const DEPLOYMENT_SETTINGS_PATCH_FIELDS = [
   "worker_model",
   "reviewer_agent",
   "reviewer_model",
+  "review_finding_linear_enabled",
 ] as const satisfies readonly (keyof DeploymentSettingsPatch)[];
 
 const REPO_PATCH_FIELDS = [
@@ -2187,6 +2195,7 @@ const REPO_PATCH_FIELDS = [
   "model_reviewer",
   "preamble_worker",
   "preamble_reviewer",
+  "review_finding_linear_enabled",
   "ci_ignore_mode",
   "ignored_check_names",
   "ignored_workflow_names",
@@ -2362,6 +2371,7 @@ function deploymentSettings(runtime: AdminApiRuntime): {
       worker_model: row?.worker_model ?? null,
       reviewer_agent: row?.reviewer_agent ?? null,
       reviewer_model: row?.reviewer_model ?? null,
+      review_finding_linear_enabled: row?.review_finding_linear_enabled ?? null,
     },
   };
 }
@@ -2377,7 +2387,14 @@ function effectiveDeploymentSettings(runtime: AdminApiRuntime): DeploymentSettin
     worker_model: selection.defaultModels?.worker ?? null,
     reviewer_agent: selection.defaults.reviewer,
     reviewer_model: selection.defaultModels?.reviewer ?? null,
+    review_finding_linear_enabled: effectiveReviewFindingLinearEnabled(runtime),
   };
+}
+
+// Global default for filing non-blocking review findings as Linear issues:
+// the stored deployment setting when present, else ON.
+function effectiveReviewFindingLinearEnabled(runtime: AdminApiRuntime): boolean {
+  return deploymentSettingsRow(runtime)?.review_finding_linear_enabled ?? true;
 }
 
 function stableJson(value: unknown): string {
