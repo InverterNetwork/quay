@@ -51,6 +51,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       "task claim",
       "task release-claim",
       "task retarget",
+      "task resnapshot",
     ],
   },
   "task list": {
@@ -96,6 +97,15 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--repo <target_repo>", desc: "Target repo_id for the cloned queued task." },
       { flag: "--base-branch <branch>", desc: "Optional target task base branch override." },
       { flag: "--yes", desc: "Required confirmation for the source task mutation." },
+    ],
+  },
+  "task resnapshot": {
+    path: "task resnapshot",
+    synopsis: "quay task resnapshot <task_id> --reason <text>",
+    summary:
+      "Re-fetch the task's Linear ticket and replace its frozen ticket_snapshot, re-baselining the reviewer's definition of done.",
+    flags: [
+      { flag: "--reason <text>", desc: "Required audit note recorded on the ticket_resnapshotted event." },
     ],
   },
   tick: {

@@ -58,6 +58,10 @@ import {
   type RetargetDeps,
 } from "../core/retarget.ts";
 import {
+  task_resnapshot,
+  type ResnapshotDeps,
+} from "../core/resnapshot.ts";
+import {
   claim_task,
   release_claim,
   submit_brief,
@@ -764,6 +768,9 @@ async function handleTask(
     case "retarget":
       if (wantsHelp(rest)) return printHelp(io, ["task", "retarget"]);
       return await handleTaskRetarget(rest, deps, io);
+    case "resnapshot":
+      if (wantsHelp(rest)) return printHelp(io, ["task", "resnapshot"]);
+      return await handleTaskResnapshot(rest, deps, io);
     default:
       // A typo'd subcommand benefits from the noun's usage block as much as
       // a missing one — surface it on stderr alongside the structured envelope.
@@ -817,6 +824,49 @@ async function handleTaskRetarget(
   const baseBranch = readFlag(argv, "--base-branch");
   if (baseBranch !== null) input.baseBranch = baseBranch;
   return emitServiceResult(await task_retarget(retargetDeps, input), io);
+}
+
+async function handleTaskResnapshot(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  const validation = validateFlags(argv, { valued: ["--reason"] });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const taskId = positional(argv);
+  if (!taskId) {
+    return writeError(io, "usage_error", "task resnapshot requires <task_id>");
+  }
+  const reason = readFlag(argv, "--reason");
+  if (reason === null) {
+    return writeError(io, "usage_error", "task resnapshot requires --reason <text>");
+  }
+  // Re-fetch reads the live Linear ticket; a deployment without the Linear
+  // adapter wired cannot re-baseline. Fail closed with the same usage-error
+  // shape the enqueue-linear path uses.
+  if (deps.linear === undefined || deps.adaptersConfig === undefined) {
+    return writeError(
+      io,
+      "adapter_not_enabled",
+      "[adapters.linear] is not configured for this deployment",
+      { adapter: "linear" },
+    );
+  }
+  const resnapshotDeps: ResnapshotDeps = {
+    db: deps.db,
+    clock: deps.clock,
+    artifactStore: deps.artifactStore,
+    supervisorLock: deps.supervisorLock,
+    linear: deps.linear,
+    slack: deps.slack,
+    adaptersConfig: deps.adaptersConfig,
+  };
+  return emitServiceResult(
+    await task_resnapshot(resnapshotDeps, { taskId, reason }),
+    io,
+  );
 }
 
 // Common "explicit --help" path for any command/subcommand: prints to stdout,
