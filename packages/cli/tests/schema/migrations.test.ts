@@ -624,7 +624,41 @@ test("deployment_settings table stores mutable agent defaults", () => {
     "reviewer_model",
     "created_at",
     "updated_at",
+    "review_finding_linear_enabled",
   ]);
+});
+
+test("review-finding Linear toggle columns are tri-state (NULL/0/1)", () => {
+  h = createHarness();
+  const db = h.db;
+
+  const deploymentCols = db
+    .query<{ name: string }, []>(`PRAGMA table_info(deployment_settings)`)
+    .all()
+    .map((r) => r.name);
+  expect(deploymentCols).toContain("review_finding_linear_enabled");
+
+  const repoCols = db
+    .query<{ name: string }, []>(`PRAGMA table_info(repos)`)
+    .all()
+    .map((r) => r.name);
+  expect(repoCols).toContain("review_finding_linear_enabled");
+
+  // New columns default to NULL (inherit / unset) on existing rows.
+  insertRepo(db, "repo-toggle-default");
+  const value = db
+    .query<{ review_finding_linear_enabled: number | null }, [string]>(
+      `SELECT review_finding_linear_enabled FROM repos WHERE repo_id = ?`,
+    )
+    .get("repo-toggle-default");
+  expect(value?.review_finding_linear_enabled).toBeNull();
+
+  // The CHECK constraint rejects out-of-range integers.
+  expect(() =>
+    db
+      .query(`UPDATE repos SET review_finding_linear_enabled = 2 WHERE repo_id = ?`)
+      .run("repo-toggle-default"),
+  ).toThrow();
 });
 
 test("identity_mappings table stores Slack to GitHub assignee mappings", () => {

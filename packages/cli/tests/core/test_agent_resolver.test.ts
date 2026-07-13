@@ -196,6 +196,7 @@ test("resolver uses DB deployment settings over TOML defaults", () => {
       worker_model: "db-worker-model",
       reviewer_agent: "claude",
       reviewer_model: "db-reviewer-model",
+      review_finding_linear_enabled: null,
     },
   });
 
@@ -240,7 +241,8 @@ test("resolver treats existing DB null settings as authoritative clears", () => 
     },
     deploymentSettings: h.db
       .query(
-        `SELECT worker_agent, worker_model, reviewer_agent, reviewer_model
+        `SELECT worker_agent, worker_model, reviewer_agent, reviewer_model,
+                review_finding_linear_enabled
            FROM deployment_settings
           WHERE singleton_id = 1`,
       )
@@ -249,6 +251,7 @@ test("resolver treats existing DB null settings as authoritative clears", () => 
         worker_model: string | null;
         reviewer_agent: string | null;
         reviewer_model: string | null;
+        review_finding_linear_enabled: boolean | null;
       },
   });
 
@@ -285,8 +288,10 @@ test("resolver reads deployment settings provider on each default resolve", () =
           worker_model: string | null;
           reviewer_agent: string | null;
           reviewer_model: string | null;
+          review_finding_linear_enabled: boolean | null;
         }, []>(
-          `SELECT worker_agent, worker_model, reviewer_agent, reviewer_model
+          `SELECT worker_agent, worker_model, reviewer_agent, reviewer_model,
+                  review_finding_linear_enabled
              FROM deployment_settings
             WHERE singleton_id = 1`,
         )

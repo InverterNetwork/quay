@@ -2373,6 +2373,9 @@ function handleSettingsImport(
     worker_model: loaded.config.agents?.worker_model ?? null,
     reviewer_agent: loaded.config.agents?.reviewer ?? null,
     reviewer_model: loaded.config.agents?.reviewer_model ?? null,
+    // No config-file source for the review-finding toggle: leave it unset so
+    // it resolves to ON (the current intended behavior).
+    review_finding_linear_enabled: null,
   };
   const onlyEmpty = argv.includes("--only-empty");
   const next = onlyEmpty && current !== null ? current : imported;
