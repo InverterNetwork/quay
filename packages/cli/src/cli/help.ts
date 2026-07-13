@@ -143,7 +143,6 @@ const COMMANDS: Record<string, CommandSpec> = {
       "outbox claim",
       "outbox complete",
       "outbox fail",
-      "outbox deliver",
     ],
   },
   "outbox list": {
@@ -189,12 +188,6 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--error <message>", desc: "Error text to store in last_error." },
       { flag: "--next-eligible-at <iso>", desc: "Optional retry cooldown timestamp." },
     ],
-  },
-  "outbox deliver": {
-    path: "outbox deliver",
-    synopsis: "quay outbox deliver <outbox_item_id>",
-    summary:
-      "Claim, execute, and complete a supported delivery outbox item with its production handler.",
   },
   enqueue: {
     path: "enqueue",
