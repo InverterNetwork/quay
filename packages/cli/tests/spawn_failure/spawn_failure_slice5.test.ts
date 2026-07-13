@@ -39,19 +39,59 @@ test("test_045_spawn_failure_no_evidence_rolls_back_budget_and_requeues", async 
   ]);
   const task = h.db
     .query<
-      { state: string; attempts_consumed: number; spawn_failures_consecutive: number },
+      {
+        state: string;
+        attempts_consumed: number;
+        spawn_failures_consecutive: number;
+        spawn_retry_next_eligible_at: string | null;
+        spawn_failure_reason: string | null;
+      },
       [string]
     >(
-      `SELECT state, attempts_consumed, spawn_failures_consecutive
+      `SELECT state, attempts_consumed, spawn_failures_consecutive,
+              spawn_retry_next_eligible_at, spawn_failure_reason
        FROM tasks WHERE task_id = ?`,
     )
     .get(t.taskId);
-  expect(task).toEqual({
-    state: "queued",
-    attempts_consumed: 0,
-    spawn_failures_consecutive: 1,
-  });
+  expect(task?.state).toBe("queued");
+  expect(task?.attempts_consumed).toBe(0);
+  expect(task?.spawn_failures_consecutive).toBe(1);
+  expect(task?.spawn_retry_next_eligible_at).toBe("2026-04-28T13:05:00.000Z");
+  expect(task?.spawn_failure_reason).toContain("repo-spawn-fail");
   expect(pendingReason(t.taskId)).toBe("initial");
+});
+
+test("spawn failure backoff skips queued retry before token preflight", async () => {
+  h = createHarness();
+  h.clock.set("2026-04-28T13:00:00.000Z");
+  const repoId = insertRepo(h.db, "repo-spawn-backoff");
+  const t = insertRunningTask(h.db, {
+    taskId: "task-spawn-backoff",
+    repoId,
+    worktreesRoot: join(h.dataDir, "worktrees"),
+    tmuxSession: null,
+    attemptsConsumed: 1,
+    remoteShaAtSpawn: null,
+  });
+
+  const built = buildTickDeps(h);
+  built.git.setRemoteHeadSha(repoId, t.branchName, null);
+  built.github.setPrExists(repoId, t.branchName, false);
+
+  expect(await tick_once(built.deps)).toEqual([
+    { task_id: t.taskId, action: "spawn_failed" },
+  ]);
+  expect(await tick_once(built.deps)).toEqual([]);
+  expect(built.github.tokenAccessCalls).toHaveLength(0);
+  expect(built.github.prExistsWithTokenCalls).toHaveLength(0);
+  expect(built.tmux.spawnAttempts).toHaveLength(0);
+
+  h.clock.set("2026-04-28T13:05:00.000Z");
+  expect(await tick_once(built.deps)).toEqual([
+    { task_id: t.taskId, action: "spawned" },
+  ]);
+  expect(built.github.tokenAccessCalls).toHaveLength(1);
+  expect(built.tmux.spawnAttempts).toHaveLength(1);
 });
 
 test("test_046b_spawn_window_push_without_pr_takes_spawn_failed_default", async () => {
@@ -129,6 +169,7 @@ test("test_062_consecutive_substrate_failures_accumulate_across_ticks", async ()
   for (let i = 0; i < 6; i++) {
     built.tmux.failSpawnNext();
     await tick_once(built.deps);
+    h.clock.set(new Date(Date.parse(h.clock.nowISO()) + 60 * 60 * 1000).toISOString());
   }
   const task = h.db
     .query<{ state: string; spawn_failures_consecutive: number }, [string]>(

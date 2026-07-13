@@ -899,6 +899,28 @@ test("orchestrator handoffs carry next eligibility timestamp", () => {
   ).toContain("WHERE status = 'pending'");
 });
 
+test("tasks table tracks spawn retry backoff and reason", () => {
+  h = createHarness();
+  const cols = h.db
+    .query<{ name: string }, []>(`PRAGMA table_info(tasks)`)
+    .all()
+    .map((r) => r.name);
+  expect(cols).toContain("spawn_retry_next_eligible_at");
+  expect(cols).toContain("spawn_failure_reason");
+
+  const indexes = h.db
+    .query<{ name: string; sql: string }, []>(
+      `SELECT name, sql
+         FROM sqlite_master
+        WHERE type = 'index'
+          AND tbl_name = 'tasks'
+          AND name = 'tasks_spawn_retry_eligible_idx'`,
+    )
+    .all();
+  expect(indexes).toHaveLength(1);
+  expect(indexes[0]!.sql).toContain("spawn_retry_next_eligible_at");
+});
+
 test("outbox items support delivery and workflow metadata", () => {
   h = createHarness();
   const cols = h.db
