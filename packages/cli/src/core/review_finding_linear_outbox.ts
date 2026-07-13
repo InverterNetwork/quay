@@ -225,7 +225,7 @@ function loadEligibleFindings(
           AND f.attempt_id = ?
           AND f.review_id = ?
           AND f.severity = 'non_blocking'
-          AND t.authoring_mode IN ('synthetic_review', 'adopted_external_pr')
+          AND t.authoring_mode = 'synthetic_review'
         ORDER BY f.ordinal`,
     )
     .all(taskId, attemptId, reviewId);
@@ -252,7 +252,7 @@ function loadCurrentFinding(
             AND f.review_id = ?
             AND f.fingerprint = ?
             AND f.severity = 'non_blocking'
-            AND t.authoring_mode IN ('synthetic_review', 'adopted_external_pr')
+            AND t.authoring_mode = 'synthetic_review'
           ORDER BY f.finding_id DESC
           LIMIT 1`,
       )

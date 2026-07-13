@@ -134,18 +134,18 @@ test("outbox deliver normalizes Linear delivery failures through CLI errors", as
   });
 });
 
-test("adopted external PR findings are human-owned and blocking findings are skipped", () => {
+test("adopted external PR findings do not create Linear follow-up outbox rows", () => {
   h = createHarness();
+  // Quay owns the feedback loop for adopted PRs: the worker respawns on
+  // changes_requested and fixes non-blocking findings in-loop, so filing a
+  // Linear issue for them would be redundant.
   const seeded = seedReviewFindingTask("adopted_external_pr");
   persistFindings(seeded, [
     finding("non_blocking", "Adopted follow-up", "Body text"),
     finding("blocking", "Blocking review", "Do not ticket this path"),
   ]);
 
-  const outbox = listFindingOutbox();
-  expect(outbox).toHaveLength(1);
-  const payload = JSON.parse(outbox[0]!.payload_json ?? "{}");
-  expect(payload.title).toBe("Adopted follow-up");
+  expect(listFindingOutbox()).toHaveLength(0);
 });
 
 test("quay-owned review findings do not create Linear follow-up outbox rows", () => {
