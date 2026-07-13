@@ -251,10 +251,11 @@ are probed against the target repository before their attempts are promoted.
 Worker tokens are checked before tmux starts by exercising repo access, branch
 PR visibility, and worker write access. Invalid, expired, empty, missing, or
 repo-inaccessible worker tokens fail as `worker_auth_invalid`: Quay retries one
-freshly resolved token source, then moves the task to `awaiting-next-brief`
-with a `worker_auth_invalid` handoff if the preflight still fails. Reviewer
-auth failures remain `spawn_substrate_failed` and stay out of the
-`review_infra_failed` retry accounting.
+freshly resolved token source after the task's spawn backoff expires, then moves
+the task to `awaiting-next-brief` with a `worker_auth_invalid` handoff if the
+preflight still fails. Reviewer auth failures remain `spawn_substrate_failed`
+until the reviewer infrastructure failure threshold parks the task in
+`non_budget_loop`.
 
 `worker.gh_token_file` is the preferred worker source when configured, even if
 `QUAY_WORKER_GH_TOKEN` is also present in the tick environment.

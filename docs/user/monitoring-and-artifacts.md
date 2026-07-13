@@ -111,5 +111,7 @@ a `tick_error` event and continues processing other tasks. A later successful
 tick path clears the task's `tick_error` field.
 
 Worker GitHub auth preflight failures are not `tick_error`: they are classified
-as `worker_auth_invalid`, retried once with freshly resolved credentials, then
-surfaced through an `awaiting-next-brief` handoff if the retry also fails.
+as `worker_auth_invalid`, retried once after `spawn_retry_next_eligible_at` with
+freshly resolved credentials, then surfaced through an `awaiting-next-brief`
+handoff if the retry also fails. Spawn/reviewer infrastructure failures record
+their latest operator-facing reason in `tasks.spawn_failure_reason`.

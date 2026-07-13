@@ -205,6 +205,7 @@ test("reviewer env token wins over gh_token_file when both are present", async (
 
 test("reviewer spawn fails before promotion when no reviewer token source exists", async () => {
   h = createHarness();
+  h.clock.set("2026-05-12T10:00:00.000Z");
   const built = buildTickDeps(h);
   const { taskId, attemptId } = seedPendingReview(h, "token-none");
 
@@ -220,6 +221,68 @@ test("reviewer spawn fails before promotion when no reviewer token source exists
   expect(built.tmux.spawnCalls).toHaveLength(0);
   expect(built.github.tokenAccessCalls).toHaveLength(0);
   expect(reviewAttemptSpawnedAt(h, attemptId)).toBeNull();
+  expect(reviewSpawnBackoff(h, taskId)).toEqual({
+    state: "pr-review",
+    review_infra_failures_consecutive: 1,
+    spawn_retry_next_eligible_at: "2026-05-12T10:05:00.000Z",
+  });
+});
+
+test("reviewer spawn auth failure backs off and parks after repeated failures", async () => {
+  h = createHarness();
+  h.clock.set("2026-05-12T10:00:00.000Z");
+  const built = buildTickDeps(h);
+  const { repoId, taskId, attemptId } = seedPendingReview(h, "token-auth-backoff");
+  const reviewerToken = "ghs_reviewer_without_repo_access";
+  built.github.setTokenAccessHandler(() => {
+    throw new Error("HTTP 404: Not Found");
+  });
+
+  const first = await tick_once(built.deps, {
+    reviewerEnabled: true,
+    env: { [REVIEWER_GH_TOKEN_ENV]: reviewerToken },
+  });
+  expect(first.find((r) => r.task_id === taskId)?.action).toBe(
+    "spawn_substrate_failed",
+  );
+  expect(built.github.tokenAccessCalls).toEqual([
+    { repoId, token: reviewerToken, actor: "reviewer" },
+  ]);
+  expect(reviewAttemptSpawnedAt(h, attemptId)).toBeNull();
+  expect(reviewSpawnBackoff(h, taskId)).toEqual({
+    state: "pr-review",
+    review_infra_failures_consecutive: 1,
+    spawn_retry_next_eligible_at: "2026-05-12T10:05:00.000Z",
+  });
+
+  expect(
+    await tick_once(built.deps, {
+      reviewerEnabled: true,
+      env: { [REVIEWER_GH_TOKEN_ENV]: reviewerToken },
+    }),
+  ).toEqual([]);
+  expect(built.github.tokenAccessCalls).toHaveLength(1);
+
+  h.clock.set("2026-05-12T10:05:00.000Z");
+  await tick_once(built.deps, {
+    reviewerEnabled: true,
+    env: { [REVIEWER_GH_TOKEN_ENV]: reviewerToken },
+  });
+  h.clock.set("2026-05-12T10:15:00.000Z");
+  const third = await tick_once(built.deps, {
+    reviewerEnabled: true,
+    env: { [REVIEWER_GH_TOKEN_ENV]: reviewerToken },
+  });
+
+  expect(third.find((r) => r.task_id === taskId)?.action).toBe(
+    "non_budget_loop_parked",
+  );
+  expect(built.github.tokenAccessCalls).toHaveLength(3);
+  expect(reviewSpawnBackoff(h, taskId)).toEqual({
+    state: "non_budget_loop",
+    review_infra_failures_consecutive: 3,
+    spawn_retry_next_eligible_at: null,
+  });
 });
 
 test("reviewer spawn fails when gh_token_file is missing", async () => {
@@ -292,8 +355,34 @@ test("reviewer spawn validates non-empty gh_token_file credentials before promot
   ]);
   expect(built.tmux.spawnCalls).toHaveLength(0);
   expect(reviewAttemptSpawnedAt(h, attemptId)).toBeNull();
-  expect(reviewInfraFailureEventCount(h, taskId)).toBe(0);
+  expect(reviewInfraFailureEventCount(h, taskId)).toBe(1);
 });
+
+function reviewSpawnBackoff(
+  harness: Harness,
+  taskId: string,
+): {
+  state: string;
+  review_infra_failures_consecutive: number;
+  spawn_retry_next_eligible_at: string | null;
+} {
+  const row = harness.db
+    .query<
+      {
+        state: string;
+        review_infra_failures_consecutive: number;
+        spawn_retry_next_eligible_at: string | null;
+      },
+      [string]
+    >(
+      `SELECT state, review_infra_failures_consecutive,
+              spawn_retry_next_eligible_at
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  if (!row) throw new Error(`missing task ${taskId}`);
+  return row;
+}
 
 function reviewAttemptSpawnedAt(harness: Harness, attemptId: number): string | null {
   const row = harness.db

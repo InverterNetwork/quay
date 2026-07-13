@@ -179,8 +179,9 @@ not consume retry budget.
 ## `worker_auth_invalid`
 
 The worker GitHub token failed Quay's spawn-time auth preflight. Quay retries
-once after re-reading the configured token source. If the retry also fails, the
-task moves to `awaiting-next-brief` with a `worker_auth_invalid` handoff.
+once after re-reading the configured token source and waiting for
+`spawn_retry_next_eligible_at`. If the retry also fails, the task moves to
+`awaiting-next-brief` with a `worker_auth_invalid` handoff.
 
 Check the configured worker token source:
 
@@ -200,6 +201,10 @@ quay task get <task_id>
 quay task events <task_id>
 quay artifact get <task_id> session_log --path
 ```
+
+`tasks.spawn_failure_reason` records the latest spawn or reviewer
+infrastructure diagnostic, and `tasks.spawn_retry_next_eligible_at` shows when a
+non-parked retry becomes eligible.
 
 Manual recovery is currently cancellation:
 
