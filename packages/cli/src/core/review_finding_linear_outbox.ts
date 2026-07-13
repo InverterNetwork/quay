@@ -114,35 +114,6 @@ function loadEligibleFindings(
     .all(taskId, attemptId, reviewId);
 }
 
-function loadCurrentFinding(
-  db: DB,
-  payload: {
-    finding_id: number;
-    task_id: string;
-    review_id: string;
-    fingerprint: string;
-  },
-): ReviewFindingOutboxRow | null {
-  return (
-    db
-      .query<ReviewFindingOutboxRow, [string, string, string]>(
-        `SELECT f.finding_id, f.task_id, f.review_id, f.head_sha, f.severity,
-                f.title, f.body_markdown, f.principle_text, f.fingerprint,
-                t.repo_id, t.authoring_mode, t.pr_number, t.pr_url
-           FROM review_findings f
-           JOIN tasks t ON t.task_id = f.task_id
-          WHERE f.task_id = ?
-            AND f.review_id = ?
-            AND f.fingerprint = ?
-            AND f.severity = 'non_blocking'
-            AND t.authoring_mode = 'synthetic_review'
-          ORDER BY f.finding_id DESC
-          LIMIT 1`,
-      )
-      .get(payload.task_id, payload.review_id, payload.fingerprint) ?? null
-  );
-}
-
 function loadLocations(db: DB, findingId: number): ReviewFindingLocationRow[] {
   return db
     .query<ReviewFindingLocationRow, [number]>(
