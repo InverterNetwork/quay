@@ -455,6 +455,15 @@ export class LocalGitAdapter implements GitPort {
     }
   }
 
+  worktreePrune(repoId: string): void {
+    const result = runIn(this.bareDir(repoId), ["git", "worktree", "prune"]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `git worktree prune failed for ${repoId}: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+  }
+
   branchDelete(repoId: string, branch: string): void {
     const result = runIn(this.bareDir(repoId), [
       "git",

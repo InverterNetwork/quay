@@ -6764,13 +6764,19 @@ function recreateMissingQueuedWorktreeIfNeeded(
       recoveryBaseRef = `origin/${task.base_branch}`;
     }
     deps.git.fetch(task.repo_id, recoveryBaseBranch);
+    deps.git.worktreePrune(task.repo_id);
     deps.git.worktreeAddExistingBranch(
       task.repo_id,
       task.worktree_path,
       task.branch_name,
       recoveryBaseRef,
     );
-    installWorktreeDependencies(deps.commandRunner, repo, task.worktree_path);
+    try {
+      installWorktreeDependencies(deps.commandRunner, repo, task.worktree_path);
+    } catch (err) {
+      removeUmbrellaFinalPrWorktreeBestEffort(deps, task.worktree_path);
+      throw err;
+    }
   } catch (err) {
     return {
       task_id: task.task_id,
