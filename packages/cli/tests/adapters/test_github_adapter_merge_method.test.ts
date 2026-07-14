@@ -1,8 +1,3 @@
-// BRIX-1920 / BRIX-1921: `mergePullRequest` must pick a merge method the
-// target repo actually allows (instead of the historical hardcoded `--merge`),
-// and a policy-rejected merge must be classified as a distinct NON-RETRYABLE
-// kind rather than `unknown`.
-//
 // Setup mirrors the other adapter tests: shadow the real `gh` binary with a
 // stub script on PATH. The stub reports a configurable merge-method policy for
 // `gh api repos/{owner}/{repo}` and logs the flag passed to `gh pr merge` so
@@ -230,7 +225,7 @@ test("allowed merge method is cached per repo (single api read across merges)", 
 test("policy-rejected merge throws GitHubMergeError kind=method_not_allowed", () => {
   const { apiLog, mergeLog } = newLogs();
   // Method selection picks --merge (allowed per policy) but the merge itself
-  // is rejected by a branch/repo rule — the BRIX-1921 safety net.
+  // is rejected by a branch/repo rule.
   installGhStub(
     mergeMethodStub({
       allow: { merge: true, squash: false, rebase: false },

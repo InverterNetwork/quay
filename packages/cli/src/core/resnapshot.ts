@@ -1,20 +1,3 @@
-// `quay task resnapshot` — re-baseline a task's frozen `ticket_snapshot`.
-//
-// A task's `ticket_snapshot` is captured once at creation and is the
-// definition-of-done the reviewer enforces. When an operator changes scope
-// mid-flight by editing the live Linear ticket, that frozen snapshot never
-// updates, so the reviewer keeps enforcing the stale acceptance criteria.
-//
-// `task_resnapshot` re-fetches the Linear issue, re-parses the quay-config
-// block, re-composes the snapshot with the SAME code path enqueue uses
-// (`fetchTicketContextWithIssue`), and replaces the single per-task
-// `ticket_snapshot` artifact both worker and reviewer read. It records a
-// `ticket_resnapshotted` audit event carrying a before/after diff and the
-// required reason, and invalidates the latest review verdict so the next tick
-// schedules a fresh review against the new snapshot (a stale
-// `changes_requested` must not block re-review). Running it when the ticket is
-// unchanged is a safe, still-audited no-op.
-
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { ArtifactStore } from "../artifacts/store.ts";
@@ -64,8 +47,9 @@ export interface ResnapshotValue {
   // Count of terminal review verdicts (`approved` / `changes_requested`)
   // superseded so the next tick re-reviews against the new snapshot.
   review_invalidated: number;
-  // The new `ticket_snapshot` artifact id, or null on a no-op.
+  // New artifacts written on a changed resnapshot, or null on a no-op.
   snapshot_artifact_id: number | null;
+  objective_artifact_id: number | null;
   event_id: number;
 }
 
@@ -140,10 +124,11 @@ export async function task_resnapshot(
     task.external_ref,
   );
   const freshSnapshot = fetched.ctx.ticket_snapshot;
+  const freshBrief = fetched.ctx.brief;
 
   const externalRef = task.external_ref;
   return deps.supervisorLock.run(() =>
-    resnapshotUnderLock(deps, task, externalRef, freshSnapshot, reason),
+    resnapshotUnderLock(deps, task, externalRef, freshSnapshot, freshBrief, reason),
   );
 }
 
@@ -152,6 +137,7 @@ function resnapshotUnderLock(
   task: TaskRow,
   externalRef: string,
   freshSnapshot: string,
+  freshBrief: string,
   reason: string,
 ): ResnapshotResult {
   const now = deps.clock.nowISO();
@@ -168,47 +154,63 @@ function resnapshotUnderLock(
     oldContent === null ||
     JSON.stringify(freshCore) !== JSON.stringify(oldCore);
 
-  const eventData: Record<string, unknown> = {
-    reason,
-    external_ref: externalRef,
-    changed,
-    review_invalidated: 0,
-    snapshot_artifact_id: null,
-    before_snapshot_hash: oldContent === null ? null : sha256(oldContent),
-    after_snapshot_hash: sha256(freshSnapshot),
-    diff: diffCore(oldCore, freshCore),
-  };
-
-  let artifactId: number | null = null;
+  let snapshotArtifactId: number | null = null;
+  let objectiveArtifactId: number | null = null;
   let reviewInvalidated = 0;
   let eventId = -1;
+  let snapshotContentAfter = oldContent;
 
   deps.db.exec("BEGIN");
   try {
     if (changed) {
       // Preserve non-core augmentation keys (and their original positions)
       // from the prior snapshot; overwrite only the core definition-of-done
-      // keys with the freshly fetched values. This is the single shared
-      // snapshot both worker and reviewer read — replaced in place, no
-      // version skew.
+      // keys with the freshly fetched values.
       const merged: Record<string, unknown> =
         oldParsed === null ? {} : { ...oldParsed };
       for (const key of SNAPSHOT_CORE_KEYS) {
         if (key in freshParsed) merged[key] = freshParsed[key];
         else delete merged[key];
       }
-      const written = deps.artifactStore.writeArtifact({
+      const snapshotContent = JSON.stringify(merged, null, 2);
+      const writtenSnapshot = deps.artifactStore.writeArtifact({
         taskId: task.task_id,
         attemptId: null,
         kind: "ticket_snapshot",
-        content: JSON.stringify(merged, null, 2),
+        content: snapshotContent,
         extension: "md",
       });
-      artifactId = written.artifactId;
+      snapshotArtifactId = writtenSnapshot.artifactId;
+      snapshotContentAfter = snapshotContent;
+
+      const writtenObjective = deps.artifactStore.writeArtifact({
+        taskId: task.task_id,
+        attemptId: null,
+        kind: "task_objective",
+        content: freshBrief,
+        extension: "md",
+      });
+      objectiveArtifactId = writtenObjective.artifactId;
+
+      deps.db
+        .query(`UPDATE task_goals SET objective = ?, updated_at = ? WHERE task_id = ?`)
+        .run(freshBrief, now, task.task_id);
+
       reviewInvalidated = invalidateLatestReview(deps.db, task.task_id);
-      eventData.review_invalidated = reviewInvalidated;
-      eventData.snapshot_artifact_id = artifactId;
     }
+
+    const eventData: Record<string, unknown> = {
+      reason,
+      external_ref: externalRef,
+      changed,
+      review_invalidated: reviewInvalidated,
+      snapshot_artifact_id: snapshotArtifactId,
+      objective_artifact_id: objectiveArtifactId,
+      before_snapshot_hash: oldContent === null ? null : sha256(oldContent),
+      after_snapshot_hash:
+        snapshotContentAfter === null ? null : sha256(snapshotContentAfter),
+      diff: diffCore(oldCore, freshCore),
+    };
 
     const eventRow = deps.db
       .query<{ event_id: number }, [string, string, string, string, string]>(
@@ -237,7 +239,8 @@ function resnapshotUnderLock(
       external_ref: externalRef,
       changed,
       review_invalidated: reviewInvalidated,
-      snapshot_artifact_id: artifactId,
+      snapshot_artifact_id: snapshotArtifactId,
+      objective_artifact_id: objectiveArtifactId,
       event_id: eventId,
     },
   };

@@ -1454,7 +1454,7 @@ function ensureTaskObjectiveArtifact(
         WHERE task_id = ?
           AND kind = 'task_objective'
           AND attempt_id IS NULL
-        ORDER BY artifact_id ASC
+        ORDER BY artifact_id DESC
         LIMIT 1`,
     )
     .get(taskId);
@@ -1641,7 +1641,7 @@ function loadReviewContextBrief(db: DB, taskId: string): string | null {
         WHERE task_id = ?
           AND kind = 'task_objective'
           AND attempt_id IS NULL
-        ORDER BY artifact_id ASC
+        ORDER BY artifact_id DESC
         LIMIT 1`,
     )
     .get(taskId);

@@ -877,7 +877,7 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                    WHERE ar.task_id = t.task_id
                      AND ar.kind = 'task_objective'
                      AND ar.attempt_id IS NULL
-                   ORDER BY ar.artifact_id ASC
+                   ORDER BY ar.artifact_id DESC
                    LIMIT 1
                 ) AS objective_file_path,
                 (
@@ -886,7 +886,7 @@ function missionControlTaskRows(db: DB): MissionControlTaskRow[] {
                    WHERE ar.task_id = t.task_id
                      AND ar.kind = 'ticket_snapshot'
                      AND ar.attempt_id IS NULL
-                   ORDER BY ar.artifact_id ASC
+                   ORDER BY ar.artifact_id DESC
                    LIMIT 1
                 ) AS ticket_snapshot_file_path,
                 CASE

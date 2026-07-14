@@ -1,8 +1,8 @@
 -- Backfill task-level kind='task_objective' artifact rows for every task
 -- that existed before the shared code-worker prompt composer landed.
 --
--- The composer's loadOriginalTaskObjective() requires a kind='task_objective'
--- artifact with attempt_id IS NULL, written once at enqueue time. Without
+-- The composer's loadOriginalTaskObjective() requires at least one
+-- kind='task_objective' artifact with attempt_id IS NULL. Without
 -- this backfill, any pre-existing active task would throw on its next CI /
 -- crash / stale / wall-clock / malformed retry, on review/conflict respawn,
 -- or on orchestrator submit-brief.

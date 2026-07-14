@@ -111,10 +111,9 @@ export function insertFinalPromptArtifact(
   }).artifactId;
 }
 
-// Seeds the kind='task_objective' artifact that loadOriginalTaskObjective
-// requires. Real enqueue writes this once per task; tests that bypass enqueue
-// (any test that uses insertTask + retries/respawn/submit_brief) must call
-// this helper explicitly.
+// Seeds a task-level kind='task_objective' artifact. Tests that bypass enqueue
+// (any test that uses insertTask + retries/respawn/submit_brief) must call this
+// helper explicitly.
 export function seedTaskObjective(
   h: { db: DB; artifactRoot: string; clock: Clock },
   taskId: string,
