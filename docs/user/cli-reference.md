@@ -426,6 +426,7 @@ quay task events <task_id>
 quay task claim <task_id>
 quay task release-claim <task_id> --claim-id <claim_id>
 quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes
+quay task recreate-worktree <task_id> --yes [--force]
 ```
 
 `task claim` only succeeds for `awaiting-next-brief` tasks.
@@ -434,6 +435,15 @@ quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes
 It also includes `authors`, parsed from the ticket's `quay-config.authors`
 block as `{name, slack_id}` objects. Legacy or malformed rows return
 `authors: []`.
+
+`task recreate-worktree` recreates an existing task's recorded worktree. By
+default it only runs when `task.worktree_path` is missing and no active attempt
+is recorded. It uses `origin/<task.branch_name>` when that remote branch exists;
+otherwise it rebuilds from `origin/<base_branch>` while restoring the task
+branch name. The repo install command runs after recreation, and Quay records a
+`worktree_recreated` event with the recovery base. Use `--force` only after
+confirming no worker is live; it allows recreation when the path already exists
+or an active attempt is still recorded.
 
 `task list`, `task get`, and `task events` accept legacy `task_id` values and
 return the same task/run rows as before. JSON output now also includes

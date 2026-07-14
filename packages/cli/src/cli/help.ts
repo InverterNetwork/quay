@@ -51,6 +51,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       "task claim",
       "task release-claim",
       "task retarget",
+      "task recreate-worktree",
     ],
   },
   "task list": {
@@ -96,6 +97,19 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--repo <target_repo>", desc: "Target repo_id for the cloned queued task." },
       { flag: "--base-branch <branch>", desc: "Optional target task base branch override." },
       { flag: "--yes", desc: "Required confirmation for the source task mutation." },
+    ],
+  },
+  "task recreate-worktree": {
+    path: "task recreate-worktree",
+    synopsis:
+      "quay task recreate-worktree <task_id> --yes [--force]",
+    summary:
+      "Recreate a task's recorded worktree when the path is missing.",
+    details:
+      "Uses origin/<task.branch_name> when that remote branch exists. Otherwise it rebuilds from origin/<base_branch> while restoring the task branch name, then reruns the repo install command.",
+    flags: [
+      { flag: "--yes", desc: "Required confirmation for git worktree mutation." },
+      { flag: "--force", desc: "Allow recreation when the path exists or an active attempt is recorded." },
     ],
   },
   tick: {
