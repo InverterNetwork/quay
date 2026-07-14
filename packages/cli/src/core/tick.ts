@@ -80,7 +80,11 @@ import {
   processGoalCompletionAudit,
   type GoalCompletionPendingTask,
 } from "./goal_audit.ts";
-import { transitionTaskState } from "./task_state.ts";
+import {
+  TASK_TERMINAL_STATES,
+  type TaskTerminalState,
+  transitionTaskState,
+} from "./task_state.ts";
 import {
   listWaitingDependencyTasks,
   releaseTaskIfDependenciesSatisfied,
@@ -1813,21 +1817,44 @@ function readReadyUmbrellaFinalPrWorkflows(
     .all();
 }
 
-// BRIX-1924: an umbrella can never reach its final PR once every expected
-// child is linked to a Quay task that terminated as `cancelled` — those
-// children can never reach `merged_to_feature_branch`, and none of the
-// expected rows is still `expected` (enqueueable) or `complete_without_quay`
-// (a success). Such an umbrella would otherwise linger `active` forever
-// (observed on BRIX-1902). This is the exact inverse of the readiness gate in
-// `readReadyUmbrellaFinalPrWorkflows`: retire when NOT EXISTS an expected task
-// that is anything other than "linked to a cancelled task". Umbrellas with a
-// child still in progress, already merged to the feature branch, complete
-// without Quay, or still unlinked (`expected`) are left untouched.
+// Terminal task states that count as an umbrella success — a child that
+// reached one of these contributed real, kept work, so its umbrella must never
+// be retired. `merged_to_feature_branch` is the umbrella-child merge terminal;
+// `merged` is a directly-merged PR.
+const UMBRELLA_CHILD_SUCCESS_TERMINAL_STATES: readonly TaskTerminalState[] = [
+  "merged_to_feature_branch",
+  "merged",
+];
+
+// The remaining canonical terminal states are non-success: a child stuck in one
+// of these has stopped for good and can never reach `merged_to_feature_branch`,
+// so it can never let its umbrella complete. Derived from TASK_TERMINAL_STATES
+// minus the successes above — concretely `cancelled` and `closed_unmerged` —
+// so a future non-success terminal state is picked up automatically.
+const UMBRELLA_CHILD_RETIRABLE_TERMINAL_STATES: readonly TaskTerminalState[] =
+  TASK_TERMINAL_STATES.filter(
+    (state) => !UMBRELLA_CHILD_SUCCESS_TERMINAL_STATES.includes(state),
+  );
+
+// BRIX-1924: an umbrella can never reach its final PR once every expected child
+// has stopped in a terminal, non-success state (`cancelled` / `closed_unmerged`
+// — see UMBRELLA_CHILD_RETIRABLE_TERMINAL_STATES) with no success or in-flight
+// child left. Such an umbrella would otherwise linger `active` forever
+// (observed on BRIX-1902). This is NOT the inverse of the readiness gate in
+// `readReadyUmbrellaFinalPrWorkflows` — the two are disjoint, and an umbrella
+// that is neither ready nor retirable (e.g. one child merged, one still
+// running) is intentionally left alone. Retire only when NOT EXISTS an expected
+// task that is anything other than "linked to a terminal-non-success task": a
+// child still in progress, a child that succeeded (`merged_to_feature_branch` /
+// `merged` / `complete_without_quay`), or a still-unlinked `expected` child
+// (which could yet be enqueued) each block retirement.
 function readRetirableUmbrellaWorkflows(
   db: DB,
 ): RetirableUmbrellaWorkflowRow[] {
+  const retirableStates = UMBRELLA_CHILD_RETIRABLE_TERMINAL_STATES;
+  const placeholders = retirableStates.map(() => "?").join(", ");
   return db
-    .query<RetirableUmbrellaWorkflowRow, []>(
+    .query<RetirableUmbrellaWorkflowRow, string[]>(
       `SELECT uw.umbrella_workflow_id, uw.external_ref, uw.repo_id
          FROM umbrella_workflows uw
         WHERE uw.state = 'active'
@@ -1847,12 +1874,12 @@ function readRetirableUmbrellaWorkflows(
              WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
                AND NOT (
                     ut.task_id IS NOT NULL
-                AND t.state = 'cancelled'
+                AND t.state IN (${placeholders})
                )
           )
         ORDER BY uw.created_at, uw.umbrella_workflow_id`,
     )
-    .all();
+    .all(...retirableStates);
 }
 
 function readSyntheticReviewLifecycle(

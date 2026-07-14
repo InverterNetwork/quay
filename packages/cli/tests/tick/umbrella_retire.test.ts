@@ -267,3 +267,69 @@ test("umbrella retirement is idempotent across ticks", async () => {
   expect(second).toEqual([]);
   expect(umbrellaState(workflowId)).toBe("cancelled");
 });
+
+test("tick does not retire a childless umbrella (no expected tasks)", async () => {
+  h = createHarness();
+  h.clock.set("2026-06-01T12:15:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-childless");
+  // Guards the load-bearing `EXISTS (>=1 expected task)` check: an umbrella
+  // with zero expected rows must never be retired (the NOT EXISTS clause is
+  // vacuously true for it).
+  const workflowId = insertUmbrella(repoId, { externalRef: "BRIX-2500" });
+  const built = buildTickDeps(h);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([]);
+  expect(umbrellaState(workflowId)).toBe("active");
+});
+
+test("tick retires an umbrella whose linked children are all closed_unmerged", async () => {
+  h = createHarness();
+  h.clock.set("2026-06-01T12:17:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-closed");
+  const workflowId = insertUmbrella(repoId, { externalRef: "BRIX-2600" });
+  insertLinkedChild(workflowId, repoId, {
+    externalRef: "BRIX-2601",
+    taskId: "child-2601",
+    taskState: "closed_unmerged",
+  });
+  insertLinkedChild(workflowId, repoId, {
+    externalRef: "BRIX-2602",
+    taskId: "child-2602",
+    taskState: "closed_unmerged",
+  });
+  const built = buildTickDeps(h);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    { task_id: `umbrella-${workflowId}`, action: "umbrella_retired" },
+  ]);
+  expect(umbrellaState(workflowId)).toBe("cancelled");
+});
+
+test("tick retires an umbrella with a cancelled + closed_unmerged child mix", async () => {
+  h = createHarness();
+  h.clock.set("2026-06-01T12:19:00.000Z");
+  const repoId = insertRepo(h.db, "repo-umbrella-mixed-terminal");
+  const workflowId = insertUmbrella(repoId, { externalRef: "BRIX-2700" });
+  insertLinkedChild(workflowId, repoId, {
+    externalRef: "BRIX-2701",
+    taskId: "child-2701",
+    taskState: "cancelled",
+  });
+  insertLinkedChild(workflowId, repoId, {
+    externalRef: "BRIX-2702",
+    taskId: "child-2702",
+    taskState: "closed_unmerged",
+  });
+  const built = buildTickDeps(h);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([
+    { task_id: `umbrella-${workflowId}`, action: "umbrella_retired" },
+  ]);
+  expect(umbrellaState(workflowId)).toBe("cancelled");
+});
