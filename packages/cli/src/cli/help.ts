@@ -53,6 +53,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       "task retarget",
       "task resnapshot",
       "task recreate-worktree",
+      "task increase-budget",
     ],
   },
   "task list": {
@@ -120,6 +121,21 @@ const COMMANDS: Record<string, CommandSpec> = {
     flags: [
       { flag: "--yes", desc: "Required confirmation for git worktree mutation." },
       { flag: "--force", desc: "Allow recreation when the path exists or an active attempt is recorded." },
+    ],
+  },
+  "task increase-budget": {
+    path: "task increase-budget",
+    synopsis:
+      "quay task increase-budget <task_id> (--by <n>|--set <n>) --reason <text> [--force]",
+    summary:
+      "Raise a task's retry budget and recompute its budget_exhausted flag.",
+    details:
+      "Use this for operator recovery when control-plane or substrate failures consumed retry budget without useful worker progress. By default it is limited to parked/recovery states; --force is required for live non-terminal states. Terminal tasks cannot be adjusted.",
+    flags: [
+      { flag: "--by <n>", desc: "Increase retry_budget by a positive integer." },
+      { flag: "--set <n>", desc: "Set retry_budget to a higher positive integer." },
+      { flag: "--reason <text>", desc: "Required human-readable audit reason." },
+      { flag: "--force", desc: "Allow adjustment for live non-terminal states." },
     ],
   },
   tick: {
