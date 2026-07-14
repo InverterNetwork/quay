@@ -3141,10 +3141,62 @@ function processUmbrellaSubtaskAutoMerge(
         );
       }
     }
+    // Non-retryable merge failure (e.g. the repo forbids the merge method):
+    // retrying the identical merge every tick can never succeed, so park the
+    // task with the reason recorded instead of looping (BRIX-1921).
+    if (err instanceof GitHubMergeError && err.kind === "method_not_allowed") {
+      return parkNonRetryableUmbrellaMerge(
+        deps,
+        task,
+        attempt,
+        `PR #${prNumber} auto-merge failed with a non-retryable error: ${err.message}`,
+      );
+    }
     throw err;
   }
 
   return finalizePrTerminal(deps, task, attempt, "merged", "done");
+}
+
+// Park a done umbrella subtask whose auto-merge failed non-retryably. Moves
+// the task into `non_budget_loop` (the same parked state the non-budget cap
+// uses) with the reason recorded in `tick_error`, so the per-tick merge retry
+// stops. Parked tasks are still polled by `processParkedPrTerminal`, which
+// finalizes them if the PR later merges/closes externally but never
+// re-attempts the doomed merge.
+function parkNonRetryableUmbrellaMerge(
+  deps: TickDeps,
+  task: DoneTaskRow,
+  attempt: CurrentAttemptRow,
+  reason: string,
+): TickTaskResult {
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET state = 'non_budget_loop',
+                tick_error = ?,
+                updated_at = ?
+          WHERE task_id = ? AND state = 'done' AND cancel_requested_at IS NULL`,
+      )
+      .run(reason, now, task.task_id);
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state, occurred_at
+         ) VALUES (?, ?, 'non_budget_loop_parked', 'done', 'non_budget_loop', ?)`,
+      )
+      .run(task.task_id, attempt.attempt_id, now);
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+  return { task_id: task.task_id, action: "non_budget_loop_parked" };
 }
 
 function reviewAppliesToHead(snapshot: PrSnapshot): boolean {
