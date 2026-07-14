@@ -74,7 +74,7 @@ import {
 import { createIdentityMappingService } from "./identity_mappings.ts";
 import { ensureWorkItemRunIdentity } from "./enqueue.ts";
 import { enqueuePrReadyApprovedOutboxItem } from "./pr_ready_approved_outbox.ts";
-import { enqueueReviewFindingLinearIssuesInOpenTxn } from "./review_finding_linear_outbox.ts";
+import { enqueueReviewFindingLinearIssuesIfEnabledInOpenTxn } from "./review_finding_linear_policy.ts";
 import { normalizeStoredSlackThreadRef } from "./slack_thread_ref.ts";
 import {
   processGoalCompletionAudit,
@@ -113,6 +113,8 @@ export const DEFAULT_MAX_NON_BUDGET_RESPAWNS = 20;
 export const DEFAULT_LOW_PRIORITY_PR_POLL_INTERVAL_MINUTES = 5;
 export const DEFAULT_PARKED_PR_POLL_INTERVAL_MINUTES = 15;
 export const DEFAULT_GITHUB_GRAPHQL_BACKOFF_MINUTES = 10;
+export const DEFAULT_SPAWN_FAILURE_BACKOFF_BASE_SECONDS = 5 * 60;
+export const DEFAULT_SPAWN_FAILURE_BACKOFF_MAX_SECONDS = 60 * 60;
 export const DEFAULT_RETAINED_CANCELLED_WORKTREE_RETENTION_HOURS = 24;
 export const DEFAULT_RETAINED_CANCELLED_WORKTREE_GC_BATCH_SIZE = 10;
 export const WORKER_GH_TOKEN_ENV = "QUAY_WORKER_GH_TOKEN";
@@ -255,6 +257,7 @@ export type TickAction =
   | "ci_passed"
   | "adopted_pr_reconciled"
   | "umbrella_final_pr_reconciled"
+  | "umbrella_retired"
   | "pr_merged"
   | "pr_closed_unmerged"
   | "review_respawn_scheduled"
@@ -448,6 +451,12 @@ interface ReadyUmbrellaFinalPrWorkflowRow {
   final_pr_task_id: string | null;
   final_pr_number: number | null;
   final_pr_url: string | null;
+}
+
+interface RetirableUmbrellaWorkflowRow {
+  umbrella_workflow_id: number;
+  external_ref: string;
+  repo_id: string;
 }
 
 interface UmbrellaFinalPrExpectedSubtaskRow {
@@ -1117,7 +1126,7 @@ export async function tick_once(
     const runningReviewSnapshot = readRunningReviewAttempts(deps.db).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
-    const pendingReviewSnapshot = readPendingReviewAttempts(deps.db).filter(
+    const pendingReviewSnapshot = readPendingReviewAttempts(deps.db, nowISO).filter(
       (t) => !cancelledIds.has(t.task_id),
     );
 
@@ -1131,7 +1140,7 @@ export async function tick_once(
       }
     }
 
-    const queuedSnapshot = readQueued(deps.db).filter(
+    const queuedSnapshot = readQueued(deps.db, nowISO).filter(
       (t) => !cancelledIds.has(t.task_id) && !closedUnmergedIds.has(t.task_id),
     );
 
@@ -1191,6 +1200,16 @@ export async function tick_once(
             workflow.repo_id,
           ),
         );
+      }
+    }
+
+    for (const workflow of readRetirableUmbrellaWorkflows(deps.db)) {
+      const auditTaskId = `umbrella-${workflow.umbrella_workflow_id}`;
+      try {
+        const result = retireUmbrellaWorkflow(deps, workflow);
+        if (result !== null) results.push(result);
+      } catch (err) {
+        results.push(recordTickError(deps, auditTaskId, err));
       }
     }
 
@@ -1634,9 +1653,9 @@ function readCancelTargets(db: DB): CancelTargetRow[] {
     .all();
 }
 
-function readQueued(db: DB): QueuedTaskRow[] {
+function readQueued(db: DB, nowISO: string): QueuedTaskRow[] {
   return db
-    .query<QueuedTaskRow, []>(
+    .query<QueuedTaskRow, [string]>(
       `SELECT t.task_id, t.repo_id, t.branch_name,
               COALESCE(t.base_branch, r.base_branch) AS base_branch,
               t.tmux_id, t.worktree_path,
@@ -1644,9 +1663,13 @@ function readQueued(db: DB): QueuedTaskRow[] {
               t.worker_execution
          FROM tasks t JOIN repos r ON r.repo_id = t.repo_id
         WHERE t.state = 'queued'
+          AND (
+            t.spawn_retry_next_eligible_at IS NULL
+            OR t.spawn_retry_next_eligible_at <= ?
+          )
         ORDER BY t.created_at, t.task_id`,
     )
-    .all();
+    .all(nowISO);
 }
 
 function readRunning(db: DB): RunningTaskRow[] {
@@ -1790,6 +1813,48 @@ function readReadyUmbrellaFinalPrWorkflows(
     .all();
 }
 
+// BRIX-1924: an umbrella can never reach its final PR once every expected
+// child is linked to a Quay task that terminated as `cancelled` — those
+// children can never reach `merged_to_feature_branch`, and none of the
+// expected rows is still `expected` (enqueueable) or `complete_without_quay`
+// (a success). Such an umbrella would otherwise linger `active` forever
+// (observed on BRIX-1902). This is the exact inverse of the readiness gate in
+// `readReadyUmbrellaFinalPrWorkflows`: retire when NOT EXISTS an expected task
+// that is anything other than "linked to a cancelled task". Umbrellas with a
+// child still in progress, already merged to the feature branch, complete
+// without Quay, or still unlinked (`expected`) are left untouched.
+function readRetirableUmbrellaWorkflows(
+  db: DB,
+): RetirableUmbrellaWorkflowRow[] {
+  return db
+    .query<RetirableUmbrellaWorkflowRow, []>(
+      `SELECT uw.umbrella_workflow_id, uw.external_ref, uw.repo_id
+         FROM umbrella_workflows uw
+        WHERE uw.state = 'active'
+          AND EXISTS (
+            SELECT 1
+              FROM umbrella_expected_tasks uet
+             WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM umbrella_expected_tasks uet
+              LEFT JOIN umbrella_tasks ut
+                ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
+               AND ut.external_ref = uet.external_ref
+              LEFT JOIN tasks t
+                ON t.task_id = ut.task_id
+             WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+               AND NOT (
+                    ut.task_id IS NOT NULL
+                AND t.state = 'cancelled'
+               )
+          )
+        ORDER BY uw.created_at, uw.umbrella_workflow_id`,
+    )
+    .all();
+}
+
 function readSyntheticReviewLifecycle(
   db: DB,
 ): SyntheticReviewLifecycleTaskRow[] {
@@ -1907,9 +1972,9 @@ function readRunningReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
     .all();
 }
 
-function readPendingReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
+function readPendingReviewAttempts(db: DB, nowISO: string): ReviewAttemptTaskRow[] {
   return db
-    .query<ReviewAttemptTaskRow, []>(
+    .query<ReviewAttemptTaskRow, [string]>(
       `SELECT t.task_id, t.repo_id, t.branch_name, t.tmux_id, t.worktree_path,
               CASE
                 WHEN t.authoring_mode = 'quay_owned'
@@ -1930,9 +1995,13 @@ function readPendingReviewAttempts(db: DB): ReviewAttemptTaskRow[] {
           AND a.reason = 'review_only'
           AND a.spawned_at IS NULL
           AND a.ended_at IS NULL
+          AND (
+            t.spawn_retry_next_eligible_at IS NULL
+            OR t.spawn_retry_next_eligible_at <= ?
+          )
         ORDER BY a.attempt_id`,
     )
-    .all();
+    .all(nowISO);
 }
 
 function loadCurrentAttempt(db: DB, taskId: string): CurrentAttemptRow | null {
@@ -2276,10 +2345,13 @@ function persistReviewFindingsInOpenTxn(
     now,
     rawReviewResult,
   });
-  enqueueReviewFindingLinearIssuesInOpenTxn(deps, {
+  // Enqueue gate (BRIX-1898): only place the Linear-issue outbox row when the
+  // toggle resolves on for this repo. Findings persistence above is unchanged.
+  enqueueReviewFindingLinearIssuesIfEnabledInOpenTxn(deps, {
     taskId: task.task_id,
     attemptId: task.attempt_id,
     reviewId,
+    repoId: task.repo_id,
   });
 }
 
@@ -3069,10 +3141,62 @@ function processUmbrellaSubtaskAutoMerge(
         );
       }
     }
+    // Non-retryable merge failure (e.g. the repo forbids the merge method):
+    // retrying the identical merge every tick can never succeed, so park the
+    // task with the reason recorded instead of looping (BRIX-1921).
+    if (err instanceof GitHubMergeError && err.kind === "method_not_allowed") {
+      return parkNonRetryableUmbrellaMerge(
+        deps,
+        task,
+        attempt,
+        `PR #${prNumber} auto-merge failed with a non-retryable error: ${err.message}`,
+      );
+    }
     throw err;
   }
 
   return finalizePrTerminal(deps, task, attempt, "merged", "done");
+}
+
+// Park a done umbrella subtask whose auto-merge failed non-retryably. Moves
+// the task into `non_budget_loop` (the same parked state the non-budget cap
+// uses) with the reason recorded in `tick_error`, so the per-tick merge retry
+// stops. Parked tasks are still polled by `processParkedPrTerminal`, which
+// finalizes them if the PR later merges/closes externally but never
+// re-attempts the doomed merge.
+function parkNonRetryableUmbrellaMerge(
+  deps: TickDeps,
+  task: DoneTaskRow,
+  attempt: CurrentAttemptRow,
+  reason: string,
+): TickTaskResult {
+  const now = deps.clock.nowISO();
+  deps.db.exec("BEGIN IMMEDIATE");
+  try {
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET state = 'non_budget_loop',
+                tick_error = ?,
+                updated_at = ?
+          WHERE task_id = ? AND state = 'done' AND cancel_requested_at IS NULL`,
+      )
+      .run(reason, now, task.task_id);
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state, occurred_at
+         ) VALUES (?, ?, 'non_budget_loop_parked', 'done', 'non_budget_loop', ?)`,
+      )
+      .run(task.task_id, attempt.attempt_id, now);
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+  return { task_id: task.task_id, action: "non_budget_loop_parked" };
 }
 
 function reviewAppliesToHead(snapshot: PrSnapshot): boolean {
@@ -3555,6 +3679,32 @@ function markFinalUmbrellaWorkflowCompleted(
   ).run(now, taskId);
 }
 
+// BRIX-1924: transition an orphaned umbrella (all children cancelled, nothing
+// left that could ever complete) to the terminal `cancelled` state. The
+// `state = 'active'` predicate keeps this idempotent — a re-run whose UPDATE
+// matches no row (already retired) returns null and emits no audit action.
+function retireUmbrellaWorkflow(
+  deps: TickDeps,
+  workflow: RetirableUmbrellaWorkflowRow,
+): TickTaskResult | null {
+  const now = deps.clock.nowISO();
+  const upd = deps.db
+    .query(
+      `UPDATE umbrella_workflows
+          SET state = 'cancelled',
+              updated_at = ?
+        WHERE umbrella_workflow_id = ?
+          AND state = 'active'`,
+    )
+    .run(now, workflow.umbrella_workflow_id);
+  const changed = (upd as { changes?: number }).changes ?? 0;
+  if (changed === 0) return null;
+  return {
+    task_id: `umbrella-${workflow.umbrella_workflow_id}`,
+    action: "umbrella_retired",
+  };
+}
+
 function isUmbrellaTask(db: DB, taskId: string): boolean {
   const row = db
     .query<{ n: number }, [string]>(
@@ -3598,17 +3748,21 @@ function loadUmbrellaFinalPrExpectedSubtasks(
               ut.task_id,
               t.state AS task_state,
               t.pr_url,
-              ao.file_path AS objective_path
+              (
+                SELECT ao.file_path
+                  FROM artifacts ao
+                 WHERE ao.task_id = ut.task_id
+                   AND ao.kind = 'task_objective'
+                   AND ao.attempt_id IS NULL
+                 ORDER BY ao.artifact_id DESC
+                 LIMIT 1
+              ) AS objective_path
          FROM umbrella_expected_tasks uet
          LEFT JOIN umbrella_tasks ut
            ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
           AND ut.external_ref = uet.external_ref
          LEFT JOIN tasks t
            ON t.task_id = ut.task_id
-         LEFT JOIN artifacts ao
-           ON ao.task_id = ut.task_id
-          AND ao.kind = 'task_objective'
-          AND ao.attempt_id IS NULL
         WHERE uet.umbrella_workflow_id = ?
         ORDER BY uet.external_ref`,
     )
@@ -5246,6 +5400,7 @@ function markReviewInfraFailure(
     ? Math.max(observedFailures, 3)
     : observedFailures;
   const parking = promptMissedReviewResultProtocol || failures >= 3;
+  const nextEligibleAt = parking ? null : spawnFailureBackoffUntil(now, failures);
 
   deps.db.exec("BEGIN IMMEDIATE");
   try {
@@ -5283,6 +5438,8 @@ function markReviewInfraFailure(
                 review_infra_failure_head_sha = ?,
                 state = ?,
                 tick_error = ?,
+                spawn_retry_next_eligible_at = ?,
+                spawn_failure_reason = ?,
                 updated_at = ?
           WHERE task_id = ? AND state = 'pr-review'
             AND cancel_requested_at IS NULL`,
@@ -5292,6 +5449,8 @@ function markReviewInfraFailure(
         task.head_sha,
         parking ? "non_budget_loop" : "pr-review",
         parking ? diagnostic : null,
+        nextEligibleAt,
+        diagnostic,
         now,
         task.task_id,
       );
@@ -5335,14 +5494,15 @@ function markReviewInfraFailure(
     deps.db
       .query(
         `INSERT INTO events (
-           task_id, attempt_id, event_type, from_state, to_state, occurred_at
-         ) VALUES (?, ?, 'review_infra_failed', 'pr-review', ?, ?)`,
+           task_id, attempt_id, event_type, from_state, to_state, occurred_at, event_data
+         ) VALUES (?, ?, 'review_infra_failed', 'pr-review', ?, ?, ?)`,
       )
       .run(
         task.task_id,
         task.attempt_id,
         parking ? "non_budget_loop" : "pr-review",
         now,
+        JSON.stringify({ failures, diagnostic, next_eligible_at: nextEligibleAt }),
       );
     deps.db.exec("COMMIT");
   } catch (err) {
@@ -6370,26 +6530,52 @@ function handleSpawnFailure(
       )
       .get(attempt.consumed_budget, now, task.task_id);
     const failures = updated?.n ?? 0;
+    const diagnostic = `worker spawn substrate failed ${failures} consecutive time(s) for repo ${task.repo_id}`;
     if (failures >= maxSpawnFailures) {
       deps.db
-        .query(`UPDATE tasks SET state = 'worktree_error' WHERE task_id = ?`)
-        .run(task.task_id);
+        .query(
+          `UPDATE tasks
+              SET state = 'worktree_error',
+                  spawn_retry_next_eligible_at = NULL,
+                  spawn_failure_reason = ?
+            WHERE task_id = ?`,
+        )
+        .run(diagnostic, task.task_id);
       deps.db
         .query(
           `INSERT INTO events (
-             task_id, attempt_id, event_type, from_state, to_state, occurred_at
-           ) VALUES (?, ?, 'worktree_error', 'running', 'worktree_error', ?)`,
+             task_id, attempt_id, event_type, from_state, to_state, occurred_at, event_data
+           ) VALUES (?, ?, 'worktree_error', 'running', 'worktree_error', ?, ?)`,
         )
-        .run(task.task_id, attempt.attempt_id, now);
+        .run(
+          task.task_id,
+          attempt.attempt_id,
+          now,
+          JSON.stringify({ failures, diagnostic }),
+        );
     } else {
       scheduleCleanSpawnRetry(deps, { taskId: task.task_id, prevAttempt: attempt });
+      const nextEligibleAt = spawnFailureBackoffUntil(now, failures);
+      deps.db
+        .query(
+          `UPDATE tasks
+              SET spawn_retry_next_eligible_at = ?,
+                  spawn_failure_reason = ?
+            WHERE task_id = ?`,
+        )
+        .run(nextEligibleAt, diagnostic, task.task_id);
       deps.db
         .query(
           `INSERT INTO events (
-             task_id, attempt_id, event_type, from_state, to_state, occurred_at
-           ) VALUES (?, ?, 'spawn_failed', 'running', 'queued', ?)`,
+             task_id, attempt_id, event_type, from_state, to_state, occurred_at, event_data
+           ) VALUES (?, ?, 'spawn_failed', 'running', 'queued', ?, ?)`,
         )
-        .run(task.task_id, attempt.attempt_id, now);
+        .run(
+          task.task_id,
+          attempt.attempt_id,
+          now,
+          JSON.stringify({ failures, next_eligible_at: nextEligibleAt, diagnostic }),
+        );
     }
     deps.db.exec("COMMIT");
     return { task_id: task.task_id, action: "spawn_failed" };
@@ -6399,6 +6585,15 @@ function handleSpawnFailure(
     } catch {}
     throw err;
   }
+}
+
+function spawnFailureBackoffUntil(nowISO: string, failures: number): string {
+  const exponent = Math.max(0, failures - 1);
+  const seconds = Math.min(
+    DEFAULT_SPAWN_FAILURE_BACKOFF_MAX_SECONDS,
+    DEFAULT_SPAWN_FAILURE_BACKOFF_BASE_SECONDS * 2 ** exponent,
+  );
+  return new Date(Date.parse(nowISO) + seconds * 1000).toISOString();
 }
 
 function countRunning(db: DB): number {
@@ -6525,13 +6720,15 @@ function handleWorkerAuthInvalidPreflight(
         .query(
           `UPDATE tasks
               SET state = 'awaiting-next-brief',
+                  spawn_retry_next_eligible_at = NULL,
+                  spawn_failure_reason = ?,
                   tick_error = NULL,
                   updated_at = ?
             WHERE task_id = ?
               AND state = 'queued'
               AND cancel_requested_at IS NULL`,
         )
-        .run(now, task.task_id);
+        .run(diagnostic, now, task.task_id);
       if (((taskUpdate as { changes?: number }).changes ?? 0) === 0) {
         deps.db.exec("ROLLBACK");
         return { task_id: task.task_id, action: "skipped_predicate" };
@@ -6566,6 +6763,15 @@ function handleWorkerAuthInvalidPreflight(
         taskId: task.task_id,
         prevAttempt: pending,
       });
+      const nextEligibleAt = spawnFailureBackoffUntil(now, 1);
+      deps.db
+        .query(
+          `UPDATE tasks
+              SET spawn_retry_next_eligible_at = ?,
+                  spawn_failure_reason = ?
+            WHERE task_id = ?`,
+        )
+        .run(nextEligibleAt, diagnostic, task.task_id);
       deps.db
         .query(
           `INSERT INTO events (
@@ -6576,7 +6782,11 @@ function handleWorkerAuthInvalidPreflight(
           task.task_id,
           pending.attempt_id,
           now,
-          JSON.stringify({ repeated: false, diagnostic }),
+          JSON.stringify({
+            repeated: false,
+            diagnostic,
+            next_eligible_at: nextEligibleAt,
+          }),
         );
     }
     deps.db.exec("COMMIT");
@@ -6674,6 +6884,67 @@ function refreshDependencyReleasedWorktreeIfNeeded(
   return null;
 }
 
+function recreateMissingQueuedWorktreeIfNeeded(
+  deps: TickDeps,
+  task: QueuedTaskRow,
+  pending: PendingAttemptRow,
+  now: string,
+): TickTaskResult | null {
+  if (pending.attempt_number <= 1) return null;
+  if (existsSync(task.worktree_path)) return null;
+
+  let recoveryBaseBranch: string;
+  let recoveryBaseRef: string;
+  try {
+    const repo = loadWorktreeDependencyRepo(deps.db, task.repo_id);
+    if (deps.git.hasRemoteBranch(task.repo_id, task.branch_name)) {
+      recoveryBaseBranch = task.branch_name;
+      recoveryBaseRef = `origin/${task.branch_name}`;
+    } else {
+      recoveryBaseBranch = task.base_branch;
+      recoveryBaseRef = `origin/${task.base_branch}`;
+    }
+    deps.git.fetch(task.repo_id, recoveryBaseBranch);
+    deps.git.worktreePrune(task.repo_id);
+    deps.git.worktreeAddExistingBranch(
+      task.repo_id,
+      task.worktree_path,
+      task.branch_name,
+      recoveryBaseRef,
+    );
+    try {
+      installWorktreeDependencies(deps.commandRunner, repo, task.worktree_path);
+    } catch (err) {
+      removeUmbrellaFinalPrWorktreeBestEffort(deps, task.worktree_path);
+      throw err;
+    }
+  } catch (err) {
+    return {
+      task_id: task.task_id,
+      action: "spawn_substrate_failed",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  deps.db
+    .query(
+      `INSERT INTO events (task_id, event_type, occurred_at, event_data)
+       VALUES (?, 'worktree_recreated', ?, ?)`,
+    )
+    .run(
+      task.task_id,
+      now,
+      JSON.stringify({
+        reason: "missing_queued_worktree",
+        branch_name: task.branch_name,
+        recovery_base_branch: recoveryBaseBranch,
+        recovery_base_ref: recoveryBaseRef,
+        worktree_path: task.worktree_path,
+      }),
+    );
+  return null;
+}
+
 function promoteAndSpawn(
   deps: TickDeps,
   task: QueuedTaskRow,
@@ -6756,6 +7027,13 @@ function promoteAndSpawn(
     now,
   );
   if (refreshResult !== null) return refreshResult;
+  const recreateResult = recreateMissingQueuedWorktreeIfNeeded(
+    deps,
+    task,
+    pending,
+    now,
+  );
+  if (recreateResult !== null) return recreateResult;
 
   const spawnEnv = addCodexLaunchIsolation(
     githubToken.env,
@@ -6831,7 +7109,13 @@ function promoteAndSpawn(
     )
     .run(sessionName, agentIdentity, agentName, agentModel, pending.attempt_id);
   deps.db
-    .query(`UPDATE tasks SET spawn_failures_consecutive = 0 WHERE task_id = ?`)
+    .query(
+      `UPDATE tasks
+          SET spawn_failures_consecutive = 0,
+              spawn_retry_next_eligible_at = NULL,
+              spawn_failure_reason = NULL
+        WHERE task_id = ?`,
+    )
     .run(task.task_id);
 
   linearSyncs.enqueue(task.external_ref, LINEAR_STATE_IN_PROGRESS);
@@ -7000,6 +7284,76 @@ function probeGithubActorToken(
   return { ok: true };
 }
 
+function recordReviewerSpawnPreflightFailure(
+  deps: TickDeps,
+  task: ReviewAttemptTaskRow,
+  diagnostic: string,
+  options: TickOptions,
+): TickTaskResult {
+  const now = deps.clock.nowISO();
+  const sameSha = task.review_infra_failure_head_sha === task.head_sha;
+  const failures = sameSha
+    ? task.review_infra_failures_consecutive + 1
+    : 1;
+  const maxSpawnFailures =
+    options.maxSpawnFailures ?? DEFAULT_MAX_SPAWN_FAILURES;
+  const parking = failures >= maxSpawnFailures;
+  const nextEligibleAt = parking ? null : spawnFailureBackoffUntil(now, failures);
+
+  deps.db.exec("BEGIN");
+  try {
+    deps.db
+      .query(
+        `UPDATE tasks
+            SET review_infra_failures_consecutive = ?,
+                review_infra_failure_head_sha = ?,
+                state = ?,
+                tick_error = ?,
+                spawn_retry_next_eligible_at = ?,
+                spawn_failure_reason = ?,
+                updated_at = ?
+          WHERE task_id = ?
+            AND state = 'pr-review'
+            AND cancel_requested_at IS NULL`,
+      )
+      .run(
+        failures,
+        task.head_sha,
+        parking ? "non_budget_loop" : "pr-review",
+        parking ? diagnostic : null,
+        nextEligibleAt,
+        diagnostic,
+        now,
+        task.task_id,
+      );
+    deps.db
+      .query(
+        `INSERT INTO events (
+           task_id, attempt_id, event_type, from_state, to_state, occurred_at, event_data
+         ) VALUES (?, ?, 'review_infra_failed', 'pr-review', ?, ?, ?)`,
+      )
+      .run(
+        task.task_id,
+        task.attempt_id,
+        parking ? "non_budget_loop" : "pr-review",
+        now,
+        JSON.stringify({ failures, diagnostic, next_eligible_at: nextEligibleAt }),
+      );
+    deps.db.exec("COMMIT");
+  } catch (err) {
+    try {
+      deps.db.exec("ROLLBACK");
+    } catch {}
+    throw err;
+  }
+
+  return {
+    task_id: task.task_id,
+    action: parking ? "non_budget_loop_parked" : "spawn_substrate_failed",
+    error: diagnostic,
+  };
+}
+
 function addCodexLaunchIsolation(
   env: TmuxSpawnInput["env"],
   worktreePath: string,
@@ -7129,11 +7483,12 @@ function promoteAndSpawnReviewer(
     options,
   );
   if (!tokenPreflight.ok) {
-    return {
-      task_id: task.task_id,
-      action: "spawn_substrate_failed",
-      error: tokenPreflight.error,
-    };
+    return recordReviewerSpawnPreflightFailure(
+      deps,
+      task,
+      tokenPreflight.error,
+      options,
+    );
   }
 
   if (task.authoring_mode === "synthetic_review") {
@@ -7247,6 +7602,14 @@ function promoteAndSpawnReviewer(
         WHERE attempt_id = ?`,
     )
     .run(sessionName, agentIdentity, agentName, agentModel, task.attempt_id);
+  deps.db
+    .query(
+      `UPDATE tasks
+          SET spawn_retry_next_eligible_at = NULL,
+              spawn_failure_reason = NULL
+        WHERE task_id = ?`,
+    )
+    .run(task.task_id);
 
   return { task_id: task.task_id, action: "spawned" };
 }

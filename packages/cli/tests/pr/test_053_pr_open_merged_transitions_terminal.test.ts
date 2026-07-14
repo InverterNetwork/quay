@@ -6,6 +6,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, existsSync } from "node:fs";
 import { getTask } from "../../src/cli/format.ts";
 import { tick_once } from "../../src/core/tick.ts";
+import { GitHubMergeError } from "../../src/ports/github.ts";
 import { createTaskDependency } from "../../src/core/task_dependencies.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { insertAttempt, insertRepo, insertTask } from "../support/fixtures.ts";
@@ -497,6 +498,119 @@ test("approved green umbrella subtask auto-merges into feature branch", async ()
     .get(taskId);
   expect(task).toEqual({ state: "merged_to_feature_branch", tick_error: null });
   expect(existsSync(worktreePath)).toBe(false);
+});
+
+test("non-retryable umbrella auto-merge failure parks the task instead of looping", async () => {
+  // BRIX-1921: if the merge is rejected for a non-retryable reason (the repo
+  // forbids the chosen merge method), the tick must park the task with the
+  // reason recorded rather than retrying the identical doomed merge every tick.
+  h = createHarness();
+  h.clock.set("2026-04-29T15:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-umbrella-merge-rejected");
+  const taskId = insertTask(h.db, {
+    taskId: "task-umbrella-merge-rejected",
+    repoId,
+    state: "done",
+  });
+  insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    spawnedAt: "2026-04-29T14:30:00.000Z",
+  });
+
+  const workflow = h.db
+    .query<{ umbrella_workflow_id: number }, [string, string, string, string, string, string]>(
+      `INSERT INTO umbrella_workflows (
+         external_ref, repo_id, base_branch, feature_branch, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       RETURNING umbrella_workflow_id`,
+    )
+    .get(
+      "BRIX-1902",
+      repoId,
+      "dev",
+      "feature/brix-1902",
+      "2026-04-29T14:20:00.000Z",
+      "2026-04-29T14:20:00.000Z",
+    );
+  h.db
+    .query(
+      `INSERT INTO umbrella_tasks (
+         umbrella_workflow_id, task_id, external_ref, created_at
+       ) VALUES (?, ?, ?, ?)`,
+    )
+    .run(workflow!.umbrella_workflow_id, taskId, "BRIX-1903", "2026-04-29T14:25:00.000Z");
+
+  const worktreePath = h.db
+    .query<{ worktree_path: string }, [string]>(
+      `SELECT worktree_path FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId)!.worktree_path;
+  mkdirSync(worktreePath, { recursive: true });
+
+  const built = buildTickDeps(h);
+  built.git.setLocalBranches(repoId, [`quay/${taskId}`]);
+  const snapshot = {
+    prNumber: 263,
+    state: "open" as const,
+    headSha: "head-rejected",
+    baseSha: "base-rejected",
+    baseRef: "feature/brix-1902",
+    mergeable: "mergeable" as const,
+    latestReview: {
+      decision: "APPROVED" as const,
+      latestReviewId: "R_rejected_approved",
+      submittedHeadSha: "head-rejected",
+      comments: "",
+    },
+    checks: {
+      checkSha: "head-rejected",
+      items: [{ name: "build", workflow: null, bucket: "pass" as const, required: true }],
+    },
+  };
+  built.github.setPrSnapshot(repoId, `quay/${taskId}`, snapshot);
+  built.github.setPrSnapshotByNumber(repoId, 263, snapshot);
+  built.github.setPrView(repoId, 263, {
+    number: 263,
+    title: "fix: umbrella subtask",
+    body: "",
+    url: "https://github.example/pr/263",
+    headRefName: `quay/${taskId}`,
+    headSha: "head-rejected",
+    baseRef: "feature/brix-1902",
+  });
+  // Simulate a policy-rejected merge (the adapter's non-retryable kind).
+  built.github.setMergePullRequestHandler(() => {
+    throw new GitHubMergeError(
+      "gh pr merge 263 failed: Merge commits are not allowed on this repository",
+      "method_not_allowed",
+    );
+  });
+
+  const results = await tick_once(built.deps);
+  expect(results).toEqual([
+    { task_id: taskId, action: "non_budget_loop_parked" },
+  ]);
+  expect(built.github.mergePullRequestCalls).toHaveLength(1);
+
+  const parked = h.db
+    .query<{ state: string; tick_error: string | null }, [string]>(
+      `SELECT state, tick_error FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(parked?.state).toBe("non_budget_loop");
+  expect(parked?.tick_error).toContain("non-retryable");
+  expect(parked?.tick_error).toContain("not allowed on this repository");
+
+  // A second tick must NOT re-attempt the doomed merge (no per-tick loop).
+  const secondResults = await tick_once(built.deps);
+  expect(secondResults).toEqual([]);
+  expect(built.github.mergePullRequestCalls).toHaveLength(1);
+  const stillParked = h.db
+    .query<{ state: string }, [string]>(`SELECT state FROM tasks WHERE task_id = ?`)
+    .get(taskId);
+  expect(stillParked?.state).toBe("non_budget_loop");
 });
 
 test("normal done task is not auto-merged even when approved and green", async () => {

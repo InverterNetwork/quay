@@ -27,9 +27,10 @@ Before enqueueing work, the operator must:
 At enqueue time, Quay fetches the effective base branch, creates a local branch
 named `quay/<slug>`, creates a worktree from `origin/<base_branch>`, runs the
 repo `install_cmd`, stores the task-level `task_objective` artifact (the raw
-original brief) plus the first attempt's `brief` and `final_prompt` artifacts,
-and creates the first pending attempt. The effective base branch is the repo
-default unless a task-level override is supplied.
+initial brief) plus the first attempt's `brief` and `final_prompt` artifacts,
+and creates the first pending attempt. `task resnapshot` can append a newer
+task-level objective after the live ticket changes. The effective base branch is
+the repo default unless a task-level override is supplied.
 
 ## Work Items, Runs, And Attempts
 
@@ -61,8 +62,8 @@ Every attempt has:
 
 - A reason, such as `initial`, `ci_fail`, `crash`, `review`, or
   `blocker_resolved`.
-- A `brief` artifact: a structured composed prompt body with the original
-  task objective (rendered from the task-level `task_objective` artifact),
+- A `brief` artifact: a structured composed prompt body with the current
+  task objective (rendered from the newest task-level `task_objective` artifact),
   the current attempt's guidance, and any diagnostics for this attempt.
 - A `final_prompt` artifact: for code-worker attempts, Quay's worker preamble
   followed by the composed `brief`; for review attempts, Quay's static
@@ -91,7 +92,7 @@ A supervisor lock prevents overlapping ticks and serializes side effects with
 Artifacts are snapshots of data that crosses a boundary, such as:
 
 - `ticket_snapshot`
-- `task_objective` (task-level; the raw original brief, source of every later attempt's stable objective section)
+- `task_objective` (task-level; the canonical brief used by later prompt objective sections)
 - `brief` (per-attempt composed body)
 - `final_prompt` (worker preamble + `brief`, or reviewer protocol + guidance
   + review `brief`)

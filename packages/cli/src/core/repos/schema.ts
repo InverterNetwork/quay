@@ -39,6 +39,10 @@ const preambleId = z.preprocess((value) => {
   return value;
 }, z.number().int().positive());
 
+// Per-repo override for filing non-blocking review findings as Linear issues.
+// Tri-state: NULL/omitted = inherit the global default, true = on, false = off.
+const reviewFindingLinearEnabled = z.boolean();
+
 export const repoAddInputSchema = z
   .object({
     repo_id: repoIdSchema,
@@ -55,6 +59,7 @@ export const repoAddInputSchema = z
     model_reviewer: modelName.optional(),
     preamble_worker: preambleId.optional(),
     preamble_reviewer: preambleId.optional(),
+    review_finding_linear_enabled: reviewFindingLinearEnabled.optional(),
     ci_ignore_mode: ciIgnoreMode.optional(),
     ignored_check_names: ciIgnoredNameList.optional(),
     ignored_workflow_names: ciIgnoredNameList.optional(),
@@ -78,6 +83,7 @@ export const repoUpdateInputSchema = z
     model_reviewer: modelName.nullable().optional(),
     preamble_worker: preambleId.nullable().optional(),
     preamble_reviewer: preambleId.nullable().optional(),
+    review_finding_linear_enabled: reviewFindingLinearEnabled.nullable().optional(),
     ci_ignore_mode: ciIgnoreMode.optional(),
     ignored_check_names: ciIgnoredNameList.optional(),
     ignored_workflow_names: ciIgnoredNameList.optional(),
@@ -107,6 +113,7 @@ export const repoImportInputSchema = z
     model_reviewer: modelName.nullable().optional(),
     preamble_worker: preambleId.nullable().optional(),
     preamble_reviewer: preambleId.nullable().optional(),
+    review_finding_linear_enabled: reviewFindingLinearEnabled.nullable().optional(),
     ci_ignore_mode: ciIgnoreMode.optional(),
     ignored_check_names: ciIgnoredNameList.optional(),
     ignored_workflow_names: ciIgnoredNameList.optional(),

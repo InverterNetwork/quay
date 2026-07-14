@@ -41,6 +41,7 @@ export interface GitPort {
   worktreeHeadSha(worktreePath: string): string | null;
   worktreeDetach(worktreePath: string): void;
   worktreeRemove(worktreePath: string): void;
+  worktreePrune(repoId: string): void;
   branchDelete(repoId: string, branch: string): void;
   // Returns the SHA at origin/<branch> in the bare clone after a fetch, or null
   // if the remote ref does not exist.

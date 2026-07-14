@@ -31,6 +31,9 @@ export interface RepoRow {
   model_reviewer: string | null;
   preamble_worker: number | null;
   preamble_reviewer: number | null;
+  // Per-repo override for filing non-blocking review findings as Linear
+  // issues. NULL = inherit the deployment default, true = on, false = off.
+  review_finding_linear_enabled: boolean | null;
   ci_ignore_mode: CiIgnoreMode;
   ignored_check_names: string[];
   ignored_workflow_names: string[];
@@ -66,15 +69,25 @@ const SELECT_REPO_COLUMNS = `
   repo_id, repo_url, base_branch, package_manager, install_cmd,
   test_cmd, ci_workflow_name, contribution_guide_path,
   agent_worker, agent_reviewer, model_worker, model_reviewer,
-  preamble_worker, preamble_reviewer,
+  preamble_worker, preamble_reviewer, review_finding_linear_enabled,
   ci_ignore_mode, ci_ignored_check_names, ci_ignored_workflow_names,
   archived_at, created_at
 `;
 
-type RepoDbRow = Omit<RepoRow, "ignored_check_names" | "ignored_workflow_names"> & {
+type RepoDbRow = Omit<
+  RepoRow,
+  "ignored_check_names" | "ignored_workflow_names" | "review_finding_linear_enabled"
+> & {
   ci_ignored_check_names: string;
   ci_ignored_workflow_names: string;
+  review_finding_linear_enabled: number | null;
 };
+
+// SQLite stores the toggle as a nullable INTEGER (NULL/0/1); the service
+// surface speaks `boolean | null` so callers never juggle 0/1.
+function reviewFindingLinearToDb(value: boolean | null | undefined): number | null {
+  return value === null || value === undefined ? null : value ? 1 : 0;
+}
 
 // Mirrors spec §10: repo removal blocks non-terminal, non-parked tasks only.
 // Parked and terminal tasks keep their FK for forensics after archival.
@@ -94,10 +107,15 @@ function fromRepoDbRow(row: RepoDbRow): RepoRow {
   const {
     ci_ignored_check_names,
     ci_ignored_workflow_names,
+    review_finding_linear_enabled,
     ...rest
   } = row;
   return {
     ...rest,
+    review_finding_linear_enabled:
+      review_finding_linear_enabled === null
+        ? null
+        : review_finding_linear_enabled !== 0,
     ignored_check_names: parseCiIgnoreListJson(ci_ignored_check_names),
     ignored_workflow_names: parseCiIgnoreListJson(ci_ignored_workflow_names),
   };
@@ -134,6 +152,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
                agent_worker = ?, agent_reviewer = ?,
                model_worker = ?, model_reviewer = ?,
                preamble_worker = ?, preamble_reviewer = ?,
+               review_finding_linear_enabled = ?,
                ci_ignore_mode = ?, ci_ignored_check_names = ?, ci_ignored_workflow_names = ?,
                archived_at = NULL
          WHERE repo_id = ?`,
@@ -151,6 +170,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         parsed.model_reviewer ?? null,
         parsed.preamble_worker ?? null,
         parsed.preamble_reviewer ?? null,
+        reviewFindingLinearToDb(parsed.review_finding_linear_enabled),
         parsed.ci_ignore_mode ?? "inherit",
         JSON.stringify(parsed.ignored_check_names ?? []),
         JSON.stringify(parsed.ignored_workflow_names ?? []),
@@ -162,10 +182,10 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
            repo_id, repo_url, base_branch, package_manager, install_cmd,
            test_cmd, ci_workflow_name, contribution_guide_path,
            agent_worker, agent_reviewer, model_worker, model_reviewer,
-           preamble_worker, preamble_reviewer,
+           preamble_worker, preamble_reviewer, review_finding_linear_enabled,
            ci_ignore_mode, ci_ignored_check_names, ci_ignored_workflow_names,
            created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         parsed.repo_id,
         parsed.repo_url,
@@ -181,6 +201,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         parsed.model_reviewer ?? null,
         parsed.preamble_worker ?? null,
         parsed.preamble_reviewer ?? null,
+        reviewFindingLinearToDb(parsed.review_finding_linear_enabled),
         parsed.ci_ignore_mode ?? "inherit",
         JSON.stringify(parsed.ignored_check_names ?? []),
         JSON.stringify(parsed.ignored_workflow_names ?? []),
@@ -210,6 +231,11 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
       if (key === "ignored_workflow_names") {
         sets.push("ci_ignored_workflow_names = ?");
         values.push(JSON.stringify(value));
+        continue;
+      }
+      if (key === "review_finding_linear_enabled") {
+        sets.push("review_finding_linear_enabled = ?");
+        values.push(reviewFindingLinearToDb(value as boolean | null | undefined));
         continue;
       }
       sets.push(`${key} = ?`);
@@ -312,6 +338,10 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
       parsed.preamble_reviewer !== undefined
         ? parsed.preamble_reviewer
         : (existing?.preamble_reviewer ?? null);
+    const reviewFindingLinearEnabled =
+      parsed.review_finding_linear_enabled !== undefined
+        ? parsed.review_finding_linear_enabled
+        : (existing?.review_finding_linear_enabled ?? null);
     const ciIgnoreMode =
       parsed.ci_ignore_mode !== undefined
         ? parsed.ci_ignore_mode
@@ -336,6 +366,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
                agent_worker = ?, agent_reviewer = ?,
                model_worker = ?, model_reviewer = ?,
                preamble_worker = ?, preamble_reviewer = ?,
+               review_finding_linear_enabled = ?,
                ci_ignore_mode = ?, ci_ignored_check_names = ?, ci_ignored_workflow_names = ?,
                archived_at = ?, created_at = ?
          WHERE repo_id = ?`,
@@ -353,6 +384,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         modelReviewer,
         preambleWorker,
         preambleReviewer,
+        reviewFindingLinearToDb(reviewFindingLinearEnabled),
         ciIgnoreMode,
         JSON.stringify(ignoredCheckNames),
         JSON.stringify(ignoredWorkflowNames),
@@ -366,10 +398,10 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
            repo_id, repo_url, base_branch, package_manager, install_cmd,
            test_cmd, ci_workflow_name, contribution_guide_path,
            agent_worker, agent_reviewer, model_worker, model_reviewer,
-           preamble_worker, preamble_reviewer,
+           preamble_worker, preamble_reviewer, review_finding_linear_enabled,
            ci_ignore_mode, ci_ignored_check_names, ci_ignored_workflow_names,
            archived_at, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         parsed.repo_id,
         parsed.repo_url,
@@ -385,6 +417,7 @@ export function createRepoService({ db, clock }: RepoServiceDeps): RepoService {
         modelReviewer,
         preambleWorker,
         preambleReviewer,
+        reviewFindingLinearToDb(reviewFindingLinearEnabled),
         ciIgnoreMode,
         JSON.stringify(ignoredCheckNames),
         JSON.stringify(ignoredWorkflowNames),

@@ -809,6 +809,7 @@ components:
         - model_reviewer
         - preamble_worker
         - preamble_reviewer
+        - review_finding_linear_enabled
         - archived_at
         - created_at
       properties:
@@ -861,6 +862,11 @@ components:
             - integer
             - "null"
           minimum: 1
+        review_finding_linear_enabled:
+          description: Per-repo override for filing non-blocking review findings as Linear issues. null inherits the deployment default; true/false pin the repo.
+          type:
+            - boolean
+            - "null"
         archived_at:
           type:
             - string
@@ -886,6 +892,7 @@ components:
         - model_reviewer
         - preamble_worker
         - preamble_reviewer
+        - review_finding_linear_enabled
         - archived_at
         - created_at
         - active_task_count
@@ -945,6 +952,11 @@ components:
             - integer
             - "null"
           minimum: 1
+        review_finding_linear_enabled:
+          description: Per-repo override for filing non-blocking review findings as Linear issues. null inherits the deployment default; true/false pin the repo.
+          type:
+            - boolean
+            - "null"
         archived_at:
           type:
             - string
@@ -1079,6 +1091,7 @@ components:
         - operations
         - ci_policy
         - adapters
+        - review_findings
         - agents
         - preambles
         - retry_templates
@@ -1104,6 +1117,15 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AdapterSummary"
+        review_findings:
+          type: object
+          additionalProperties: false
+          required:
+            - linear_enabled
+          properties:
+            linear_enabled:
+              description: Global default for filing non-blocking review findings as Linear issues (resolves ON when the deployment setting is unset). Policy flag, distinct from the Linear adapter connectivity toggle.
+              type: boolean
         agents:
           $ref: "#/components/schemas/AgentsReadModel"
         preambles:
@@ -2053,6 +2075,11 @@ components:
             - integer
             - "null"
           minimum: 1
+        review_finding_linear_enabled:
+          description: Per-repo override for filing non-blocking review findings as Linear issues. null inherits the deployment default; true/false pin the repo. Affects synthetic_review tasks only.
+          type:
+            - boolean
+            - "null"
         ci_ignore_mode:
           type: string
           enum:
@@ -2125,6 +2152,11 @@ components:
             - string
             - "null"
           minLength: 1
+        review_finding_linear_enabled:
+          description: Global default for filing non-blocking review findings as Linear issues. null leaves it unset (resolves to ON). Policy flag, distinct from the Linear adapter connectivity toggle.
+          type:
+            - boolean
+            - "null"
     TagsReplaceChange:
       type: object
       additionalProperties: false

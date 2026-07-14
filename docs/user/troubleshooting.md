@@ -179,8 +179,9 @@ not consume retry budget.
 ## `worker_auth_invalid`
 
 The worker GitHub token failed Quay's spawn-time auth preflight. Quay retries
-once after re-reading the configured token source. If the retry also fails, the
-task moves to `awaiting-next-brief` with a `worker_auth_invalid` handoff.
+once after re-reading the configured token source and waiting for
+`spawn_retry_next_eligible_at`. If the retry also fails, the task moves to
+`awaiting-next-brief` with a `worker_auth_invalid` handoff.
 
 Check the configured worker token source:
 
@@ -201,7 +202,23 @@ quay task events <task_id>
 quay artifact get <task_id> session_log --path
 ```
 
-Manual recovery is currently cancellation:
+`tasks.spawn_failure_reason` records the latest spawn or reviewer
+infrastructure diagnostic, and `tasks.spawn_retry_next_eligible_at` shows when a
+non-parked retry becomes eligible.
+
+If the task row still points at a missing `worktree_path`, recreate that
+recorded worktree without DB surgery:
+
+```bash
+quay task recreate-worktree <task_id> --yes
+```
+
+Quay prefers `origin/<task.branch_name>` when it exists. If that branch is gone
+from the remote, Quay rebuilds from `origin/<base_branch>` and checks out the
+task branch name again. The command refuses existing paths and active attempts
+unless `--force` is supplied.
+
+Cancellation remains available when the task should not continue:
 
 ```bash
 quay cancel <task_id> --keep-worktree

@@ -2,12 +2,12 @@
 //
 // Every code-worker attempt — initial, deterministic retry, non-budget
 // respawn, orchestrator submit-brief — assembles its final prompt from the
-// same conceptual sections so the original task objective remains first-class
-// across the whole lifecycle.
+// same conceptual sections so the task objective remains first-class across
+// the whole lifecycle.
 //
 // Sections in render order:
 //   1. Output contract        — the code-worker protocol preamble.
-//   2. Stable task objective  — original brief, capped if oversized, with a
+//   2. Stable task objective  — current brief, capped if oversized, with a
 //                               pointer to the full `task_objective` artifact.
 //   3. Reference repos        — optional deployment/runtime context for
 //                               read-only sibling repo checkouts.
@@ -131,9 +131,9 @@ export function composeReviewerPrompt(
   };
 }
 
-// Loads the canonical original task objective for a task. The objective is
-// written once at enqueue time (kind='task_objective', attempt_id IS NULL) and
-// referenced by every subsequent code-worker attempt.
+// Loads the current task objective for a task. Enqueue writes the first
+// task-level artifact; task resnapshot can append a newer one when operators
+// re-baseline the ticket.
 export function loadOriginalTaskObjective(
   db: DB,
   taskId: string,
@@ -145,13 +145,13 @@ export function loadOriginalTaskObjective(
         WHERE task_id = ?
           AND kind = 'task_objective'
           AND attempt_id IS NULL
-        ORDER BY artifact_id ASC
+        ORDER BY artifact_id DESC
         LIMIT 1`,
     )
     .get(taskId);
   if (!row) {
     throw new Error(
-      `task_objective artifact not found for task ${taskId}; enqueue must write it once on task creation`,
+      `task_objective artifact not found for task ${taskId}; enqueue must write one on task creation`,
     );
   }
   let body: string;
@@ -212,7 +212,7 @@ function renderTaskObjective(obj: TaskObjectiveRef, cap: number): string {
     attrs.push(`excerpt-bytes="${utf8ByteLength(rendered)}"`);
   }
   const inner = truncated
-    ? `${escapeXmlText(rendered)}\n\n[Excerpt truncated. Read the full original task objective from artifact #${obj.artifactId} at ${obj.filePath}.]`
+    ? `${escapeXmlText(rendered)}\n\n[Excerpt truncated. Read the full task objective from artifact #${obj.artifactId} at ${obj.filePath}.]`
     : escapeXmlText(obj.body);
   return `<quay-task-objective ${attrs.join(" ")}>\n${inner}\n</quay-task-objective>`;
 }

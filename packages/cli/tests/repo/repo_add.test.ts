@@ -89,6 +89,51 @@ test("test_repo_add_persists_optional_repo_config", () => {
   expect(row2.contribution_guide_path).toBe("CONTRIBUTING.md");
 });
 
+test("test_repo_review_finding_linear_override_round_trips_tri_state", () => {
+  h = createHarness();
+  const repos = createRepoService({ db: h.db, clock: h.clock });
+
+  // Default: unset (inherit).
+  const inherited = repos.add({ ...REQUIRED_FIELDS, repo_id: "repo-inherit" });
+  expect(inherited.review_finding_linear_enabled).toBeNull();
+
+  // Explicit on / off persist as booleans.
+  const on = repos.add({
+    ...REQUIRED_FIELDS,
+    repo_id: "repo-on",
+    review_finding_linear_enabled: true,
+  });
+  expect(on.review_finding_linear_enabled).toBe(true);
+
+  const off = repos.add({
+    ...REQUIRED_FIELDS,
+    repo_id: "repo-off",
+    review_finding_linear_enabled: false,
+  });
+  expect(off.review_finding_linear_enabled).toBe(false);
+
+  // Update flips and clears the override.
+  expect(
+    repos.update("repo-on", { review_finding_linear_enabled: false })
+      .review_finding_linear_enabled,
+  ).toBe(false);
+  expect(
+    repos.update("repo-on", { review_finding_linear_enabled: null })
+      .review_finding_linear_enabled,
+  ).toBeNull();
+
+  // upsert preserves an omitted override on an existing row, and applies it
+  // on insert.
+  repos.upsert({ ...REQUIRED_FIELDS, repo_id: "repo-off" });
+  expect(repos.get("repo-off")?.review_finding_linear_enabled).toBe(false);
+  repos.upsert({
+    ...REQUIRED_FIELDS,
+    repo_id: "repo-new",
+    review_finding_linear_enabled: true,
+  });
+  expect(repos.get("repo-new")?.review_finding_linear_enabled).toBe(true);
+});
+
 test("test_repo_add_rejects_duplicate_id", () => {
   h = createHarness();
   const repos = createRepoService({ db: h.db, clock: h.clock });

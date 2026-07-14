@@ -426,6 +426,8 @@ quay task events <task_id>
 quay task claim <task_id>
 quay task release-claim <task_id> --claim-id <claim_id>
 quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes
+quay task resnapshot <task_id> --reason <text>
+quay task recreate-worktree <task_id> --yes [--force]
 ```
 
 `task claim` only succeeds for `awaiting-next-brief` tasks.
@@ -434,6 +436,15 @@ quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes
 It also includes `authors`, parsed from the ticket's `quay-config.authors`
 block as `{name, slack_id}` objects. Legacy or malformed rows return
 `authors: []`.
+
+`task recreate-worktree` recreates an existing task's recorded worktree. By
+default it only runs when `task.worktree_path` is missing and no active attempt
+is recorded. It uses `origin/<task.branch_name>` when that remote branch exists;
+otherwise it rebuilds from `origin/<base_branch>` while restoring the task
+branch name. The repo install command runs after recreation, and Quay records a
+`worktree_recreated` event with the recovery base. Use `--force` only after
+confirming no worker is live; it allows recreation when the path already exists
+or an active attempt is still recorded.
 
 `task list`, `task get`, and `task events` accept legacy `task_id` values and
 return the same task/run rows as before. JSON output now also includes
@@ -509,6 +520,22 @@ worker session is killed. If retarget crashes after creating the linked clone
 but before the source reaches terminal state, the next `quay tick` recovers the
 cancel intent and writes the same source-side `retargeted` audit context from
 the linked clone.
+
+`task resnapshot` re-baselines a task's frozen `ticket_snapshot` and current
+`task_objective` — the definition of done the reviewer enforces and the
+objective worker/reviewer prompts load. It re-fetches the task's Linear ticket,
+re-parses the `quay-config` block, and re-composes both artifacts with the same
+code path enqueue uses. Use it when an operator has edited the live ticket to
+change scope mid-flight: without a resnapshot, later prompts keep enforcing the
+stale acceptance criteria. It emits a `ticket_resnapshotted` audit event
+carrying the required `--reason` and a before/after diff of the snapshot, and it
+invalidates the latest review verdict (superseding a standing `approved` /
+`changes_requested`) so the next `quay tick` runs a fresh review against the new
+snapshot and objective rather than being blocked by a stale verdict. Running it
+when the ticket is unchanged is a safe, still-audited no-op: the event is
+recorded but the artifacts are not rewritten and no verdict is invalidated. The
+command requires the Linear adapter to be configured, and the task must have an
+`external_ref`.
 
 ## Submit Brief
 

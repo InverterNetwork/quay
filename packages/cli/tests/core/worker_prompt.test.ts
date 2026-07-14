@@ -314,7 +314,7 @@ test("objective over cap renders an excerpt plus pointer to full artifact", () =
   expect(composed.brief).toContain('objective-bytes="2048"');
   expect(composed.brief).toContain("excerpt-bytes=");
   expect(composed.brief).toContain(
-    `[Excerpt truncated. Read the full original task objective from artifact #${SAFE_OBJECTIVE.artifactId} at ${SAFE_OBJECTIVE.filePath}.]`,
+    `[Excerpt truncated. Read the full task objective from artifact #${SAFE_OBJECTIVE.artifactId} at ${SAFE_OBJECTIVE.filePath}.]`,
   );
   // Excerpt is a prefix of the body, never exceeds the cap.
   const matchExcerptBytes = composed.brief.match(/excerpt-bytes="(\d+)"/);
@@ -341,7 +341,7 @@ test("default render cap is exposed as a constant", () => {
   expect(DEFAULT_OBJECTIVE_RENDER_CAP_BYTES).toBeGreaterThan(1024);
 });
 
-test("loadOriginalTaskObjective reads the task-level kind='task_objective' artifact", () => {
+test("loadOriginalTaskObjective reads the current task-level kind='task_objective' artifact", () => {
   h = createHarness();
   const taskId = insertTask(h.db, { taskId: "obj-task" });
   const store = createArtifactStore({
@@ -361,6 +361,35 @@ test("loadOriginalTaskObjective reads the task-level kind='task_objective' artif
   expect(ref.artifactId).toBe(written.artifactId);
   expect(ref.filePath).toBe(written.filePath);
   expect(ref.body).toBe("Build the widget service.");
+});
+
+test("loadOriginalTaskObjective prefers the latest resnapshotted objective", () => {
+  h = createHarness();
+  const taskId = insertTask(h.db, { taskId: "resnapshotted-objective" });
+  const store = createArtifactStore({
+    db: h.db,
+    artifactRoot: h.artifactRoot,
+    clock: h.clock,
+  });
+  store.writeArtifact({
+    taskId,
+    attemptId: null,
+    kind: "task_objective",
+    content: "Original objective.",
+    extension: "md",
+  });
+  const latest = store.writeArtifact({
+    taskId,
+    attemptId: null,
+    kind: "task_objective",
+    content: "Re-baselined objective.",
+    extension: "md",
+  });
+
+  const ref = loadOriginalTaskObjective(h.db, taskId);
+  expect(ref.artifactId).toBe(latest.artifactId);
+  expect(ref.filePath).toBe(latest.filePath);
+  expect(ref.body).toBe("Re-baselined objective.");
 });
 
 test("loadOriginalTaskObjective throws when no task_objective artifact exists", () => {

@@ -81,9 +81,9 @@ binary and invalid UTF-8 artifacts such as `malformed_signal`.
 
 | Kind | Meaning |
 | --- | --- |
-| `ticket_snapshot` | Snapshot of source ticket/context at enqueue time. |
-| `task_objective` | Stable original task brief, written once at enqueue and reused by every later code-worker attempt as the canonical objective. Task-level (no `attempt_id`). |
-| `brief` | Per-attempt composed prompt body: a structured `<quay-task-objective>` block pointing at the task-level `task_objective` artifact, a `<quay-current-attempt-guidance>` block (initial instruction, retry/respawn template, or orchestrator-submitted brief), and an optional `<quay-diagnostics>` block (CI excerpt, review comments, conflict slice, etc.). The raw original brief lives in `task_objective`, not here. |
+| `ticket_snapshot` | Snapshot of source ticket/context. Enqueue writes the first task-level row; `task resnapshot` can append a newer task-level snapshot after the live ticket changes. |
+| `task_objective` | Canonical task brief reused by later code-worker and reviewer prompts. Enqueue writes the first task-level row; `task resnapshot` can append a newer task-level objective. |
+| `brief` | Per-attempt composed prompt body: a structured `<quay-task-objective>` block pointing at the current task-level `task_objective` artifact, a `<quay-current-attempt-guidance>` block (initial instruction, retry/respawn template, or orchestrator-submitted brief), and an optional `<quay-diagnostics>` block (CI excerpt, review comments, conflict slice, etc.). The current task objective lives in `task_objective`, not here. |
 | `final_prompt` | Code-worker attempts: worker preamble plus the attempt's composed `brief`. Review attempts: static reviewer protocol, reviewer guidance, then the review `brief`. |
 | `session_log` | Captured tmux output. |
 | `usage` | JSON usage envelope captured per attempt. `.quay-usage.json` is stored verbatim when present; otherwise Codex `--json` JSONL in `.quay-tool-trace.log` can synthesize normalized model/token totals. |
@@ -111,5 +111,7 @@ a `tick_error` event and continues processing other tasks. A later successful
 tick path clears the task's `tick_error` field.
 
 Worker GitHub auth preflight failures are not `tick_error`: they are classified
-as `worker_auth_invalid`, retried once with freshly resolved credentials, then
-surfaced through an `awaiting-next-brief` handoff if the retry also fails.
+as `worker_auth_invalid`, retried once after `spawn_retry_next_eligible_at` with
+freshly resolved credentials, then surfaced through an `awaiting-next-brief`
+handoff if the retry also fails. Spawn/reviewer infrastructure failures record
+their latest operator-facing reason in `tasks.spawn_failure_reason`.

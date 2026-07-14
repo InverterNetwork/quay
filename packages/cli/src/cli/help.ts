@@ -51,6 +51,8 @@ const COMMANDS: Record<string, CommandSpec> = {
       "task claim",
       "task release-claim",
       "task retarget",
+      "task resnapshot",
+      "task recreate-worktree",
     ],
   },
   "task list": {
@@ -98,6 +100,28 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--yes", desc: "Required confirmation for the source task mutation." },
     ],
   },
+  "task resnapshot": {
+    path: "task resnapshot",
+    synopsis: "quay task resnapshot <task_id> --reason <text>",
+    summary:
+      "Re-fetch the task's Linear ticket and replace its frozen ticket_snapshot, re-baselining the reviewer's definition of done.",
+    flags: [
+      { flag: "--reason <text>", desc: "Required audit note recorded on the ticket_resnapshotted event." },
+    ],
+  },
+  "task recreate-worktree": {
+    path: "task recreate-worktree",
+    synopsis:
+      "quay task recreate-worktree <task_id> --yes [--force]",
+    summary:
+      "Recreate a task's recorded worktree when the path is missing.",
+    details:
+      "Uses origin/<task.branch_name> when that remote branch exists. Otherwise it rebuilds from origin/<base_branch> while restoring the task branch name, then reruns the repo install command.",
+    flags: [
+      { flag: "--yes", desc: "Required confirmation for git worktree mutation." },
+      { flag: "--force", desc: "Allow recreation when the path exists or an active attempt is recorded." },
+    ],
+  },
   tick: {
     path: "tick",
     synopsis: "quay tick",
@@ -143,7 +167,6 @@ const COMMANDS: Record<string, CommandSpec> = {
       "outbox claim",
       "outbox complete",
       "outbox fail",
-      "outbox deliver",
     ],
   },
   "outbox list": {
@@ -189,12 +212,6 @@ const COMMANDS: Record<string, CommandSpec> = {
       { flag: "--error <message>", desc: "Error text to store in last_error." },
       { flag: "--next-eligible-at <iso>", desc: "Optional retry cooldown timestamp." },
     ],
-  },
-  "outbox deliver": {
-    path: "outbox deliver",
-    synopsis: "quay outbox deliver <outbox_item_id>",
-    summary:
-      "Claim, execute, and complete a supported delivery outbox item with its production handler.",
   },
   enqueue: {
     path: "enqueue",

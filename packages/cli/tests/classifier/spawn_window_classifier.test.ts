@@ -83,3 +83,74 @@ test("test_spawn_window_null_session_uses_same_classifier", async () => {
   expect(evTypes).toContain("blocker_ingested");
   expect(evTypes).not.toContain("spawn_failed");
 });
+
+test("spawn-window stale pre-existing PR without current evidence is spawn_failed", async () => {
+  h = createHarness();
+  h.clock.set("2026-07-14T10:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-spawn-window-stale-pr");
+  const worktreesRoot = join(h.dataDir, "worktrees");
+  const t = insertRunningTask(h.db, {
+    taskId: "task-spawn-window-stale-pr",
+    repoId,
+    worktreesRoot,
+    tmuxSession: null,
+    remoteShaAtSpawn: "same-remote-head",
+    prExistedAtSpawn: 1,
+    attemptsConsumed: 1,
+  });
+
+  const built = buildTickDeps(h);
+  built.git.setRemoteHeadSha(repoId, t.branchName, "same-remote-head");
+  built.github.setPrExists(repoId, t.branchName, true);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([{ task_id: t.taskId, action: "spawn_failed" }]);
+
+  const task = h.db
+    .query<
+      {
+        state: string;
+        attempts_consumed: number;
+        spawn_failures_consecutive: number;
+      },
+      [string]
+    >(
+      `SELECT state, attempts_consumed, spawn_failures_consecutive
+         FROM tasks WHERE task_id = ?`,
+    )
+    .get(t.taskId);
+  expect(task).toEqual({
+    state: "queued",
+    attempts_consumed: 0,
+    spawn_failures_consecutive: 1,
+  });
+
+  const attempts = h.db
+    .query<{ attempt_number: number; spawned_at: string | null; exit_kind: string | null }, [string]>(
+      `SELECT attempt_number, spawned_at, exit_kind
+         FROM attempts
+        WHERE task_id = ?
+        ORDER BY attempt_number`,
+    )
+    .all(t.taskId);
+  expect(attempts).toEqual([
+    {
+      attempt_number: 1,
+      spawned_at: "2026-01-01T00:00:00.000Z",
+      exit_kind: "spawn_failed",
+    },
+    { attempt_number: 2, spawned_at: null, exit_kind: null },
+  ]);
+
+  const evTypes = h.db
+    .query<{ event_type: string }, [string]>(
+      `SELECT event_type FROM events WHERE task_id = ? ORDER BY event_id`,
+    )
+    .all(t.taskId)
+    .map((r) => r.event_type);
+  expect(evTypes).toContain("spawn_failed");
+  expect(evTypes).not.toContain("no_progress");
+  expect(evTypes).not.toContain("existing_pr_attached");
+});

@@ -36,6 +36,7 @@
 import { join, resolve } from "node:path";
 import { GitHubMergeError } from "../ports/github.ts";
 import type {
+  GitHubMergeErrorKind,
   GitHubPort,
   GitHubGraphqlRateLimit,
   OpenBranchPr,
@@ -59,8 +60,15 @@ export interface RunResult {
   stderr: string;
 }
 
+export type MergeMethod = "merge" | "squash" | "rebase";
+
 export class GitHubCliAdapter implements GitHubPort {
   private cachedLogin: string | null = null;
+  // Allowed merge method per repo_id. The repo's merge-method policy is stable
+  // across a run, so we read it once and reuse it for every subsequent merge
+  // (an umbrella's child PRs all merge into the same repo). See
+  // `allowedMergeMethod`.
+  private readonly cachedMergeMethod = new Map<string, MergeMethod>();
 
   constructor(private readonly reposRoot: string) {}
 
@@ -268,32 +276,71 @@ export class GitHubCliAdapter implements GitHubPort {
     prNumber: number,
     expectedHeadSha: string,
   ): void {
+    // Pick a merge method the target repo actually allows. The historical
+    // hardcoded `--merge` fails on squash-only repos ("Merge commits are not
+    // allowed on this repository"); read the repo's policy and pass the
+    // matching flag (BRIX-1920).
+    const methodFlag = MERGE_METHOD_FLAG[this.allowedMergeMethod(repoId)];
     const result = this.run(repoId, [
       "gh",
       "pr",
       "merge",
       String(prNumber),
-      "--merge",
+      methodFlag,
       "--match-head-commit",
       expectedHeadSha,
     ]);
     if (result.exitCode === 0) return;
     const msg = `${result.stdout}\n${result.stderr}`;
-    const lower = msg.toLowerCase();
-    const kind =
-      lower.includes("head branch was modified") ||
-      lower.includes("head sha") ||
-      lower.includes("head commit")
-        ? "head_mismatch"
-        : lower.includes("not mergeable") ||
-            lower.includes("merge conflict") ||
-            lower.includes("cannot be merged")
-          ? "not_mergeable"
-          : "unknown";
     throw new GitHubMergeError(
       `gh pr merge ${prNumber} failed: ${msg.trim()}`,
-      kind,
+      classifyMergeErrorKind(msg),
     );
+  }
+
+  // Resolve an allowed merge method for the repo by reading its merge-method
+  // policy (`allow_merge_commit` / `allow_squash_merge` / `allow_rebase_merge`)
+  // via `gh api repos/{owner}/{repo}` — gh resolves the `{owner}/{repo}`
+  // placeholders from the bare clone's `origin`, same as `probeTokenAccess`.
+  //
+  // GitHub exposes no single "default method" field, so we pick
+  // deterministically: prefer `merge` (byte-identical to the historical
+  // `--merge` wherever it's allowed), else `squash`, else `rebase`. If the
+  // repo allows none (shouldn't happen), throw a clear error. Cached per
+  // repo_id — the policy is stable and every umbrella child merge in the same
+  // repo would otherwise re-read it.
+  private allowedMergeMethod(repoId: string): MergeMethod {
+    const cached = this.cachedMergeMethod.get(repoId);
+    if (cached !== undefined) return cached;
+    const result = this.run(repoId, ["gh", "api", "repos/{owner}/{repo}"]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `gh api repos/{owner}/{repo} (merge methods) failed: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+    } catch (err) {
+      throw new Error(
+        `gh api repos/{owner}/{repo} returned unparseable JSON for merge methods: ${(err as Error).message}`,
+      );
+    }
+    const method: MergeMethod | null =
+      parsed.allow_merge_commit === true
+        ? "merge"
+        : parsed.allow_squash_merge === true
+          ? "squash"
+          : parsed.allow_rebase_merge === true
+            ? "rebase"
+            : null;
+    if (method === null) {
+      throw new Error(
+        `repo "${repoId}" allows no merge method (merge, squash and rebase are all disabled); cannot auto-merge`,
+      );
+    }
+    this.cachedMergeMethod.set(repoId, method);
+    return method;
   }
 
   getGraphqlRateLimit(repoId: string): GitHubGraphqlRateLimit | null {
@@ -1505,6 +1552,50 @@ function mapMergeable(raw: unknown): PrMergeableState {
   const s = String(raw ?? "").toUpperCase();
   if (s === "MERGEABLE") return "mergeable";
   if (s === "CONFLICTING") return "conflicting";
+  return "unknown";
+}
+
+// `gh pr merge` flag for each resolved merge method.
+const MERGE_METHOD_FLAG: Record<MergeMethod, string> = {
+  merge: "--merge",
+  squash: "--squash",
+  rebase: "--rebase",
+};
+
+// Classify a `gh pr merge` failure from its combined stdout+stderr. Pure and
+// deterministic — exported so unit tests can exercise it without a `gh`
+// binary. Order matters: the policy-rejection check runs first because a
+// repo that forbids the chosen method is a distinct, NON-RETRYABLE failure
+// (BRIX-1921) that must not be miscategorised as `unknown` and retried every
+// tick.
+export function classifyMergeErrorKind(message: string): GitHubMergeErrorKind {
+  const lower = message.toLowerCase();
+  // Policy rejection: the repo disallows the merge method we used. gh surfaces
+  // this as "Merge commits are not allowed on this repository", "Squash merges
+  // are not allowed on this repository", "Rebase merges are not allowed on
+  // this repository", or a bare "merge method ... is not allowed" from the
+  // GraphQL merge mutation.
+  if (
+    lower.includes("not allowed on this repository") ||
+    lower.includes("merge method is not allowed") ||
+    lower.includes("merge method not allowed")
+  ) {
+    return "method_not_allowed";
+  }
+  if (
+    lower.includes("head branch was modified") ||
+    lower.includes("head sha") ||
+    lower.includes("head commit")
+  ) {
+    return "head_mismatch";
+  }
+  if (
+    lower.includes("not mergeable") ||
+    lower.includes("merge conflict") ||
+    lower.includes("cannot be merged")
+  ) {
+    return "not_mergeable";
+  }
   return "unknown";
 }
 

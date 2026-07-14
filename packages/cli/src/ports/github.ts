@@ -243,10 +243,23 @@ export interface PostedReviewAuthor {
   decision: PostedReview["decision"];
 }
 
+// `kind` classifies the merge failure so the tick can decide whether to retry.
+// `head_mismatch` and `not_mergeable` are RETRYABLE (head moved / transient
+// unmergeable — a later tick may succeed). `method_not_allowed` is
+// NON-RETRYABLE: the repo forbids the merge method GitHub was asked to use
+// ("Merge commits are not allowed on this repository" and similar), so
+// retrying the identical merge every tick can never succeed — the tick parks
+// the task instead of looping (BRIX-1921). `unknown` is the catch-all.
+export type GitHubMergeErrorKind =
+  | "not_mergeable"
+  | "head_mismatch"
+  | "method_not_allowed"
+  | "unknown";
+
 export class GitHubMergeError extends Error {
   constructor(
     message: string,
-    readonly kind: "not_mergeable" | "head_mismatch" | "unknown",
+    readonly kind: GitHubMergeErrorKind,
   ) {
     super(message);
     this.name = "GitHubMergeError";

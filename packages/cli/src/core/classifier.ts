@@ -279,6 +279,18 @@ export function classifyAndApply(
     return transitionPrOpened(deps, task, attempt, remoteShaAtExit, exitInfo);
   }
   if (prExistsAtExit && noProgress) {
+    const adoptedReady = ingestAdoptedReadyForReviewSignal(
+      deps,
+      task,
+      attempt,
+      remoteShaAtExit,
+      exitInfo,
+      predicate,
+    );
+    if (adoptedReady !== null) return adoptedReady;
+    if (options.spawnWindow && prExistedAtSpawn && remoteUnchanged) {
+      return { outcome: "spawn_window_no_evidence" };
+    }
     if (task.pr_number === null) {
       const attached = reconcileExistingOpenPr(
         deps,
@@ -290,15 +302,6 @@ export function classifyAndApply(
       );
       if (attached !== null) return attached;
     }
-    const adoptedReady = ingestAdoptedReadyForReviewSignal(
-      deps,
-      task,
-      attempt,
-      remoteShaAtExit,
-      exitInfo,
-      predicate,
-    );
-    if (adoptedReady !== null) return adoptedReady;
     return scheduleNoProgressRetry(
       deps,
       task,

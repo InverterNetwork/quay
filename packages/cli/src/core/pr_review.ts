@@ -1454,7 +1454,7 @@ function ensureTaskObjectiveArtifact(
         WHERE task_id = ?
           AND kind = 'task_objective'
           AND attempt_id IS NULL
-        ORDER BY artifact_id ASC
+        ORDER BY artifact_id DESC
         LIMIT 1`,
     )
     .get(taskId);
@@ -1569,7 +1569,11 @@ function composeTaskReviewBrief(
   lines.push(
     "",
     renderReviewRequiredAction(
-      task.authoring_mode === "quay_owned" ? "quay_owned" : "non_quay_owned",
+      // adopted_external_pr is treated as quay_owned for verdict disposition:
+      // Quay owns the feedback loop (the worker respawns on changes_requested),
+      // so non-blocking findings are fixed in-loop rather than filed to Linear.
+      // Only synthetic_review (human owns the branch) stays non-quay-owned.
+      task.authoring_mode === "synthetic_review" ? "non_quay_owned" : "quay_owned",
     ),
   );
 
@@ -1637,7 +1641,7 @@ function loadReviewContextBrief(db: DB, taskId: string): string | null {
         WHERE task_id = ?
           AND kind = 'task_objective'
           AND attempt_id IS NULL
-        ORDER BY artifact_id ASC
+        ORDER BY artifact_id DESC
         LIMIT 1`,
     )
     .get(taskId);

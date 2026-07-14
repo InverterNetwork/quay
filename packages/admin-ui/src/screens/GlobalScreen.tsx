@@ -157,6 +157,7 @@ interface SettingsBodyProps {
 
 function SettingsBody({ global, changes, onChange, onOpenPreamble, active, setActive }: SettingsBodyProps) {
   const deploymentSettings = deploymentSettingsFields(global, changes, onChange);
+  const reviewFindings = reviewFindingLinearToggle(global, changes, onChange);
   return (
     <div
       style={{
@@ -228,6 +229,43 @@ function SettingsBody({ global, changes, onChange, onOpenPreamble, active, setAc
           {global.adapters.map((adapter) => (
             <AdapterCard key={adapter.name} adapter={adapter} />
           ))}
+          <SubGroup
+            title="Review findings"
+            hint="policy · default on · affects synthetic_review tasks only"
+            columns={1}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                justifyContent: 'space-between',
+                gap: 16,
+              }}
+            >
+              <div style={{ minWidth: 0, display: 'grid', gap: 4 }}>
+                <HStack gap={8} align="baseline">
+                  <T kind="body-sm" style={{ fontWeight: 500 }}>
+                    File non-blocking review findings as Linear issues
+                  </T>
+                  {reviewFindings.dirty && (
+                    <Badge tone="accent" size="sm" variant="outline">
+                      edited
+                    </Badge>
+                  )}
+                </HStack>
+                <T kind="mono-sm" color="var(--ink-3)" style={{ lineHeight: 1.5 }}>
+                  Gates whether a synthetic_review finding is enqueued as a Linear issue.
+                  Worker-authored (quay_owned) tasks never create issues regardless of this
+                  switch. This is policy — distinct from the Linear adapter connectivity flag
+                  above. Repos may override it under their own Review findings control.
+                </T>
+              </div>
+              <Toggle
+                checked={reviewFindings.value}
+                onChange={(next) => reviewFindings.commit(next)}
+              />
+            </div>
+          </SubGroup>
         </Section>
 
         <Section
@@ -515,7 +553,12 @@ function ReadOnlyField({ field }: { field: ConfigFieldSummary }) {
   );
 }
 
-type DeploymentSettingsKey = keyof DeploymentSettingsUpdateChange['patch'];
+// The string-valued deployment settings; the boolean review-finding toggle is
+// handled separately by reviewFindingLinearToggle.
+type DeploymentSettingsKey = keyof Omit<
+  DeploymentSettingsUpdateChange['patch'],
+  'review_finding_linear_enabled'
+>;
 
 function deploymentSettingsFields(
   global: GlobalConfigSummary,
@@ -564,6 +607,41 @@ function deploymentSettingsFields(
         change: {
           type: 'deployment_settings.update',
           patch: { [key]: after },
+        },
+      });
+    },
+  };
+}
+
+const REVIEW_FINDING_LINEAR_CHANGE_ID = 'deployment_settings:review_finding_linear_enabled';
+
+function reviewFindingLinearToggle(
+  global: GlobalConfigSummary,
+  changes: ChangeEntry[],
+  onChange: (entry: ChangeEntry) => void,
+) {
+  const baseline = global.reviewFindings.linearEnabled;
+
+  function pending(): boolean | undefined {
+    const entry = changes.find((change) => change.id === REVIEW_FINDING_LINEAR_CHANGE_ID);
+    if (entry?.change.type !== 'deployment_settings.update') return undefined;
+    const value = entry.change.patch.review_finding_linear_enabled;
+    return typeof value === 'boolean' ? value : undefined;
+  }
+
+  return {
+    value: pending() ?? baseline,
+    dirty: changes.some((change) => change.id === REVIEW_FINDING_LINEAR_CHANGE_ID),
+    commit(next: boolean): void {
+      onChange({
+        id: REVIEW_FINDING_LINEAR_CHANGE_ID,
+        scope: 'global',
+        label: 'deployment review_finding_linear_enabled',
+        before: baseline ? 'on' : 'off',
+        after: next ? 'on' : 'off',
+        change: {
+          type: 'deployment_settings.update',
+          patch: { review_finding_linear_enabled: next },
         },
       });
     },

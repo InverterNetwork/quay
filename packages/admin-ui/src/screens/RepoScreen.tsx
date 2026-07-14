@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { Card } from '../components/Card';
+import { Segmented } from '../components/Segmented';
 import { HStack } from '../components/Stack';
 import { T } from '../components/Typography';
 import { Icon } from '../icons/Icon';
@@ -117,6 +118,7 @@ interface BodyProps {
 function Body({ repo, global, changes, onChange, active, setActive }: BodyProps) {
   const field = createRepoFieldAccess(repo, changes, onChange);
   const guidance = createRepoGuidanceAccess(repo, changes, onChange);
+  const reviewFindings = createRepoReviewFindingAccess(repo, changes, onChange);
   const globalWorkerPreamble = global.preambles.find((preamble) => preamble.kind === 'code') ?? null;
   const globalReviewerPreamble = global.preambles.find((preamble) => preamble.kind === 'review') ?? null;
   const workerBasePreamble = effectiveWithPending(
@@ -335,6 +337,47 @@ function Body({ repo, global, changes, onChange, active, setActive }: BodyProps)
               onCommit={(next) => field.commit('model_reviewer', next)}
             />
           </SubGroup>
+          <SubGroup
+            title="Review findings"
+            hint="override the global default · affects synthetic_review tasks only"
+            columns={1}
+          >
+            <div style={{ display: 'grid', gap: 10 }}>
+              <HStack gap={10} align="baseline">
+                <T kind="body-sm" style={{ fontWeight: 500 }}>
+                  File non-blocking findings as Linear issues
+                </T>
+                <Badge
+                  tone={reviewFindings.source === 'override' ? 'accent' : 'neutral'}
+                  size="sm"
+                  variant="outline"
+                >
+                  {reviewFindings.source}
+                </Badge>
+                {reviewFindings.dirty && (
+                  <Badge tone="accent" size="sm" variant="outline">
+                    edited
+                  </Badge>
+                )}
+                <span style={{ flex: 1 }} />
+                <Segmented
+                  value={reviewFindings.state}
+                  options={[
+                    { value: 'inherit', label: 'Inherit' },
+                    { value: 'on', label: 'On' },
+                    { value: 'off', label: 'Off' },
+                  ]}
+                  onChange={(next) => reviewFindings.commit(next)}
+                />
+              </HStack>
+              <T kind="mono-sm" color="var(--ink-3)" style={{ lineHeight: 1.5 }}>
+                Inherit follows the global default (
+                {global.reviewFindings.linearEnabled ? 'on' : 'off'}). Worker-authored
+                (quay_owned) tasks never create issues regardless. Off suppresses the Linear
+                issue only; findings are still persisted and still posted in the PR review.
+              </T>
+            </div>
+          </SubGroup>
         </Section>
 
         {/* 04 · Prompts */}
@@ -414,7 +457,9 @@ function Body({ repo, global, changes, onChange, active, setActive }: BodyProps)
 }
 
 type RepoPatch = RepoUpdateChange['patch'];
-type RepoPatchKey = keyof RepoPatch;
+// The string/number-valued repo fields; the boolean review-finding override is
+// handled separately by createRepoReviewFindingAccess.
+type RepoPatchKey = keyof Omit<RepoPatch, 'review_finding_linear_enabled'>;
 
 function createRepoFieldAccess(
   repo: RepoSummary,
@@ -474,6 +519,62 @@ function createRepoFieldAccess(
           type: 'repo.update',
           repo_id: repo.id,
           patch: { [key]: after } as RepoPatch,
+        },
+      });
+    },
+  };
+}
+
+type ReviewFindingTriState = 'inherit' | 'on' | 'off';
+
+function triStateFromValue(value: boolean | null): ReviewFindingTriState {
+  return value === null ? 'inherit' : value ? 'on' : 'off';
+}
+
+function valueFromTriState(state: ReviewFindingTriState): boolean | null {
+  return state === 'inherit' ? null : state === 'on';
+}
+
+// Per-repo tri-state override for filing non-blocking review findings as
+// Linear issues. Wires through the same repo.update change machinery as the
+// Agents overrides; `source` mirrors that block (override when set, else
+// inherits) and feeds the Overview "N overrides from Global" counter.
+function createRepoReviewFindingAccess(
+  repo: RepoSummary,
+  changes: ChangeEntry[],
+  onChange: (entry: ChangeEntry) => void,
+) {
+  const changeId = `repo:${repo.id}:review_finding_linear_enabled`;
+  const baseline: boolean | null = repo.reviewFindingLinearEnabled ?? null;
+
+  function pending(): boolean | null | undefined {
+    const entry = changes.find((change) => change.id === changeId);
+    if (entry?.change.type !== 'repo.update') return undefined;
+    if (!('review_finding_linear_enabled' in entry.change.patch)) return undefined;
+    return entry.change.patch.review_finding_linear_enabled ?? null;
+  }
+
+  const current = (() => {
+    const p = pending();
+    return p === undefined ? baseline : p;
+  })();
+
+  return {
+    state: triStateFromValue(current),
+    source: current === null ? 'inherits' : 'override',
+    dirty: changes.some((change) => change.id === changeId),
+    commit(state: ReviewFindingTriState): void {
+      const after = valueFromTriState(state);
+      onChange({
+        id: changeId,
+        scope: repo.id,
+        label: `${repo.id} review_finding_linear_enabled`,
+        before: triStateFromValue(baseline),
+        after: triStateFromValue(after),
+        change: {
+          type: 'repo.update',
+          repo_id: repo.id,
+          patch: { review_finding_linear_enabled: after },
         },
       });
     },
