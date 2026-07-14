@@ -1,26 +1,17 @@
-// BRIX-1916 — `quay task resnapshot <task_id> --reason <text>`.
-//
-// Covers each acceptance criterion:
-//   * replaces the frozen ticket_snapshot from the current Linear ticket and
-//     re-parses the quay-config block (single shared snapshot, no version skew),
-//   * emits a ticket_resnapshotted event with a before/after diff + reason,
-//   * invalidates a stale changes_requested verdict so the next tick re-reviews,
-//   * preserves creation-time snapshot augmentations it does not recompute,
-//   * runs as a safe, still-audited no-op when the ticket is unchanged,
-//   * fails cleanly on unknown task / missing external_ref / missing reason /
-//     adapter-disabled.
-
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dispatch } from "../../src/cli/dispatch.ts";
 import { bufferIO } from "../../src/cli/io.ts";
+import { enterReview } from "../../src/core/pr_review.ts";
 import { createRepoService } from "../../src/core/repos/service.ts";
 import { fetchTicketContextWithIssue } from "../../src/core/ticket_context.ts";
+import { loadOriginalTaskObjective } from "../../src/core/worker_prompt.ts";
 import type { DB } from "../../src/db/connection.ts";
 import type { LinearIssue } from "../../src/ports/linear.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
 import { buildCliDeps } from "../support/cli_deps.ts";
-import { insertPreamble } from "../support/fixtures.ts";
+import { insertPreamble, seedTaskObjective } from "../support/fixtures.ts";
 
 let h: Harness | null = null;
 afterEach(() => {
@@ -126,6 +117,10 @@ function latestSnapshot(harness: Harness, taskId: string): string {
   return readFileSync(row.file_path, "utf8");
 }
 
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
 function snapshotCount(harness: Harness, taskId: string): number {
   return harness.db
     .query<{ n: number }, [string]>(
@@ -198,6 +193,7 @@ test("resnapshot replaces the frozen snapshot from the current Linear ticket", a
   );
   insertTask(h.db, { taskId: "task-1" });
   seedSnapshot(built, "task-1", original);
+  seedTaskObjective(h, "task-1", "Original worker objective: Original strict AC.");
 
   // Operator relaxes the AC on the live ticket.
   built.linear.setIssue(makeIssue("Relaxed AC: the happy path is sufficient."));
@@ -219,9 +215,8 @@ test("resnapshot replaces the frozen snapshot from the current Linear ticket", a
     review_invalidated: 0,
   });
   expect(payload.snapshot_artifact_id).not.toBeNull();
+  expect(payload.objective_artifact_id).not.toBeNull();
 
-  // Single shared snapshot replaced in place; latest content reflects the
-  // re-fetched ticket and a freshly re-parsed quay-config block.
   expect(snapshotCount(h, "task-1")).toBe(2);
   const parsed = JSON.parse(latestSnapshot(h, "task-1"));
   expect(parsed.linear_issue.body).toContain("Relaxed AC");
@@ -229,6 +224,11 @@ test("resnapshot replaces the frozen snapshot from the current Linear ticket", a
   expect(parsed.quay_config_block.repo).toBe(REPO_ID);
   expect(parsed.quay_config_block.tags).toEqual(["resnapshot"]);
   expect(built.linear.getIssueCalls).toContain(EXTERNAL_REF);
+
+  const objective = loadOriginalTaskObjective(h.db, "task-1");
+  expect(objective.artifactId).toBe(payload.objective_artifact_id);
+  expect(objective.body).toContain("Relaxed AC");
+  expect(objective.body).not.toContain("Original strict AC");
 });
 
 test("resnapshot emits a ticket_resnapshotted event with a before/after diff and the reason", async () => {
@@ -264,6 +264,77 @@ test("resnapshot emits a ticket_resnapshotted event with a before/after diff and
   expect(typeof data.before_snapshot_hash).toBe("string");
   expect(typeof data.after_snapshot_hash).toBe("string");
   expect(data.before_snapshot_hash).not.toBe(data.after_snapshot_hash);
+  expect(data.after_snapshot_hash).toBe(sha256(latestSnapshot(h, "task-1")));
+});
+
+test("resnapshot updates the reviewer prompt context for the next review", async () => {
+  h = createHarness();
+  addRepo(h);
+  const built = buildCliDeps(h);
+
+  const original = await composeSnapshot(built, makeIssue("Original AC for review."));
+  insertTask(h.db, { taskId: "task-1", state: "pr-open" });
+  seedSnapshot(built, "task-1", original);
+  seedTaskObjective(h, "task-1", "Original reviewer objective: stale AC.");
+  built.linear.setIssue(makeIssue("Relaxed AC for review."));
+
+  const io = bufferIO();
+  const result = await dispatch(
+    ["task", "resnapshot", "task-1", "--reason", "review should use latest ticket"],
+    built.deps,
+    io,
+  );
+  expect(result.exitCode).toBe(0);
+
+  built.github.setPrView(REPO_ID, 17, {
+    number: 17,
+    title: "Task PR",
+    body: "Body",
+    url: "https://github.example/repo/pull/17",
+    headRefName: "quay/task-1",
+    headSha: "head-review",
+    baseRef: "main",
+    isCrossRepository: false,
+  });
+  built.github.setPrSnapshotByNumber(REPO_ID, 17, {
+    state: "open",
+    headSha: "head-review",
+    baseSha: "base-review",
+    mergeable: "mergeable",
+    latestReview: { decision: "NONE", latestReviewId: null, comments: "" },
+    checks: {
+      checkSha: "head-review",
+      items: [{ name: "ci", workflow: null, bucket: "pass", required: true }],
+    },
+  });
+
+  const review = enterReview(
+    {
+      db: h.db,
+      clock: h.clock,
+      github: built.github,
+      tmux: built.tmux,
+      artifactStore: built.deps.artifactStore,
+    },
+    {
+      repoId: REPO_ID,
+      prNumber: 17,
+      reviewerEnabled: true,
+      gateQuayOwnedDone: true,
+    },
+  );
+  expect(review.scheduled).toBe(true);
+  expect(review.attempt_id).not.toBeNull();
+
+  const promptPath = h.db
+    .query<{ file_path: string }, [number]>(
+      `SELECT file_path FROM artifacts
+        WHERE attempt_id = ? AND kind = 'final_prompt'`,
+    )
+    .get(review.attempt_id!)!.file_path;
+  const finalPrompt = readFileSync(promptPath, "utf8");
+  expect(finalPrompt).toContain("Relaxed AC for review");
+  expect(finalPrompt).not.toContain("stale AC");
 });
 
 test("resnapshot invalidates a stale changes_requested verdict so the next tick re-reviews", async () => {
@@ -321,6 +392,9 @@ test("resnapshot preserves creation-time snapshot augmentations it does not reco
   expect(parsed.linear_issue.body).toContain("Relaxed AC");
   expect(parsed.linear_blocked_by_relations).toEqual([{ identifier: "BRIX-1900" }]);
   expect(parsed.linear_hierarchy).toEqual({ parent: null, children: [] });
+
+  const data = JSON.parse(latestEvent(h, "task-1").event_data!);
+  expect(data.after_snapshot_hash).toBe(sha256(latestSnapshot(h, "task-1")));
 });
 
 test("resnapshot is a safe, still-audited no-op when the ticket is unchanged", async () => {
@@ -380,6 +454,8 @@ test("resnapshot no-op ignores creation-time augmentations when comparing", asyn
   expect(result.exitCode).toBe(0);
   expect(JSON.parse(io.out()).changed).toBe(false);
   expect(snapshotCount(h, "task-1")).toBe(1);
+  const data = JSON.parse(latestEvent(h, "task-1").event_data!);
+  expect(data.before_snapshot_hash).toBe(data.after_snapshot_hash);
 });
 
 test("resnapshot rejects an unknown task", async () => {

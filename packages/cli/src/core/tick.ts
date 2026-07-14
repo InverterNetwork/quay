@@ -3748,17 +3748,21 @@ function loadUmbrellaFinalPrExpectedSubtasks(
               ut.task_id,
               t.state AS task_state,
               t.pr_url,
-              ao.file_path AS objective_path
+              (
+                SELECT ao.file_path
+                  FROM artifacts ao
+                 WHERE ao.task_id = ut.task_id
+                   AND ao.kind = 'task_objective'
+                   AND ao.attempt_id IS NULL
+                 ORDER BY ao.artifact_id DESC
+                 LIMIT 1
+              ) AS objective_path
          FROM umbrella_expected_tasks uet
          LEFT JOIN umbrella_tasks ut
            ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
           AND ut.external_ref = uet.external_ref
          LEFT JOIN tasks t
            ON t.task_id = ut.task_id
-         LEFT JOIN artifacts ao
-           ON ao.task_id = ut.task_id
-          AND ao.kind = 'task_objective'
-          AND ao.attempt_id IS NULL
         WHERE uet.umbrella_workflow_id = ?
         ORDER BY uet.external_ref`,
     )

@@ -130,7 +130,7 @@ export function loadGoalPromptContext(
         WHERE task_id = ?
           AND kind = 'task_objective'
           AND attempt_id IS NULL
-        ORDER BY artifact_id ASC
+        ORDER BY artifact_id DESC
         LIMIT 1`,
     )
     .get(taskId);
