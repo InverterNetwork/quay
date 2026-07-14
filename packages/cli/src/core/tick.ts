@@ -257,6 +257,7 @@ export type TickAction =
   | "ci_passed"
   | "adopted_pr_reconciled"
   | "umbrella_final_pr_reconciled"
+  | "umbrella_retired"
   | "pr_merged"
   | "pr_closed_unmerged"
   | "review_respawn_scheduled"
@@ -450,6 +451,12 @@ interface ReadyUmbrellaFinalPrWorkflowRow {
   final_pr_task_id: string | null;
   final_pr_number: number | null;
   final_pr_url: string | null;
+}
+
+interface RetirableUmbrellaWorkflowRow {
+  umbrella_workflow_id: number;
+  external_ref: string;
+  repo_id: string;
 }
 
 interface UmbrellaFinalPrExpectedSubtaskRow {
@@ -1196,6 +1203,16 @@ export async function tick_once(
       }
     }
 
+    for (const workflow of readRetirableUmbrellaWorkflows(deps.db)) {
+      const auditTaskId = `umbrella-${workflow.umbrella_workflow_id}`;
+      try {
+        const result = retireUmbrellaWorkflow(deps, workflow);
+        if (result !== null) results.push(result);
+      } catch (err) {
+        results.push(recordTickError(deps, auditTaskId, err));
+      }
+    }
+
     for (const task of prOpenSnapshot) {
       const skipped = githubBackoffSkipResult(githubBackoff, task.task_id);
       if (skipped !== null) {
@@ -1789,6 +1806,48 @@ function readReadyUmbrellaFinalPrWorkflows(
                       ut.task_id IS NOT NULL
                   AND t.state = 'merged_to_feature_branch'
                  )
+               )
+          )
+        ORDER BY uw.created_at, uw.umbrella_workflow_id`,
+    )
+    .all();
+}
+
+// BRIX-1924: an umbrella can never reach its final PR once every expected
+// child is linked to a Quay task that terminated as `cancelled` — those
+// children can never reach `merged_to_feature_branch`, and none of the
+// expected rows is still `expected` (enqueueable) or `complete_without_quay`
+// (a success). Such an umbrella would otherwise linger `active` forever
+// (observed on BRIX-1902). This is the exact inverse of the readiness gate in
+// `readReadyUmbrellaFinalPrWorkflows`: retire when NOT EXISTS an expected task
+// that is anything other than "linked to a cancelled task". Umbrellas with a
+// child still in progress, already merged to the feature branch, complete
+// without Quay, or still unlinked (`expected`) are left untouched.
+function readRetirableUmbrellaWorkflows(
+  db: DB,
+): RetirableUmbrellaWorkflowRow[] {
+  return db
+    .query<RetirableUmbrellaWorkflowRow, []>(
+      `SELECT uw.umbrella_workflow_id, uw.external_ref, uw.repo_id
+         FROM umbrella_workflows uw
+        WHERE uw.state = 'active'
+          AND EXISTS (
+            SELECT 1
+              FROM umbrella_expected_tasks uet
+             WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM umbrella_expected_tasks uet
+              LEFT JOIN umbrella_tasks ut
+                ON ut.umbrella_workflow_id = uet.umbrella_workflow_id
+               AND ut.external_ref = uet.external_ref
+              LEFT JOIN tasks t
+                ON t.task_id = ut.task_id
+             WHERE uet.umbrella_workflow_id = uw.umbrella_workflow_id
+               AND NOT (
+                    ut.task_id IS NOT NULL
+                AND t.state = 'cancelled'
                )
           )
         ORDER BY uw.created_at, uw.umbrella_workflow_id`,
@@ -3566,6 +3625,32 @@ function markFinalUmbrellaWorkflowCompleted(
       WHERE final_pr_task_id = ?
         AND state = 'active'`,
   ).run(now, taskId);
+}
+
+// BRIX-1924: transition an orphaned umbrella (all children cancelled, nothing
+// left that could ever complete) to the terminal `cancelled` state. The
+// `state = 'active'` predicate keeps this idempotent — a re-run whose UPDATE
+// matches no row (already retired) returns null and emits no audit action.
+function retireUmbrellaWorkflow(
+  deps: TickDeps,
+  workflow: RetirableUmbrellaWorkflowRow,
+): TickTaskResult | null {
+  const now = deps.clock.nowISO();
+  const upd = deps.db
+    .query(
+      `UPDATE umbrella_workflows
+          SET state = 'cancelled',
+              updated_at = ?
+        WHERE umbrella_workflow_id = ?
+          AND state = 'active'`,
+    )
+    .run(now, workflow.umbrella_workflow_id);
+  const changed = (upd as { changes?: number }).changes ?? 0;
+  if (changed === 0) return null;
+  return {
+    task_id: `umbrella-${workflow.umbrella_workflow_id}`,
+    action: "umbrella_retired",
+  };
 }
 
 function isUmbrellaTask(db: DB, taskId: string): boolean {
