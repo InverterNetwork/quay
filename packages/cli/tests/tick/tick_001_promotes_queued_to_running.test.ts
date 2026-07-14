@@ -1,4 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { createTaskDependency } from "../../src/core/task_dependencies.ts";
 import { tick_once } from "../../src/core/tick.ts";
 import { createHarness, type Harness } from "../support/harness.ts";
@@ -136,6 +138,173 @@ test("tick does not spawn tasks waiting on dependencies", async () => {
   expect(task).toEqual({
     state: "waiting_dependencies",
     attempts_consumed: 0,
+  });
+});
+
+test("tick recreates missing queued respawn worktree from remote task branch", async () => {
+  h = createHarness();
+  h.clock.set("2026-07-14T11:00:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-missing-respawn-worktree");
+  const taskId = insertTask(h.db, {
+    taskId: "task-missing-respawn-worktree",
+    repoId,
+  });
+  const worktreePath = join(h.dataDir, "worktrees", taskId);
+  h.db
+    .query(`UPDATE tasks SET worktree_path = ? WHERE task_id = ?`)
+    .run(worktreePath, taskId);
+
+  const firstAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-07-14T10:00:00.000Z",
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET ended_at = '2026-07-14T10:05:00.000Z',
+              exit_kind = 'spawn_failed'
+        WHERE attempt_id = ?`,
+    )
+    .run(firstAttemptId);
+  const retryAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "spawn_failed",
+    consumedBudget: 1,
+  });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, retryAttemptId);
+
+  const built = buildTickDeps(h);
+  const branchName = `quay/${taskId}`;
+  built.git.setRemoteBranches(repoId, [branchName]);
+  built.git.setRemoteHeadSha(repoId, branchName, "retry-remote-head");
+  built.github.setPrExists(repoId, branchName, false);
+
+  expect(existsSync(worktreePath)).toBe(false);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([{ task_id: taskId, action: "spawned" }]);
+  expect(existsSync(worktreePath)).toBe(true);
+  expect(built.git.calls).toContainEqual({
+    op: "hasRemoteBranch",
+    args: { repoId, branch: branchName },
+  });
+  expect(built.git.calls).toContainEqual({
+    op: "fetch",
+    args: { repoId, ref: branchName },
+  });
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeAddExistingBranch",
+    args: {
+      repoId,
+      worktreePath,
+      branch: branchName,
+      baseRef: `origin/${branchName}`,
+    },
+  });
+  expect(built.commandRunner.calls).toEqual([
+    { command: "bun install", cwd: worktreePath },
+  ]);
+  expect(built.tmux.spawnCalls).toHaveLength(1);
+  expect(built.tmux.spawnCalls[0]!.worktreePath).toBe(worktreePath);
+
+  const event = h.db
+    .query<{ event_type: string; event_data: string | null }, [string]>(
+      `SELECT event_type, event_data
+         FROM events
+        WHERE task_id = ? AND event_type = 'worktree_recreated'`,
+    )
+    .get(taskId);
+  expect(event?.event_type).toBe("worktree_recreated");
+  expect(JSON.parse(event!.event_data!)).toEqual({
+    reason: "missing_queued_worktree",
+    branch_name: branchName,
+    recovery_base_branch: branchName,
+    recovery_base_ref: `origin/${branchName}`,
+    worktree_path: worktreePath,
+  });
+});
+
+test("tick recreates missing queued respawn worktree from base when task branch is absent", async () => {
+  h = createHarness();
+  h.clock.set("2026-07-14T11:05:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-missing-respawn-worktree-base");
+  const taskId = insertTask(h.db, {
+    taskId: "task-missing-respawn-worktree-base",
+    repoId,
+  });
+  const worktreePath = join(h.dataDir, "worktrees", taskId);
+  h.db
+    .query(`UPDATE tasks SET worktree_path = ? WHERE task_id = ?`)
+    .run(worktreePath, taskId);
+
+  const firstAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-07-14T10:00:00.000Z",
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET ended_at = '2026-07-14T10:05:00.000Z',
+              exit_kind = 'spawn_failed'
+        WHERE attempt_id = ?`,
+    )
+    .run(firstAttemptId);
+  const retryAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "spawn_failed",
+    consumedBudget: 1,
+  });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, retryAttemptId);
+
+  const built = buildTickDeps(h);
+  const branchName = `quay/${taskId}`;
+  built.git.setRemoteBranches(repoId, []);
+  built.github.setPrExists(repoId, branchName, false);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([{ task_id: taskId, action: "spawned" }]);
+  expect(built.git.calls).toContainEqual({
+    op: "fetch",
+    args: { repoId, ref: "main" },
+  });
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeAddExistingBranch",
+    args: {
+      repoId,
+      worktreePath,
+      branch: branchName,
+      baseRef: "origin/main",
+    },
+  });
+  expect(built.commandRunner.calls).toEqual([
+    { command: "bun install", cwd: worktreePath },
+  ]);
+
+  const event = h.db
+    .query<{ event_data: string | null }, [string]>(
+      `SELECT event_data
+         FROM events
+        WHERE task_id = ? AND event_type = 'worktree_recreated'`,
+    )
+    .get(taskId);
+  expect(JSON.parse(event!.event_data!)).toMatchObject({
+    reason: "missing_queued_worktree",
+    branch_name: branchName,
+    recovery_base_branch: "main",
+    recovery_base_ref: "origin/main",
+    worktree_path: worktreePath,
   });
 });
 

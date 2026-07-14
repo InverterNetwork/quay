@@ -6743,6 +6743,61 @@ function refreshDependencyReleasedWorktreeIfNeeded(
   return null;
 }
 
+function recreateMissingQueuedWorktreeIfNeeded(
+  deps: TickDeps,
+  task: QueuedTaskRow,
+  pending: PendingAttemptRow,
+  now: string,
+): TickTaskResult | null {
+  if (pending.attempt_number <= 1) return null;
+  if (existsSync(task.worktree_path)) return null;
+
+  let recoveryBaseBranch: string;
+  let recoveryBaseRef: string;
+  try {
+    const repo = loadWorktreeDependencyRepo(deps.db, task.repo_id);
+    if (deps.git.hasRemoteBranch(task.repo_id, task.branch_name)) {
+      recoveryBaseBranch = task.branch_name;
+      recoveryBaseRef = `origin/${task.branch_name}`;
+    } else {
+      recoveryBaseBranch = task.base_branch;
+      recoveryBaseRef = `origin/${task.base_branch}`;
+    }
+    deps.git.fetch(task.repo_id, recoveryBaseBranch);
+    deps.git.worktreeAddExistingBranch(
+      task.repo_id,
+      task.worktree_path,
+      task.branch_name,
+      recoveryBaseRef,
+    );
+    installWorktreeDependencies(deps.commandRunner, repo, task.worktree_path);
+  } catch (err) {
+    return {
+      task_id: task.task_id,
+      action: "spawn_substrate_failed",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  deps.db
+    .query(
+      `INSERT INTO events (task_id, event_type, occurred_at, event_data)
+       VALUES (?, 'worktree_recreated', ?, ?)`,
+    )
+    .run(
+      task.task_id,
+      now,
+      JSON.stringify({
+        reason: "missing_queued_worktree",
+        branch_name: task.branch_name,
+        recovery_base_branch: recoveryBaseBranch,
+        recovery_base_ref: recoveryBaseRef,
+        worktree_path: task.worktree_path,
+      }),
+    );
+  return null;
+}
+
 function promoteAndSpawn(
   deps: TickDeps,
   task: QueuedTaskRow,
@@ -6825,6 +6880,13 @@ function promoteAndSpawn(
     now,
   );
   if (refreshResult !== null) return refreshResult;
+  const recreateResult = recreateMissingQueuedWorktreeIfNeeded(
+    deps,
+    task,
+    pending,
+    now,
+  );
+  if (recreateResult !== null) return recreateResult;
 
   const spawnEnv = addCodexLaunchIsolation(
     githubToken.env,
