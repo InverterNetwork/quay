@@ -267,6 +267,7 @@ test("worker PR visibility permission failure is classified as auth invalid", as
 
 test("worker auth preflight retries once with freshly resolved token then spawns", async () => {
   h = createHarness();
+  h.clock.set("2026-05-13T10:00:00.000Z");
   const built = buildTickDeps(h);
   const repoId = insertRepo(h.db, "repo-worker-auth-refresh");
   const taskId = insertTask(h.db, {
@@ -305,6 +306,17 @@ test("worker auth preflight retries once with freshly resolved token then spawns
   expect(built.tmux.spawnCalls).toHaveLength(0);
   writeFileSync(tokenPath, "ghs_fresh_worker_token\n");
 
+  expect(
+    await tick_once(built.deps, {
+      workerGhTokenFile: tokenPath,
+      env: {},
+    }),
+  ).toEqual([]);
+  expect(built.github.tokenAccessCalls.map((c) => c.token)).toEqual([
+    "ghs_stale_worker_token",
+  ]);
+
+  h.clock.set("2026-05-13T10:05:00.000Z");
   const second = await tick_once(built.deps, {
     workerGhTokenFile: tokenPath,
     env: {},
@@ -323,6 +335,7 @@ test("worker auth preflight retries once with freshly resolved token then spawns
 
 test("worker auth preflight escalates clearly after the fresh-auth retry fails", async () => {
   h = createHarness();
+  h.clock.set("2026-05-13T10:00:00.000Z");
   const built = buildTickDeps(h);
   const repoId = insertRepo(h.db, "repo-worker-auth-repeated");
   const taskId = insertTask(h.db, {
@@ -347,6 +360,14 @@ test("worker auth preflight escalates clearly after the fresh-auth retry fails",
   await tick_once(built.deps, {
     env: { [WORKER_GH_TOKEN_ENV]: token },
   });
+  expect(
+    await tick_once(built.deps, {
+      env: { [WORKER_GH_TOKEN_ENV]: token },
+    }),
+  ).toEqual([]);
+  expect(built.github.tokenAccessCalls).toHaveLength(1);
+
+  h.clock.set("2026-05-13T10:05:00.000Z");
   const second = await tick_once(built.deps, {
     env: { [WORKER_GH_TOKEN_ENV]: token },
   });

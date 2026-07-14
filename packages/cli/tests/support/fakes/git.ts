@@ -137,6 +137,11 @@ export class FakeGit implements GitPort {
     if (this.fail.worktreeAdd?.(worktreePath)) {
       throw new Error(`fake: worktreeAddExistingBranch failed for ${worktreePath}`);
     }
+    for (const checkout of this.worktreeBranches.values()) {
+      if (checkout.repoId === repoId && checkout.branch === branch) {
+        throw new Error(`fake: branch ${branch} is checked out in a worktree`);
+      }
+    }
     mkdirSync(worktreePath, { recursive: true });
     this.worktrees.add(worktreePath);
     let set = this.localBranches.get(repoId);
@@ -201,6 +206,17 @@ export class FakeGit implements GitPort {
     this.worktrees.delete(worktreePath);
     this.worktreeBranches.delete(worktreePath);
     this.worktreeHeads.delete(worktreePath);
+  }
+
+  worktreePrune(repoId: string): void {
+    this.record("worktreePrune", { repoId });
+    for (const [path, checkout] of [...this.worktreeBranches.entries()]) {
+      if (checkout.repoId === repoId && !existsSync(path)) {
+        this.worktrees.delete(path);
+        this.worktreeBranches.delete(path);
+        this.worktreeHeads.delete(path);
+      }
+    }
   }
 
   branchDelete(repoId: string, branch: string): void {

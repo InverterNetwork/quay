@@ -2245,6 +2245,104 @@ test("POST /v1/changes/apply preserves effective defaults on first partial deplo
   });
 });
 
+test("GET /v1/global exposes the review-finding Linear default (ON when unset)", async () => {
+  h = createHarness();
+  const handler = createHandler();
+
+  const response = await handler(new Request("http://quay.local/v1/global"));
+  const body = await responseJson(response);
+
+  expect(response.status).toBe(200);
+  expect(body).toMatchObject({ review_findings: { linear_enabled: true } });
+});
+
+test("POST /v1/changes/apply toggles the global review-finding Linear default off", async () => {
+  h = createHarness();
+  const handler = createHandler();
+  const revision = await currentRevision(handler);
+
+  const response = await handler(postJson("/v1/changes/apply", {
+    base_revision: revision,
+    changes: [
+      {
+        type: "deployment_settings.update",
+        patch: { review_finding_linear_enabled: false },
+      },
+    ],
+  }));
+
+  expect(response.status).toBe(200);
+  expect(
+    h.db
+      .query<{ review_finding_linear_enabled: number | null }, []>(
+        `SELECT review_finding_linear_enabled
+           FROM deployment_settings
+          WHERE singleton_id = 1`,
+      )
+      .get()?.review_finding_linear_enabled,
+  ).toBe(0);
+
+  const global = await responseJson(
+    await handler(new Request("http://quay.local/v1/global")),
+  );
+  expect(global).toMatchObject({ review_findings: { linear_enabled: false } });
+});
+
+test("GET /v1/repos/:id exposes the review-finding Linear override (inherit by default)", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  repoService.add({
+    repo_id: "repo-toggle",
+    repo_url: "git@example.com:owner/repo-toggle.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  const handler = createHandler({ repoService });
+
+  const body = await responseJson(
+    await handler(new Request("http://quay.local/v1/repos/repo-toggle")),
+  );
+
+  expect(body.review_finding_linear_enabled).toBeNull();
+});
+
+test("POST /v1/changes/apply sets a per-repo review-finding Linear override", async () => {
+  h = createHarness();
+  const repoService = createRepoService({ db: h.db, clock: h.clock });
+  repoService.add({
+    repo_id: "repo-toggle",
+    repo_url: "git@example.com:owner/repo-toggle.git",
+    base_branch: "main",
+    package_manager: "bun",
+    install_cmd: "bun install",
+  });
+  const handler = createHandler({ repoService });
+  const revision = await currentRevision(handler);
+
+  const response = await handler(postJson("/v1/changes/apply", {
+    base_revision: revision,
+    changes: [
+      {
+        type: "repo.update",
+        repo_id: "repo-toggle",
+        patch: { review_finding_linear_enabled: false },
+      },
+    ],
+  }));
+
+  expect(response.status).toBe(200);
+  expect(JSON.stringify(await responseJson(response))).toContain(
+    "review_finding_linear_enabled",
+  );
+  expect(repoService.get("repo-toggle")?.review_finding_linear_enabled).toBe(false);
+
+  const detail = await responseJson(
+    await handler(new Request("http://quay.local/v1/repos/repo-toggle")),
+  );
+  expect(detail.review_finding_linear_enabled).toBe(false);
+});
+
 test("GET /v1/global includes identity mappings and unmapped contributor discovery", async () => {
   h = createHarness();
   const repoId = insertRepo(h.db, "repo-identities");

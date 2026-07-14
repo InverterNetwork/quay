@@ -93,9 +93,6 @@ test("test_linear_sync_queue_does_not_block_on_enqueue", async () => {
     async updateIssueBody() {
       throw new Error("not used");
     },
-    async createIssue() {
-      throw new Error("not used");
-    },
   };
   const queue = new LinearSyncQueue(slowLinear);
   // Enqueue is sync — this line returns before `setIssueState` resolves.

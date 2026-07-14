@@ -62,6 +62,10 @@ import {
   type ResnapshotDeps,
 } from "../core/resnapshot.ts";
 import {
+  recreate_task_worktree,
+  type RecreateWorktreeDeps,
+} from "../core/recreate_worktree.ts";
+import {
   claim_task,
   release_claim,
   submit_brief,
@@ -106,9 +110,6 @@ import {
   type AdoptPrResult,
   type EnterReviewResult,
 } from "../core/pr_review.ts";
-import {
-  processReviewFindingLinearIssueOutboxItem,
-} from "../core/review_finding_linear_outbox.ts";
 
 export interface CliPaths {
   reposRoot: string;
@@ -527,9 +528,6 @@ async function handleOutbox(
     case "fail":
       if (wantsHelp(rest)) return printHelp(io, ["outbox", "fail"]);
       return handleOutboxFail(rest, deps, io);
-    case "deliver":
-      if (wantsHelp(rest)) return printHelp(io, ["outbox", "deliver"]);
-      return await handleOutboxDeliver(rest, deps, io);
     default:
       return writeErrorWithUsage(
         io,
@@ -538,34 +536,6 @@ async function handleOutbox(
         `unknown outbox subcommand: ${sub}`,
       );
   }
-}
-
-async function handleOutboxDeliver(
-  argv: string[],
-  deps: CliDeps,
-  io: CliIO,
-): Promise<DispatchResult> {
-  const validation = validateFlags(argv, { valued: [] });
-  if (!validation.ok) {
-    return writeError(io, "usage_error", validation.message, validation.details);
-  }
-  const parsed = parsePositiveIntArg(positional(argv), "outbox deliver");
-  if (!parsed.ok) return writeError(io, "usage_error", parsed.message);
-  const linear = pickLinearAdapter(deps);
-  if (linear === undefined) {
-    return writeError(
-      io,
-      "adapter_not_enabled",
-      "[adapters.linear] is not configured for this deployment",
-      { adapter: "linear" },
-    );
-  }
-  const row = await processReviewFindingLinearIssueOutboxItem(
-    { db: deps.db, clock: deps.clock, linear },
-    { outboxItemId: parsed.value },
-  );
-  io.stdout(`${JSON.stringify(row)}\n`);
-  return { exitCode: 0 };
 }
 
 function handleOutboxList(
@@ -771,6 +741,9 @@ async function handleTask(
     case "resnapshot":
       if (wantsHelp(rest)) return printHelp(io, ["task", "resnapshot"]);
       return await handleTaskResnapshot(rest, deps, io);
+    case "recreate-worktree":
+      if (wantsHelp(rest)) return printHelp(io, ["task", "recreate-worktree"]);
+      return await handleTaskRecreateWorktree(rest, deps, io);
     default:
       // A typo'd subcommand benefits from the noun's usage block as much as
       // a missing one — surface it on stderr alongside the structured envelope.
@@ -781,6 +754,42 @@ async function handleTask(
         `unknown task subcommand: ${sub}`,
       );
   }
+}
+
+async function handleTaskRecreateWorktree(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  const validation = validateFlags(argv, {
+    boolean: ["--yes", "--force"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const taskId = positional(argv);
+  if (!taskId) {
+    return writeError(
+      io,
+      "usage_error",
+      "task recreate-worktree requires <task_id>",
+    );
+  }
+  const recreateDeps: RecreateWorktreeDeps = {
+    db: deps.db,
+    clock: deps.clock,
+    git: deps.git,
+    commandRunner: deps.commandRunner,
+    supervisorLock: deps.supervisorLock,
+  };
+  return emitServiceResult(
+    await recreate_task_worktree(recreateDeps, {
+      taskId,
+      yes: argv.includes("--yes"),
+      force: argv.includes("--force"),
+    }),
+    io,
+  );
 }
 
 async function handleTaskRetarget(
@@ -2423,6 +2432,9 @@ function handleSettingsImport(
     worker_model: loaded.config.agents?.worker_model ?? null,
     reviewer_agent: loaded.config.agents?.reviewer ?? null,
     reviewer_model: loaded.config.agents?.reviewer_model ?? null,
+    // No config-file source for the review-finding toggle: leave it unset so
+    // it resolves to ON (the current intended behavior).
+    review_finding_linear_enabled: null,
   };
   const onlyEmpty = argv.includes("--only-empty");
   const next = onlyEmpty && current !== null ? current : imported;
