@@ -81,9 +81,9 @@ binary and invalid UTF-8 artifacts such as `malformed_signal`.
 
 | Kind | Meaning |
 | --- | --- |
-| `ticket_snapshot` | Snapshot of source ticket/context at enqueue time. |
-| `task_objective` | Stable original task brief, written once at enqueue and reused by every later code-worker attempt as the canonical objective. Task-level (no `attempt_id`). |
-| `brief` | Per-attempt composed prompt body: a structured `<quay-task-objective>` block pointing at the task-level `task_objective` artifact, a `<quay-current-attempt-guidance>` block (initial instruction, retry/respawn template, or orchestrator-submitted brief), and an optional `<quay-diagnostics>` block (CI excerpt, review comments, conflict slice, etc.). The raw original brief lives in `task_objective`, not here. |
+| `ticket_snapshot` | Snapshot of source ticket/context. Enqueue writes the first task-level row; `task resnapshot` can append a newer task-level snapshot after the live ticket changes. |
+| `task_objective` | Canonical task brief reused by later code-worker and reviewer prompts. Enqueue writes the first task-level row; `task resnapshot` can append a newer task-level objective. |
+| `brief` | Per-attempt composed prompt body: a structured `<quay-task-objective>` block pointing at the current task-level `task_objective` artifact, a `<quay-current-attempt-guidance>` block (initial instruction, retry/respawn template, or orchestrator-submitted brief), and an optional `<quay-diagnostics>` block (CI excerpt, review comments, conflict slice, etc.). The current task objective lives in `task_objective`, not here. |
 | `final_prompt` | Code-worker attempts: worker preamble plus the attempt's composed `brief`. Review attempts: static reviewer protocol, reviewer guidance, then the review `brief`. |
 | `session_log` | Captured tmux output. |
 | `usage` | JSON usage envelope captured per attempt. `.quay-usage.json` is stored verbatim when present; otherwise Codex `--json` JSONL in `.quay-tool-trace.log` can synthesize normalized model/token totals. |

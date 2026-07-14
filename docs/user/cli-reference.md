@@ -521,21 +521,21 @@ but before the source reaches terminal state, the next `quay tick` recovers the
 cancel intent and writes the same source-side `retargeted` audit context from
 the linked clone.
 
-`task resnapshot` re-baselines a task's frozen `ticket_snapshot` — the
-definition of done the reviewer enforces. It re-fetches the task's Linear
-ticket, re-parses the `quay-config` block, re-composes the snapshot with the
-same code path enqueue uses, and replaces the single per-task `ticket_snapshot`
-artifact both worker and reviewer read (no version skew). Use it when an
-operator has edited the live ticket to change scope mid-flight: the frozen
-snapshot otherwise keeps the reviewer enforcing the stale acceptance criteria.
-It emits a `ticket_resnapshotted` audit event carrying the required `--reason`
-and a before/after diff of the snapshot, and it invalidates the latest review
-verdict (superseding a standing `approved` / `changes_requested`) so the next
-`quay tick` runs a fresh review against the new snapshot rather than being
-blocked by a stale verdict. Running it when the ticket is unchanged is a safe,
-still-audited no-op: the event is recorded but the artifact is not rewritten and
-no verdict is invalidated. The command requires the Linear adapter to be
-configured, and the task must have an `external_ref`.
+`task resnapshot` re-baselines a task's frozen `ticket_snapshot` and current
+`task_objective` — the definition of done the reviewer enforces and the
+objective worker/reviewer prompts load. It re-fetches the task's Linear ticket,
+re-parses the `quay-config` block, and re-composes both artifacts with the same
+code path enqueue uses. Use it when an operator has edited the live ticket to
+change scope mid-flight: without a resnapshot, later prompts keep enforcing the
+stale acceptance criteria. It emits a `ticket_resnapshotted` audit event
+carrying the required `--reason` and a before/after diff of the snapshot, and it
+invalidates the latest review verdict (superseding a standing `approved` /
+`changes_requested`) so the next `quay tick` runs a fresh review against the new
+snapshot and objective rather than being blocked by a stale verdict. Running it
+when the ticket is unchanged is a safe, still-audited no-op: the event is
+recorded but the artifacts are not rewritten and no verdict is invalidated. The
+command requires the Linear adapter to be configured, and the task must have an
+`external_ref`.
 
 ## Submit Brief
 
