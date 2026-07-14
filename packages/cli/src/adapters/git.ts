@@ -455,6 +455,18 @@ export class LocalGitAdapter implements GitPort {
     }
   }
 
+  worktreePrune(repoId: string): void {
+    // `git worktree prune` drops admin entries under `<bare>/worktrees/*`
+    // whose working-tree directory is missing. Without this, a directory that
+    // was deleted out of band (no `git worktree remove`) leaves Git believing
+    // the branch is still checked out there, so a later `git worktree add -B`
+    // for the same branch/path fails with "already used by worktree".
+    // Best-effort: prune is a cleanup step, so a non-zero exit (e.g. nothing
+    // to prune, or a transient FS error) is swallowed — the subsequent
+    // `worktree add` surfaces any genuine breakage.
+    runIn(this.bareDir(repoId), ["git", "worktree", "prune"]);
+  }
+
   branchDelete(repoId: string, branch: string): void {
     const result = runIn(this.bareDir(repoId), [
       "git",

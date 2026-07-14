@@ -137,6 +137,23 @@ export class FakeGit implements GitPort {
     if (this.fail.worktreeAdd?.(worktreePath)) {
       throw new Error(`fake: worktreeAddExistingBranch failed for ${worktreePath}`);
     }
+    // Mirror real Git: `git worktree add -B <branch>` refuses when the branch
+    // is still registered to a worktree whose directory was removed out of
+    // band ("'<branch>' is already used by worktree at '<missing path>'").
+    // The registration only clears via `git worktree prune`/`remove`, so a
+    // caller that skips pruning stays wedged. Tests seed this state with
+    // `setWorktreeBranch` + an out-of-band `rmSync` of the directory.
+    for (const [registeredPath, checkout] of this.worktreeBranches) {
+      if (
+        checkout.repoId === repoId &&
+        checkout.branch === branch &&
+        !existsSync(registeredPath)
+      ) {
+        throw new Error(
+          `fake: worktreeAddExistingBranch failed: '${branch}' is already used by worktree at '${registeredPath}'`,
+        );
+      }
+    }
     mkdirSync(worktreePath, { recursive: true });
     this.worktrees.add(worktreePath);
     let set = this.localBranches.get(repoId);
@@ -201,6 +218,20 @@ export class FakeGit implements GitPort {
     this.worktrees.delete(worktreePath);
     this.worktreeBranches.delete(worktreePath);
     this.worktreeHeads.delete(worktreePath);
+  }
+
+  worktreePrune(repoId: string): void {
+    this.record("worktreePrune", { repoId });
+    // Drop registrations for this repo whose directory no longer exists,
+    // mirroring `git worktree prune`. This frees the branch/path so a
+    // subsequent `worktreeAddExistingBranch` can reuse them.
+    for (const [registeredPath, checkout] of this.worktreeBranches) {
+      if (checkout.repoId === repoId && !existsSync(registeredPath)) {
+        this.worktreeBranches.delete(registeredPath);
+        this.worktrees.delete(registeredPath);
+        this.worktreeHeads.delete(registeredPath);
+      }
+    }
   }
 
   branchDelete(repoId: string, branch: string): void {

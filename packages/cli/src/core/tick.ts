@@ -6764,6 +6764,13 @@ function recreateMissingQueuedWorktreeIfNeeded(
       recoveryBaseRef = `origin/${task.base_branch}`;
     }
     deps.git.fetch(task.repo_id, recoveryBaseBranch);
+    // The directory is gone (existsSync check above), but Git may still record
+    // `branch_name` as checked out at this path if it was removed out of band
+    // without `git worktree remove`. In that state `worktreeAddExistingBranch`
+    // fails with "'<branch>' is already used by worktree at '<missing path>'",
+    // so prune the dangling registration first to free the branch and path.
+    // Filesystem absence alone does not prove Git thinks the worktree is gone.
+    deps.git.worktreePrune(task.repo_id);
     deps.git.worktreeAddExistingBranch(
       task.repo_id,
       task.worktree_path,
@@ -6772,6 +6779,13 @@ function recreateMissingQueuedWorktreeIfNeeded(
     );
     installWorktreeDependencies(deps.commandRunner, repo, task.worktree_path);
   } catch (err) {
+    // If we created the worktree before a later fallible step (dependency
+    // install) failed, the directory now exists but is half-initialized. Left
+    // in place, the next tick's `existsSync` guard would treat it as healthy
+    // and spawn a worker from a worktree whose install never completed. Tear
+    // it down so the retry repeats the full recreate+install path.
+    // `worktreeRemove` is a no-op when the path was never created.
+    deps.git.worktreeRemove(task.worktree_path);
     return {
       task_id: task.task_id,
       action: "spawn_substrate_failed",
