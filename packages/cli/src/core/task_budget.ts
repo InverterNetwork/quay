@@ -179,18 +179,24 @@ function adjustUnderLock(
     previous_budget_exhausted: task.budget_exhausted === 1,
     budget_exhausted: nextBudgetExhausted === 1,
   };
-  const event = deps.db.transaction(() => {
-    deps.db
+  const txResult = deps.db.transaction(() => {
+    const upd = deps.db
       .query(
         `UPDATE tasks
             SET retry_budget = ?,
                 budget_exhausted = ?,
                 updated_at = ?
-          WHERE task_id = ?`,
+          WHERE task_id = ?
+            AND state = ?
+            AND cancel_requested_at IS NULL`,
       )
-      .run(nextBudget, nextBudgetExhausted, now, task.task_id);
+      .run(nextBudget, nextBudgetExhausted, now, task.task_id, task.state);
+    const changes = (upd as { changes?: number }).changes ?? 0;
+    if (changes === 0) {
+      return { ok: false as const };
+    }
 
-    return deps.db
+    const event = deps.db
       .query<{ event_id: number }, [string, string, string, string, string]>(
         `INSERT INTO events (
            task_id, event_type, from_state, to_state, occurred_at, event_data
@@ -204,8 +210,27 @@ function adjustUnderLock(
         now,
         JSON.stringify(eventData),
       );
+    return { ok: true as const, event };
   })();
-  if (!event) throw new Error("task_budget_adjusted event insert returned no row");
+  if (!txResult.ok) {
+    const current = loadTask(deps.db, task.task_id);
+    return {
+      ok: false,
+      error: {
+        code: "unsafe_state",
+        message:
+          `task ${task.task_id} changed before budget adjustment; retry after re-checking its current state`,
+        details: {
+          task_id: task.task_id,
+          observed_state: task.state,
+          current_state: current?.state ?? null,
+        },
+      },
+    };
+  }
+  if (!txResult.event) {
+    throw new Error("task_budget_adjusted event insert returned no row");
+  }
 
   return {
     ok: true,
@@ -219,7 +244,7 @@ function adjustUnderLock(
       budget_exhausted: nextBudgetExhausted === 1,
       reason,
       forced: input.force === true,
-      event_id: event.event_id,
+      event_id: txResult.event.event_id,
     },
   };
 }

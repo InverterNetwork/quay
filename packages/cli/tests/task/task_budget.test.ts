@@ -131,6 +131,66 @@ test("adjust_task_budget raises budget, clears exhaustion, and records audit rea
   });
 });
 
+test("adjust_task_budget refuses when state changes before fenced update", async () => {
+  const { h, built, taskId } = setupTask("awaiting-next-brief");
+  let mutated = false;
+  const racingClock = {
+    now: () => h.clock.now(),
+    nowISO: () => {
+      if (!mutated) {
+        mutated = true;
+        h.db
+          .query(`UPDATE tasks SET state = 'queued' WHERE task_id = ?`)
+          .run(taskId);
+      }
+      return h.clock.nowISO();
+    },
+  };
+
+  const result = await adjust_task_budget(
+    {
+      db: h.db,
+      clock: racingClock,
+      supervisorLock: built.deps.supervisorLock,
+    },
+    {
+      taskId,
+      by: 1,
+      reason: "operator recovery after substrate failure",
+    },
+  );
+
+  expect(result).toMatchObject({
+    ok: false,
+    error: {
+      code: "unsafe_state",
+      details: {
+        task_id: taskId,
+        observed_state: "awaiting-next-brief",
+        current_state: "queued",
+      },
+    },
+  });
+  const task = h.db
+    .query<{ state: string; retry_budget: number; budget_exhausted: number }, [string]>(
+      `SELECT state, retry_budget, budget_exhausted FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    state: "queued",
+    retry_budget: 5,
+    budget_exhausted: 1,
+  });
+  const eventCount = h.db
+    .query<{ count: number }, [string]>(
+      `SELECT count(*) AS count
+         FROM events
+        WHERE task_id = ? AND event_type = 'task_budget_adjusted'`,
+    )
+    .get(taskId);
+  expect(eventCount).toEqual({ count: 0 });
+});
+
 test("task increase-budget CLI lets blocker_resolved resume after budget is raised", async () => {
   const { h, built, taskId } = setupTask();
 
