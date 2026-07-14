@@ -230,6 +230,71 @@ test("tick recreates missing queued respawn worktree from remote task branch", a
   });
 });
 
+test("tick prunes stale git metadata before recreating missing queued respawn worktree", async () => {
+  h = createHarness();
+  h.clock.set("2026-07-14T11:03:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-missing-respawn-worktree-stale-git");
+  const taskId = insertTask(h.db, {
+    taskId: "task-missing-respawn-worktree-stale-git",
+    repoId,
+  });
+  const worktreePath = join(h.dataDir, "worktrees", taskId);
+  h.db
+    .query(`UPDATE tasks SET worktree_path = ? WHERE task_id = ?`)
+    .run(worktreePath, taskId);
+
+  const firstAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-07-14T10:00:00.000Z",
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET ended_at = '2026-07-14T10:05:00.000Z',
+              exit_kind = 'spawn_failed'
+        WHERE attempt_id = ?`,
+    )
+    .run(firstAttemptId);
+  const retryAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "spawn_failed",
+    consumedBudget: 1,
+  });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, retryAttemptId);
+
+  const built = buildTickDeps(h);
+  const branchName = `quay/${taskId}`;
+  built.git.setRemoteBranches(repoId, [branchName]);
+  built.git.worktreeBranches.set(worktreePath, { repoId, branch: branchName });
+  built.github.setPrExists(repoId, branchName, false);
+
+  expect(existsSync(worktreePath)).toBe(false);
+
+  const results = await tick_once(built.deps);
+
+  expect(results).toEqual([{ task_id: taskId, action: "spawned" }]);
+  expect(built.git.calls).toContainEqual({
+    op: "worktreePrune",
+    args: { repoId },
+  });
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeAddExistingBranch",
+    args: {
+      repoId,
+      worktreePath,
+      branch: branchName,
+      baseRef: `origin/${branchName}`,
+    },
+  });
+  expect(existsSync(worktreePath)).toBe(true);
+  expect(built.tmux.spawnCalls).toHaveLength(1);
+});
+
 test("tick recreates missing queued respawn worktree from base when task branch is absent", async () => {
   h = createHarness();
   h.clock.set("2026-07-14T11:05:00.000Z");
@@ -306,6 +371,75 @@ test("tick recreates missing queued respawn worktree from base when task branch 
     recovery_base_ref: "origin/main",
     worktree_path: worktreePath,
   });
+});
+
+test("tick removes partially recreated queued worktree when dependency install fails", async () => {
+  h = createHarness();
+  h.clock.set("2026-07-14T11:07:00.000Z");
+
+  const repoId = insertRepo(h.db, "repo-missing-respawn-worktree-install-fails");
+  const taskId = insertTask(h.db, {
+    taskId: "task-missing-respawn-worktree-install-fails",
+    repoId,
+  });
+  const worktreePath = join(h.dataDir, "worktrees", taskId);
+  h.db
+    .query(`UPDATE tasks SET worktree_path = ? WHERE task_id = ?`)
+    .run(worktreePath, taskId);
+
+  const firstAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 1,
+    reason: "initial",
+    consumedBudget: 1,
+    spawnedAt: "2026-07-14T10:00:00.000Z",
+  });
+  h.db
+    .query(
+      `UPDATE attempts
+          SET ended_at = '2026-07-14T10:05:00.000Z',
+              exit_kind = 'spawn_failed'
+        WHERE attempt_id = ?`,
+    )
+    .run(firstAttemptId);
+  const retryAttemptId = insertAttempt(h.db, {
+    taskId,
+    attemptNumber: 2,
+    reason: "spawn_failed",
+    consumedBudget: 1,
+  });
+  insertFinalPromptArtifact(h.db, h.artifactRoot, h.clock, taskId, retryAttemptId);
+
+  const built = buildTickDeps(h);
+  const branchName = `quay/${taskId}`;
+  built.git.setRemoteBranches(repoId, [branchName]);
+  built.github.setPrExists(repoId, branchName, false);
+  built.commandRunner.failNext("install boom");
+
+  const failed = await tick_once(built.deps);
+
+  expect(failed).toEqual([
+    {
+      task_id: taskId,
+      action: "spawn_substrate_failed",
+      error: expect.stringContaining("install_cmd failed"),
+    },
+  ]);
+  expect(existsSync(worktreePath)).toBe(false);
+  expect(built.git.calls).toContainEqual({
+    op: "worktreeRemove",
+    args: { worktreePath },
+  });
+  expect(built.tmux.spawnCalls).toHaveLength(0);
+
+  const retried = await tick_once(built.deps);
+
+  expect(retried).toEqual([{ task_id: taskId, action: "spawned" }]);
+  expect(built.commandRunner.calls).toEqual([
+    { command: "bun install", cwd: worktreePath },
+    { command: "bun install", cwd: worktreePath },
+  ]);
+  expect(built.tmux.spawnCalls).toHaveLength(1);
 });
 
 test("tick reconciles waiting dependencies from local merged task state before promotion", async () => {
