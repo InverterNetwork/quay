@@ -428,6 +428,7 @@ quay task release-claim <task_id> --claim-id <claim_id>
 quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes
 quay task resnapshot <task_id> --reason <text>
 quay task recreate-worktree <task_id> --yes [--force]
+quay task increase-budget <task_id> (--by <n>|--set <n>) --reason <text> [--force]
 ```
 
 `task claim` only succeeds for `awaiting-next-brief` tasks.
@@ -445,6 +446,18 @@ branch name. The repo install command runs after recreation, and Quay records a
 `worktree_recreated` event with the recovery base. Use `--force` only after
 confirming no worker is live; it allows recreation when the path already exists
 or an active attempt is still recorded.
+
+`task increase-budget` raises an existing task's copied `retry_budget` after an
+operator has confirmed that control-plane or substrate failures consumed retry
+budget without useful worker progress. It requires a human-readable `--reason`,
+records a `task_budget_adjusted` audit event, and recomputes
+`budget_exhausted` from `attempts_consumed >= retry_budget`. Use `--by <n>` to
+add attempts or `--set <n>` to set a higher absolute budget. By default the
+command is limited to parked/recovery states such as `awaiting-next-brief`,
+`waiting_human`, `claimed-by-orchestrator`, `non_budget_loop`,
+`orchestrator_loop`, and `worktree_error`; use `--force` only after confirming a
+live non-terminal task should receive more retry budget. Terminal tasks cannot
+be adjusted.
 
 `task list`, `task get`, and `task events` accept legacy `task_id` values and
 return the same task/run rows as before. JSON output now also includes

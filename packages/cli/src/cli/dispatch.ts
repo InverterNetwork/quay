@@ -66,6 +66,10 @@ import {
   type RecreateWorktreeDeps,
 } from "../core/recreate_worktree.ts";
 import {
+  adjust_task_budget,
+  type AdjustTaskBudgetDeps,
+} from "../core/task_budget.ts";
+import {
   claim_task,
   release_claim,
   submit_brief,
@@ -744,6 +748,9 @@ async function handleTask(
     case "recreate-worktree":
       if (wantsHelp(rest)) return printHelp(io, ["task", "recreate-worktree"]);
       return await handleTaskRecreateWorktree(rest, deps, io);
+    case "increase-budget":
+      if (wantsHelp(rest)) return printHelp(io, ["task", "increase-budget"]);
+      return await handleTaskIncreaseBudget(rest, deps, io);
     default:
       // A typo'd subcommand benefits from the noun's usage block as much as
       // a missing one — surface it on stderr alongside the structured envelope.
@@ -754,6 +761,82 @@ async function handleTask(
         `unknown task subcommand: ${sub}`,
       );
   }
+}
+
+async function handleTaskIncreaseBudget(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  const validation = validateFlags(argv, {
+    boolean: ["--force"],
+    valued: ["--by", "--set", "--reason"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const taskId = positional(argv);
+  if (!taskId) {
+    return writeError(
+      io,
+      "usage_error",
+      "task increase-budget requires <task_id>",
+    );
+  }
+  const reason = readFlag(argv, "--reason");
+  if (reason === null) {
+    return writeError(
+      io,
+      "usage_error",
+      "task increase-budget requires --reason <text>",
+    );
+  }
+  const byRaw = readFlag(argv, "--by");
+  const setRaw = readFlag(argv, "--set");
+  if (
+    (byRaw === null && setRaw === null) ||
+    (byRaw !== null && setRaw !== null)
+  ) {
+    return writeError(
+      io,
+      "usage_error",
+      "task increase-budget requires exactly one of --by or --set",
+    );
+  }
+  const by = byRaw === null
+    ? undefined
+    : parsePositiveIntArg(byRaw, "task increase-budget", "by");
+  if (by !== undefined && !by.ok) {
+    return writeError(io, "usage_error", by.message);
+  }
+  const set = setRaw === null
+    ? undefined
+    : parsePositiveIntArg(setRaw, "task increase-budget", "set");
+  if (set !== undefined && !set.ok) {
+    return writeError(io, "usage_error", set.message);
+  }
+  const budgetDeps: AdjustTaskBudgetDeps = {
+    db: deps.db,
+    clock: deps.clock,
+    supervisorLock: deps.supervisorLock,
+  };
+  const input: {
+    taskId: string;
+    by?: number;
+    set?: number;
+    reason: string;
+    force: boolean;
+  } = {
+    taskId,
+    reason,
+    force: argv.includes("--force"),
+  };
+  if (by !== undefined) input.by = by.value;
+  if (set !== undefined) input.set = set.value;
+  return emitServiceResult(
+    await adjust_task_budget(budgetDeps, input),
+    io,
+  );
 }
 
 async function handleTaskRecreateWorktree(
