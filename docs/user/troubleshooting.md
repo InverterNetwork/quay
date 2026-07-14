@@ -206,7 +206,19 @@ quay artifact get <task_id> session_log --path
 infrastructure diagnostic, and `tasks.spawn_retry_next_eligible_at` shows when a
 non-parked retry becomes eligible.
 
-Manual recovery is currently cancellation:
+If the task row still points at a missing `worktree_path`, recreate that
+recorded worktree without DB surgery:
+
+```bash
+quay task recreate-worktree <task_id> --yes
+```
+
+Quay prefers `origin/<task.branch_name>` when it exists. If that branch is gone
+from the remote, Quay rebuilds from `origin/<base_branch>` and checks out the
+task branch name again. The command refuses existing paths and active attempts
+unless `--force` is supplied.
+
+Cancellation remains available when the task should not continue:
 
 ```bash
 quay cancel <task_id> --keep-worktree

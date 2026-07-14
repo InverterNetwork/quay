@@ -58,6 +58,10 @@ import {
   type RetargetDeps,
 } from "../core/retarget.ts";
 import {
+  recreate_task_worktree,
+  type RecreateWorktreeDeps,
+} from "../core/recreate_worktree.ts";
+import {
   claim_task,
   release_claim,
   submit_brief,
@@ -730,6 +734,9 @@ async function handleTask(
     case "retarget":
       if (wantsHelp(rest)) return printHelp(io, ["task", "retarget"]);
       return await handleTaskRetarget(rest, deps, io);
+    case "recreate-worktree":
+      if (wantsHelp(rest)) return printHelp(io, ["task", "recreate-worktree"]);
+      return await handleTaskRecreateWorktree(rest, deps, io);
     default:
       // A typo'd subcommand benefits from the noun's usage block as much as
       // a missing one — surface it on stderr alongside the structured envelope.
@@ -740,6 +747,42 @@ async function handleTask(
         `unknown task subcommand: ${sub}`,
       );
   }
+}
+
+async function handleTaskRecreateWorktree(
+  argv: string[],
+  deps: CliDeps,
+  io: CliIO,
+): Promise<DispatchResult> {
+  const validation = validateFlags(argv, {
+    boolean: ["--yes", "--force"],
+  });
+  if (!validation.ok) {
+    return writeError(io, "usage_error", validation.message, validation.details);
+  }
+  const taskId = positional(argv);
+  if (!taskId) {
+    return writeError(
+      io,
+      "usage_error",
+      "task recreate-worktree requires <task_id>",
+    );
+  }
+  const recreateDeps: RecreateWorktreeDeps = {
+    db: deps.db,
+    clock: deps.clock,
+    git: deps.git,
+    commandRunner: deps.commandRunner,
+    supervisorLock: deps.supervisorLock,
+  };
+  return emitServiceResult(
+    await recreate_task_worktree(recreateDeps, {
+      taskId,
+      yes: argv.includes("--yes"),
+      force: argv.includes("--force"),
+    }),
+    io,
+  );
 }
 
 async function handleTaskRetarget(
