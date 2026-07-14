@@ -168,9 +168,16 @@ is rejected in this state.
 Use one of:
 
 ```bash
+quay task increase-budget <task_id> --by 2 --reason "repaired missing worktree; previous retries did not spawn a worker"
 quay escalate-human <task_id> --claim-id <claim_id> --question-file ./question.md
 quay cancel <task_id>
 ```
+
+Use `task increase-budget` when an operator has fixed a control-plane or
+substrate issue that consumed retry budget without useful worker progress, for
+example a deleted worktree that caused repeated spawn/no-progress failures. The
+command records the reason in a `task_budget_adjusted` audit event and clears
+`budget_exhausted` only when the raised budget is above `attempts_consumed`.
 
 After asking a human, use `record-human-reply` to persist the answer, then
 `submit-brief --reason advice_answered`; that reason is allowed because it does
