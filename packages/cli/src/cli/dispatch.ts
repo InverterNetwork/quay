@@ -68,6 +68,7 @@ import {
 import {
   adjust_task_budget,
   type AdjustTaskBudgetDeps,
+  type TaskBudgetCounter,
 } from "../core/task_budget.ts";
 import {
   claim_task,
@@ -769,8 +770,8 @@ async function handleTaskIncreaseBudget(
   io: CliIO,
 ): Promise<DispatchResult> {
   const validation = validateFlags(argv, {
-    boolean: ["--force"],
-    valued: ["--by", "--set", "--reason"],
+    boolean: ["--force", "--reset"],
+    valued: ["--by", "--set", "--reason", "--counter"],
   });
   if (!validation.ok) {
     return writeError(io, "usage_error", validation.message, validation.details);
@@ -791,16 +792,36 @@ async function handleTaskIncreaseBudget(
       "task increase-budget requires --reason <text>",
     );
   }
+  const counterRaw = readFlag(argv, "--counter");
+  const counter = counterRaw === null ? undefined : parseTaskBudgetCounter(
+    counterRaw,
+  );
+  if (counterRaw !== null && counter === null) {
+    return writeError(
+      io,
+      "usage_error",
+      "task increase-budget --counter must be retry_budget or non_budget_respawns",
+    );
+  }
+  const selectedCounter: TaskBudgetCounter | undefined =
+    counter === null ? undefined : counter;
   const byRaw = readFlag(argv, "--by");
   const setRaw = readFlag(argv, "--set");
+  const reset = argv.includes("--reset");
   if (
-    (byRaw === null && setRaw === null) ||
-    (byRaw !== null && setRaw !== null)
+    [byRaw !== null, setRaw !== null, reset].filter(Boolean).length !== 1
   ) {
     return writeError(
       io,
       "usage_error",
-      "task increase-budget requires exactly one of --by or --set",
+      "task increase-budget requires exactly one of --by, --set, or --reset",
+    );
+  }
+  if ((selectedCounter ?? "retry_budget") === "retry_budget" && reset) {
+    return writeError(
+      io,
+      "usage_error",
+      "task increase-budget --reset requires --counter non_budget_respawns",
     );
   }
   const by = byRaw === null
@@ -811,6 +832,8 @@ async function handleTaskIncreaseBudget(
   }
   const set = setRaw === null
     ? undefined
+    : (selectedCounter ?? "retry_budget") === "non_budget_respawns"
+    ? parseNonNegativeIntArg(setRaw, "task increase-budget", "set")
     : parsePositiveIntArg(setRaw, "task increase-budget", "set");
   if (set !== undefined && !set.ok) {
     return writeError(io, "usage_error", set.message);
@@ -822,8 +845,10 @@ async function handleTaskIncreaseBudget(
   };
   const input: {
     taskId: string;
+    counter?: TaskBudgetCounter;
     by?: number;
     set?: number;
+    reset?: boolean;
     reason: string;
     force: boolean;
   } = {
@@ -831,12 +856,21 @@ async function handleTaskIncreaseBudget(
     reason,
     force: argv.includes("--force"),
   };
+  if (selectedCounter !== undefined) input.counter = selectedCounter;
   if (by !== undefined) input.by = by.value;
   if (set !== undefined) input.set = set.value;
+  if (reset) input.reset = true;
   return emitServiceResult(
     await adjust_task_budget(budgetDeps, input),
     io,
   );
+}
+
+function parseTaskBudgetCounter(value: string): TaskBudgetCounter | null {
+  if (value === "retry_budget" || value === "non_budget_respawns") {
+    return value;
+  }
+  return null;
 }
 
 async function handleTaskRecreateWorktree(
@@ -2922,6 +2956,24 @@ function parsePositiveIntArg(
     return {
       ok: false,
       message: `${command} requires a positive integer ${noun} (got ${raw})`,
+    };
+  }
+  return { ok: true, value: Number(raw) };
+}
+
+function parseNonNegativeIntArg(
+  raw: string | null,
+  command: string,
+  noun: string,
+): { ok: true; value: number } | { ok: false; message: string } {
+  if (raw === null) {
+    return { ok: false, message: `${command} requires <${noun}>` };
+  }
+  if (!/^(0|[1-9]\d*)$/.test(raw)) {
+    return {
+      ok: false,
+      message:
+        `${command} requires a non-negative integer ${noun} (got ${raw})`,
     };
   }
   return { ok: true, value: Number(raw) };

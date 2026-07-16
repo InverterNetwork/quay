@@ -61,6 +61,7 @@ function setupTask(state = "claimed-by-orchestrator"): {
           SET attempts_consumed = 5,
               retry_budget = 5,
               budget_exhausted = 1,
+              non_budget_respawns_consumed = 21,
               claim_id = CASE WHEN state = 'claimed-by-orchestrator' THEN 'claim-budget' ELSE claim_id END,
               claimed_at = CASE WHEN state = 'claimed-by-orchestrator' THEN ? ELSE claimed_at END
         WHERE task_id = ?`,
@@ -95,6 +96,8 @@ test("adjust_task_budget raises budget, clears exhaustion, and records audit rea
       retry_budget: 7,
       previous_budget_exhausted: true,
       budget_exhausted: false,
+      previous_non_budget_respawns_consumed: 21,
+      non_budget_respawns_consumed: 21,
       reason: "missing worktree burned retries without worker progress",
       forced: false,
     },
@@ -123,11 +126,82 @@ test("adjust_task_budget raises budget, clears exhaustion, and records audit rea
     to_state: "claimed-by-orchestrator",
   });
   expect(JSON.parse(event!.event_data)).toMatchObject({
+    counter: "retry_budget",
     reason: "missing worktree burned retries without worker progress",
     previous_retry_budget: 5,
     retry_budget: 7,
     previous_budget_exhausted: true,
     budget_exhausted: false,
+  });
+});
+
+test("adjust_task_budget resets non-budget respawn counter and records audit reason", async () => {
+  const { h, built, taskId } = setupTask("non_budget_loop");
+
+  const result = await adjust_task_budget(
+    {
+      db: h.db,
+      clock: h.clock,
+      supervisorLock: built.deps.supervisorLock,
+    },
+    {
+      taskId,
+      counter: "non_budget_respawns",
+      reset: true,
+      reason: "operator confirmed review loop is still converging",
+    },
+  );
+
+  expect(result).toMatchObject({
+    ok: true,
+    value: {
+      task_id: taskId,
+      counter: "non_budget_respawns",
+      state: "non_budget_loop",
+      previous_retry_budget: 5,
+      retry_budget: 5,
+      previous_budget_exhausted: true,
+      budget_exhausted: true,
+      previous_non_budget_respawns_consumed: 21,
+      non_budget_respawns_consumed: 0,
+      reason: "operator confirmed review loop is still converging",
+      forced: false,
+    },
+  });
+  const task = h.db
+    .query<
+      {
+        retry_budget: number;
+        budget_exhausted: number;
+        non_budget_respawns_consumed: number;
+      },
+      [string]
+    >(
+      `SELECT retry_budget, budget_exhausted, non_budget_respawns_consumed
+         FROM tasks
+        WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    retry_budget: 5,
+    budget_exhausted: 1,
+    non_budget_respawns_consumed: 0,
+  });
+
+  const event = h.db
+    .query<{ event_type: string; event_data: string }, [string]>(
+      `SELECT event_type, event_data
+         FROM events
+        WHERE task_id = ? AND event_type = 'task_non_budget_respawns_adjusted'`,
+    )
+    .get(taskId);
+  expect(event?.event_type).toBe("task_non_budget_respawns_adjusted");
+  expect(JSON.parse(event!.event_data)).toMatchObject({
+    counter: "non_budget_respawns",
+    reason: "operator confirmed review loop is still converging",
+    reset: true,
+    previous_non_budget_respawns_consumed: 21,
+    non_budget_respawns_consumed: 0,
   });
 });
 
@@ -245,6 +319,61 @@ test("task increase-budget CLI lets blocker_resolved resume after budget is rais
   expect(task).toEqual({ state: "queued", budget_exhausted: 0 });
 });
 
+test("task increase-budget CLI sets non-budget respawn counter to zero", async () => {
+  const { h, built, taskId } = setupTask("non_budget_loop");
+
+  const io = bufferIO();
+  const result = await dispatch(
+    [
+      "task",
+      "increase-budget",
+      taskId,
+      "--counter",
+      "non_budget_respawns",
+      "--set",
+      "0",
+      "--reason",
+      "recovering a legitimate PR review loop",
+    ],
+    built.deps,
+    io,
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  expect(JSON.parse(io.out())).toMatchObject({
+    task_id: taskId,
+    counter: "non_budget_respawns",
+    previous_non_budget_respawns_consumed: 21,
+    non_budget_respawns_consumed: 0,
+    retry_budget: 5,
+    budget_exhausted: true,
+  });
+  const task = h.db
+    .query<{ non_budget_respawns_consumed: number }, [string]>(
+      `SELECT non_budget_respawns_consumed FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({ non_budget_respawns_consumed: 0 });
+});
+
+test("task get exposes non-budget respawn counter for inspection", async () => {
+  const { built, taskId } = setupTask("non_budget_loop");
+
+  const io = bufferIO();
+  const result = await dispatch(["task", "get", taskId], built.deps, io);
+
+  expect(result.exitCode).toBe(0);
+  expect(io.err()).toBe("");
+  expect(JSON.parse(io.out())).toMatchObject({
+    task_id: taskId,
+    state: "non_budget_loop",
+    retry_budget: 5,
+    budget_exhausted: true,
+    non_budget_respawns_consumed: 21,
+  });
+});
+
 test("task increase-budget guards live states unless forced", async () => {
   const { built, taskId } = setupTask("queued");
 
@@ -286,6 +415,63 @@ test("task increase-budget guards live states unless forced", async () => {
   expect(JSON.parse(forcedIo.out())).toMatchObject({
     retry_budget: 6,
     forced: true,
+  });
+});
+
+test("task increase-budget guards live states for non-budget counter unless forced", async () => {
+  const { h, built, taskId } = setupTask("done");
+
+  const refusedIo = bufferIO();
+  const refused = await dispatch(
+    [
+      "task",
+      "increase-budget",
+      taskId,
+      "--counter",
+      "non_budget_respawns",
+      "--reset",
+      "--reason",
+      "testing guardrail",
+    ],
+    built.deps,
+    refusedIo,
+  );
+  expect(refused.exitCode).toBe(1);
+  expect(JSON.parse(refusedIo.err())).toMatchObject({
+    error: "unsafe_state",
+  });
+
+  const forcedIo = bufferIO();
+  const forced = await dispatch(
+    [
+      "task",
+      "increase-budget",
+      taskId,
+      "--counter",
+      "non_budget_respawns",
+      "--reset",
+      "--reason",
+      "operator confirmed done task should be rechecked for PR feedback",
+      "--force",
+    ],
+    built.deps,
+    forcedIo,
+  );
+  expect(forced.exitCode).toBe(0);
+  expect(JSON.parse(forcedIo.out())).toMatchObject({
+    counter: "non_budget_respawns",
+    previous_non_budget_respawns_consumed: 21,
+    non_budget_respawns_consumed: 0,
+    forced: true,
+  });
+  const task = h.db
+    .query<{ state: string; non_budget_respawns_consumed: number }, [string]>(
+      `SELECT state, non_budget_respawns_consumed FROM tasks WHERE task_id = ?`,
+    )
+    .get(taskId);
+  expect(task).toEqual({
+    state: "done",
+    non_budget_respawns_consumed: 0,
   });
 });
 

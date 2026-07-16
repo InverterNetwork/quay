@@ -428,7 +428,7 @@ quay task release-claim <task_id> --claim-id <claim_id>
 quay task retarget <task_id> --repo <target_repo> [--base-branch <branch>] --yes
 quay task resnapshot <task_id> --reason <text>
 quay task recreate-worktree <task_id> --yes [--force]
-quay task increase-budget <task_id> (--by <n>|--set <n>) --reason <text> [--force]
+quay task increase-budget <task_id> [--counter retry_budget|non_budget_respawns] (--by <n>|--set <n>|--reset) --reason <text> [--force]
 ```
 
 `task claim` only succeeds for `awaiting-next-brief` tasks.
@@ -447,17 +447,27 @@ branch name. The repo install command runs after recreation, and Quay records a
 confirming no worker is live; it allows recreation when the path already exists
 or an active attempt is still recorded.
 
-`task increase-budget` raises an existing task's copied `retry_budget` after an
-operator has confirmed that control-plane or substrate failures consumed retry
-budget without useful worker progress. It requires a human-readable `--reason`,
-records a `task_budget_adjusted` audit event, and recomputes
-`budget_exhausted` from `attempts_consumed >= retry_budget`. Use `--by <n>` to
-add attempts or `--set <n>` to set a higher absolute budget. By default the
-command is limited to parked/recovery states such as `awaiting-next-brief`,
-`waiting_human`, `claimed-by-orchestrator`, `non_budget_loop`,
-`orchestrator_loop`, and `worktree_error`; use `--force` only after confirming a
-live non-terminal task should receive more retry budget. Terminal tasks cannot
-be adjusted.
+`task increase-budget` adjusts an existing task's copied `retry_budget` by
+default, or its `non_budget_respawns_consumed` counter with
+`--counter non_budget_respawns`. Use `retry_budget` after an operator has
+confirmed that control-plane or substrate failures consumed retry budget without
+useful worker progress. It records a `task_budget_adjusted` audit event and
+recomputes `budget_exhausted` from `attempts_consumed >= retry_budget`.
+
+Use `--counter non_budget_respawns` after a review/conflict loop has exhausted
+the non-budget cap and an operator has decided whether to continue the same
+task lineage. `--by <n>` increases the selected counter, `--set <n>` sets
+`retry_budget` to a higher positive integer or `non_budget_respawns` to a
+non-negative integer, and `--reset` sets `non_budget_respawns` to 0. Non-budget
+mutations record a `task_non_budget_respawns_adjusted` audit event. Adjusting
+the counter does not by itself move a task out of `non_budget_loop`; inspect the
+task state and recover it intentionally when continuation is desired.
+
+By default the command is limited to parked/recovery states such as
+`awaiting-next-brief`, `waiting_human`, `claimed-by-orchestrator`,
+`non_budget_loop`, `orchestrator_loop`, and `worktree_error`; use `--force` only
+after confirming a live non-terminal task should receive the adjustment.
+Terminal tasks cannot be adjusted.
 
 `task list`, `task get`, and `task events` accept legacy `task_id` values and
 return the same task/run rows as before. JSON output now also includes

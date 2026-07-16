@@ -266,6 +266,18 @@ The task exceeded the configured cap for review/conflict respawns. Inspect the
 latest `review_comments` or `conflict_slice` artifact and decide whether to
 cancel or recover manually.
 
+To adjust the per-task non-budget counter without direct database edits:
+
+```bash
+quay task increase-budget <task_id> --counter non_budget_respawns --reset --reason "operator confirmed PR review loop is still converging"
+quay task increase-budget <task_id> --counter non_budget_respawns --set 19 --reason "allow one more review respawn at the current cap"
+```
+
+This records a `task_non_budget_respawns_adjusted` event with old/new values and
+the reason. Counter changes do not automatically resume a task parked in
+`non_budget_loop`; confirm whether the task should remain parked, be cancelled,
+or be moved back to a state where the next tick can process fresh PR feedback.
+
 For PR review tasks, a `tick_error` containing `reviewer identity mismatch`
 means Quay found a review at the PR head SHA, but it was authored by a
 different GitHub identity than `[reviewer].login`. Check the actual review
