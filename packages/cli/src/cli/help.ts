@@ -126,14 +126,16 @@ const COMMANDS: Record<string, CommandSpec> = {
   "task increase-budget": {
     path: "task increase-budget",
     synopsis:
-      "quay task increase-budget <task_id> (--by <n>|--set <n>) --reason <text> [--force]",
+      "quay task increase-budget <task_id> [--counter retry_budget|non_budget_respawns] (--by <n>|--set <n>|--reset) --reason <text> [--force]",
     summary:
-      "Raise a task's retry budget and recompute its budget_exhausted flag.",
+      "Adjust a task's retry budget or non-budget respawn counter.",
     details:
-      "Use this for operator recovery when control-plane or substrate failures consumed retry budget without useful worker progress. By default it is limited to parked/recovery states; --force is required for live non-terminal states. Terminal tasks cannot be adjusted.",
+      "Use retry_budget for operator recovery when control-plane or substrate failures consumed retry budget without useful worker progress. Use non_budget_respawns when review/conflict loops have exhausted the non-budget cap. Counter adjustment does not by itself resume a task parked in non_budget_loop; inspect state and recover it intentionally. By default this command is limited to parked/recovery states; --force is required for live non-terminal states. Terminal tasks cannot be adjusted.",
     flags: [
-      { flag: "--by <n>", desc: "Increase retry_budget by a positive integer." },
-      { flag: "--set <n>", desc: "Set retry_budget to a higher positive integer." },
+      { flag: "--counter <name>", desc: "Counter to adjust: retry_budget (default) or non_budget_respawns." },
+      { flag: "--by <n>", desc: "Increase the selected counter by a positive integer." },
+      { flag: "--set <n>", desc: "Set retry_budget to a higher positive integer, or non_budget_respawns to a non-negative integer." },
+      { flag: "--reset", desc: "Set non_budget_respawns to 0." },
       { flag: "--reason <text>", desc: "Required human-readable audit reason." },
       { flag: "--force", desc: "Allow adjustment for live non-terminal states." },
     ],

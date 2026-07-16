@@ -212,8 +212,8 @@ quay outbox complete <outbox_item_id> --claim-id <id>
 quay outbox fail <outbox_item_id> --claim-id <id> --error <message>
                                                # shared side-effect outbox
 quay task get <task_id> | task list        # read commands (deterministic JSON)
-quay task increase-budget <task_id> --by <n> --reason <text>
-                                           # operator recovery for burned retry budget
+quay task increase-budget <task_id> [--counter retry_budget|non_budget_respawns] (--by <n>|--set <n>|--reset) --reason <text>
+                                           # operator recovery for burned retry or non-budget counters
 quay submit-brief | escalate-human | record-human-reply | cancel
 quay artifact get <task_id> <kind>         # raw bytes to stdout
 ```
