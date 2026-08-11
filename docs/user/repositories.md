@@ -61,6 +61,48 @@ git clone --bare git@github.com:owner/myrepo.git /Users/me/.acc/repos/myrepo.git
 Quay validates that the bare clone exists before enqueueing. If it is missing,
 enqueue fails with `bare_clone_missing` and prints the expected path.
 
+## Enable PR Review Enrollment
+
+`quay review-pr --pr <owner/repo>:<number>` resolves `<owner/repo>` through the
+repo registry before it looks up the pull request. To add review support for a
+private GitHub repo, complete the full runtime setup:
+
+1. Register the repo metadata with a stable `repo_id`, typically matching the
+   repository name:
+
+   ```bash
+   quay repo add \
+     --id myrepo \
+     --url https://github.com/owner/myrepo \
+     --base-branch main \
+     --package-manager bun \
+     --install-cmd "bun install"
+   ```
+
+2. Materialize the bare clone at `<repos_root>/<repo_id>.git`:
+
+   ```bash
+   git clone --bare https://github.com/owner/myrepo <repos_root>/myrepo.git
+   ```
+
+3. Verify the GitHub token used by the Quay worker can read the repository and
+   pull request:
+
+   ```bash
+   gh repo view owner/myrepo --json viewerPermission
+   gh pr view 123 -R owner/myrepo --json number,headRefOid,baseRefName
+   ```
+
+4. Enroll or poke the review:
+
+   ```bash
+   quay review-pr --pr owner/myrepo:123
+   ```
+
+If step 4 still fails with `repo_not_configured`, the registry row is missing
+or archived. If GitHub reports `Not Found` during steps 2 or 3, grant the Quay
+GitHub App installation access to the repository before retrying.
+
 ## Update A Repo
 
 ```bash
