@@ -152,6 +152,26 @@ correct the Linear blocked-by relation, then enqueue again.
 Quay could not find an unused `quay/<slug>` branch for the task. Check local
 branches, remote branches, and open PRs for the generated branch name.
 
+## `fork_pr_unsupported`
+
+`quay adopt-pr` was pointed at a pull request whose head branch lives in a
+fork. Adoption is limited to same-repo branches: once a PR is adopted, Quay
+code workers push to that branch, and Quay does not push to branches in
+contributor forks.
+
+This applies to `adopt-pr` only. `quay review-pr` accepts a fork PR and
+reviews it read-only — the reviewer checks out the PR head and posts a
+verdict without writing to the branch.
+
+Fix, when you need Quay to push to the branch:
+
+```bash
+git push git@github.com:<org>/<repo>.git HEAD:refs/heads/my-branch
+quay adopt-pr --pr <repo>:<num>
+```
+
+Then retry the command.
+
 ## `repo_has_active_tasks`
 
 `quay repo remove` refuses to archive a repo while active tasks still reference
